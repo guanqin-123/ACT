@@ -41,16 +41,16 @@ def main():
     print("\n3. Full validation with configuration:")
     try:
         # Try to use actual config file, fall back to defaults
-        config_path = "configs/test_scenarios.yaml" 
+        config_path = "modules/configs/test_scenarios.yaml"
         full_result = validate_abstraction_verifier(config_path)
         success = full_result.get("validations", {}).get("correctness", {}).get("success", False)
         print(f"   Comprehensive validation: {'✅ PASSED' if success else '❌ FAILED'}")
-        
+
         if "validations" in full_result:
             for validation_type, validation_result in full_result["validations"].items():
                 if hasattr(validation_result, 'total_tests'):
                     print(f"   {validation_type}: {validation_result.passed_tests}/{validation_result.total_tests} tests passed")
-    
+
     except Exception as e:
         print(f"   ⚠️  Config-based validation failed: {e}")
         print("   (This is expected if config files are not accessible)")

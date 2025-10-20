@@ -90,13 +90,13 @@ __version__ = "1.0.0"
 
 # Default configuration paths
 DEFAULT_CONFIG_PATHS = {
-    "mock_inputs": "configs/mock_inputs.yaml",
-    "test_scenarios": "configs/test_scenarios.yaml", 
-    "solver_settings": "configs/solver_settings.yaml"
+    "mock_inputs": "modules/configs/mock_inputs.yaml",
+    "test_scenarios": "modules/configs/test_scenarios.yaml", 
+    "solver_settings": "modules/configs/solver_settings.yaml"
 }
 
 
-def validate_abstraction_verifier(config_path: str = "configs/test_scenarios.yaml",
+def validate_abstraction_verifier(config_path: str = "modules/configs/test_scenarios.yaml",
                                 verifier_module: Optional[Any] = None,
                                 log_level: str = "INFO",
                                 device: str = "cpu") -> Dict[str, Any]:

@@ -46,13 +46,13 @@ Examples:
   python run_tests.py --quick
   
   # Run specific test scenarios
-  python run_tests.py --config configs/test_scenarios.yaml
+    python run_tests.py --config modules/configs/test_scenarios.yaml
   
   # Run only correctness tests
   python run_tests.py --correctness-only
   
   # Run with custom mock inputs
-  python run_tests.py --mock-config configs/mock_inputs.yaml
+    python run_tests.py --mock-config modules/configs/mock_inputs.yaml
   
   # Generate performance report
   python run_tests.py --performance --output results.json
@@ -75,11 +75,11 @@ Examples:
                            help="Run comprehensive validation with all tests")
     
     # Configuration files
-    parser.add_argument("--config", type=str, default="configs/test_scenarios.yaml",
+    parser.add_argument("--config", type=str, default="modules/configs/test_scenarios.yaml",
                        help="Path to test scenarios configuration file")
-    parser.add_argument("--mock-config", type=str, default="configs/mock_inputs.yaml",
+    parser.add_argument("--mock-config", type=str, default="modules/configs/mock_inputs.yaml",
                        help="Path to mock inputs configuration file")
-    parser.add_argument("--solver-config", type=str, default="configs/solver_settings.yaml",
+    parser.add_argument("--solver-config", type=str, default="modules/configs/solver_settings.yaml",
                        help="Path to solver settings configuration file")
     
     # Test type selection

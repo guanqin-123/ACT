@@ -22,7 +22,7 @@ act/pipeline/
 ├── utils.py              # Shared utilities and performance profiling
 ├── run_tests.py          # Command-line interface
 ├── torch2act.py          # Torch→ACT converter 
-├── configs/              # Configuration files
+├── modules/configs/      # Configuration files (moved under modules)
 │   ├── mock_inputs.yaml  # Mock data generation templates
 │   ├── test_scenarios.yaml # Complete test scenario definitions
 │   ├── solver_settings.yaml # Solver configuration options
@@ -152,7 +152,7 @@ generator.generate_full_report(validation_results, performance_results, regressi
 ### 1. Quick Validation (3 lines)
 ```python
 from act.pipeline import validate_abstraction_verifier
-result = validate_abstraction_verifier("configs/my_tests.yaml")
+result = validate_abstraction_verifier("modules/configs/my_tests.yaml")
 print(f"Status: {'✅ PASSED' if result.success else '❌ FAILED'}")
 ```
 
@@ -168,7 +168,7 @@ from act.pipeline import MockInputFactory, AbstractionVerifierValidator
 
 # Generate custom test inputs
 factory = MockInputFactory()
-test_data = factory.generate_from_config("configs/custom_mocks.yaml")
+test_data = factory.generate_from_config("modules/configs/custom_mocks.yaml")
 
 # Validate with custom inputs
 validator = AbstractionVerifierValidator()
@@ -205,7 +205,7 @@ python run_tests.py --config my_tests.yaml --mock-config my_mocks.yaml
 
 ## Configuration System
 
-### Test Scenarios (`configs/test_scenarios.yaml`)
+### Test Scenarios (`modules/configs/test_scenarios.yaml`)
 ```yaml
 scenarios:
   quick_smoke_test:
@@ -217,7 +217,7 @@ scenarios:
     timeout: 30
 ```
 
-### Mock Inputs (`configs/mock_inputs.yaml`)
+### Mock Inputs (`modules/configs/mock_inputs.yaml`)
 ```yaml
 sample_data:
   mnist_small:
@@ -235,7 +235,7 @@ input_specs:
     epsilon: 0.1
 ```
 
-### Solver Settings (`configs/solver_settings.yaml`)
+### Solver Settings (`modules/configs/solver_settings.yaml`)
 ```yaml
 solvers:
   torch_lp:
@@ -261,7 +261,7 @@ assert quick_validate(), "Basic functionality broken"
 ### 2. **Feature Testing**
 ```python
 # When adding new features - comprehensive validation
-result = validate_abstraction_verifier("configs/feature_tests.yaml")
+result = validate_abstraction_verifier("modules/configs/feature_tests.yaml")
 assert result.validations.correctness.success, "Correctness regression detected"
 ```
 

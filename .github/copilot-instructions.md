@@ -65,7 +65,7 @@ python act/wrapper_exts/ext_runner.py \
 ## Configuration System
 
 ### Dataset Defaults
-Config files in `configs/` provide verifier-specific defaults:
+Config files in `modules/configs/` provide verifier-specific defaults:
 ```ini
 [MNIST] # eran_defaults.ini
 mean = [0.1307]

@@ -64,7 +64,7 @@ jobs:
       - name: Set up ACT environments
         shell: bash -l {0}
         run: |
-          cd setup/
+          cd modules/setup/
           ACT_CI_MODE=true source setup.sh abcrown
 
       - name: Patch abCrown submodule
@@ -115,7 +115,7 @@ jobs:
       - name: Set up ACT environments
         shell: bash -l {0}
         run: |
-          cd setup/
+          cd modules/setup/
           ACT_CI_MODE=true source setup.sh abcrown
 
       - name: Patch abCrown submodule (BSD sed)
@@ -166,7 +166,7 @@ jobs:
       - name: Set up ACT ERAN environment
         shell: bash -l {0}
         run: |
-          cd setup/
+          cd modules/setup/
           ACT_CI_MODE=true source setup.sh eran
 
       - name: Run ERAN verification (from project root)

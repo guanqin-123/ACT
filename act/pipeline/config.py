@@ -38,10 +38,10 @@ class ValidationError(Exception):
 @dataclass
 class ConfigPaths:
     """Standard configuration file paths."""
-    mock_inputs: str = "configs/mock_inputs.yaml"
-    test_scenarios: str = "configs/test_scenarios.yaml"
-    solver_settings: str = "configs/solver_settings.yaml"
-    baselines: str = "configs/baselines.json"
+    mock_inputs: str = "modules/configs/mock_inputs.yaml"
+    test_scenarios: str = "modules/configs/test_scenarios.yaml"
+    solver_settings: str = "modules/configs/solver_settings.yaml"
+    baselines: str = "modules/configs/baselines.json"
 
 
 class ConfigManager:
@@ -281,7 +281,8 @@ class ConfigManager:
     def list_available_configs(self) -> List[str]:
         """List all available configuration files."""
         configs = []
-        config_dir = self.base_path / "configs"
+        # Configs are stored under modules/configs at repo root
+        config_dir = Path(self.base_path.parent.parent) / "modules" / "configs"
         
         if config_dir.exists():
             for file_path in config_dir.glob("*.yaml"):
