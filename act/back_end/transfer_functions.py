@@ -1,4 +1,4 @@
-#===- act/back_end/transfer_function.py - Transfer Function Interface ---====#
+#===- act/back_end/transfer_functions.py - Transfer Function Interface --===#
 # ACT: Abstract Constraint Transformer
 # Copyright (C) 2025– ACT Team
 #
@@ -19,6 +19,30 @@ for different layer types during the analysis phase.
 The interface supports multiple implementations:
 - IntervalTF: Interval-based bounds propagation  
 - HybridzTF: HybridZ zonotope-based analysis with enhanced precision
+"""
+
+import torch
+#===- act/back_end/transfer_functions.py - Transfer Function Interface --===#
+# ACT: Abstract Constraint Transformer
+# Copyright (C) 2025– ACT Team
+#
+# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
+# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
+#===---------------------------------------------------------------------===#
+#
+# Purpose:
+#   Transfer Function Interface. Defines the abstract interface for transfer
+#   function implementations in the ACT verification framework. Transfer
+#   functions compute bounds and constraints.
+#
+#===---------------------------------------------------------------------===#
+
+"""
+Transfer function dispatch interface used by the backend analysis.
+
+This module defines a small abstract interface for transfer function
+implementations and a global registry to select between implementations
+(e.g. IntervalTF, HybridzTF).
 """
 
 import torch
@@ -54,6 +78,7 @@ class AnalysisContext:
         """Get current bounds for a specific layer."""
         facts = self.after if use_after else self.before
         return facts[layer_id].bounds if layer_id in facts else self.before[layer_id].bounds
+
 
 
 class TransferFunction(ABC):
@@ -131,6 +156,7 @@ def set_transfer_function_mode(mode: str = "interval") -> None:
         set_transfer_function(HybridzTF())
     else:
         raise ValueError(f"Unknown transfer function mode: {mode}. Use 'interval' or 'hybridz'.")
+
 
 
 @torch.no_grad()
