@@ -89,10 +89,10 @@ setup_abcrown() {
 
     # Step 8: Create empty config file for abcrown CLI parameter mode
     echo "[ACT] Creating empty_config.yaml for CLI-only abcrown runs..."
-    echo "{}" > ../act/wrapper_exts/abcrown/empty_config.yaml
+    echo "{}" > ../../act/wrapper_exts/abcrown/empty_config.yaml
 
     # Step 9: Patch the abcrown module __init__.py
-    ABCROWN_SUBMODULE_DIR="../modules/abcrown"
+    ABCROWN_SUBMODULE_DIR="../../modules/abcrown"
     INIT_RELATIVE_PATH="complete_verifier/__init__.py"
     INIT_FULL_PATH="$ABCROWN_SUBMODULE_DIR/$INIT_RELATIVE_PATH"
 
@@ -152,7 +152,7 @@ esac
 
 # Final setup steps (for all or when not in CI mode)
 if [ "$ACT_CI_MODE" = "false" ] && [ "$COMPONENT" = "all" ]; then
-    export ACTHOME=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+    export ACTHOME=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
     export GRB_LICENSE_FILE=$ACTHOME/gurobi/gurobi.lic
     echo "[ACT] Gurobi license path configured for this shell: $GRB_LICENSE_FILE"
 fi

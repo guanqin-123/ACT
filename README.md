@@ -23,3 +23,8 @@ python main.py --verifier act
 ## License
 
 ACT is licensed under GNU Affero General Public License v3.0 (AGPL-3.0).
+
+
+## Acknowledgements
+
+This project was developed with the assistance of GitHub Copilot to enhance code readability and efficiency. AI-generated suggestions were reviewed and tested by the contributors before inclusion.

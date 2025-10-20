@@ -80,7 +80,7 @@ act/
   - Unified command-line interface supporting all verifiers
   - Parameter parsing, validation, and backend routing
   - Comprehensive argument compatibility across different verification tools
-  - Integration with configuration defaults from `../configs/`
+  - Integration with configuration defaults from `../modules/configs/`
 
 ### **`front_end/` - User-Facing Data Processing**
 - **`loaders/`**: Comprehensive data loading and preprocessing
@@ -230,7 +230,7 @@ The three-tier modular architecture provides several key advantages:
 - **Continuous Validation**: Baseline capture and regression detection for quality assurance
 
 ### **Configuration Management**
-- **Centralized Defaults**: Configuration files in `../configs/` provide optimal parameters
+- **Centralized Defaults**: Configuration files in `../modules/configs/` provide optimal parameters
 - **Device Management**: Intelligent GPU/CPU device selection and memory optimization
 - **Environment Isolation**: Different verifiers can use separate conda environments
 - **Parameter Management**: Unified command-line interface with type validation

@@ -32,7 +32,7 @@ This directory contains all environment setup scripts and dependency requirement
   - Gurobi optimizer
   - Sorted containers for efficient data structures
 
-- **`eran_requirements.txt`**: Dependencies for ERAN environment (`act-eran`)
+- **`eran_requirements.txt`**n: Dependencies for ERAN environment (`act-eran`)
   - Python 3.8 compatible packages
   - TensorFlow 2.9.3 for ERAN compatibility
   - ONNX 1.8.0 (specific version required by ERAN)
@@ -41,13 +41,13 @@ This directory contains all environment setup scripts and dependency requirement
 ## Usage
 
 ### Quick Setup
-```bash
+```
 cd setup/
 source setup.sh
 ```
 
 ### Manual ERAN Setup (if needed)
-```bash
+```
 cd setup/
 source eran_env_setup.sh
 ```
@@ -56,13 +56,13 @@ source eran_env_setup.sh
 
 ### Environment Creation Failures
 If conda environments fail to create:
-```bash
+```
 conda clean --all
 conda update conda
 ```
 
 ### Linux System Dependencies for ERAN (Ubuntu/Debian)
-```bash
+```
 sudo apt-get update
 sudo apt-get install build-essential cmake m4 autoconf libtool
 sudo apt-get install libgmp-dev libmpfr-dev
@@ -72,13 +72,6 @@ sudo apt-get install libgmp-dev libmpfr-dev
 - Academic users: https://www.gurobi.com/academia/
 - Ensure license is activated in each conda environment
 - Check license with: `python -c "import gurobipy; print('Gurobi OK')"`
-
-### ERAN Compilation Issues
-Common solutions:
-1. Ensure all system dependencies are installed
-2. Check GCC version compatibility (GCC 7-9 recommended)
-3. Verify ELINA library compilation logs
-4. Clear any cached builds: `rm -rf modules/eran/ELINA/build/`
 
 ## Environment Specifications
 

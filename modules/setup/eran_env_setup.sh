@@ -37,7 +37,7 @@ conda install -y -c conda-forge \
 
 echo "[ERAN] Installing Python packages..."
 pip install -r eran_requirements.txt
-ERAN_DIR="$(cd ../modules/eran && pwd)"
+ERAN_DIR="$(cd ../../modules/eran && pwd)"
 echo "[ERAN] Switching to $ERAN_DIR"
 pushd "$ERAN_DIR" > /dev/null
 

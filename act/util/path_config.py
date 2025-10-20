@@ -114,7 +114,8 @@ def get_data_root() -> str:
 
 def get_config_root() -> str:
     """Get the configs directory path."""
-    return os.path.join(get_project_root(), 'configs')
+    # After reorganizing repository, configs live under modules/configs
+    return os.path.join(get_project_root(), 'modules', 'configs')
 
 
 def get_modules_root() -> str:
