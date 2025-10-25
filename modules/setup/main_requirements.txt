@@ -1,26 +1,39 @@
-# main env dependencies
+# Core dependencies - REQUIRED
 torch>=2.0.0,<2.4.0
 torchvision>=0.12.0,<0.19.0
 numpy>=1.20,<2.0
+pyyaml>=6.0
+termcolor>=2.3.0
+psutil>=5.9.5
+sortedcontainers>=2.4
+pandas>=2.0
+packaging>=20.0
+tqdm>=4.64
+
+# ONNX ecosystem - REQUIRED
 onnx
 git+https://github.com/doctormeee/onnx2pytorch.git
 onnxruntime>=1.15
 onnxoptimizer>=0.3
 skl2onnx>=1.14
 
+# Solvers - REQUIRED
+gurobipy>=10
 
-packaging>=20.0
+# Development tools - REQUIRED
 pylint>=2.15
 appdirs>=1.4
-tqdm>=4.64
 graphviz>=0.20.3
-
-pyyaml>=6.0
-termcolor>=2.3.0
-gurobipy>=10
-psutil>=5.9.5
-sortedcontainers>=2.4
-pandas>=2.0
 ninja>=1.10,<1.11.1.2
 
-tensorflow
+# Model loading (for Keras/TF models) - REQUIRED
+tensorflow>=2.13.0
+
+# Note: The following are transitive dependencies (auto-installed):
+# - scipy, requests, pillow (via torch/torchvision)
+# - protobuf, typing-extensions (via onnx/tensorflow)
+# - All nvidia-* packages (via torch with CUDA)
+# - sympy, networkx (via torch)
+# - certifi, charset-normalizer, urllib3, idna (via requests)
+# - markupsafe, jinja2 (via tensorflow)
+# - Other utility packages
