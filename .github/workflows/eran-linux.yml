@@ -28,7 +28,7 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}
 
     steps:
-      # 0) Reclaim space early
+      # 0) Free up space early
       - name: Free disk space (Ubuntu)
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
@@ -41,16 +41,17 @@ jobs:
       - name: Show space after cleanup
         run: df -hT
 
-      # 1) Checkout minimal tree
+      # 1) Shallow checkout
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
           submodules: false
 
+      # 2) Sparse checkout (skip missing dirs to avoid fatal)
       - name: Enable sparse checkout (minimal tree)
         run: |
-          git sparse-checkout init --cone
+          git sparse-checkout init --cone --skip-checks
           git sparse-checkout set \
             act \
             modules/eran \
@@ -58,22 +59,24 @@ jobs:
             models/Sample_models/MNIST
           git read-tree -mu HEAD
 
+      # If ERAN is a submodule, fetch it shallowly (safe if not present)
       - name: Update ERAN submodule (shallow)
         run: |
           if grep -q "path = modules/eran" .gitmodules 2>/dev/null; then
             git submodule update --init --depth 1 modules/eran
           fi
 
-      # 2) Miniconda with mamba
+      # 3) Miniconda with mamba (pin version for caching)
       - name: Set up Miniconda (mamba)
         uses: conda-incubator/setup-miniconda@v3
         with:
           auto-update-conda: true
           python-version: "3.9"
           miniforge-variant: Miniforge3
+          miniforge-version: "24.3.0-0"
           use-mamba: true
 
-      # 3) System dependencies
+      # 4) System deps
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -81,7 +84,7 @@ jobs:
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
 
-      # 4) Create ERAN env
+      # 5) Create ERAN env
       - name: Set up ACT environments (ERAN)
         shell: bash -l {0}
         run: |
@@ -92,7 +95,7 @@ jobs:
           conda clean --all --yes
           python -m pip cache purge || true
 
-      # 5) Run ERAN verification
+      # 6) Run ERAN verification
       - name: Run ERAN verification
         shell: bash -l {0}
         run: |
@@ -109,7 +112,7 @@ jobs:
             --start 0 --end 5 --epsilon 0.01 --norm inf \
             --mean 0.1307 --std 0.3081
 
-      # 6) Upload logs on failure
+      # 7) Upload logs on failure
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -121,7 +124,7 @@ jobs:
             **/*.tmp
           retention-days: 7
 
-      # 7) Final cleanup
+      # 8) Final cleanup
       - name: Final cleanup and space report
         shell: bash -l {0}
         run: |
