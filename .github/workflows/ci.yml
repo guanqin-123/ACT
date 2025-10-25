@@ -159,7 +159,7 @@ jobs:
   eran-linux:
     name: ERAN (Linux)
     runs-on: ubuntu-22.04
-    needs: abcrown-linux
+    needs: quick-test
     steps:
       - name: Checkout repository with submodules
         uses: actions/checkout@v4
