@@ -1,0 +1,131 @@
+name: abCrown CI (Linux)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: abcrown-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  abcrown-linux:
+    name: abCrown (Ubuntu 22.04)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      CONDA_PKGS_DIRS: /tmp/conda_pkgs
+      PIP_CACHE_DIR: /tmp/pip_cache
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONUNBUFFERED: "1"
+      TF_ENABLE_ONEDNN_OPTS: "0"
+      ACT_CI_MODE: "true"
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Free disk space (Ubuntu)
+        uses: jlumbroso/free-disk-space@v1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      - name: Show space after cleanup
+        run: df -hT
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Enable sparse checkout (minimal tree)
+        run: |
+          git sparse-checkout init --cone
+          git sparse-checkout set \
+            act \
+            modules/abcrown \
+            modules/setup \
+            models/Sample_models/MNIST
+          git read-tree -mu HEAD
+
+      - name: Update abCrown submodule (shallow)
+        run: |
+          if grep -q "path = modules/abcrown" .gitmodules 2>/dev/null; then
+            git submodule update --init --depth 1 modules/abcrown
+          fi
+
+      - name: Set up Miniconda (mamba)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+          python-version: "3.9"
+          miniforge-variant: Miniforge3
+          use-mamba: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgmp-dev libmpfr-dev
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Set up ACT environments (abCrown)
+        shell: bash -l {0}
+        run: |
+          cd modules/setup/
+          ACT_CI_MODE=true source setup.sh abcrown
+          conda info
+          conda list
+          conda clean --all --yes
+          python -m pip cache purge || true
+
+      - name: Patch abCrown submodule
+        run: |
+          INIT_FULL_PATH="modules/abcrown/complete_verifier/__init__.py"
+          if [ -f "$INIT_FULL_PATH" ] && grep -q "^from abcrown import abCrown" "$INIT_FULL_PATH"; then
+            sed -i 's/^from abcrown import abCrown/# from abcrown import abCrown/' "$INIT_FULL_PATH"
+          fi
+
+      - name: Run abCrown verification
+        shell: bash -l {0}
+        run: |
+          source "$(conda info --base)/etc/profile.d/conda.sh"
+          conda activate act-abcrown
+          find "$GITHUB_WORKSPACE" -maxdepth 2 -name "__pycache__" -type d -exec rm -rf {} +
+          cd "$GITHUB_WORKSPACE"
+          python -m act.wrapper_exts.ext_runner \
+            --verifier abcrown \
+            --device cpu \
+            --method alpha_beta \
+            --model_path models/Sample_models/MNIST/small_relu_mnist_cnn_model_1.onnx \
+            --dataset mnist --spec_type local_lp \
+            --start 0 --end 1 --epsilon 0.1 --norm inf \
+            --mean 0.1307 --std 0.3081
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: abcrown-logs
+          path: |
+            **/act*.log
+            **/abcrown*/**/*.log
+            **/*.tmp
+          retention-days: 7
+
+      - name: Final cleanup
+        shell: bash -l {0}
+        run: |
+          conda clean --all --yes || true
+          python -m pip cache purge || true
+          rm -rf /tmp/conda_pkgs /tmp/pip_cache || true
+          find "$GITHUB_WORKSPACE" -maxdepth 2 -name "__pycache__" -type d -exec rm -rf {} +
+          df -hT
