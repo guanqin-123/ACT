@@ -28,7 +28,7 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}
 
     steps:
-      # 0) Free ~20–30 GB before starting
+      # 0) Free ~20–30 GB early
       - name: Free disk space (Ubuntu)
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
@@ -48,34 +48,33 @@ jobs:
           fetch-depth: 1
           submodules: false
 
-      # 2) Sparse checkout (skip missing dirs to avoid fatal error)
+      # 2) Sparse checkout with safety guards
       - name: Enable sparse checkout (minimal tree)
         run: |
-          git sparse-checkout init --cone --skip-checks
-          git sparse-checkout set \
-            act \
-            modules/abcrown \
-            modules/setup \
-            models/Sample_models/MNIST
-          git read-tree -mu HEAD
+          git sparse-checkout init --cone
+          paths="act modules/setup models/Sample_models/MNIST"
+          [ -d modules/abcrown ] || paths="$paths modules/abcrown"
+          git sparse-checkout set $paths
+          git read-tree -mu HEAD || true
 
+      # 3) Update abCrown submodule (shallow if it exists)
       - name: Update abCrown submodule (shallow)
         run: |
           if grep -q "path = modules/abcrown" .gitmodules 2>/dev/null; then
             git submodule update --init --depth 1 modules/abcrown
           fi
 
-      # 3) Install Miniconda (mamba)
+      # 4) Install Miniconda (mamba)
       - name: Set up Miniconda (mamba)
         uses: conda-incubator/setup-miniconda@v3
         with:
           auto-update-conda: true
           python-version: "3.9"
           miniforge-variant: Miniforge3
-          miniforge-version: "24.3.0-0"   # pin to cache it
+          miniforge-version: "24.3.0-0"
           use-mamba: true
 
-      # 4) System dependencies
+      # 5) System dependencies
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -83,7 +82,7 @@ jobs:
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
 
-      # 5) Create ACT abCrown environment
+      # 6) Create ACT environment for abCrown
       - name: Set up ACT environments (abCrown)
         shell: bash -l {0}
         run: |
@@ -94,7 +93,7 @@ jobs:
           conda clean --all --yes
           python -m pip cache purge || true
 
-      # 6) Patch abCrown submodule
+      # 7) Patch abCrown submodule if needed
       - name: Patch abCrown submodule
         run: |
           INIT_FULL_PATH="modules/abcrown/complete_verifier/__init__.py"
@@ -102,7 +101,7 @@ jobs:
             sed -i 's/^from abcrown import abCrown/# from abcrown import abCrown/' "$INIT_FULL_PATH"
           fi
 
-      # 7) Run verification
+      # 8) Run abCrown verification
       - name: Run abCrown verification
         shell: bash -l {0}
         run: |
@@ -119,7 +118,7 @@ jobs:
             --start 0 --end 1 --epsilon 0.1 --norm inf \
             --mean 0.1307 --std 0.3081
 
-      # 8) Upload logs on failure
+      # 9) Upload logs on failure
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -131,7 +130,7 @@ jobs:
             **/*.tmp
           retention-days: 7
 
-      # 9) Final cleanup
+      # 10) Final cleanup
       - name: Final cleanup and space report
         shell: bash -l {0}
         run: |

@@ -28,7 +28,7 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}
 
     steps:
-      # 0) Free up space early
+      # 0) Free up space
       - name: Free disk space (Ubuntu)
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
@@ -41,32 +41,30 @@ jobs:
       - name: Show space after cleanup
         run: df -hT
 
-      # 1) Shallow checkout
+      # 1) Checkout repo shallowly
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
           submodules: false
 
-      # 2) Sparse checkout (skip missing dirs to avoid fatal)
+      # 2) Sparse checkout with safety guards (compatible with all git versions)
       - name: Enable sparse checkout (minimal tree)
         run: |
-          git sparse-checkout init --cone --skip-checks
-          git sparse-checkout set \
-            act \
-            modules/eran \
-            modules/setup \
-            models/Sample_models/MNIST
-          git read-tree -mu HEAD
+          git sparse-checkout init --cone
+          paths="act modules/setup models/Sample_models/MNIST"
+          [ -d modules/eran ] || paths="$paths modules/eran"
+          git sparse-checkout set $paths
+          git read-tree -mu HEAD || true
 
-      # If ERAN is a submodule, fetch it shallowly (safe if not present)
+      # 3) Update ERAN submodule (shallow if it exists)
       - name: Update ERAN submodule (shallow)
         run: |
           if grep -q "path = modules/eran" .gitmodules 2>/dev/null; then
             git submodule update --init --depth 1 modules/eran
           fi
 
-      # 3) Miniconda with mamba (pin version for caching)
+      # 4) Miniconda setup (pin version for cache stability)
       - name: Set up Miniconda (mamba)
         uses: conda-incubator/setup-miniconda@v3
         with:
@@ -76,7 +74,7 @@ jobs:
           miniforge-version: "24.3.0-0"
           use-mamba: true
 
-      # 4) System deps
+      # 5) System dependencies
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -84,7 +82,7 @@ jobs:
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
 
-      # 5) Create ERAN env
+      # 6) Set up ACT environment for ERAN
       - name: Set up ACT environments (ERAN)
         shell: bash -l {0}
         run: |
@@ -95,7 +93,7 @@ jobs:
           conda clean --all --yes
           python -m pip cache purge || true
 
-      # 6) Run ERAN verification
+      # 7) Run ERAN verification
       - name: Run ERAN verification
         shell: bash -l {0}
         run: |
@@ -112,7 +110,7 @@ jobs:
             --start 0 --end 5 --epsilon 0.01 --norm inf \
             --mean 0.1307 --std 0.3081
 
-      # 7) Upload logs on failure
+      # 8) Upload logs if run fails
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -124,7 +122,7 @@ jobs:
             **/*.tmp
           retention-days: 7
 
-      # 8) Final cleanup
+      # 9) Final cleanup
       - name: Final cleanup and space report
         shell: bash -l {0}
         run: |
