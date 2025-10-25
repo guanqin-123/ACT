@@ -28,9 +28,9 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}
 
     steps:
-      # 0) Free up 20–30 GB early
+      # 0) Reclaim space early
       - name: Free disk space (Ubuntu)
-        uses: jlumbroso/free-disk-space@v1
+        uses: jlumbroso/free-disk-space@v1.3.1
         with:
           android: true
           dotnet: true
@@ -41,7 +41,7 @@ jobs:
       - name: Show space after cleanup
         run: df -hT
 
-      # 1) Checkout only minimal files
+      # 1) Checkout minimal tree
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -73,7 +73,7 @@ jobs:
           miniforge-variant: Miniforge3
           use-mamba: true
 
-      # 3) System deps
+      # 3) System dependencies
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -81,7 +81,7 @@ jobs:
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
 
-      # 4) Set up ACT ERAN environment
+      # 4) Create ERAN env
       - name: Set up ACT environments (ERAN)
         shell: bash -l {0}
         run: |
