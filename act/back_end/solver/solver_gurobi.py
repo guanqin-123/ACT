@@ -46,7 +46,7 @@ class GurobiSolver(Solver):
         return SolverCaps(False)
 
     def __init__(self):
-        if gp is None:
+        if not GUROBI_AVAILABLE:
             raise RuntimeError("gurobipy is not available in this environment.")
         self.m = None
         self._x = []

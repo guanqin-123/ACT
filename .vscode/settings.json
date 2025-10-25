@@ -19,6 +19,9 @@
     "terminal.integrated.env.linux": {
         "PYTHONPATH": "${workspaceFolder}"
     },
+    "terminal.integrated.env.osx": {
+        "PYTHONPATH": "${workspaceFolder}"
+    },
     "github.copilot.chat.commitMessageGeneration.instructions": [
         {
             "text": "read the changes and summarize and also add mojis where necessary."

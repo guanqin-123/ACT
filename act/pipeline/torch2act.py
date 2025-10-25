@@ -448,8 +448,8 @@ if __name__ == "__main__":
     try:
         torch_solver = TorchLPSolver()
         # Use default device for TorchLP solver
-        torch_solver.begin("act_verification", device="gpu")
-        print("  ✅ TorchLP solver available (device: gpu)")
+        torch_solver.begin("act_verification")
+        print(f"  ✅ TorchLP solver available (device: {torch_solver._device})")
     except Exception as e:
         print(f"  ❌ TorchLP initialization failed: {e}")
     

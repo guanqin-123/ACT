@@ -1,0 +1,21 @@
+name: act-py312
+channels:
+  - gurobi
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pytorch
+  - torchvision
+  - torchaudio
+  - onnx
+  - onnxruntime
+  - pandas
+  - numpy
+  - networkx
+  - tqdm
+  - gurobi
+  - pip
+  - pip:
+      - onnxconverter-common
+      - onnxscript

@@ -7,6 +7,12 @@ An end-to-end neural network verification platform that supports refinement-base
 ## Quick Start
 
 ```bash
+# 0. Preparation
+Install [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/install#quickstart-install-instructions)
+
+conda env create -f environment.yml
+conda activate act-py312 # Activate an environment (python-3.12)
+
 # 1. Clone repository
 git clone --recursive https://github.com/SVF-tools/ACT.git
 cd ACT
