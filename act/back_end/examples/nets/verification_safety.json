@@ -1,112 +1,290 @@
 {
-  "meta": {
-    "name": "verification_safety",
-    "description": "Simple safety verification scenario",
-    "architecture_type": "verification",
-    "input_shape": [
-      1,
-      4
-    ]
-  },
-  "layers": [
-    {
-      "id": 0,
-      "kind": "INPUT_SPEC",
-      "params": {
-        "bounds": {
-          "lower": -2.0,
-          "upper": 2.0
-        }
+  "format_version": "1.0",
+  "act_net": {
+    "layers": [
+      {
+        "id": 0,
+        "kind": "INPUT",
+        "params": {},
+        "meta": {
+          "shape": [
+            1,
+            5
+          ],
+          "dtype": "torch.float64",
+          "desc": "Safety property input",
+          "layout": "FLAT",
+          "dataset_name": "safety_benchmark",
+          "value_range": [
+            0.0,
+            10.0
+          ],
+          "scale_hint": "unknown",
+          "distribution": "uniform",
+          "domain": "tabular"
+        },
+        "in_vars": [],
+        "out_vars": [
+          1
+        ],
+        "cache": {}
       },
-      "meta": {},
-      "in_vars": [],
-      "out_vars": [
-        1
-      ]
-    },
-    {
-      "id": 1,
-      "kind": "DENSE",
-      "params": {
-        "output_features": 8,
-        "xavier_init": true
+      {
+        "id": 1,
+        "kind": "INPUT_SPEC",
+        "params": {
+          "lb": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEsIDUpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              1,
+              5
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "ub": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEsIDUpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAkQAAAAAAAACRAAAAAAAAAJEAAAAAAAAAkQAAAAAAAACRA",
+            "dtype": "torch.float64",
+            "shape": [
+              1,
+              5
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "meta": {
+          "kind": "BOX",
+          "lb_val": 0.0,
+          "ub_val": 10.0
+        },
+        "in_vars": [
+          1
+        ],
+        "out_vars": [
+          2
+        ],
+        "cache": {}
       },
-      "meta": {},
-      "in_vars": [
-        1
-      ],
-      "out_vars": [
-        2
-      ]
-    },
-    {
-      "id": 2,
-      "kind": "RELU",
-      "params": {},
-      "meta": {},
-      "in_vars": [
-        2
-      ],
-      "out_vars": [
-        3
-      ]
-    },
-    {
-      "id": 3,
-      "kind": "DENSE",
-      "params": {
-        "output_features": 2,
-        "xavier_init": true
+      {
+        "id": 2,
+        "kind": "DENSE",
+        "params": {
+          "W": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIwLCA1KSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoFNF66cESivzw70KObeKw/d0wnWVFemL9I09ogRga5Px+oH7wbyrG/l1BmajUbvz/s3LwIlKqAv3D1AClgxLw/zPjGQ2hsgD9VRnIGviKXv2iPcDXrBJU/v+ray2UBsj/eqMEKYyBXvyNrx14dOZm/nMqd74ikuj96VzCsEMmvv4MLS1Mq07M/PLaHk/P8sz/MIccOyBK0v+QZ+btpsqe/5wFZPelRqb8IuKW0Rw61P1z1brjS0sU/lyb3VvfRqD+9xtzwmf2ZvyuVYCyDAbK/kJcC4Be2wr9XwJgFgeyuP3XGFLRMrI0/yKMEXy1Nlj+OYw5BOrGwv9dIDvxtgpS/I94c6vbnoT/raABTkZLAv9DiJt+pTbW/lAqnQpCtuz+Ixm2Avyt3P6oMFa7X36S/Yv71AykRdj9kqnjI51uoPymHSs+XL7Y/f+dX0Pz/nj9HDA/8j8zMv/eohInuu4Q/uGZxmPPKxr+83FYn6Pmyv2B8j9zzAri/2Bobbmw/YL9iHtUey37DPyyK5SUETbU/jaQwApTeej+81O7RH22RP+Gj4Bro7XY/NX88N2EFzL8yRUbRvYcqv7ER2ubOdaQ/aFL3/yO8s7/pBWEPF7yIPzZqfAT8ipY/o++lxdcliD+jzVWTLHaUv/f6FUHdScE/2JPp1YZ9lT+fXHVTbRmVv0h7zpLgCqW/3XzlXfksuz/kRU5B/n27P+ggEEeJiLU/ZcDQrp7TrT9WfRbd5smwPwxHVU9V1L+/BDm3Arx1rD8YX46gLYTKP1aHPhKo9KE/jI62rE4wxb8YYAHVEi6wP/SIWKXSXMs/NKoNfQuPvL9XQLnKtGDMPwvwrtt+OoA/B3HXDIogq7+amFcubsunv0sXV6boGJE/00KeeNMOob9QZXLcjay4v2BoVUrKv7A/KPMAM9jpyD9AehRnKELBP0+/V91g/Ik/4g38lu3xvz9egl1frMnDP7CQ+wwUQ6W/tMPSVtT8sD/fDEuBa8rAP9O4j8X/5rO/TDDGMUtexb8b2ObRcyHEP1haUuIEbrg/FrtD8fuftD8Bh+wbuG/BPw==",
+            "dtype": "torch.float64",
+            "shape": [
+              20,
+              5
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "b": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIwLCksIH0gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              20
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "meta": {
+          "in_features": 5,
+          "out_features": 20,
+          "bias_enabled": true
+        },
+        "in_vars": [
+          2
+        ],
+        "out_vars": [
+          3
+        ],
+        "cache": {}
       },
-      "meta": {},
-      "in_vars": [
-        3
-      ],
-      "out_vars": [
-        4
-      ]
+      {
+        "id": 3,
+        "kind": "RELU",
+        "params": {},
+        "meta": {},
+        "in_vars": [
+          3
+        ],
+        "out_vars": [
+          4
+        ],
+        "cache": {}
+      },
+      {
+        "id": 4,
+        "kind": "DENSE",
+        "params": {
+          "W": {
+            "data": "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",
+            "dtype": "torch.float64",
+            "shape": [
+              10,
+              20
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "b": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEwLCksIH0gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "dtype": "torch.float64",
+            "shape": [
+              10
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "meta": {
+          "in_features": 20,
+          "out_features": 10,
+          "bias_enabled": true
+        },
+        "in_vars": [
+          4
+        ],
+        "out_vars": [
+          5
+        ],
+        "cache": {}
+      },
+      {
+        "id": 5,
+        "kind": "RELU",
+        "params": {},
+        "meta": {},
+        "in_vars": [
+          5
+        ],
+        "out_vars": [
+          6
+        ],
+        "cache": {}
+      },
+      {
+        "id": 6,
+        "kind": "DENSE",
+        "params": {
+          "W": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDEwKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAq/6nzcMuXNvzemgWyvFbo/6u59uuxovL9lqCsVXg+wP+w40/DDZ7c/o24HncK9mD/NvnOi6QyjP0N568Mk9KC/3efo0qcvpb/7sC7O1TfBv1HRR3qNCqA/+OOoBQ7Rsz+INWfIcViVP+IHHNWCbNE/TTd74Op+uT+EawJ5xMNqP1gWfIOx+rm/yvjlbpeRtj9SOKbpTCOXvwKRePyiUby/",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              10
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "b": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "meta": {
+          "in_features": 10,
+          "out_features": 2,
+          "bias_enabled": true
+        },
+        "in_vars": [
+          6
+        ],
+        "out_vars": [
+          7
+        ],
+        "cache": {}
+      },
+      {
+        "id": 7,
+        "kind": "ASSERT",
+        "params": {},
+        "meta": {
+          "kind": "LINEAR_LE"
+        },
+        "in_vars": [
+          7
+        ],
+        "out_vars": [
+          8
+        ],
+        "cache": {}
+      }
+    ],
+    "graph": {
+      "preds": {
+        "0": [],
+        "1": [
+          0
+        ],
+        "2": [
+          1
+        ],
+        "3": [
+          2
+        ],
+        "4": [
+          3
+        ],
+        "5": [
+          4
+        ],
+        "6": [
+          5
+        ],
+        "7": [
+          6
+        ]
+      },
+      "succs": {
+        "0": [
+          1
+        ],
+        "1": [
+          2
+        ],
+        "2": [
+          3
+        ],
+        "3": [
+          4
+        ],
+        "4": [
+          5
+        ],
+        "5": [
+          6
+        ],
+        "6": [
+          7
+        ],
+        "7": []
+      }
     },
-    {
-      "id": 4,
-      "kind": "ASSERT",
-      "params": {},
-      "meta": {},
-      "in_vars": [
-        4
+    "metadata": {
+      "creation_time": "2025-10-27T22:36:40.074435",
+      "framework_version": "ACT-1.0",
+      "layer_count": 8,
+      "layer_kinds": [
+        "INPUT",
+        "INPUT_SPEC",
+        "DENSE",
+        "RELU",
+        "DENSE",
+        "RELU",
+        "DENSE",
+        "ASSERT"
       ],
-      "out_vars": [
-        5
-      ]
+      "generated_by": "NetFactory"
     }
-  ],
-  "preds": {
-    "0": [],
-    "1": [
-      0
-    ],
-    "2": [
-      1
-    ],
-    "3": [
-      2
-    ],
-    "4": [
-      3
-    ]
-  },
-  "succs": {
-    "0": [
-      1
-    ],
-    "1": [
-      2
-    ],
-    "2": [
-      3
-    ],
-    "3": [
-      4
-    ],
-    "4": []
   }
 }

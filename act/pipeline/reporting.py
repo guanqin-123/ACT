@@ -38,8 +38,7 @@ from pathlib import Path
 import logging
 from collections import defaultdict
 
-from act.pipeline.correctness import ValidationResult, PerformanceResult, VerifyResult
-from act.pipeline.regression import RegressionResult, TrendData, BaselineMetrics
+from act.pipeline.regression import ValidationResult, PerformanceResult, VerifyResult, RegressionResult, TrendData, BaselineMetrics
 
 logger = logging.getLogger(__name__)
 

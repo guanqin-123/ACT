@@ -20,6 +20,31 @@ import torch.nn as nn
 from typing import Dict, Any, Optional, List, Tuple, Union
 
 # ------------------- Model Inference Function --------------------------------
+# Helper function for single model inference
+# -----------------------------------------------------------------------------
+def infer_single_model(combo_id: str, model: nn.Sequential, input_tensor: torch.Tensor) -> Tuple[bool, Optional[torch.Tensor], Optional[str]]:
+    """
+    Test a single wrapped model with input tensor.
+    
+    Args:
+        combo_id: Model identifier (e.g., "m:mnist_mlp_small|x:mnist")
+        model: Synthesized wrapped model to test
+        input_tensor: Input tensor for model inference
+        
+    Returns:
+        Tuple of (success, output, error_msg):
+            - success: True if inference succeeded, False otherwise
+            - output: Model output tensor if successful, None otherwise
+            - error_msg: Error message if failed, None otherwise
+    """
+    try:
+        with torch.no_grad():
+            output = model(input_tensor)
+            return True, output, None
+    except Exception as e:
+        return False, None, str(e)[:100]
+
+
 # Main model inference function
 # -----------------------------------------------------------------------------
 def model_inference(models: Dict[str, nn.Sequential], input_data: Dict[str, Dict[str, torch.Tensor]]) -> Dict[str, nn.Sequential]:
@@ -59,18 +84,18 @@ def model_inference(models: Dict[str, nn.Sequential], input_data: Dict[str, Dict
         
         for combo_id, model in models_list:
             model_name = combo_id.split('|')[0].split(':')[1]
-            try:
-                with torch.no_grad():
-                    output = model(test_input)
-                    success_count += 1
-                    dataset_successes += 1
-                    successful_models[combo_id] = model  # Store successful model
-            except Exception as e:
+            success, output, error_msg = infer_single_model(combo_id, model, test_input)
+            
+            if success:
+                success_count += 1
+                dataset_successes += 1
+                successful_models[combo_id] = model  # Store successful model
+            else:
                 failure_count += 1
                 # Track unique failure patterns
                 pattern = f"{model_name.split('_')[0]} + {dataset_name}"  # e.g., "mnist + cifar10"
                 if pattern not in failure_summary:
-                    failure_summary[pattern] = {'count': 0, 'error': str(e)[:100]}
+                    failure_summary[pattern] = {'count': 0, 'error': error_msg}
                 failure_summary[pattern]['count'] += 1
         
         print(f"   {dataset_name}: {dataset_successes}/{len(models_list)} successful")

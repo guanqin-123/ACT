@@ -15,25 +15,36 @@ networks:
     layers:
       - kind: INPUT
         params: {}
-        meta: {shape: [1, 784], dtype: "torch.float64"}
+        meta: 
+          shape: [1, 784]
+          dtype: "torch.float64"
+          desc: "MNIST flattened input"
+          layout: "FLAT"
+          dataset_name: "mnist"
+          num_classes: 10
+          value_range: [0.0, 1.0]
+          scale_hint: "0-1"
+          distribution: "normalized"
+          domain: "vision"
+          channels: 1
       - kind: INPUT_SPEC
         params: {}
         meta: {kind: "BOX", lb_val: 0.0, ub_val: 1.0}
       - kind: DENSE
-        params: {}  # W tensor will be generated during network creation
-        meta: {in_features: 784, out_features: 32}
+        params: {}  # W, b tensors will be generated during network creation
+        meta: {in_features: 784, out_features: 32, bias_enabled: true}
       - kind: RELU
         params: {}
         meta: {}
       - kind: DENSE
-        params: {}  # W tensor will be generated during network creation
-        meta: {in_features: 32, out_features: 16}
+        params: {}  # W, b tensors will be generated during network creation
+        meta: {in_features: 32, out_features: 16, bias_enabled: true}
       - kind: RELU
         params: {}
         meta: {}
       - kind: DENSE
-        params: {}  # W tensor will be generated during network creation
-        meta: {in_features: 16, out_features: 10}
+        params: {}  # W, b tensors will be generated during network creation
+        meta: {in_features: 16, out_features: 10, bias_enabled: true}
       - kind: ASSERT
         params: {}
         meta: {kind: "TOP1_ROBUST"}
@@ -46,7 +57,18 @@ networks:
     layers:
       - kind: INPUT
         params: {}
-        meta: {shape: [1, 1, 28, 28], dtype: "torch.float64"}
+        meta:
+          shape: [1, 1, 28, 28]
+          dtype: "torch.float64"
+          desc: "MNIST grayscale image"
+          layout: "CHW"
+          dataset_name: "mnist"
+          num_classes: 10
+          value_range: [0.0, 1.0]
+          scale_hint: "0-1"
+          distribution: "normalized"
+          domain: "vision"
+          channels: 1
       - kind: INPUT_SPEC
         params: {}
         meta: {kind: "BOX", lb_val: 0.0, ub_val: 1.0}
@@ -72,14 +94,14 @@ networks:
         params: {}
         meta: {input_shape: [1, 32, 7, 7], output_shape: [1, 1568]}
       - kind: DENSE
-        params: {}  # W tensor will be generated during network creation
-        meta: {in_features: 1568, out_features: 64}
+        params: {}  # W, b tensors will be generated during network creation
+        meta: {in_features: 1568, out_features: 64, bias_enabled: true}
       - kind: RELU
         params: {}
         meta: {}
       - kind: DENSE
-        params: {}  # W tensor will be generated during network creation
-        meta: {in_features: 64, out_features: 10}
+        params: {}  # W, b tensors will be generated during network creation
+        meta: {in_features: 64, out_features: 10, bias_enabled: true}
       - kind: ASSERT
         params: {}
         meta: {kind: "TOP1_ROBUST"}
@@ -93,25 +115,35 @@ networks:
     layers:
       - kind: INPUT
         params: {}
-        meta: {shape: [1, 10], dtype: "torch.float64"}
+        meta:
+          shape: [1, 10]
+          dtype: "torch.float64"
+          desc: "Simple adversarial input"
+          layout: "FLAT"
+          dataset_name: "synthetic"
+          num_classes: 3
+          value_range: [0.0, 1.0]
+          scale_hint: "0-1"
+          distribution: "uniform"
+          domain: "tabular"
       - kind: INPUT_SPEC
         params: {}
         meta: {kind: "LINF_BALL", eps: 0.1, center_val: 0.5}
       - kind: DENSE
-        params: {}  # W tensor will be generated during network creation
-        meta: {in_features: 10, out_features: 8}
+        params: {}  # W, b tensors will be generated during network creation
+        meta: {in_features: 10, out_features: 8, bias_enabled: true}
       - kind: RELU
         params: {}
         meta: {}
       - kind: DENSE
-        params: {}  # W tensor will be generated during network creation
-        meta: {in_features: 8, out_features: 4}
+        params: {}  # W, b tensors will be generated during network creation
+        meta: {in_features: 8, out_features: 4, bias_enabled: true}
       - kind: RELU
         params: {}
         meta: {}
       - kind: DENSE
-        params: {}  # W tensor will be generated during network creation
-        meta: {in_features: 4, out_features: 3}
+        params: {}  # W, b tensors will be generated during network creation
+        meta: {in_features: 4, out_features: 3, bias_enabled: true}
       - kind: ASSERT
         params: {}
         meta: {kind: "TOP1_ROBUST"}
@@ -125,26 +157,445 @@ networks:
     layers:
       - kind: INPUT
         params: {}
-        meta: {shape: [1, 10], dtype: "torch.float64"}
+        meta:
+          shape: [1, 10]
+          dtype: "torch.float64"
+          desc: "Custom tabular input"
+          layout: "FLAT"
+          dataset_name: "custom"
+          num_classes: 3
+          value_range: [-1.0, 1.0]
+          scale_hint: "normalized"
+          distribution: "normal"
+          domain: "tabular"
       - kind: INPUT_SPEC
         params: {}
         meta: {kind: "BOX", lb_val: -1.0, ub_val: 1.0}
       - kind: DENSE
-        params: {}  # W tensor will be generated during network creation
-        meta: {in_features: 10, out_features: 16}
+        params: {}  # W, b tensors will be generated during network creation
+        meta: {in_features: 10, out_features: 16, bias_enabled: true}
       - kind: RELU
         params: {}
         meta: {}
       - kind: DENSE
-        params: {}  # W tensor will be generated during network creation
-        meta: {in_features: 16, out_features: 8}
+        params: {}  # W, b tensors will be generated during network creation
+        meta: {in_features: 16, out_features: 8, bias_enabled: true}
       - kind: RELU
         params: {}
         meta: {}
       - kind: DENSE
-        params: {}  # W tensor will be generated during network creation
-        meta: {in_features: 8, out_features: 3}
+        params: {}  # W, b tensors will be generated during network creation
+        meta: {in_features: 8, out_features: 3, bias_enabled: true}
       - kind: ASSERT
         params: {}
         meta: {kind: "TOP1_ROBUST"}
     metadata: {custom: true, input_bounds: [-1.0, 1.0]}
+
+  mnist_mlp_medium:
+    description: "Medium MLP for MNIST (128-64-32 hidden layers)"
+    architecture_type: mlp
+    input_shape: [1, 784]
+    layers:
+      - kind: INPUT
+        params: {}
+        meta:
+          shape: [1, 784]
+          dtype: "torch.float64"
+          desc: "MNIST flattened input"
+          layout: "FLAT"
+          dataset_name: "mnist"
+          num_classes: 10
+          value_range: [0.0, 1.0]
+          scale_hint: "0-1"
+          distribution: "normalized"
+          domain: "vision"
+          channels: 1
+      - kind: INPUT_SPEC
+        params: {}
+        meta: {kind: "BOX", lb_val: 0.0, ub_val: 1.0}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 784, out_features: 128, bias_enabled: true}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 128, out_features: 64, bias_enabled: true}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 64, out_features: 32, bias_enabled: true}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 32, out_features: 10, bias_enabled: true}
+      - kind: ASSERT
+        params: {}
+        meta: {kind: "TOP1_ROBUST"}
+    metadata: {dataset: mnist, task: classification, size: medium}
+
+  adversarial_mnist:
+    description: "MNIST adversarial network with L∞ perturbation"
+    architecture_type: adversarial
+    input_shape: [1, 784]
+    layers:
+      - kind: INPUT
+        params: {}
+        meta:
+          shape: [1, 784]
+          dtype: "torch.float64"
+          desc: "MNIST adversarial input"
+          layout: "FLAT"
+          dataset_name: "mnist"
+          num_classes: 10
+          value_range: [0.0, 1.0]
+          scale_hint: "0-1"
+          distribution: "normalized"
+          domain: "vision"
+          channels: 1
+      - kind: INPUT_SPEC
+        params: {}
+        meta: {kind: "LINF_BALL", eps: 0.05, center_val: 0.5}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 784, out_features: 64, bias_enabled: true}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 64, out_features: 32, bias_enabled: true}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 32, out_features: 10, bias_enabled: true}
+      - kind: ASSERT
+        params: {}
+        meta: {kind: "TOP1_ROBUST"}
+    metadata: {dataset: mnist, verification_type: adversarial, epsilon: 0.05}
+
+  cifar10_cnn_small:
+    description: "Small CNN for CIFAR-10"
+    architecture_type: cnn
+    input_shape: [1, 3, 32, 32]
+    layers:
+      - kind: INPUT
+        params: {}
+        meta:
+          shape: [1, 3, 32, 32]
+          dtype: "torch.float64"
+          desc: "CIFAR-10 RGB image"
+          layout: "CHW"
+          dataset_name: "cifar10"
+          num_classes: 10
+          value_range: [0.0, 1.0]
+          scale_hint: "0-1"
+          distribution: "normalized"
+          domain: "vision"
+          channels: 3
+      - kind: INPUT_SPEC
+        params: {}
+        meta: {kind: "BOX", lb_val: 0.0, ub_val: 1.0}
+      - kind: CONV2D
+        params: {}
+        meta: {input_shape: [1, 3, 32, 32], output_shape: [1, 32, 32, 32], in_channels: 3, out_channels: 32, kernel_size: 3, padding: 1}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: MAXPOOL2D
+        params: {}
+        meta: {kernel_size: 2}
+      - kind: CONV2D
+        params: {}
+        meta: {input_shape: [1, 32, 16, 16], output_shape: [1, 64, 16, 16], in_channels: 32, out_channels: 64, kernel_size: 3, padding: 1}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: MAXPOOL2D
+        params: {}
+        meta: {kernel_size: 2}
+      - kind: FLATTEN
+        params: {}
+        meta: {input_shape: [1, 64, 8, 8], output_shape: [1, 4096]}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 4096, out_features: 128, bias_enabled: true}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 128, out_features: 10, bias_enabled: true}
+      - kind: ASSERT
+        params: {}
+        meta: {kind: "TOP1_ROBUST"}
+    metadata: {dataset: cifar10, task: classification, size: small}
+
+  cifar10_cnn_medium:
+    description: "Medium CNN for CIFAR-10 with more filters"
+    architecture_type: cnn
+    input_shape: [1, 3, 32, 32]
+    layers:
+      - kind: INPUT
+        params: {}
+        meta:
+          shape: [1, 3, 32, 32]
+          dtype: "torch.float64"
+          desc: "CIFAR-10 RGB image"
+          layout: "CHW"
+          dataset_name: "cifar10"
+          num_classes: 10
+          value_range: [0.0, 1.0]
+          scale_hint: "0-1"
+          distribution: "normalized"
+          domain: "vision"
+          channels: 3
+      - kind: INPUT_SPEC
+        params: {}
+        meta: {kind: "BOX", lb_val: 0.0, ub_val: 1.0}
+      - kind: CONV2D
+        params: {}
+        meta: {input_shape: [1, 3, 32, 32], output_shape: [1, 64, 32, 32], in_channels: 3, out_channels: 64, kernel_size: 3, padding: 1}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: CONV2D
+        params: {}
+        meta: {input_shape: [1, 64, 32, 32], output_shape: [1, 64, 32, 32], in_channels: 64, out_channels: 64, kernel_size: 3, padding: 1}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: MAXPOOL2D
+        params: {}
+        meta: {kernel_size: 2}
+      - kind: CONV2D
+        params: {}
+        meta: {input_shape: [1, 64, 16, 16], output_shape: [1, 128, 16, 16], in_channels: 64, out_channels: 128, kernel_size: 3, padding: 1}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: CONV2D
+        params: {}
+        meta: {input_shape: [1, 128, 16, 16], output_shape: [1, 128, 16, 16], in_channels: 128, out_channels: 128, kernel_size: 3, padding: 1}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: MAXPOOL2D
+        params: {}
+        meta: {kernel_size: 2}
+      - kind: FLATTEN
+        params: {}
+        meta: {input_shape: [1, 128, 8, 8], output_shape: [1, 8192]}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 8192, out_features: 256, bias_enabled: true}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 256, out_features: 10, bias_enabled: true}
+      - kind: ASSERT
+        params: {}
+        meta: {kind: "TOP1_ROBUST"}
+    metadata: {dataset: cifar10, task: classification, size: medium}
+
+  custom_mlp_medium:
+    description: "Medium custom MLP with box constraints"
+    architecture_type: mlp
+    input_shape: [1, 20]
+    layers:
+      - kind: INPUT
+        params: {}
+        meta:
+          shape: [1, 20]
+          dtype: "torch.float64"
+          desc: "Custom tabular input"
+          layout: "FLAT"
+          dataset_name: "custom"
+          num_classes: 5
+          value_range: [-2.0, 2.0]
+          scale_hint: "normalized"
+          distribution: "normal"
+          domain: "tabular"
+      - kind: INPUT_SPEC
+        params: {}
+        meta: {kind: "BOX", lb_val: -2.0, ub_val: 2.0}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 20, out_features: 64, bias_enabled: true}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 64, out_features: 32, bias_enabled: true}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 32, out_features: 16, bias_enabled: true}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 16, out_features: 5, bias_enabled: true}
+      - kind: ASSERT
+        params: {}
+        meta: {kind: "TOP1_ROBUST"}
+    metadata: {custom: true, input_bounds: [-2.0, 2.0], size: medium}
+
+  custom_cnn:
+    description: "Custom CNN architecture for image classification"
+    architecture_type: cnn
+    input_shape: [1, 3, 64, 64]
+    layers:
+      - kind: INPUT
+        params: {}
+        meta:
+          shape: [1, 3, 64, 64]
+          dtype: "torch.float64"
+          desc: "Custom RGB image"
+          layout: "CHW"
+          dataset_name: "custom"
+          num_classes: 8
+          value_range: [0.0, 255.0]
+          scale_hint: "0-255"
+          distribution: "uniform"
+          domain: "vision"
+          channels: 3
+      - kind: INPUT_SPEC
+        params: {}
+        meta: {kind: "BOX", lb_val: 0.0, ub_val: 255.0}
+      - kind: CONV2D
+        params: {}
+        meta: {input_shape: [1, 3, 64, 64], output_shape: [1, 32, 64, 64], in_channels: 3, out_channels: 32, kernel_size: 5, padding: 2}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: MAXPOOL2D
+        params: {}
+        meta: {kernel_size: 2}
+      - kind: CONV2D
+        params: {}
+        meta: {input_shape: [1, 32, 32, 32], output_shape: [1, 64, 32, 32], in_channels: 32, out_channels: 64, kernel_size: 3, padding: 1}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: MAXPOOL2D
+        params: {}
+        meta: {kernel_size: 2}
+      - kind: CONV2D
+        params: {}
+        meta: {input_shape: [1, 64, 16, 16], output_shape: [1, 128, 16, 16], in_channels: 64, out_channels: 128, kernel_size: 3, padding: 1}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: MAXPOOL2D
+        params: {}
+        meta: {kernel_size: 2}
+      - kind: FLATTEN
+        params: {}
+        meta: {input_shape: [1, 128, 8, 8], output_shape: [1, 8192]}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 8192, out_features: 256, bias_enabled: true}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 256, out_features: 8, bias_enabled: true}
+      - kind: ASSERT
+        params: {}
+        meta: {kind: "TOP1_ROBUST"}
+    metadata: {custom: true, image_size: [64, 64]}
+
+  verification_safety:
+    description: "Safety verification network with linear constraints"
+    architecture_type: verification
+    input_shape: [1, 5]
+    layers:
+      - kind: INPUT
+        params: {}
+        meta:
+          shape: [1, 5]
+          dtype: "torch.float64"
+          desc: "Safety property input"
+          layout: "FLAT"
+          dataset_name: "safety_benchmark"
+          value_range: [0.0, 10.0]
+          scale_hint: "unknown"
+          distribution: "uniform"
+          domain: "tabular"
+      - kind: INPUT_SPEC
+        params: {}
+        meta: {kind: "BOX", lb_val: 0.0, ub_val: 10.0}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 5, out_features: 20, bias_enabled: true}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 20, out_features: 10, bias_enabled: true}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 10, out_features: 2, bias_enabled: true}
+      - kind: ASSERT
+        params: {}
+        meta: {kind: "LINEAR_LE"}
+    metadata: {verification_type: safety, property: linear_constraints}
+
+  verification_reachability:
+    description: "Reachability verification network"
+    architecture_type: verification
+    input_shape: [1, 8]
+    layers:
+      - kind: INPUT
+        params: {}
+        meta:
+          shape: [1, 8]
+          dtype: "torch.float64"
+          desc: "Reachability analysis input"
+          layout: "FLAT"
+          dataset_name: "reachability_benchmark"
+          value_range: [-5.0, 5.0]
+          scale_hint: "normalized"
+          distribution: "normal"
+          domain: "tabular"
+      - kind: INPUT_SPEC
+        params: {}
+        meta: {kind: "BOX", lb_val: -5.0, ub_val: 5.0}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 8, out_features: 32, bias_enabled: true}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 32, out_features: 16, bias_enabled: true}
+      - kind: RELU
+        params: {}
+        meta: {}
+      - kind: DENSE
+        params: {}
+        meta: {in_features: 16, out_features: 4, bias_enabled: true}
+      - kind: ASSERT
+        params: {}
+        meta: {kind: "RANGE"}
+    metadata: {verification_type: reachability, property: output_bounds}

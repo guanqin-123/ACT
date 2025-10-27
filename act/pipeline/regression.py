@@ -10,6 +10,7 @@
 #   Baseline management and regression testing for ACT pipeline. Provides
 #   comprehensive regression testing capabilities including baseline capture,
 #   performance tracking, correctness regression detection, and trend analysis.
+#   Also defines shared data classes used across pipeline modules.
 #
 #===---------------------------------------------------------------------===#
 
@@ -23,12 +24,64 @@ from typing import Dict, Any, List, Optional, Tuple, Union
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 from pathlib import Path
+from enum import Enum
 import logging
 
 from act.pipeline.utils import PerformanceProfiler, clear_torch_cache
-from act.pipeline.correctness import ValidationResult, PerformanceResult, VerifyResult
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Shared Data Classes
+# ============================================================================
+
+class VerifyResult(Enum):
+    """Verification result enum."""
+    SAT = "satisfiable"
+    UNSAT = "unsatisfiable"
+    CLEAN_FAILURE = "clean_failure"
+    UNKNOWN = "unknown"
+    TIMEOUT = "timeout"
+    ERROR = "error"
+
+
+@dataclass
+class ValidationResult:
+    """Result from validation test execution."""
+    success: bool
+    total_tests: int
+    passed_tests: int
+    failed_tests: int
+    execution_time: float
+    memory_usage_mb: float
+    results: List[Dict[str, Any]] = field(default_factory=list)
+    error_message: Optional[str] = None
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+@dataclass
+class PerformanceResult:
+    """Result from performance profiling."""
+    test_id: str
+    execution_time: float
+    memory_usage_mb: float
+    peak_memory_mb: float = 0.0
+    cpu_percent: float = 0.0
+    success: bool = True
+    error_message: Optional[str] = None
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    
+    # Additional performance metrics
+    forward_pass_time: float = 0.0
+    verification_time: float = 0.0
+    solver_time: float = 0.0
+    abstraction_time: float = 0.0
+
+
+# ============================================================================
+# Regression Testing Data Classes
+# ============================================================================
 
 
 @dataclass

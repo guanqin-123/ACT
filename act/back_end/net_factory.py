@@ -101,10 +101,16 @@ class NetFactory:
                 weight = self.generate_weight_tensor(kind, meta)
                 if weight is not None:
                     params["W"] = weight
+                # Generate bias if enabled
+                if meta.get("bias_enabled", False):
+                    out_features = meta.get("out_features", 10)
+                    params["b"] = torch.zeros(out_features)
             elif kind.startswith("CONV") and "weight" not in params:
                 weight = self.generate_weight_tensor(kind, meta)
                 if weight is not None:
                     params["weight"] = weight
+                # Generate bias if needed (CONV layers typically have bias by default)
+                # For now, we don't add bias to CONV layers unless specified
             
             # Create layer (validation happens automatically in __post_init__)
             layer = Layer(

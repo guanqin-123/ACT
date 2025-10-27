@@ -112,3 +112,15 @@
 2025-10-16 14:26:51,702 - gurobipy - INFO - Set parameter LicenseID to value 2711348
 2025-10-16 14:26:51,706 - gurobipy - INFO - Academic license 2711348 - for non-commercial use only - registered to y.___@unsw.edu.au
 2025-10-16 14:26:51,706 - gurobipy - INFO - Warning: Gurobi version mismatch between Python 12.0.2 and C library 12.0.3
+2025-10-27 21:51:09,929 - act.pipeline.model_factory - INFO - Loaded ACT Net from act/back_end/examples/nets/mnist_mlp_small.json
+2025-10-27 21:51:09,936 - act.pipeline.model_factory - INFO - Created PyTorch model 'mnist_mlp_small' (mlp) with 25818 parameters
+2025-10-27 21:58:35,679 - act.pipeline.model_factory - INFO - Loaded ACT Net from act/back_end/examples/nets/mnist_mlp_small.json
+2025-10-27 21:58:35,680 - act.pipeline.model_factory - INFO - Created PyTorch model 'mnist_mlp_small' (mlp) with 25818 parameters
+2025-10-27 22:00:52,543 - act.pipeline.model_factory - INFO - Loaded ACT Net from act/back_end/examples/nets/mnist_mlp_small.json
+2025-10-27 22:00:52,543 - act.pipeline.model_factory - INFO - Created PyTorch model 'mnist_mlp_small' (mlp) with 25818 parameters
+2025-10-27 22:00:52,548 - act.pipeline.model_factory - INFO - Loaded ACT Net from act/back_end/examples/nets/mnist_cnn_small.json
+2025-10-27 22:00:52,549 - act.pipeline.model_factory - INFO - Created PyTorch model 'mnist_cnn_small' (cnn) with 106122 parameters
+2025-10-27 22:00:52,554 - act.pipeline.model_factory - INFO - Loaded ACT Net from act/back_end/examples/nets/adversarial_simple.json
+2025-10-27 22:00:52,554 - act.pipeline.model_factory - INFO - Created PyTorch model 'adversarial_simple' (adversarial) with 139 parameters
+2025-10-27 22:00:52,556 - act.pipeline.model_factory - INFO - Loaded ACT Net from act/back_end/examples/nets/custom_mlp_small.json
+2025-10-27 22:00:52,556 - act.pipeline.model_factory - INFO - Created PyTorch model 'custom_mlp_small' (mlp) with 339 parameters
