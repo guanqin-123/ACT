@@ -152,8 +152,33 @@ class LayerKind(str, enum.Enum):
 # -------------------------------------------
 REGISTRY: Dict[str, Dict[str, List[str]]] = {
     # Wrapper & specs
-    LayerKind.INPUT.value:       {"params_required": [], "params_optional": ["center"], "meta_required": ["shape"], "meta_optional": []},
-    LayerKind.INPUT_SPEC.value:  {"params_required": [], "params_optional": ["lb","ub","center","A","b"], "meta_required": ["kind"], "meta_optional": ["eps"]},
+    LayerKind.INPUT.value:       {
+        "params_required": [], 
+        "params_optional": [
+            "center",           # Optional tensor: center point for perturbation specs (flattened)
+        ], 
+        "meta_required": [
+            "shape",            # Required tuple: input shape including batch=1 (e.g., (1, 784) or (1, 3, 32, 32))
+            "dtype",            # Required str: tensor data type (e.g., "torch.float32", "torch.float64") - CRITICAL for verification soundness
+        ], 
+        "meta_optional": [
+            "desc",             # Optional str: human-readable description (default: "input")
+            # Tier 1: Essential metadata for data characterization
+            "layout",           # Optional str: data format - "CHW" (channel-first), "HWC" (channel-last), "FLAT" (flattened)
+            "dataset_name",     # Optional str: dataset identifier (e.g., "mnist", "cifar10", "custom_data")
+            # Tier 2: Important metadata for verification context
+            "num_classes",      # Optional int: number of output classes for classification tasks
+            "value_range",      # Optional tuple: (min, max) actual value range in data (e.g., (0.0, 1.0) or (0.0, 255.0))
+            "scale_hint",       # Optional str: scale description - "0-1", "0-255", "normalized", "unknown"
+            "distribution",     # Optional str: data distribution - "uniform", "normal", "normalized", "unknown", or custom (free-form)
+            # Tier 3: Optional metadata for debugging and tracking
+            "label",            # Optional tensor: ground truth label (0-D or 1-D tensor, device-aware via register_buffer)
+            "sample_id",        # Optional int/str: sample identifier for tracking individual inputs
+            "domain",           # Optional str: problem domain - "vision", "tabular", "text", "audio"
+            "channels",         # Optional int: number of channels (e.g., 1 for grayscale, 3 for RGB)
+        ]
+    },
+    LayerKind.INPUT_SPEC.value:  {"params_required": [], "params_optional": ["lb","ub","center","A","b"], "meta_required": ["kind"], "meta_optional": ["eps","lb_val","ub_val","center_val"]},
     LayerKind.ASSERT.value:      {"params_required": [], "params_optional": ["c","lb","ub"], "meta_required": ["kind"], "meta_optional": ["d","y_true","margin"]},
 
     # Adapters

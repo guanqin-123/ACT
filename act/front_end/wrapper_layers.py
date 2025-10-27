@@ -34,30 +34,116 @@ def prod(seq: Tuple[int, ...]) -> int:
 
 
 class InputLayer(nn.Module):
-    """Declares the symbolic input block (shape/optional center). No-op at inference."""
-    def __init__(self, shape: Tuple[int, ...], center: Optional[torch.Tensor] = None, desc: str = "input"):
+    """
+    Declares the symbolic input block with rich metadata. No-op at inference.
+    
+    Supports comprehensive metadata tracking for verification including data type,
+    layout, dataset information, and optional ground truth labels.
+    
+    NOTE: dtype is REQUIRED for verification soundness (different dtypes have
+    different precision/range affecting bound propagation).
+    """
+    def __init__(
+        self,
+        shape: Tuple[int, ...],
+        dtype: torch.dtype,  # REQUIRED: Critical for verification soundness
+        center: Optional[torch.Tensor] = None,
+        desc: str = "input",
+        # Tier 1: Essential metadata (strongly recommended)
+        layout: Optional[str] = None,
+        dataset_name: Optional[str] = None,
+        # Tier 2: Important metadata
+        num_classes: Optional[int] = None,
+        value_range: Optional[Tuple[float, float]] = None,
+        scale_hint: Optional[str] = None,
+        distribution: Optional[str] = None,  # NEW: "uniform", "normal", "normalized", "unknown", or custom
+        # Tier 3: Optional metadata
+        label: Optional[Union[torch.Tensor, int]] = None,
+        sample_id: Optional[Union[int, str]] = None,
+        domain: Optional[str] = None,
+        channels: Optional[int] = None,
+    ):
         super().__init__()
         assert shape[0] == 1, "Verification wrapper assumes batch=1."
+        
+        # Core attributes (dtype now required)
         self.shape = tuple(shape)
+        self.dtype = dtype  # REQUIRED
         self.desc = desc
         
-        # GPU-first device management
+        # Tier 1: Essential metadata
+        self.layout = layout
+        self.dataset_name = dataset_name
+        
+        # Tier 2: Important metadata
+        self.num_classes = num_classes
+        self.value_range = tuple(value_range) if value_range else None
+        self.scale_hint = scale_hint
+        self.distribution = distribution  # NEW
+        
+        # Tier 3: Optional metadata
+        self.sample_id = sample_id
+        self.domain = domain
+        self.channels = channels
+        
+        # GPU-first device management for tensor buffers
         if center is not None:
             center = center.to(device=get_default_device(), dtype=get_default_dtype())
             self.register_buffer("center", center.reshape(-1))
         else:
             self.center = None
+        
+        # Label as tensor buffer (device-aware, auto-converts from int)
+        if label is not None:
+            if isinstance(label, int):
+                label = torch.tensor(label, dtype=torch.long)
+            label = label.to(device=get_default_device(), dtype=torch.long)
+            self.register_buffer("label", label.reshape(-1))  # Always 1-D
+        else:
+            self.label = None
+        
         self._validate_schema()
 
     def _validate_schema(self):
         """Validate parameters against INPUT layer schema"""
         schema = REGISTRY[LayerKind.INPUT.value]
+        
+        # Collect params (only tensors)
         params = {}
         if self.center is not None:
             params["center"] = self.center
-        meta = {"shape": self.shape}
+        
+        # Collect meta (everything else - dtype now REQUIRED)
+        meta = {
+            "shape": self.shape,
+            "dtype": str(self.dtype)  # REQUIRED - must always be present
+        }
+        
+        # Add non-default desc
         if self.desc != "input":
             meta["desc"] = self.desc
+        
+        # Add Tier 1-3 metadata (only if not None)
+        if self.layout is not None:
+            meta["layout"] = self.layout
+        if self.dataset_name is not None:
+            meta["dataset_name"] = self.dataset_name
+        if self.num_classes is not None:
+            meta["num_classes"] = self.num_classes
+        if self.value_range is not None:
+            meta["value_range"] = self.value_range
+        if self.scale_hint is not None:
+            meta["scale_hint"] = self.scale_hint
+        if self.distribution is not None:  # NEW
+            meta["distribution"] = self.distribution
+        if self.label is not None:
+            meta["label"] = self.label  # Tensor stored directly
+        if self.sample_id is not None:
+            meta["sample_id"] = self.sample_id
+        if self.domain is not None:
+            meta["domain"] = self.domain
+        if self.channels is not None:
+            meta["channels"] = self.channels
         
         # Check required/optional params and meta
         for key in schema["params_required"]:
@@ -78,12 +164,41 @@ class InputLayer(nn.Module):
         N = prod(self.shape[1:])
         out_vars = list(range(len(in_vars), len(in_vars) + N))
         
+        # Collect params (only center)
         params = {}
         if self.center is not None:
             params["center"] = self.center
-        meta = {"shape": self.shape}
+        
+        # Collect meta (dtype is REQUIRED, always present)
+        meta = {
+            "shape": self.shape,
+            "dtype": str(self.dtype)  # REQUIRED
+        }
+        
         if self.desc != "input":
             meta["desc"] = self.desc
+        
+        # Add all optional metadata fields (only if not None)
+        if self.layout is not None:
+            meta["layout"] = self.layout
+        if self.dataset_name is not None:
+            meta["dataset_name"] = self.dataset_name
+        if self.num_classes is not None:
+            meta["num_classes"] = self.num_classes
+        if self.value_range is not None:
+            meta["value_range"] = self.value_range
+        if self.scale_hint is not None:
+            meta["scale_hint"] = self.scale_hint
+        if self.distribution is not None:  # NEW
+            meta["distribution"] = self.distribution
+        if self.label is not None:
+            meta["label"] = self.label
+        if self.sample_id is not None:
+            meta["sample_id"] = self.sample_id
+        if self.domain is not None:
+            meta["domain"] = self.domain
+        if self.channels is not None:
+            meta["channels"] = self.channels
         
         layer = create_layer(
             id=layer_id_start,
@@ -94,6 +209,36 @@ class InputLayer(nn.Module):
             out_vars=out_vars
         )
         return [layer], out_vars
+
+    def get_metadata_summary(self) -> Dict[str, Any]:
+        """Return a summary of all metadata for debugging/logging"""
+        return {
+            "shape": self.shape,
+            "desc": self.desc,
+            "dtype": str(self.dtype),  # Always present (required)
+            "layout": self.layout,
+            "dataset_name": self.dataset_name,
+            "num_classes": self.num_classes,
+            "value_range": self.value_range,
+            "scale_hint": self.scale_hint,
+            "distribution": self.distribution,  # NEW
+            "label": self.label.item() if self.label is not None else None,
+            "sample_id": self.sample_id,
+            "domain": self.domain,
+            "channels": self.channels,
+            "has_center": self.center is not None,
+        }
+
+    def __repr__(self) -> str:
+        """Enhanced string representation with key metadata"""
+        meta_str = f"shape={self.shape}"
+        if self.dataset_name:
+            meta_str += f", dataset={self.dataset_name}"
+        if self.label is not None:
+            meta_str += f", label={self.label.item()}"
+        if self.layout:
+            meta_str += f", layout={self.layout}"
+        return f"InputLayer({meta_str})"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x

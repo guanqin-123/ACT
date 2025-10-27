@@ -433,8 +433,46 @@ def synthesize_wrapped_models(
                     margin_str = f"m{out_spec.margin:.1f}" if hasattr(out_spec, 'margin') and out_spec.margin is not None else "m0.0"
                     combo_id = f"m:{model_id}|x:{input_id}|is:{in_spec.kind}|os:{out_spec.kind}_{margin_str}"
 
+                    # Extract metadata from pack for InputLayer
+                    dtype = x.dtype  # REQUIRED
+                    layout = pack.get("layout", "FLAT")
+                    dataset_name = input_id  # Key is dataset name
+                    scale_hint = pack.get("scale_hint", None)
+                    value_range = (float(x.min().item()), float(x.max().item())) if x.numel() > 0 else None
+                    
+                    # Infer distribution from scale_hint or default to unknown
+                    distribution = pack.get("distribution", None)
+                    if distribution is None and scale_hint == "normalized":
+                        distribution = "normalized"
+                    elif distribution is None:
+                        distribution = "unknown"
+                    
+                    # Extract label if available
+                    label_tensor = None
+                    if "labels" in pack and pack["labels"] is not None and pack["labels"].numel() > 0:
+                        label_tensor = pack["labels"][0]  # First label (already tensor)
+                    
+                    # Infer additional metadata
+                    channels = x.shape[1] if x.dim() == 4 else None  # For (B,C,H,W)
+                    domain = "vision" if x.dim() == 4 else "tabular"
+                    num_classes = None  # Could infer from model output shape if needed
+
                     layers: List[nn.Module] = [
-                        InputLayer(shape=tuple(x.shape), center=center_opt),
+                        InputLayer(
+                            shape=tuple(x.shape),
+                            dtype=dtype,  # REQUIRED
+                            center=center_opt,
+                            layout=layout,
+                            dataset_name=dataset_name,
+                            num_classes=num_classes,
+                            value_range=value_range,
+                            scale_hint=scale_hint,
+                            distribution=distribution,  # NEW
+                            label=label_tensor,
+                            sample_id=None,  # Could add index if tracking
+                            domain=domain,
+                            channels=channels,
+                        ),
                         adapter,
                         InputSpecLayer(spec=pushed_in_spec),
                     ]
@@ -565,7 +603,9 @@ def model_synthesis() -> Tuple[Dict[str, nn.Sequential], Dict[str, Dict[str, tor
             input_data[name] = {
                 "x": first_sample,
                 "layout": "FLAT",  # CSV data is flattened
-                "center": first_sample.reshape(-1)  # For LINF_BALL specs
+                "center": first_sample.reshape(-1),  # For LINF_BALL specs
+                "labels": pack["labels"][0:1] if pack["labels"].numel() > 0 else None,  # First label tensor
+                "scale_hint": "unknown",  # CSV data scale unknown
             }
             print(f"📦 Prepared dataset '{name}': {first_sample.shape} -> {first_sample.numel()} features")
         else:

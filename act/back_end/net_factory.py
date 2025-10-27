@@ -5,7 +5,7 @@ import json
 import yaml
 import torch
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from act.back_end.core import Layer, Net
 from act.back_end.serialization.serialization import NetSerializer
@@ -49,9 +49,36 @@ class NetFactory:
             return torch.randn(*weight_shape) * 0.1
         return None
     
+    def _generate_input_spec_params(self, params: Dict[str, Any], meta: Dict[str, Any], input_shape: Optional[List[int]]) -> None:
+        """Generate INPUT_SPEC params based on kind and meta values."""
+        if not input_shape:
+            return  # Can't generate without shape
+        
+        spec_kind = meta.get("kind")
+        
+        if spec_kind == "BOX":
+            # Generate lb/ub from meta values
+            lb_val = meta.get("lb_val", 0.0)
+            ub_val = meta.get("ub_val", 1.0)
+            params["lb"] = torch.full(input_shape, lb_val)
+            params["ub"] = torch.full(input_shape, ub_val)
+        
+        elif spec_kind == "LINF_BALL":
+            # Generate center + lb/ub from center_val and eps
+            eps = meta.get("eps")
+            assert eps is not None, "LINF_BALL requires 'eps' in meta"
+            
+            center_val = meta.get("center_val", 0.5)  # Default to 0.5 for normalized inputs
+            params["center"] = torch.full(input_shape, center_val)
+            params["lb"] = params["center"] - eps
+            params["ub"] = params["center"] + eps
+        
+        # LIN_POLY: skip (too complex, user must provide A and b matrices)
+    
     def create_network(self, name: str, spec: Dict[str, Any]) -> Net:
         """Create network from YAML spec."""
         layers = []
+        
         for i, layer_spec in enumerate(spec['layers']):
             # Simple sequential variable assignment
             in_vars = [i] if i > 0 else []
@@ -62,8 +89,15 @@ class NetFactory:
             meta = layer_spec.get('meta', {})
             kind = layer_spec['kind']
             
-            # Generate required weight tensors for layers that need them
-            if kind == "DENSE" and "W" not in params:
+            # Get input shape for INPUT_SPEC generation
+            input_shape = None
+            if i > 0 and layers[i-1].kind == "INPUT":
+                input_shape = layers[i-1].meta.get("shape")
+            
+            # === AUTO-GENERATION DISPATCH ===
+            if kind == "INPUT_SPEC":
+                self._generate_input_spec_params(params, meta, input_shape)
+            elif kind == "DENSE" and "W" not in params:
                 weight = self.generate_weight_tensor(kind, meta)
                 if weight is not None:
                     params["W"] = weight
@@ -72,6 +106,7 @@ class NetFactory:
                 if weight is not None:
                     params["weight"] = weight
             
+            # Create layer (validation happens automatically in __post_init__)
             layer = Layer(
                 id=i,
                 kind=kind,
@@ -80,6 +115,7 @@ class NetFactory:
                 in_vars=in_vars,
                 out_vars=out_vars
             )
+            
             layers.append(layer)
         
         # Create graph structure for Net

@@ -56,9 +56,19 @@ def mock_wrapped_mlp_mnist(
     center_data = torch.tensor(rng.random(784), dtype=dtype, device=device)  # Flattened MNIST image
     true_label = int(rng.integers(0, num_classes))
     
-    # Input layer with shape declaration
+    # Input layer with shape declaration and metadata
     input_shape = (1, 784)  # Batch=1, features=784
-    input_layer = InputLayer(shape=input_shape, center=center_data)
+    input_layer = InputLayer(
+        shape=input_shape,
+        dtype=center_data.dtype,  # REQUIRED
+        center=center_data,
+        layout="FLAT",
+        dataset_name="mnist",
+        num_classes=num_classes,
+        distribution="unknown",
+        label=true_label,  # Auto-converted from int to tensor
+        domain="vision",
+    )
     
     # Simple identity adapter (no transformation needed for flattened MNIST)
     adapter = InputAdapterLayer()
@@ -127,14 +137,25 @@ def mock_wrapped_cnn_mnist(
     device = get_default_device()
     dtype = get_default_dtype()
     
-    # Create mock MNIST sample (28x28 = 784 features, flattened for compatibility)
+    # Create mock MNIST sample (28x28 image)
     rng = np.random.default_rng(seed)
-    center_data = torch.tensor(rng.random(784), dtype=dtype, device=device)  # Flattened for compatibility
+    center_data = torch.tensor(rng.random((1, 28, 28)), dtype=dtype, device=device)  # Image format
     true_label = int(rng.integers(0, num_classes))
     
-    # Input layer with flattened shape for compatibility
-    input_shape = (1, 784)  # Batch=1, features=784 (compatible with MLP)
-    input_layer = InputLayer(shape=input_shape, center=center_data)
+    # Input layer with shape declaration and metadata
+    input_shape = (1, 1, 28, 28)  # Batch=1, Channels=1, Height=28, Width=28
+    input_layer = InputLayer(
+        shape=input_shape,
+        dtype=center_data.dtype,  # REQUIRED
+        center=center_data,
+        layout="CHW",  # CNN expects channel-first
+        dataset_name="mnist",
+        num_classes=num_classes,
+        distribution="unknown",
+        label=true_label,
+        domain="vision",
+        channels=1,  # MNIST is grayscale
+    )
     
     # Simple adapter (identity)
     adapter = InputAdapterLayer()
@@ -217,9 +238,20 @@ def mock_wrapped_mlp_cifar(
     center_data = torch.tensor(rng.random(3072), dtype=dtype, device=device)  # Flattened CIFAR-10 image
     true_label = int(rng.integers(0, num_classes))
     
-    # Input layer with shape declaration
-    input_shape = (1, 3072)  # Batch=1, features=3072
-    input_layer = InputLayer(shape=input_shape, center=center_data)
+    # Input layer with shape declaration and metadata
+    input_shape = (1, 3072)  # Batch=1, features=3072 (32x32x3 flattened)
+    input_layer = InputLayer(
+        shape=input_shape,
+        dtype=center_data.dtype,  # REQUIRED
+        center=center_data,
+        layout="FLAT",
+        dataset_name="cifar10",
+        num_classes=num_classes,
+        distribution="unknown",
+        label=true_label,
+        domain="vision",
+        channels=3,  # CIFAR-10 is RGB
+    )
     
     # Simple identity adapter (no transformation needed for flattened CIFAR-10)
     adapter = InputAdapterLayer()
