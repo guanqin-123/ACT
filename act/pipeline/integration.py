@@ -901,7 +901,7 @@ def create_mnist_test_case(
     
     return IntegrationTestCase(
         dataset_name="mnist",
-        model_path="models/vnnModels/MNIST/small_relu_mnist_cnn_model_1.onnx",
+        model_path="models/vnnmodels/MNIST/small_relu_mnist_cnn_model_1.onnx",
         spec_type="local_lp",
         sample_indices=sample_indices,
         epsilon=epsilon,

@@ -59,7 +59,7 @@
 2025-10-13 17:59:46,129 - act.pipeline.integration - INFO - Running real verification test: mnist
 2025-10-13 17:59:46,129 - act.pipeline.integration - INFO - Creating test case: mnist, samples: [0, 1]
 2025-10-13 17:59:46,129 - act.pipeline.integration - INFO - Loading dataset from: data/MNIST_csv/mnist_first_100_samples.csv
-2025-10-13 17:59:46,158 - act.pipeline.integration - INFO - Loading ONNX model: models/vnnModels/MNIST/small_relu_mnist_cnn_model_1.onnx
+2025-10-13 17:59:46,158 - act.pipeline.integration - INFO - Loading ONNX model: models/vnnmodels/MNIST/small_relu_mnist_cnn_model_1.onnx
 2025-10-13 17:59:46,336 - act.pipeline.integration - INFO - Creating input specs with epsilon=0.1, norm=inf
 2025-10-13 17:59:46,337 - act.pipeline.integration - INFO - Creating output spec for class 7
 2025-10-13 17:59:46,337 - act.pipeline.integration - INFO - Created test case: mnist_integration_test
@@ -82,7 +82,7 @@
 2025-10-13 18:05:19,503 - act.pipeline.integration - INFO - Running real verification test: mnist
 2025-10-13 18:05:19,503 - act.pipeline.integration - INFO - Creating test case: mnist, samples: [0, 1]
 2025-10-13 18:05:19,503 - act.pipeline.integration - INFO - Loading dataset from: data/MNIST_csv/mnist_first_100_samples.csv
-2025-10-13 18:05:19,518 - act.pipeline.integration - INFO - Loading ONNX model: models/vnnModels/MNIST/small_relu_mnist_cnn_model_1.onnx
+2025-10-13 18:05:19,518 - act.pipeline.integration - INFO - Loading ONNX model: models/vnnmodels/MNIST/small_relu_mnist_cnn_model_1.onnx
 2025-10-13 18:05:19,636 - act.pipeline.integration - INFO - Creating input specs with epsilon=0.1, norm=inf
 2025-10-13 18:05:19,636 - act.pipeline.integration - INFO - Creating output spec for class 7
 2025-10-13 18:05:19,637 - act.pipeline.integration - INFO - Created test case: mnist_integration_test
