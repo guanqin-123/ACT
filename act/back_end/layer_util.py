@@ -78,7 +78,8 @@ def _format_unknown(kind: str, category: str, unknowns: List[str], allowed: List
 def validate_layer(layer: "Layer") -> None:
     """Strict validation against REGISTRY with friendly messages."""
     kind = layer.kind
-    assert kind in REGISTRY, f"Kind '{kind}' not in REGISTRY. Add it to REGISTRY in act_layers.py."
+    if kind not in REGISTRY:
+        raise ValueError(f"Kind '{kind}' not in REGISTRY. Add it to REGISTRY in act_layers.py.")
 
     spec = REGISTRY[kind]
 
@@ -87,23 +88,25 @@ def validate_layer(layer: "Layer") -> None:
         # If torch isn't available, skip the runtime type check.
         try:
             import torch  # noqa
-            assert isinstance(val, Tensor), f"{kind}.params['{name}'] must be torch.Tensor, got {type(val)}."  # type: ignore[arg-type]
+            if not isinstance(val, Tensor):  # type: ignore[arg-type]
+                raise TypeError(f"{kind}.params['{name}'] must be torch.Tensor, got {type(val)}.")
         except ImportError:
             pass
 
     miss_p = _missing(spec['params_required'], layer.params)
     miss_m = _missing(spec['meta_required'], layer.meta)
     
-    # Additional INPUT-specific check: assert dtype VALUE matches device_manager
+    # Additional INPUT-specific check: dtype VALUE matches device_manager
     if kind == LayerKind.INPUT.value and 'dtype' in layer.meta:
         from act.util.device_manager import get_default_dtype
         expected_dtype = str(get_default_dtype()).replace('torch.', 'torch.')
         yaml_dtype = layer.meta['dtype']
-        assert yaml_dtype == expected_dtype, (
-            f"INPUT layer {layer.id} has dtype='{yaml_dtype}' "
-            f"but device_manager expects '{expected_dtype}'. "
-            f"Update configuration to use dtype: \"{expected_dtype}\""
-        )
+        if yaml_dtype != expected_dtype:
+            raise ValueError(
+                f"INPUT layer {layer.id} has dtype='{yaml_dtype}' "
+                f"but device_manager expects '{expected_dtype}'. "
+                f"Update configuration to use dtype: \"{expected_dtype}\""
+            )
 
     allowed_p = spec['params_required'] + spec['params_optional']
     allowed_m = spec['meta_required'] + spec['meta_optional']
@@ -131,43 +134,53 @@ def validate_layer(layer: "Layer") -> None:
         if not has_any:
             errs.append("MHA requires in_proj_* or split {q,k,v}_proj.* or out_proj.weight.")
 
-    assert not errs, f"Layer(id={layer.id}, kind={kind}) schema violation:\n- " + "\n- ".join(errs)
+    if errs:
+        raise ValueError(f"Layer(id={layer.id}, kind={kind}) schema violation:\n- " + "\n- ".join(errs))
 
 def validate_graph(layers: List["Layer"]) -> None:
     seen = set()
     for ly in layers:
-        assert ly.id not in seen, f"Duplicate layer id {ly.id}"
+        if ly.id in seen:
+            raise ValueError(f"Duplicate layer id {ly.id}")
         seen.add(ly.id)
         validate_layer(ly)
     for ly in layers:
         for v in ly.in_vars + ly.out_vars:
-            assert isinstance(v, int) and v >= 0, f"Invalid var id {v} in layer {ly.id}"
+            if not isinstance(v, int) or v < 0:
+                raise ValueError(f"Invalid var id {v} in layer {ly.id}")
 
 def validate_wrapper_graph(layers: List["Layer"]) -> None:
     """Hard assertions for the wrapper layout."""
-    assert layers, "Empty graph"
+    if not layers:
+        raise ValueError("Empty graph")
 
     kinds = [ly.kind for ly in layers]
     input_count = kinds.count(LayerKind.INPUT.value)
     input_spec_count = kinds.count(LayerKind.INPUT_SPEC.value)
-    assert input_count == 1, f"Wrapper must have exactly one INPUT layer, found {input_count}."
-    assert input_spec_count >= 1, "Wrapper must include at least one INPUT_SPEC layer."
-    assert kinds[-1] == LayerKind.ASSERT.value, f"Last layer must be ASSERT, found {kinds[-1]}."
+    
+    if input_count != 1:
+        raise ValueError(f"Wrapper must have exactly one INPUT layer, found {input_count}.")
+    if input_spec_count < 1:
+        raise ValueError("Wrapper must include at least one INPUT_SPEC layer.")
+    if kinds[-1] != LayerKind.ASSERT.value:
+        raise ValueError(f"Last layer must be ASSERT, found {kinds[-1]}.")
 
     first_spec_idx = kinds.index(LayerKind.INPUT_SPEC.value)
     input_idx = kinds.index(LayerKind.INPUT.value)
 
     # Adapters only between INPUT..first INPUT_SPEC
     for i in range(input_idx + 1, first_spec_idx):
-        assert kinds[i] in ADAPTER_KINDS, (
-            f"Only adapters {sorted(ADAPTER_KINDS)} allowed between INPUT and INPUT_SPEC; got {kinds[i]} at pos {i}."
-        )
+        if kinds[i] not in ADAPTER_KINDS:
+            raise ValueError(
+                f"Only adapters {sorted(ADAPTER_KINDS)} allowed between INPUT and INPUT_SPEC; got {kinds[i]} at pos {i}."
+            )
 
     # No INPUT/INPUT_SPEC after first spec (except final ASSERT at end)
     for i, k in enumerate(kinds[first_spec_idx+1:-1], start=first_spec_idx+1):
-        assert k not in (LayerKind.INPUT.value, LayerKind.INPUT_SPEC.value), (
-            f"Unexpected {k} after the first INPUT_SPEC at index {i}."
-        )
+        if k in (LayerKind.INPUT.value, LayerKind.INPUT_SPEC.value):
+            raise ValueError(
+                f"Unexpected {k} after the first INPUT_SPEC at index {i}."
+            )
 
 def create_layer(id: int, kind: str, params: Dict[str, "Tensor"], meta: Dict[str, Any],
                  in_vars: List[int], out_vars: List[int]) -> "Layer":

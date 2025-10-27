@@ -59,7 +59,8 @@ def flatten_index_map_for_permute(shape: Tuple[int, ...], permute_axes: Tuple[in
     Build a vector index map that transforms flattened(H,W,C) → flattened(C,H,W) (or any given perm).
     shape is (1, *dims); permute_axes apply over dims[=shape[1:]].
     """
-    assert len(shape) >= 2
+    if len(shape) < 2:
+        raise ValueError(f"Shape must have at least 2 dimensions (batch + features), got {len(shape)}")
     dims = shape[1:]
     # coords grid in original order
     grid = torch.stack(torch.meshgrid(*[torch.arange(d) for d in dims], indexing="ij"), dim=-1).reshape(-1, len(dims))
@@ -86,7 +87,8 @@ def make_input_adapter_from_pack(pack: Dict[str, Any], target_model: Optional[nn
       report: Dict[str, Any]
     """
     x: torch.Tensor = pack["x"]
-    assert x.shape[0] == 1, "Assumes batch=1 for verification."
+    if x.shape[0] != 1:
+        raise ValueError(f"Assumes batch=1 for verification, got batch size {x.shape[0]}")
     layout = pack.get("layout", infer_layout_from_tensor(x))
     scale_hint = pack.get("scale_hint", "unknown")
     mean = pack.get("mean", None)
@@ -277,12 +279,14 @@ def push_input_spec_through_adapter(
 
     if in_spec.kind in (InKind.BOX, InKind.LINF_BALL):
         if in_spec.kind == InKind.LINF_BALL:
-            assert in_spec.center is not None and in_spec.eps is not None, "LINF_BALL requires center & eps"
+            if in_spec.center is None or in_spec.eps is None:
+                raise ValueError("LINF_BALL requires center & eps")
             c = in_spec.center.reshape(-1)
             eps = torch.tensor(in_spec.eps, dtype=c.dtype, device=c.device)
             lb, ub = c - eps, c + eps
         else:
-            assert in_spec.lb is not None and in_spec.ub is not None, "BOX requires lb & ub"
+            if in_spec.lb is None or in_spec.ub is None:
+                raise ValueError("BOX requires lb & ub")
             lb, ub = in_spec.lb.reshape(-1), in_spec.ub.reshape(-1)
 
         # index ops
@@ -318,11 +322,13 @@ def push_input_spec_through_adapter(
             # Skip strict assertion for channel adaptation cases - the specs will be approximate
             pass  
         else:
-            assert lb.numel() == expected_elements, f"BOX size {lb.numel()} != post-adapter elements {expected_elements}"
+            if lb.numel() != expected_elements:
+                raise ValueError(f"BOX size {lb.numel()} != post-adapter elements {expected_elements}")
         return pushed, info
 
     if in_spec.kind == InKind.LIN_POLY:
-        assert in_spec.A is not None and in_spec.b is not None, "LIN_POLY requires A & b"
+        if in_spec.A is None or in_spec.b is None:
+            raise ValueError("LIN_POLY requires A & b")
         A, b = in_spec.A, in_spec.b
 
         # index ops on columns of A
@@ -360,7 +366,8 @@ def push_input_spec_through_adapter(
             pass
         else:
             expected_elements = prod(post_shape[1:]) if len(post_shape) > 2 else post_shape[1]
-            assert A.shape[1] == expected_elements, f"LIN_POLY width {A.shape[1]} != post-adapter elements {expected_elements}"
+            if A.shape[1] != expected_elements:
+                raise ValueError(f"LIN_POLY width {A.shape[1]} != post-adapter elements {expected_elements}")
         return pushed, info
 
     raise ValueError(f"Unsupported InputSpec kind: {in_spec.kind}")

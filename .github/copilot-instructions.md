@@ -119,6 +119,7 @@ When writing code for this project, follow these Python best practices:
 - Apply abstract base classes (ABC) for extensible interfaces
 - Use factory patterns for object creation when appropriate
 - Handle errors with try/except and custom exceptions
+- Good practices for raising ValueError, TypeError, etc.
 - Manage resources with context managers (`with` statements)
 - Use logging (not print) for diagnostics
 - Write modular, testable code (single responsibility principle)

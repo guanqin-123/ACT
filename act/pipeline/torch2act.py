@@ -406,9 +406,12 @@ if __name__ == "__main__":
             net = TorchToACT(wrapped_model).run()
             
             # Verify the conversion produced a valid net
-            assert net.layers, "Net should have layers"
-            assert net.layers[0].kind == "INPUT", "First layer should be INPUT"
-            assert net.layers[-1].kind == "ASSERT", "Last layer should be ASSERT"
+            if not net.layers:
+                raise ValueError("Net should have layers")
+            if net.layers[0].kind != "INPUT":
+                raise ValueError(f"First layer should be INPUT, got {net.layers[0].kind}")
+            if net.layers[-1].kind != "ASSERT":
+                raise ValueError(f"Last layer should be ASSERT, got {net.layers[-1].kind}")
             
             # Store successful conversion
             successful_conversions[model_id] = (wrapped_model, net)

@@ -64,7 +64,8 @@ class InputLayer(nn.Module):
         channels: Optional[int] = None,
     ):
         super().__init__()
-        assert shape[0] == 1, "Verification wrapper assumes batch=1."
+        if shape[0] != 1:
+            raise ValueError(f"Verification wrapper assumes batch=1, got batch size {shape[0]}")
         
         # Core attributes (dtype now required)
         self.shape = tuple(shape)

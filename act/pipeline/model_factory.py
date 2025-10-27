@@ -191,8 +191,10 @@ class ModelFactory:
             out_features = meta.get("out_features")
             bias_enabled = meta.get("bias_enabled", True)
             
-            assert in_features is not None, "DENSE layer requires 'in_features' in meta"
-            assert out_features is not None, "DENSE layer requires 'out_features' in meta"
+            if in_features is None:
+                raise ValueError("DENSE layer requires 'in_features' in meta")
+            if out_features is None:
+                raise ValueError("DENSE layer requires 'out_features' in meta")
             
             layer = nn.Linear(in_features, out_features, bias=bias_enabled)
             
@@ -212,8 +214,10 @@ class ModelFactory:
             dilation = meta.get("dilation", 1)
             groups = meta.get("groups", 1)
             
-            assert in_channels is not None, "CONV2D layer requires 'in_channels' in meta"
-            assert out_channels is not None, "CONV2D layer requires 'out_channels' in meta"
+            if in_channels is None:
+                raise ValueError("CONV2D layer requires 'in_channels' in meta")
+            if out_channels is None:
+                raise ValueError("CONV2D layer requires 'out_channels' in meta")
             
             layer = nn.Conv2d(
                 in_channels=in_channels,
@@ -238,8 +242,10 @@ class ModelFactory:
             stride = meta.get("stride", 1)
             padding = meta.get("padding", 0)
             
-            assert in_channels is not None, "CONV1D layer requires 'in_channels' in meta"
-            assert out_channels is not None, "CONV1D layer requires 'out_channels' in meta"
+            if in_channels is None:
+                raise ValueError("CONV1D layer requires 'in_channels' in meta")
+            if out_channels is None:
+                raise ValueError("CONV1D layer requires 'out_channels' in meta")
             
             layer = nn.Conv1d(in_channels, out_channels, kernel_size, stride, padding)
             
@@ -256,8 +262,10 @@ class ModelFactory:
             stride = meta.get("stride", 1)
             padding = meta.get("padding", 0)
             
-            assert in_channels is not None, "CONV3D layer requires 'in_channels' in meta"
-            assert out_channels is not None, "CONV3D layer requires 'out_channels' in meta"
+            if in_channels is None:
+                raise ValueError("CONV3D layer requires 'in_channels' in meta")
+            if out_channels is None:
+                raise ValueError("CONV3D layer requires 'out_channels' in meta")
             
             layer = nn.Conv3d(in_channels, out_channels, kernel_size, stride, padding)
             
@@ -273,7 +281,8 @@ class ModelFactory:
             stride = meta.get("stride")
             padding = meta.get("padding", 0)
             
-            assert kernel_size is not None, "MAXPOOL2D layer requires 'kernel_size' in meta"
+            if kernel_size is None:
+                raise ValueError("MAXPOOL2D layer requires 'kernel_size' in meta")
             
             return nn.MaxPool2d(kernel_size, stride=stride, padding=padding)
         
@@ -282,7 +291,8 @@ class ModelFactory:
             stride = meta.get("stride")
             padding = meta.get("padding", 0)
             
-            assert kernel_size is not None, "MAXPOOL1D layer requires 'kernel_size' in meta"
+            if kernel_size is None:
+                raise ValueError("MAXPOOL1D layer requires 'kernel_size' in meta")
             
             return nn.MaxPool1d(kernel_size, stride=stride, padding=padding)
         
@@ -291,7 +301,8 @@ class ModelFactory:
             stride = meta.get("stride")
             padding = meta.get("padding", 0)
             
-            assert kernel_size is not None, "MAXPOOL3D layer requires 'kernel_size' in meta"
+            if kernel_size is None:
+                raise ValueError("MAXPOOL3D layer requires 'kernel_size' in meta")
             
             return nn.MaxPool3d(kernel_size, stride=stride, padding=padding)
         
@@ -300,7 +311,8 @@ class ModelFactory:
             stride = meta.get("stride")
             padding = meta.get("padding", 0)
             
-            assert kernel_size is not None, "AVGPOOL2D layer requires 'kernel_size' in meta"
+            if kernel_size is None:
+                raise ValueError("AVGPOOL2D layer requires 'kernel_size' in meta")
             
             return nn.AvgPool2d(kernel_size, stride=stride, padding=padding)
         
@@ -367,17 +379,20 @@ class ModelFactory:
         
         elif kind == "BATCHNORM2D":
             num_features = meta.get("num_features")
-            assert num_features is not None, "BATCHNORM2D requires 'num_features' in meta"
+            if num_features is None:
+                raise ValueError("BATCHNORM2D requires 'num_features' in meta")
             return nn.BatchNorm2d(num_features)
         
         elif kind == "BATCHNORM1D":
             num_features = meta.get("num_features")
-            assert num_features is not None, "BATCHNORM1D requires 'num_features' in meta"
+            if num_features is None:
+                raise ValueError("BATCHNORM1D requires 'num_features' in meta")
             return nn.BatchNorm1d(num_features)
         
         elif kind == "LAYERNORM":
             normalized_shape = meta.get("normalized_shape")
-            assert normalized_shape is not None, "LAYERNORM requires 'normalized_shape' in meta"
+            if normalized_shape is None:
+                raise ValueError("LAYERNORM requires 'normalized_shape' in meta")
             return nn.LayerNorm(normalized_shape)
         
         # Embedding and sequence layers
@@ -385,8 +400,10 @@ class ModelFactory:
             num_embeddings = meta.get("num_embeddings")
             embedding_dim = meta.get("embedding_dim")
             
-            assert num_embeddings is not None, "EMBEDDING requires 'num_embeddings' in meta"
-            assert embedding_dim is not None, "EMBEDDING requires 'embedding_dim' in meta"
+            if num_embeddings is None:
+                raise ValueError("EMBEDDING requires 'num_embeddings' in meta")
+            if embedding_dim is None:
+                raise ValueError("EMBEDDING requires 'embedding_dim' in meta")
             
             return nn.Embedding(num_embeddings, embedding_dim)
         
@@ -397,8 +414,10 @@ class ModelFactory:
             bidirectional = meta.get("bidirectional", False)
             batch_first = meta.get("batch_first", False)
             
-            assert input_size is not None, "RNN requires 'input_size' in meta"
-            assert hidden_size is not None, "RNN requires 'hidden_size' in meta"
+            if input_size is None:
+                raise ValueError("RNN requires 'input_size' in meta")
+            if hidden_size is None:
+                raise ValueError("RNN requires 'hidden_size' in meta")
             
             return nn.RNN(input_size, hidden_size, num_layers, 
                          batch_first=batch_first, bidirectional=bidirectional)
@@ -410,8 +429,10 @@ class ModelFactory:
             bidirectional = meta.get("bidirectional", False)
             batch_first = meta.get("batch_first", False)
             
-            assert input_size is not None, "LSTM requires 'input_size' in meta"
-            assert hidden_size is not None, "LSTM requires 'hidden_size' in meta"
+            if input_size is None:
+                raise ValueError("LSTM requires 'input_size' in meta")
+            if hidden_size is None:
+                raise ValueError("LSTM requires 'hidden_size' in meta")
             
             return nn.LSTM(input_size, hidden_size, num_layers,
                           batch_first=batch_first, bidirectional=bidirectional)
@@ -423,8 +444,10 @@ class ModelFactory:
             bidirectional = meta.get("bidirectional", False)
             batch_first = meta.get("batch_first", False)
             
-            assert input_size is not None, "GRU requires 'input_size' in meta"
-            assert hidden_size is not None, "GRU requires 'hidden_size' in meta"
+            if input_size is None:
+                raise ValueError("GRU requires 'input_size' in meta")
+            if hidden_size is None:
+                raise ValueError("GRU requires 'hidden_size' in meta")
             
             return nn.GRU(input_size, hidden_size, num_layers,
                          batch_first=batch_first, bidirectional=bidirectional)

@@ -52,7 +52,7 @@ class NetFactory:
     def _generate_input_spec_params(self, params: Dict[str, Any], meta: Dict[str, Any], input_shape: Optional[List[int]]) -> None:
         """Generate INPUT_SPEC params based on kind and meta values."""
         if not input_shape:
-            return  # Can't generate without shape
+            raise ValueError("Cannot generate INPUT_SPEC params: input shape is required but not provided")
         
         spec_kind = meta.get("kind")
         
@@ -66,7 +66,8 @@ class NetFactory:
         elif spec_kind == "LINF_BALL":
             # Generate center + lb/ub from center_val and eps
             eps = meta.get("eps")
-            assert eps is not None, "LINF_BALL requires 'eps' in meta"
+            if eps is None:
+                raise ValueError("LINF_BALL requires 'eps' in meta")
             
             center_val = meta.get("center_val", 0.5)  # Default to 0.5 for normalized inputs
             params["center"] = torch.full(input_shape, center_val)
