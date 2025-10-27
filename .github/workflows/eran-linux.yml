@@ -89,7 +89,7 @@ jobs:
             --verifier eran \
             --device cpu \
             --method deepzono \
-            --model_path models/Sample_models/MNIST/small_relu_mnist_cnn_model_1.onnx \
+            --model_path models/vnnModels/MNIST/small_relu_mnist_cnn_model_1.onnx \
             --dataset mnist --spec_type local_lp \
             --start 0 --end 5 --epsilon 0.01 --norm inf \
             --mean 0.1307 --std 0.3081

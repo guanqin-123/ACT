@@ -52,7 +52,7 @@ conda activate act-main
 ### Running Verification
 ```bash
 python act/wrapper_exts/ext_runner.py \
-  --model_path models/Sample_models/MNIST/small_relu_mnist_cnn_model_1.onnx \
+  --model_path models/vnnModels/MNIST/small_relu_mnist_cnn_model_1.onnx \
   --dataset mnist --spec_type local_lp \
   --start 0 --end 1 --epsilon 0.03 --norm inf \
   --mean 0.1307 --std 0.3081
@@ -82,7 +82,7 @@ spec_type = "local_lp"
 
 ### Path Handling
 - **Project root**: Always use project root as working directory
-- **Model paths**: Relative to project root (`models/Sample_models/...`)
+- **Model paths**: Relative to project root (`models/vnnModels/...`)
 - **Import structure**: Hierarchical imports following `act/front_end`, `act/back_end`, `act/pipeline`
 
 ### Memory Patterns

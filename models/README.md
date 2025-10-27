@@ -4,15 +4,15 @@ This directory contains pre-trained neural network models for verification bench
 
 ## Directory Structure
 
-### Sample_models (`Sample_models/`)
+### vnnModels (`vnnModels/`)
 **Simple sample models for testing and demonstrations**
 
-#### MNIST Sample Models (`Sample_models/MNIST/`)
+#### MNIST Sample Models (`vnnModels/MNIST/`)
 - **`small_relu_mnist_cnn_model_1.onnx`**: Small CNN with ReLU activation
 - **`small_sigmoid_mnist_cnn_model_1.onnx`**: Small CNN with Sigmoid activation
 - **`small_tanh_mnist_cnn_model_1.onnx`**: Small CNN with Tanh activation
 
-#### CIFAR-10 Sample Models (`Sample_models/CIFAR10/`)
+#### CIFAR-10 Sample Models (`vnnModels/CIFAR10/`)
 - **`small_relu_cifar10_cnn_model_1.onnx`**: Small CNN with ReLU activation
 - **`small_sigmoid_cifar10_cnn_model_1.onnx`**: Small CNN with Sigmoid activation
 - **`small_tanh_cifar10_cnn_model_1.onnx`**: Small CNN with Tanh activation
