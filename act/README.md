@@ -21,7 +21,6 @@ act/
 │   ├── preprocessor_text.py        # Text preprocessing utilities
 │   ├── preprocessor_base.py        # Base preprocessor interface
 │   ├── utils_image.py              # Image utility functions
-│   ├── model_inference.py          # Model inference utilities
 │   ├── mocks.py                    # Mock data generation for testing
 │   └── README.md                   # Front-end documentation
 │
@@ -170,6 +169,11 @@ act/
   - Automatic device detection and management
   - GPU memory optimization and fallback strategies
   - Global PyTorch device and dtype configuration
+
+- **`model_inference.py`**: Model inference and testing framework
+  - Wrapped model testing with execution statistics
+  - Architecture mismatch detection and analysis
+  - User-friendly error explanations for debugging
 
 - **`options.py`**: Command-line argument processing
   - Centralized CLI option definitions for all verifiers

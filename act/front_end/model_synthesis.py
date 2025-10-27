@@ -25,7 +25,7 @@ from act.front_end.specs import InputSpec, OutputSpec, InKind, OutKind
 from act.front_end.loaders.data_loader import DatasetLoader
 from act.front_end.loaders.model_loader import ModelLoader
 from act.front_end.loaders.spec_loader import SpecLoader
-from act.front_end.model_inference import model_inference
+from act.util.model_inference import model_inference
 from act.front_end.wrapper_layers import InputLayer, InputAdapterLayer, InputSpecLayer, OutputSpecLayer
 
 

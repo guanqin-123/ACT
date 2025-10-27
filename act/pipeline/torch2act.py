@@ -46,7 +46,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from act.front_end.model_inference import model_inference
+from act.util.model_inference import model_inference
 from act.front_end.model_synthesis import model_synthesis
 from act.back_end.core import Net, Layer
 from act.back_end.layer_schema import LayerKind
