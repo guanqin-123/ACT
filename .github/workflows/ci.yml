@@ -62,6 +62,11 @@ jobs:
           cd ${{ github.workspace }}
           timeout 60 python act/front_end/model_synthesis.py
 
+      - name: Run ACT2Torch Pipeline Tests
+        run: |
+          cd ${{ github.workspace }}
+          python act/pipeline/model_factory.py
+
       - name: Run Torch2ACT Pipeline Tests
         run: |
           cd ${{ github.workspace }}
