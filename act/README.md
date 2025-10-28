@@ -15,7 +15,7 @@ act/
 │   │   ├── model_loader.py         # Neural network model loading (ONNX/PyTorch)
 │   │   └── spec_loader.py          # Specification loading and processing
 │   ├── specs.py                    # InputSpec/OutputSpec with InKind/OutKind enums
-│   ├── wrapper_layers.py           # PyTorch verification wrapper modules
+│   ├── verifiable_model.py         # PyTorch verification wrapper modules
 │   ├── model_synthesis.py          # Advanced model generation and optimization
 │   ├── preprocessor_image.py       # Image preprocessing and normalization
 │   ├── preprocessor_text.py        # Text preprocessing utilities
@@ -91,7 +91,7 @@ act/
   - `InputSpec`/`OutputSpec` classes with `InKind`/`OutKind` type safety
   - Support for BOX, L_INF, LIN_POLY input constraints and SAFETY, ASSERT output properties
 
-- **`wrapper_layers.py`**: PyTorch verification wrapper modules
+- **`verifiable_model.py`**: PyTorch verification wrapper modules
   - `InputLayer`: Declares symbolic input blocks for verification
   - `InputAdapterLayer`: Config-driven input preprocessing (permute/reorder/slice/pad/affine/linear-proj)
   - `InputSpecLayer`: Wraps ACT InputSpec as nn.Module for seamless integration

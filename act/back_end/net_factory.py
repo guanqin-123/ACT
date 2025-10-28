@@ -9,6 +9,7 @@ from typing import Dict, Any, List, Optional
 
 from act.back_end.core import Layer, Net
 from act.back_end.serialization.serialization import NetSerializer
+from act.front_end.specs import InKind, OutKind
 
 
 class NetFactory:
@@ -56,14 +57,15 @@ class NetFactory:
         
         spec_kind = meta.get("kind")
         
-        if spec_kind == "BOX":
+        # Compare with enum class variables (these are strings, not Enum objects)
+        if spec_kind == InKind.BOX:
             # Generate lb/ub from meta values
             lb_val = meta.get("lb_val", 0.0)
             ub_val = meta.get("ub_val", 1.0)
             params["lb"] = torch.full(input_shape, lb_val)
             params["ub"] = torch.full(input_shape, ub_val)
         
-        elif spec_kind == "LINF_BALL":
+        elif spec_kind == InKind.LINF_BALL:
             # Generate center + lb/ub from center_val and eps
             eps = meta.get("eps")
             if eps is None:
@@ -75,6 +77,163 @@ class NetFactory:
             params["ub"] = params["center"] + eps
         
         # LIN_POLY: skip (too complex, user must provide A and b matrices)
+    
+    def _generate_assert_params(self, params: Dict[str, Any], meta: Dict[str, Any], output_shape: Optional[List[int]]) -> None:
+        """
+        Generate ASSERT (OutputSpec) params based on kind and meta values.
+        
+        ASSERT layers define verification properties that the network output
+        must satisfy. They are used for spec-free verification where constraints
+        are embedded directly in the model, enabling single-call checking:
+        
+            results = model(input)  # Returns dict with satisfaction status
+        
+        Four ASSERT kinds are supported, each with distinct verification semantics:
+        
+        1. TOP1_ROBUST (Classification Robustness)
+           -----------------------------------------------
+           Purpose: Verify that the true class has the highest score
+           Verification: argmax(y) == y_true
+           
+           Required meta:
+           - y_true: Index of the ground truth class (int)
+           
+           Use cases:
+           - Adversarial robustness: Ensure predictions remain correct under perturbations
+           - Safety-critical classification: Verify correct class prediction
+           - MNIST/CIFAR robustness benchmarks
+           
+           Expected outcome:
+           - PASS: True class has highest logit/probability
+           - FAIL: Different class has higher score (misclassification)
+           
+           Example:
+           meta:
+             kind: "TOP1_ROBUST"
+             y_true: 7  # Verify output predicts class 7
+        
+        2. MARGIN_ROBUST (Classification with Safety Margin)
+           -----------------------------------------------
+           Purpose: Verify true class exceeds others by a safety margin
+           Verification: y[y_true] - max(y[i≠y_true]) >= margin
+           
+           Required meta:
+           - y_true: Index of the ground truth class (int)
+           - margin: Minimum required separation from other classes (float)
+           
+           Use cases:
+           - High-confidence verification: Ensure robust predictions with buffer
+           - Safety margins for critical applications
+           - Confidence-based filtering
+           
+           Expected outcome:
+           - PASS: True class exceeds others by at least margin
+           - FAIL: Margin too small (weak confidence) or misclassification
+           
+           Example:
+           meta:
+             kind: "MARGIN_ROBUST"
+             y_true: 3
+             margin: 0.5  # Require 0.5 separation from other classes
+        
+        3. LINEAR_LE (Linear Inequality Constraint)
+           -----------------------------------------------
+           Purpose: Verify linear combination of outputs satisfies inequality
+           Verification: c^T · y <= d
+           
+           Required params:
+           - c: Coefficient vector (list/tensor, shape matches output)
+           - d: Threshold scalar (float)
+           
+           Use cases:
+           - Control systems: Verify output stays within operational limits
+           - Resource constraints: Total output bounded (e.g., sum of activations)
+           - Custom safety properties: Linear combination constraints
+           - Reachability analysis: Verify state space boundaries
+           
+           Expected outcome:
+           - PASS: c^T · y <= d (constraint satisfied)
+           - FAIL: c^T · y > d (constraint violated)
+           
+           Example (verify sum of outputs ≤ 5.0):
+           params:
+             c: [1.0, 1.0, 1.0, 1.0, 1.0]  # Sum all 5 outputs
+           meta:
+             kind: "LINEAR_LE"
+             d: 5.0  # Upper bound
+        
+        4. RANGE (Box Constraint on Outputs)
+           -----------------------------------------------
+           Purpose: Verify all outputs lie within specified bounds
+           Verification: lb <= y <= ub (element-wise)
+           
+           Required params:
+           - lb: Lower bound vector (list/tensor, shape matches output)
+           - ub: Upper bound vector (list/tensor, shape matches output)
+           
+           Use cases:
+           - Output range safety: Ensure values stay within physical limits
+           - Control systems: Verify actuator outputs within safe range
+           - Regression verification: Output predictions within expected bounds
+           - Reachability: Verify state remains in safe region
+           
+           Expected outcome:
+           - PASS: All elements satisfy lb <= y[i] <= ub (safe region)
+           - FAIL: One or more elements outside bounds (unsafe region)
+           
+           Example (verify regression output in [0, 10]):
+           params:
+             lb: [0.0, 0.0, 0.0]  # 3 outputs, all >= 0
+             ub: [10.0, 10.0, 10.0]  # All <= 10
+           meta:
+             kind: "RANGE"
+        
+        Notes:
+        - All params specified as lists in YAML are automatically converted to tensors
+        - TOP1_ROBUST and MARGIN_ROBUST are classification-specific (discrete classes)
+        - LINEAR_LE and RANGE are general (work with any output shape)
+        - Verification happens automatically in OutputSpecLayer.forward()
+        - Results returned in dict: {output, output_satisfied, output_explanation}
+        """
+        if not output_shape:
+            raise ValueError("Cannot generate ASSERT params: output shape is required but not provided")
+        
+        assert_kind = meta.get("kind")
+        
+        # Compare with OutKind class variables (these are strings, not Enum objects)
+        if assert_kind == OutKind.TOP1_ROBUST:
+            # No params to generate (y_true already in meta)
+            # Just validate y_true is present
+            if "y_true" not in meta:
+                raise ValueError("TOP1_ROBUST requires 'y_true' in meta")
+        
+        elif assert_kind == OutKind.MARGIN_ROBUST:
+            # No params to generate (y_true and margin already in meta)
+            # Just validate they are present
+            if "y_true" not in meta:
+                raise ValueError("MARGIN_ROBUST requires 'y_true' in meta")
+            if "margin" not in meta:
+                raise ValueError("MARGIN_ROBUST requires 'margin' in meta")
+        
+        elif assert_kind == OutKind.LINEAR_LE:
+            # Convert c from list to tensor if present
+            if "c" in params and isinstance(params["c"], list):
+                params["c"] = torch.tensor(params["c"], dtype=torch.float32)
+            
+            # Validate d is present in meta
+            if "d" not in meta:
+                raise ValueError("LINEAR_LE requires 'd' in meta")
+        
+        elif assert_kind == OutKind.RANGE:
+            # Convert lb/ub from lists to tensors if present
+            if "lb" in params and isinstance(params["lb"], list):
+                params["lb"] = torch.tensor(params["lb"], dtype=torch.float32)
+            if "ub" in params and isinstance(params["ub"], list):
+                params["ub"] = torch.tensor(params["ub"], dtype=torch.float32)
+            
+            # Validate both are present
+            if "lb" not in params or "ub" not in params:
+                raise ValueError("RANGE requires both 'lb' and 'ub' in params")
     
     def create_network(self, name: str, spec: Dict[str, Any]) -> Net:
         """Create network from YAML spec."""
@@ -95,9 +254,27 @@ class NetFactory:
             if i > 0 and layers[i-1].kind == "INPUT":
                 input_shape = layers[i-1].meta.get("shape")
             
+            # Get output shape for ASSERT generation (from last non-wrapper layer)
+            output_shape = None
+            if i > 0:
+                # Look at previous layer's meta for out_features (DENSE) or output shape
+                for j in range(i-1, -1, -1):
+                    prev_layer = layers[j]
+                    if prev_layer.kind == "DENSE":
+                        out_features = prev_layer.meta.get("out_features")
+                        if out_features:
+                            output_shape = [1, out_features]
+                            break
+                    elif prev_layer.kind in ["CONV2D", "CONV1D", "CONV3D"]:
+                        # For conv layers, would need to compute output shape
+                        # For now, skip as we're using flatten + dense
+                        pass
+            
             # === AUTO-GENERATION DISPATCH ===
             if kind == "INPUT_SPEC":
                 self._generate_input_spec_params(params, meta, input_shape)
+            elif kind == "ASSERT":
+                self._generate_assert_params(params, meta, output_shape)
             elif kind == "DENSE" and "W" not in params:
                 weight = self.generate_weight_tensor(kind, meta)
                 if weight is not None:

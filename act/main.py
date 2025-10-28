@@ -33,6 +33,7 @@ def run_act_native_verifier(args_dict):
     from act.back_end.solver.solver_torch import TorchLPSolver
     from act.back_end.solver.solver_gurobi import GurobiSolver
     from act.back_end.verifier import verify_once, verify_bab
+    from act.back_end.layer_schema import LayerKind
     
     # Get device and dtype from device manager (automatically reads command line)
     from act.util.device_manager import get_default_device, get_default_dtype
@@ -69,9 +70,9 @@ def run_act_native_verifier(args_dict):
             # Verify the conversion produced a valid net
             if not net.layers:
                 raise ValueError("Net should have layers")
-            if net.layers[0].kind != "INPUT":
+            if net.layers[0].kind != LayerKind.INPUT.value:
                 raise ValueError(f"First layer should be INPUT, got {net.layers[0].kind}")
-            if net.layers[-1].kind != "ASSERT":
+            if net.layers[-1].kind != LayerKind.ASSERT.value:
                 raise ValueError(f"Last layer should be ASSERT, got {net.layers[-1].kind}")
             
             # Store successful conversion

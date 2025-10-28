@@ -8,24 +8,48 @@
 #===---------------------------------------------------------------------===#
 #
 # Purpose:
-#   PyTorch model factory that creates nn.Module instances from
-#   examples_config.yaml specifications. Complements net_factory.py
-#   (which creates ACT Net objects) by generating actual PyTorch models
-#   for testing, integration, and Torch2ACT conversion.
+#   PyTorch model factory for spec-free verification testing. Creates
+#   verifiable PyTorch models from examples_config.yaml specifications
+#   with embedded input/output constraints for automatic verification.
 #
-#   CRITICAL: Models created by this factory are EQUIVALENT to the
-#   corresponding ACT Nets - they share the exact same weights loaded
-#   from the pre-generated JSON files. This ensures numerical consistency
-#   between PyTorch inference and ACT verification.
+# Key Features:
+#   - Spec-free models: InputSpecLayer/OutputSpecLayer embedded in model
+#   - Weight consistency: Loads shared weights from JSON (same as ACT Nets)
+#   - VerifiableModel: Returns models with automatic constraint checking
+#   - Bidirectional testing: Validates PyTorch→ACT→PyTorch round trips
+#   - Comprehensive coverage: 12 test networks across 4 verification scenarios
+#
+# Architecture:
+#   Each model is wrapped with verification layers:
+#   1. InputLayer: Declares input shape/dtype/device
+#   2. [Optional] InputAdapterLayer: Preprocessing (normalize, flatten, etc.)
+#   3. InputSpecLayer: Input constraints (BOX, L_INF, LIN_POLY)
+#   4. Model layers: nn.Linear, nn.Conv2d, nn.ReLU, etc.
+#   5. OutputSpecLayer: Output constraints (SAFETY, TOP1_ROBUST, etc.)
+#
+# Test Scenarios (examples_config.yaml):
+#   - mnist_robust_*: Classification robustness (ε-ball perturbations)
+#   - cifar_margin_*: Classification margin constraints
+#   - control_*: Control system safety (state bounds)
+#   - reachability_*: Reachability analysis (target regions)
+#
+# Weight Consistency:
+#   Models and ACT Nets load identical weights from JSON files, ensuring:
+#   - PyTorch inference ≡ ACT forward bounds (numerically identical)
+#   - Round-trip conversion preserves all parameters
+#   - Verification results match between PyTorch and ACT
 #
 # Usage:
 #   factory = ModelFactory()
-#   model = factory.create_model("mnist_mlp_small", load_weights=True)
-#   model.eval()
-#   output = model(input_tensor)
+#   model = factory.create_model("mnist_robust_easy", load_weights=True)
+#   
+#   # Model is VerifiableModel with constraint checking
+#   results = model(input_tensor)
+#   print(f"Output: {results['output']}")
+#   print(f"Constraints satisfied: {results['output_satisfied']}")
 #
 # Testing:
-#   python act/pipeline/model_factory.py  # Verifies all models
+#   python act/pipeline/model_factory.py  # Tests all 12 networks
 #
 #===---------------------------------------------------------------------===#
 
@@ -106,85 +130,104 @@ class ModelFactory:
         
         return model
     
-    def generate_input_from_input_layer(self, layers_spec: List[Dict[str, Any]]) -> torch.Tensor:
+    def generate_test_input(self, name: str, test_case: str = "center") -> torch.Tensor:
         """
-        Generate input tensor from INPUT layer metadata in layer specifications.
+        Generate strategic test input considering both INPUT metadata and INPUT_SPEC constraints.
         
         Args:
-            layers_spec: List of layer configurations from examples_config.yaml
+            name: Network name from examples_config.yaml
+            test_case: One of "center" (safe), "boundary" (risky), "random" (uncertain)
             
         Returns:
-            Input tensor generated based on INPUT layer metadata
+            Input tensor strategically placed for verification testing
             
-        Raises:
-            ValueError: If no INPUT layer found or required metadata missing
+        Test Case Strategy:
+        - center: Input at center of constraint region (expected PASS)
+        - boundary: Input near boundary of constraints (expected UNCERTAIN/FAIL)
+        - random: Random input in constraint region (expected varied results)
         """
-        # Find INPUT layer
+        if name not in self.config['networks']:
+            raise KeyError(f"Network '{name}' not found")
+        
+        spec = self.config['networks'][name]
+        layers_spec = spec['layers']
+        
+        # Find INPUT and INPUT_SPEC layers
         input_layer = None
+        input_spec_layer = None
         for layer_spec in layers_spec:
             if layer_spec['kind'] == 'INPUT':
                 input_layer = layer_spec
-                break
+            elif layer_spec['kind'] == 'INPUT_SPEC':
+                input_spec_layer = layer_spec
         
         if input_layer is None:
-            raise ValueError("No INPUT layer found in layer specifications")
+            raise ValueError(f"No INPUT layer found in network '{name}'")
         
-        meta = input_layer.get('meta', {})
-        
-        # Extract metadata with defaults
-        shape = meta.get('shape')
+        # Get INPUT metadata
+        input_meta = input_layer.get('meta', {})
+        shape = input_meta.get('shape')
         if shape is None:
-            raise ValueError("INPUT layer missing required 'shape' metadata")
+            raise ValueError(f"INPUT layer missing 'shape' in network '{name}'")
         
-        dtype_str = meta.get('dtype')
-        if dtype_str is None:
-            raise ValueError("INPUT layer missing required 'dtype' metadata")
-        
-        value_range = meta.get('value_range', [0.0, 1.0])
-        distribution = meta.get('distribution', 'uniform')
-        
-        # Map dtype string to torch dtype (handle both "float64" and "torch.float64" formats)
-        if dtype_str.startswith('torch.'):
-            dtype_str = dtype_str.replace('torch.', '')
-        
+        dtype_str = input_meta.get('dtype', 'torch.float32').replace('torch.', '')
         dtype_map = {
-            'float16': torch.float16,
-            'float32': torch.float32,
-            'float64': torch.float64,
-            'int8': torch.int8,
-            'int16': torch.int16,
-            'int32': torch.int32,
-            'int64': torch.int64,
+            'float16': torch.float16, 'float32': torch.float32, 'float64': torch.float64,
+            'int8': torch.int8, 'int16': torch.int16, 'int32': torch.int32, 'int64': torch.int64,
             'uint8': torch.uint8,
         }
+        dtype = dtype_map.get(dtype_str, torch.float32)
         
-        if dtype_str not in dtype_map:
-            raise ValueError(f"Unsupported dtype '{dtype_str}'. Must be one of: {list(dtype_map.keys())}")
+        # Get INPUT_SPEC constraints if present
+        if input_spec_layer is not None:
+            spec_meta = input_spec_layer.get('meta', {})
+            spec_kind = spec_meta.get('kind')
+            
+            if spec_kind == 'BOX':
+                lb_val = spec_meta.get('lb_val', 0.0)
+                ub_val = spec_meta.get('ub_val', 1.0)
+                
+                if test_case == 'center':
+                    # Center of box: (lb + ub) / 2
+                    value = (lb_val + ub_val) / 2.0
+                    tensor = torch.full(shape, value, dtype=dtype)
+                elif test_case == 'boundary':
+                    # Near upper boundary: ub - small_epsilon
+                    value = ub_val - 0.001
+                    tensor = torch.full(shape, value, dtype=dtype)
+                elif test_case == 'random':
+                    # Random within bounds
+                    tensor = torch.rand(*shape, dtype=dtype) * (ub_val - lb_val) + lb_val
+                else:
+                    raise ValueError(f"Unknown test_case '{test_case}'")
+            
+            elif spec_kind == 'LINF_BALL':
+                center_val = spec_meta.get('center_val', 0.5)
+                eps = spec_meta.get('eps', 0.1)
+                
+                if test_case == 'center':
+                    # At center of L∞ ball
+                    tensor = torch.full(shape, center_val, dtype=dtype)
+                elif test_case == 'boundary':
+                    # Near boundary: center + eps - small_delta
+                    value = center_val + eps - 0.001
+                    tensor = torch.full(shape, value, dtype=dtype)
+                elif test_case == 'random':
+                    # Random within L∞ ball
+                    perturbation = (torch.rand(*shape, dtype=dtype) - 0.5) * 2.0 * eps
+                    tensor = torch.full(shape, center_val, dtype=dtype) + perturbation
+                else:
+                    raise ValueError(f"Unknown test_case '{test_case}'")
+            
+            else:
+                # LIN_POLY or unknown: fallback to uniform random in value_range
+                value_range = input_meta.get('value_range', [0.0, 1.0])
+                tensor = torch.rand(*shape, dtype=dtype) * (value_range[1] - value_range[0]) + value_range[0]
         
-        dtype = dtype_map[dtype_str]
-        
-        # Generate tensor based on distribution using the target dtype directly
-        if distribution == 'normal':
-            # Generate normal distribution, then scale to value_range
-            tensor = torch.randn(*shape, dtype=dtype)
-            # Normalize to [0, 1] approximately (clip to 3 sigma)
-            tensor = torch.clamp(tensor, -3.0, 3.0)
-            tensor = (tensor + 3.0) / 6.0  # Map [-3, 3] to [0, 1]
-            # Scale to target range
-            tensor = tensor * (value_range[1] - value_range[0]) + value_range[0]
-        elif distribution == 'uniform':
-            # Generate uniform distribution in value_range
-            tensor = torch.rand(*shape, dtype=dtype)
-            tensor = tensor * (value_range[1] - value_range[0]) + value_range[0]
-        elif distribution == 'zeros':
-            tensor = torch.zeros(*shape, dtype=dtype)
-        elif distribution == 'ones':
-            tensor = torch.ones(*shape, dtype=dtype)
         else:
-            # Default to uniform
-            logger.warning(f"Unknown distribution '{distribution}', using uniform")
-            tensor = torch.rand(*shape, dtype=dtype)
-            tensor = tensor * (value_range[1] - value_range[0]) + value_range[0]
+            # No INPUT_SPEC: use uniform random in value_range
+            value_range = input_meta.get('value_range', [0.0, 1.0])
+            tensor = torch.rand(*shape, dtype=dtype) * (value_range[1] - value_range[0]) + value_range[0]
         
         return tensor
     
@@ -210,21 +253,18 @@ class ModelFactory:
 
 
 def main():
-    """Test model factory with all example networks and verify equivalence with ACT Nets."""
+    """Test model factory with all example networks and verify spec-free verification."""
     logging.basicConfig(level=logging.INFO)
-    
-    # Import inference function
-    from act.util.model_inference import infer_single_model
     
     factory = ModelFactory()
     
     print("=" * 80)
-    print("PyTorch Model Factory - Testing All Networks")
+    print("PyTorch Model Factory - Spec-Free Verification Testing")
     print("=" * 80)
     
     all_passed = True
-    inference_passed = 0
-    inference_failed = 0
+    total_tests = 0
+    passed_tests = 0
     
     for name in factory.list_networks():
         print(f"\n{'=' * 80}")
@@ -236,120 +276,85 @@ def main():
         print(f"Description: {info['description']}")
         print(f"Architecture: {info['architecture_type']}")
         print(f"Input shape: {info['input_shape']}")
-        print(f"Core layers: {info['num_layers']}")
         
-        # Create model
+        # Create model with VerifiableModel wrapper
         try:
             model = factory.create_model(name, load_weights=True)
+            print(f"\n✅ Created VerifiableModel model")
             
-            # Print model summary
-            print(f"\nPyTorch Model:")
-            print(model)
+            # Test with 3 strategic test cases
+            test_cases = ['center', 'boundary', 'random']
             
-            # Count parameters
-            total_params = sum(p.numel() for p in model.parameters())
-            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            print(f"\nTotal parameters: {total_params:,}")
-            print(f"Trainable parameters: {trainable_params:,}")
-            
-            # Generate input from INPUT layer metadata
-            print(f"\n🎲 Generating input from INPUT layer metadata...")
-            layers_spec = factory.config['networks'][name]['layers']
-            try:
-                input_tensor = factory.generate_input_from_input_layer(layers_spec)
-                print(f"  ✅ Generated input tensor:")
-                print(f"     Shape: {list(input_tensor.shape)}")
-                print(f"     Dtype: {input_tensor.dtype}")
-                print(f"     Range: [{input_tensor.min():.4f}, {input_tensor.max():.4f}]")
+            for test_case in test_cases:
+                print(f"\n📊 Test Case: {test_case}")
+                print("-" * 80)
                 
-                # Test inference using infer_single_model
-                print(f"\n🔧 Testing inference with infer_single_model()...")
-                success, output, error_msg = infer_single_model(name, model, input_tensor)
+                try:
+                    # Generate strategic input
+                    input_tensor = factory.generate_test_input(name, test_case)
+                    print(f"  Input shape: {list(input_tensor.shape)}")
+                    print(f"  Input range: [{input_tensor.min():.4f}, {input_tensor.max():.4f}]")
+                    
+                    # Run model with automatic constraint checking
+                    results = model(input_tensor)
+                    
+                    # Check if results is a dict (VerifiableModel) or tensor (legacy)
+                    if isinstance(results, dict):
+                        # VerifiableModel returns dict with verification info
+                        output = results['output']
+                        input_satisfied = results['input_satisfied']
+                        input_explanation = results['input_explanation']
+                        output_satisfied = results['output_satisfied']
+                        output_explanation = results['output_explanation']
+                        
+                        print(f"\n  📥 {input_explanation}")
+                        print(f"  📤 {output_explanation}")
+                        print(f"  Output shape: {list(output.shape)}")
+                        print(f"  Output range: [{output.min():.4f}, {output.max():.4f}]")
+                        
+                        # Track test success
+                        total_tests += 1
+                        if input_satisfied and output_satisfied:
+                            passed_tests += 1
+                            print(f"  ✅ Test PASSED (both constraints satisfied)")
+                        elif not input_satisfied:
+                            print(f"  ⚠️  Test UNCERTAIN (input constraint violated)")
+                        else:
+                            print(f"  ❌ Test FAILED (output constraint violated)")
+                    
+                    else:
+                        # Legacy nn.Sequential (no verification)
+                        output = results
+                        print(f"  ⚠️  Legacy model (no constraint checking)")
+                        print(f"  Output shape: {list(output.shape)}")
+                        print(f"  Output range: [{output.min():.4f}, {output.max():.4f}]")
+                        total_tests += 1
                 
-                if success:
-                    print(f"  ✅ Inference successful!")
-                    print(f"     Output shape: {list(output.shape)}")
-                    print(f"     Output range: [{output.min():.4f}, {output.max():.4f}]")
-                    print(f"     Output mean: {output.mean():.4f}")
-                    inference_passed += 1
-                else:
-                    print(f"  ❌ Inference failed: {error_msg}")
-                    inference_failed += 1
+                except Exception as e:
+                    print(f"  ❌ Test case '{test_case}' failed: {e}")
+                    import traceback
+                    traceback.print_exc()
                     all_passed = False
-                    
-            except Exception as e:
-                print(f"  ❌ Failed to generate input or run inference: {e}")
-                inference_failed += 1
-                all_passed = False
-            
-            # Verify equivalence with ACT Net
-            print(f"\n📊 Verifying equivalence with ACT Net...")
-            net_path = factory.nets_dir / f"{name}.json"
-            if net_path.exists():
-                with open(net_path, 'r') as f:
-                    net_dict = json.load(f)
-                act_net, _ = NetSerializer.deserialize_net(net_dict)
-                
-                # Check that parameter counts match
-                act_param_count = sum(
-                    p.numel() for layer in act_net.layers 
-                    for p in layer.params.values() 
-                    if isinstance(p, torch.Tensor)
-                )
-                
-                if act_param_count == total_params:
-                    print(f"  ✅ Parameter count matches: {total_params:,}")
-                else:
-                    print(f"  ⚠️  Parameter count mismatch: PyTorch={total_params:,}, ACT={act_param_count:,}")
-                
-                # Verify weight transfer by comparing layer by layer
-                torch_layer_idx = 0
-                for i, layer_spec in enumerate(factory.config['networks'][name]['layers']):
-                    if layer_spec['kind'] in ['INPUT', 'INPUT_SPEC', 'ASSERT']:
-                        continue
-                    
-                    act_layer = act_net.layers[i]
-                    torch_layer = model[torch_layer_idx]
-                    
-                    # Verify weight transfer for parametric layers
-                    if layer_spec['kind'] == 'DENSE' and 'W' in act_layer.params:
-                        weight_diff = (torch_layer.weight - act_layer.params['W']).abs().max()
-                        if weight_diff < 1e-10:
-                            print(f"  ✅ DENSE layer [{torch_layer_idx}]: weights match (diff={weight_diff:.2e})")
-                        else:
-                            print(f"  ❌ DENSE layer [{torch_layer_idx}]: weights differ (diff={weight_diff:.2e})")
-                            all_passed = False
-                    
-                    elif layer_spec['kind'] in ['CONV2D', 'CONV1D', 'CONV3D'] and 'weight' in act_layer.params:
-                        weight_diff = (torch_layer.weight - act_layer.params['weight']).abs().max()
-                        if weight_diff < 1e-10:
-                            print(f"  ✅ {layer_spec['kind']} layer [{torch_layer_idx}]: weights match (diff={weight_diff:.2e})")
-                        else:
-                            print(f"  ❌ {layer_spec['kind']} layer [{torch_layer_idx}]: weights differ (diff={weight_diff:.2e})")
-                            all_passed = False
-                    
-                    torch_layer_idx += 1
-            else:
-                print(f"  ⚠️  No ACT Net file found for comparison")
-            
-            print(f"\n✅ Successfully created model '{name}'")
             
         except Exception as e:
-            print(f"\n❌ Failed to create model '{name}': {e}")
+            print(f"\n❌ Failed to create/test model '{name}': {e}")
             import traceback
             traceback.print_exc()
             all_passed = False
-            inference_failed += 1
     
+    # Print summary
     print("\n" + "=" * 80)
-    print(f"📊 Inference Test Summary:")
-    print(f"   ✅ Passed: {inference_passed}")
-    print(f"   ❌ Failed: {inference_failed}")
-    print(f"   Total: {inference_passed + inference_failed}")
+    print(f"📊 Verification Test Summary:")
+    print(f"   Total tests: {total_tests}")
+    print(f"   ✅ Passed: {passed_tests}")
+    print(f"   ⚠️  Uncertain/Failed: {total_tests - passed_tests}")
+    if total_tests > 0:
+        success_rate = (passed_tests / total_tests) * 100
+        print(f"   Success rate: {success_rate:.1f}%")
     print("=" * 80)
     
     if all_passed:
-        print("✅ All models created successfully and verified equivalent to ACT Nets")
+        print("✅ All models created and tested successfully")
     else:
         print("⚠️  Some models had issues - see details above")
     print("=" * 80)

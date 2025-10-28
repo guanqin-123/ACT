@@ -26,7 +26,13 @@ from act.front_end.loaders.data_loader import DatasetLoader
 from act.front_end.loaders.model_loader import ModelLoader
 from act.front_end.loaders.spec_loader import SpecLoader
 from act.util.model_inference import model_inference
-from act.front_end.wrapper_layers import InputLayer, InputAdapterLayer, InputSpecLayer, OutputSpecLayer
+from act.front_end.verifiable_model import (
+    InputLayer,
+    InputAdapterLayer,
+    InputSpecLayer,
+    OutputSpecLayer,
+    VerifiableModel,
+)
 
 
 # -----------------------------------------------------------------------------
@@ -300,7 +306,7 @@ def push_input_spec_through_adapter(
                              "define the spec after the projection or skip the projection for verification.")
 
         pushed = InputSpec(kind=InKind.BOX, lb=lb, ub=ub)
-        info["pushed_kind"] = "BOX"
+        info["pushed_kind"] = InKind.BOX
         info["size"] = lb.numel()
         
         # For reshaped tensors, compare total elements accounting for channel adaptation
@@ -357,7 +363,7 @@ def push_input_spec_through_adapter(
             raise ValueError("Pushing LIN_POLY through general linear projection not implemented in this wrapper.")
 
         pushed = InputSpec(kind=InKind.LIN_POLY, A=A, b=b)
-        info["pushed_kind"] = "LIN_POLY"
+        info["pushed_kind"] = InKind.LIN_POLY
         info["size"] = A.shape[1]
         
         # For reshaped tensors with channel adaptation, be more lenient
@@ -490,7 +496,7 @@ def synthesize_wrapped_models(
                     layers.append(model)
                     layers.append(OutputSpecLayer(spec=out_spec))
 
-                    wrapped = nn.Sequential(*layers)
+                    wrapped = VerifiableModel(*layers)
                     wrapped_models[combo_id] = wrapped
                     reports[combo_id] = WrapReport(
                         post_adapter_shape=post_shape,

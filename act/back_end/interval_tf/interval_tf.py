@@ -17,6 +17,7 @@ import torch
 from typing import Dict, List
 from act.back_end.core import Bounds, Fact, Layer, Net, ConSet
 from act.back_end.transfer_functions import TransferFunction, AnalysisContext
+from act.back_end.layer_schema import LayerKind
 from act.back_end.interval_tf.tf_mlp import *
 from act.back_end.interval_tf.tf_cnn import *
 from act.back_end.interval_tf.tf_rnn import *
@@ -29,15 +30,15 @@ class IntervalTF(TransferFunction):
     # Layer kind to function mapping
     _LAYER_REGISTRY = {
         # Identity/constraint layers
-        "INPUT": lambda L, bounds, ctx: Fact(bounds=bounds, cons=ConSet()),
-        "INPUT_SPEC": lambda L, bounds, ctx: Fact(bounds=bounds, cons=ConSet()),
-        "ASSERT": lambda L, bounds, ctx: Fact(bounds=bounds, cons=ConSet()),
+        LayerKind.INPUT.value: lambda L, bounds, ctx: Fact(bounds=bounds, cons=ConSet()),
+        LayerKind.INPUT_SPEC.value: lambda L, bounds, ctx: Fact(bounds=bounds, cons=ConSet()),
+        LayerKind.ASSERT.value: lambda L, bounds, ctx: Fact(bounds=bounds, cons=ConSet()),
         
         # MLP operations
-        "DENSE": lambda L, bounds, ctx: tf_dense(L, bounds),
+        LayerKind.DENSE.value: lambda L, bounds, ctx: tf_dense(L, bounds),
         "BIAS": lambda L, bounds, ctx: tf_bias(L, bounds),
         "SCALE": lambda L, bounds, ctx: tf_scale(L, bounds),
-        "RELU": lambda L, bounds, ctx: tf_relu(L, bounds),
+        LayerKind.RELU.value: lambda L, bounds, ctx: tf_relu(L, bounds),
         "LRELU": lambda L, bounds, ctx: tf_lrelu(L, bounds),
         "ABS": lambda L, bounds, ctx: tf_abs(L, bounds),
         "CLIP": lambda L, bounds, ctx: tf_clip(L, bounds),

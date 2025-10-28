@@ -34,6 +34,7 @@ import torch
 # ACT backend imports
 from act.back_end.core import Bounds, Con, ConSet
 from act.back_end.solver.solver_base import Solver, SolveStatus
+from act.back_end.layer_schema import LayerKind
 
 # Front-end enums (kinds)
 from act.front_end.specs import InKind, OutKind
@@ -60,18 +61,18 @@ class VerifResult:
 
 def find_entry_layer_id(net) -> int:
     """Return the id of the single INPUT layer."""
-    candidates = [L.id for L in net.layers if L.kind == "INPUT"]
+    candidates = [L.id for L in net.layers if L.kind == LayerKind.INPUT.value]
     if len(candidates) != 1:
         raise ValueError(f"Expected exactly one INPUT layer, found {len(candidates)}.")
     return candidates[0]
 
 def gather_input_spec_layers(net):
     """Return list of INPUT_SPEC layers (can be ≥1)."""
-    return [L for L in net.layers if L.kind == "INPUT_SPEC"]
+    return [L for L in net.layers if L.kind == LayerKind.INPUT_SPEC.value]
 
 def get_assert_layer(net):
     """Return the last ASSERT layer (must be last)."""
-    if not net.layers or net.layers[-1].kind != "ASSERT":
+    if not net.layers or net.layers[-1].kind != LayerKind.ASSERT.value:
         raise ValueError("Expected last ACT layer to be ASSERT.")
     return net.layers[-1]
 
