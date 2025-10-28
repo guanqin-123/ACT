@@ -7,37 +7,48 @@
 #===---------------------------------------------------------------------===#
 #
 # Purpose:
-#   Spec-free, input-free Torch → ACT converter. Converts a wrapped 
-#   nn.Sequential model (with embedded InputSpecLayer and OutputSpecLayer)
-#   into an ACT Net/Layer graph consumable by downstream analyzers/solvers.
+#   Spec-free PyTorch → ACT converter for verification. Converts wrapped
+#   PyTorch models (containing InputLayer, InputSpecLayer, and OutputSpecLayer)
+#   into ACT Net graphs with embedded constraints for formal verification.
 #
-#===---------------------------------------------------------------------===#
-
-# torch2act.py — Spec-free, input-free Torch → ACT converter
-# Converts a *wrapped* nn.Sequential model (with embedded InputSpecLayer and OutputSpecLayer)
-# into an ACT Net/Layer graph consumable by downstream analyzers/solvers.
+# Key Features:
+#   - Spec-free: Constraints embedded in model, not passed separately
+#   - Input-free: Input specifications extracted from wrapper layers
+#   - Bidirectional: Paired with act2torch.py for round-trip conversion
+#   - Weight preservation: Transfers all model parameters to ACT format
+#
+# Architecture:
+#   InputLayer           → INPUT      (declares input shape/dtype/device)
+#   InputAdapterLayer    → PERMUTE/REORDER/SLICE/PAD/SCALE_SHIFT/etc.
+#   InputSpecLayer       → INPUT_SPEC (input constraints: BOX, L_INF, LIN_POLY)
+#   nn.Linear            → DENSE      (fully connected layers)
+#   nn.Conv2d            → CONV2D     (convolutional layers)
+#   nn.ReLU              → RELU       (activation functions)
+#   OutputSpecLayer      → ASSERT     (output constraints: SAFETY, classification)
 #
 # Contract:
-#   - Exactly one InputLayer must be present (source of input shape).
-#   - At least one InputSpecLayer exists (constraints embedded in post-adapter space).
-#   - The last module is OutputSpecLayer (→ ASSERT as last ACT layer).
+#   - Exactly one InputLayer must be present (defines input shape)
+#   - Optional InputSpecLayer for input constraints
+#   - Optional OutputSpecLayer for output constraints
+#   - All wrapper layers converted to ACT layer graph
 #
-# Mapping:
-#   InputLayer           → INPUT                   (allocates initial var block)
-#   InputAdapterLayer    → PERMUTE/REORDER/SLICE/PAD/SCALE_SHIFT/LINEAR_PROJ
-#   InputSpecLayer       → INPUT_SPEC              (constraint-only, no new vars)
-#   nn.Flatten           → FLATTEN
-#   nn.Linear            → DENSE
-#   nn.ReLU              → RELU
-#   OutputSpecLayer      → ASSERT                  (constraint-only, no new vars)
+# Data Organization:
+#   - Layer.params: Numeric tensors (weights, bounds, constraint matrices)
+#   - Layer.meta: JSON-serializable metadata (dimensions, flags, configs)
+#   - Layer.vars: Variable indices for constraint tracking
 #
-# Notes:
-#   • No external input_shape or spec objects are accepted; everything is read from the wrapper.
-#   • All numeric tensors (weights, bounds, etc.) go in Layer.params (torch.Tensor).
-#   • Small flags/metadata go in Layer.meta (JSON-serializable).
+# Usage:
+#   from act.pipeline.torch2act import TorchToACT
+#   
+#   # Convert wrapped PyTorch model to ACT Net
+#   converter = TorchToACT(pytorch_model)
+#   act_net = converter.run()
+#   
+#   # ACT Net ready for verification
+#   from act.back_end.verifier import verify_once
+#   result = verify_once(act_net)
 #
-# Optional helpers included:
-#   - SolveResult enum + interpret_validation() (maps SAT/UNSAT to VIOLATED/VALID semantics).
+#===---------------------------------------------------------------------===#
 #
 from __future__ import annotations
 
@@ -53,6 +64,7 @@ from act.back_end.layer_schema import LayerKind
 from act.back_end.layer_util import create_layer
 from act.back_end.solver.solver_torch import TorchLPSolver
 from act.back_end.solver.solver_gurobi import GurobiSolver
+from act.front_end.specs import InKind, OutKind
 
 # -----------------------------------------------------------------------------
 # Public helper for solver interpretation (optional)
@@ -408,9 +420,9 @@ if __name__ == "__main__":
             # Verify the conversion produced a valid net
             if not net.layers:
                 raise ValueError("Net should have layers")
-            if net.layers[0].kind != "INPUT":
+            if net.layers[0].kind != LayerKind.INPUT.value:
                 raise ValueError(f"First layer should be INPUT, got {net.layers[0].kind}")
-            if net.layers[-1].kind != "ASSERT":
+            if net.layers[-1].kind != LayerKind.ASSERT.value:
                 raise ValueError(f"Last layer should be ASSERT, got {net.layers[-1].kind}")
             
             # Store successful conversion

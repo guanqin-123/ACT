@@ -300,7 +300,7 @@ def push_input_spec_through_adapter(
                              "define the spec after the projection or skip the projection for verification.")
 
         pushed = InputSpec(kind=InKind.BOX, lb=lb, ub=ub)
-        info["pushed_kind"] = "BOX"
+        info["pushed_kind"] = InKind.BOX
         info["size"] = lb.numel()
         
         # For reshaped tensors, compare total elements accounting for channel adaptation
@@ -357,7 +357,7 @@ def push_input_spec_through_adapter(
             raise ValueError("Pushing LIN_POLY through general linear projection not implemented in this wrapper.")
 
         pushed = InputSpec(kind=InKind.LIN_POLY, A=A, b=b)
-        info["pushed_kind"] = "LIN_POLY"
+        info["pushed_kind"] = InKind.LIN_POLY
         info["size"] = A.shape[1]
         
         # For reshaped tensors with channel adaptation, be more lenient

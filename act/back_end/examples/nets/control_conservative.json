@@ -1,0 +1,233 @@
+{
+  "format_version": "1.0",
+  "act_net": {
+    "layers": [
+      {
+        "id": 0,
+        "kind": "INPUT",
+        "params": {},
+        "meta": {
+          "shape": [
+            1,
+            8
+          ],
+          "dtype": "torch.float64",
+          "desc": "Control state",
+          "dataset_name": "control",
+          "value_range": [
+            -1.0,
+            1.0
+          ]
+        },
+        "in_vars": [],
+        "out_vars": [
+          1
+        ],
+        "cache": {}
+      },
+      {
+        "id": 1,
+        "kind": "INPUT_SPEC",
+        "params": {
+          "lb": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEsIDgpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAADwvwAAAAAAAPC/AAAAAAAA8L8AAAAAAADwvwAAAAAAAPC/AAAAAAAA8L8AAAAAAADwvwAAAAAAAPC/",
+            "dtype": "torch.float64",
+            "shape": [
+              1,
+              8
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "ub": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEsIDgpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAADwPwAAAAAAAPA/AAAAAAAA8D8AAAAAAADwPwAAAAAAAPA/AAAAAAAA8D8AAAAAAADwPwAAAAAAAPA/",
+            "dtype": "torch.float64",
+            "shape": [
+              1,
+              8
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "meta": {
+          "kind": "BOX",
+          "lb_val": -1.0,
+          "ub_val": 1.0
+        },
+        "in_vars": [
+          1
+        ],
+        "out_vars": [
+          2
+        ],
+        "cache": {}
+      },
+      {
+        "id": 2,
+        "kind": "DENSE",
+        "params": {
+          "W": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDE2LCA4KSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIApQHTuO89ylv3Bbn6q+5Lg/Deq+CkrIvT88tiXhJialP/aLRvM6YbA/h89sRHJttb/3evv3pQzBv8Af8LSRgLs/Asqrqworfr/TqYf9vZmov3UjoSPfjbS/wb8NnJN1kb/LbyRgbZ6gP/AYMUjWm50/MKzN5naotj8n6et+sZyxv0O9aQ8QHcm/3GvBlgDwoj9zK4CUOVWCPw2qbKUAk7+/XC7qNBPDnj/oSKJbSg3Lv2/iczm+RqA/vj/IviuGtL+beioeNLmiP0Urykl94ru/BsMABJh5sb9UW7kxBxu3v4LItN7Stry/siQfg/gUoj/Xu3BTx4GYv4D/Pvbasrq/pDRee2FZtb9l7KZ13GK6P338+T2aCqi/VZEYqksTvL9MafXZYS6Evyq5ArRN/ms/YDSlblg/uT/EG8Yb6Jy/v3iutsnwZre/3P+dcibPq790krEjCOmzv8jScdq5C3W/UJZIIzCtl7+i/56DPJjNP9PfbT/AI6W/oJJ8oQn8tT+mF4WaIqGwv6z5rcXRYa8/+ynREaJHoT//JXTZ8tTOv/EdmXFQznU/APGE8l8spL8PdWdvMfGrvxfQB2xXob0/EK6RA1n4vz8YauHeHeW3Pw0sZpSSsLo/+rAgtTGuqz9EwF9aq9yvPwZ6zt+sa8c/1bfAzUuAtr8c2G6hZziZP0C/rmErO8A/oGknijcItb+UtYA/LLLGv3iOAQHc8rA/Yp/MqAr/qT9yiBl2E0bAv28S+MsK7qC/b1jX9O0xgr8GyeCUU06Bv5j35Lqr/bE/vq1ZDGp+pj/tx01j1DTOP4A1fU5aMZe/QpSxDfLgkb8jSl5PboeyP2sZB5B7/Zc/bXNCSThgqr8K/nIgL1e7v331vRNsjIo/CtSCiBrAmT/n6u5eTy+sv28xVCxdCrC/ay8WA1u4kL/KBQDdNymxvy3ANH5G0sA/lnzdJTHdsj/QUe8hFd2ZPxgDthfvp7a/veal8RPAsT/tA2nipaulv5TbRvzZeca/5vwGRbTrwj8u40KXVwKhP26XbcYribW/0rWvlDhWmT/0NEpBEEi0v7hRfHq9tcu/l55UzQffwb9knFdswQfEP9lUWjgjLcC/KYYa5p26s79w1mHxIdesv3c55rd2er+/AVt2hhmKtT+4wO+I7si1PwJZBxxxL7O/YniSQnmgZz/IKZXrViXEv7xOGdQup7c/xx35Dzobxb8kwSesniSmv7DlLB18iLo/Ba7EPg2juL+xmtN6sV7GP7kXBWhQxrY/fD3JRmWIvb80AEQnuc52v0+0sKrDSoo/BBdghcVvqr+sWy+F5AnAP3MBWgVwy8E/n0wnXLqdwj/SVL879Ve+PxWCeq3RCrg/",
+            "dtype": "torch.float64",
+            "shape": [
+              16,
+              8
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "b": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDE2LCksIH0gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "dtype": "torch.float64",
+            "shape": [
+              16
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "meta": {
+          "in_features": 8,
+          "out_features": 16,
+          "bias_enabled": true
+        },
+        "in_vars": [
+          2
+        ],
+        "out_vars": [
+          3
+        ],
+        "cache": {}
+      },
+      {
+        "id": 3,
+        "kind": "RELU",
+        "params": {},
+        "meta": {},
+        "in_vars": [
+          3
+        ],
+        "out_vars": [
+          4
+        ],
+        "cache": {}
+      },
+      {
+        "id": 4,
+        "kind": "DENSE",
+        "params": {
+          "W": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDQsIDE2KSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAqOz6aH9K9Ev1nkqgC2QsG/VkJSGHHfor8NHsx2Vm/Sv7WBsvkrPo4/+J7jHkBcvT8d0DVJAECfP8tleugd3MA/3S6U9b2kvr+q+kRyTX2ev9SWNVwWcKY/vgBhjtQhpj+M9FvbOcWeP+cKuNbgXoO/mIwYNrHXgj/vVLlvcNCnP7TNfbJ074i/fh4Y6MqNsb/UZkRGMF6+v7u+RwCDvsS//I01myPqyj94mCPk0LW0P/jjhj5NIHK/ehAtYqFasD/wxZz2J0qqv6D0nEnT152/2hin5NgCwT8tP5Z3IHWvPzqr+lqOvL+/YjhYq2Icrj83VHrccVWuvyCjOY3Ol7O/tE2Gk7sdwL//y4Dc1QexP/mVIBvD9oA/hLoikoEKlj/xvkOVLxvCvzvBPW3sqcG/unyRFIui0j9CViDIV2yAP3yFOFVczZm/yEoRqMQLsD/yozvrzva9P8x6gzt46rM/F0zd5iH9sb8VZv/3YUqhP0rBWP/+T8K/yEOu8/Jrkz/Dc77Z6suov7DnsY3V370/+8khwZSNdz9EtEDNNvOqP+dzaj0LebC/lsqRcDKicL9n17kkyxu7P0kwqyzifbO/PNtHiM9Svj8qKrW60GuSP9z3111Eu4G/GtMPdGW+sT+RCkkoxECnvygbYi0BTL+/h7Ea4Sowtj8Wp2zcKtyyvw==",
+            "dtype": "torch.float64",
+            "shape": [
+              4,
+              16
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "b": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDQsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "dtype": "torch.float64",
+            "shape": [
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "meta": {
+          "in_features": 16,
+          "out_features": 4,
+          "bias_enabled": true
+        },
+        "in_vars": [
+          4
+        ],
+        "out_vars": [
+          5
+        ],
+        "cache": {}
+      },
+      {
+        "id": 5,
+        "kind": "ASSERT",
+        "params": {
+          "c": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY0JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDQsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAIA/AACAPwAAgD8AAIA/",
+            "dtype": "torch.float32",
+            "shape": [
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "meta": {
+          "kind": "LINEAR_LE",
+          "d": 2.0
+        },
+        "in_vars": [
+          5
+        ],
+        "out_vars": [
+          6
+        ],
+        "cache": {}
+      }
+    ],
+    "graph": {
+      "preds": {
+        "0": [],
+        "1": [
+          0
+        ],
+        "2": [
+          1
+        ],
+        "3": [
+          2
+        ],
+        "4": [
+          3
+        ],
+        "5": [
+          4
+        ]
+      },
+      "succs": {
+        "0": [
+          1
+        ],
+        "1": [
+          2
+        ],
+        "2": [
+          3
+        ],
+        "3": [
+          4
+        ],
+        "4": [
+          5
+        ],
+        "5": []
+      }
+    },
+    "metadata": {
+      "creation_time": "2025-10-28T22:16:57.110679",
+      "framework_version": "ACT-1.0",
+      "layer_count": 6,
+      "layer_kinds": [
+        "INPUT",
+        "INPUT_SPEC",
+        "DENSE",
+        "RELU",
+        "DENSE",
+        "ASSERT"
+      ],
+      "generated_by": "NetFactory"
+    }
+  }
+}

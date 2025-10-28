@@ -20,6 +20,7 @@ import difflib
 try:
     # Try relative import first (when used as module)
     from .layer_schema import REGISTRY, LayerKind
+    from act.front_end.specs import InKind, OutKind
 except ImportError:
     # Fallback to absolute import (when run standalone)
     import sys
@@ -29,6 +30,7 @@ except ImportError:
     project_root = get_project_root()
     sys.path.insert(0, project_root)
     from act.back_end.layer_schema import REGISTRY, LayerKind
+    from act.front_end.specs import InKind, OutKind
 
 # Import Layer from core to avoid circular import issues
 from typing import TYPE_CHECKING
@@ -234,7 +236,7 @@ if __name__ == "__main__":
         ub_tensor = torch.full((1,3,32,32), 1.0)
         layers.append(create_layer(
             id=2, kind=LayerKind.INPUT_SPEC.value,
-            params={"lb": lb_tensor, "ub": ub_tensor}, meta={"kind": "BOX"},
+            params={"lb": lb_tensor, "ub": ub_tensor}, meta={"kind": InKind.BOX},
             in_vars=[0], out_vars=[0],
         ))
         # Model toy
@@ -251,7 +253,7 @@ if __name__ == "__main__":
         ))
         layers.append(create_layer(
             id=5, kind=LayerKind.ASSERT.value,
-            params={}, meta={"kind": "TOP1_ROBUST", "y_true": 3},
+            params={}, meta={"kind": OutKind.TOP1_ROBUST, "y_true": 3},
             in_vars=[2], out_vars=[2],
         ))
 

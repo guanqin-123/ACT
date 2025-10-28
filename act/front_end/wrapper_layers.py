@@ -7,9 +7,71 @@
 #===---------------------------------------------------------------------===#
 #
 # Purpose:
-#   PyTorch nn.Module wrappers that bridge PyTorch models with ACT
-#   verification framework, providing PyTorch compatibility while
-#   enabling conversion to ACT format.
+#   PyTorch wrapper layers for spec-free verification. Provides nn.Module
+#   components that embed specifications directly into models, enabling
+#   constraint checking during inference and seamless ACT conversion.
+#
+# Key Features:
+#   - Spec-free: Constraints embedded in model architecture, not external
+#   - PyTorch-native: Full nn.Module compatibility for training/inference
+#   - Bidirectional: Converts to/from ACT format via torch2act/act2torch
+#   - Automatic verification: Returns constraint satisfaction status
+#   - Rich metadata: Tracks input shapes, dtypes, devices for verification
+#
+# Core Wrapper Layers:
+#
+#   InputLayer:
+#     Declares symbolic input with metadata (shape, dtype, device).
+#     No-op at inference, converted to INPUT layer in ACT.
+#
+#   InputAdapterLayer:
+#     Preprocessing operations (normalize, permute, flatten, slice).
+#     Converted to PERMUTE/SCALE_SHIFT/FLATTEN/etc. in ACT.
+#
+#   InputSpecLayer:
+#     Input constraint checking (BOX, L_INF, LIN_POLY).
+#     Returns (x, satisfied, explanation) tuple during inference.
+#     Converted to INPUT_SPEC layer in ACT.
+#
+#   OutputSpecLayer:
+#     Output constraint checking (SAFETY, TOP1_ROBUST, MARGIN, etc.).
+#     Returns (x, satisfied, explanation) tuple during inference.
+#     Converted to ASSERT layer in ACT.
+#
+# Verification Workflow:
+#   1. Build model with wrapper layers:
+#      model = nn.Sequential(
+#          InputLayer(shape=(1, 28, 28)),
+#          InputSpecLayer(InputSpec(kind=InKind.L_INF, eps=0.03)),
+#          nn.Flatten(),
+#          nn.Linear(784, 128),
+#          nn.ReLU(),
+#          nn.Linear(128, 10),
+#          OutputSpecLayer(OutputSpec(kind=OutKind.TOP1_ROBUST, y_true=5))
+#      )
+#
+#   2. Wrap with VerifiableModel (from act2torch.py):
+#      verifiable = VerifiableModel(*model)
+#
+#   3. Run with automatic constraint checking:
+#      results = verifiable(input_tensor)
+#      # Returns: {'output', 'input_satisfied', 'output_satisfied', ...}
+#
+#   4. Convert to ACT for formal verification:
+#      from act.pipeline.torch2act import TorchToACT
+#      act_net = TorchToACT(verifiable).run()
+#
+# Specification Support:
+#   Input constraints (InKind):
+#     - BOX: Interval bounds [lb, ub]
+#     - L_INF: ε-ball around center
+#     - LIN_POLY: Linear polyhedron Ax ≤ b
+#
+#   Output constraints (OutKind):
+#     - SAFETY: Linear constraints cx ≤ d
+#     - TOP1_ROBUST: Classification robustness (true label stays top-1)
+#     - MARGIN: Classification margin > threshold
+#     - LOCAL_ROBUST: Local robustness verification
 #
 #===---------------------------------------------------------------------===#
 
@@ -528,8 +590,79 @@ class InputSpecLayer(nn.Module):
         )
         return [layer], in_vars
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, bool, str]:
+        """
+        Forward pass with constraint checking.
+        
+        Returns:
+            Tuple of (tensor, satisfied, explanation):
+            - tensor: The input tensor (unchanged)
+            - satisfied: True if input satisfies all constraints
+            - explanation: Human-readable constraint check result
+        """
+        # If no spec, pass through without checking
+        if self.spec is None:
+            return x, True, "✅ INPUT: No constraints"
+        
+        # Check constraints based on kind
+        if self.kind == InKind.BOX:
+            # Box constraint: lb <= x <= ub
+            if self.lb is None or self.ub is None:
+                return x, True, "⚠️ INPUT BOX: Missing lb/ub"
+            
+            lb_satisfied = (x >= self.lb).all()
+            ub_satisfied = (x <= self.ub).all()
+            satisfied = bool(lb_satisfied and ub_satisfied)
+            
+            if satisfied:
+                margin_lb = (x - self.lb).min().item()
+                margin_ub = (self.ub - x).min().item()
+                margin = min(margin_lb, margin_ub)
+                explanation = f"✅ INPUT BOX: lb≤x≤ub (margin={margin:.4f})"
+            else:
+                lb_viol = (x < self.lb).sum().item()
+                ub_viol = (x > self.ub).sum().item()
+                explanation = f"❌ INPUT BOX: {lb_viol} lb violations, {ub_viol} ub violations"
+            
+            return x, satisfied, explanation
+        
+        elif self.kind == InKind.LINF_BALL:
+            # L∞-ball constraint: ||x - center||∞ <= eps
+            if self.center is None or self.eps is None:
+                return x, True, "⚠️ INPUT L∞: Missing center/eps"
+            
+            center = self.center.reshape(x.shape)
+            linf_dist = (x - center).abs().max().item()
+            satisfied = linf_dist <= self.eps
+            
+            if satisfied:
+                explanation = f"✅ INPUT L∞: ||x-c||∞={linf_dist:.4f}≤ε={self.eps:.4f}"
+            else:
+                explanation = f"❌ INPUT L∞: ||x-c||∞={linf_dist:.4f}>ε={self.eps:.4f}"
+            
+            return x, satisfied, explanation
+        
+        elif self.kind == InKind.LIN_POLY:
+            # Linear polytope: Ax <= b
+            if self.A is None or self.b is None:
+                return x, True, "⚠️ INPUT LIN_POLY: Missing A/b"
+            
+            x_flat = x.reshape(-1)
+            residuals = self.A @ x_flat - self.b  # Should be <= 0
+            max_violation = residuals.max().item()
+            satisfied = max_violation <= 0
+            
+            if satisfied:
+                margin = -max_violation  # How much slack we have
+                explanation = f"✅ INPUT LIN_POLY: Ax≤b (margin={margin:.4f})"
+            else:
+                num_violations = (residuals > 0).sum().item()
+                explanation = f"❌ INPUT LIN_POLY: {num_violations} constraints violated (max={max_violation:.4f})"
+            
+            return x, satisfied, explanation
+        
+        else:
+            return x, True, f"⚠️ INPUT: Unknown kind {self.kind}"
 
 
 class OutputSpecLayer(nn.Module):
@@ -599,5 +732,100 @@ class OutputSpecLayer(nn.Module):
         )
         return [layer], in_vars
 
-    def forward(self, y: torch.Tensor) -> torch.Tensor:
-        return y
+    def forward(self, y: torch.Tensor) -> Tuple[torch.Tensor, bool, str]:
+        """
+        Forward pass with constraint checking.
+        
+        Returns:
+            Tuple of (tensor, satisfied, explanation):
+            - tensor: The output tensor (unchanged)
+            - satisfied: True if output satisfies all constraints
+            - explanation: Human-readable constraint check result
+        """
+        # If no spec, pass through without checking
+        if self.spec is None:
+            return y, True, "✅ OUTPUT: No constraints"
+        
+        # Check constraints based on kind
+        if self.kind == OutKind.TOP1_ROBUST:
+            # Top-1 robustness: y_true class has highest score
+            if self.y_true is None:
+                return y, True, "⚠️ OUTPUT TOP1: Missing y_true"
+            
+            y_flat = y.reshape(-1)
+            pred_class = y_flat.argmax().item()
+            y_true_score = y_flat[self.y_true].item()
+            max_other_score = y_flat[[i for i in range(len(y_flat)) if i != self.y_true]].max().item()
+            margin = y_true_score - max_other_score
+            
+            satisfied = pred_class == self.y_true
+            
+            if satisfied:
+                explanation = f"✅ OUTPUT TOP1: Class {self.y_true} wins (margin={margin:.4f})"
+            else:
+                explanation = f"❌ OUTPUT TOP1: Class {pred_class} wins, expected {self.y_true} (margin={margin:.4f})"
+            
+            return y, satisfied, explanation
+        
+        elif self.kind == OutKind.MARGIN_ROBUST:
+            # Margin robustness: y_true class score exceeds others by margin
+            if self.y_true is None or self.margin is None:
+                return y, True, "⚠️ OUTPUT MARGIN: Missing y_true/margin"
+            
+            y_flat = y.reshape(-1)
+            y_true_score = y_flat[self.y_true].item()
+            max_other_score = y_flat[[i for i in range(len(y_flat)) if i != self.y_true]].max().item()
+            actual_margin = y_true_score - max_other_score
+            
+            satisfied = actual_margin >= self.margin
+            
+            if satisfied:
+                explanation = f"✅ OUTPUT MARGIN: margin={actual_margin:.4f}≥{self.margin:.4f}"
+            else:
+                explanation = f"❌ OUTPUT MARGIN: margin={actual_margin:.4f}<{self.margin:.4f}"
+            
+            return y, satisfied, explanation
+        
+        elif self.kind == OutKind.LINEAR_LE:
+            # Linear inequality: c^T y <= d
+            if self.c is None or self.d is None:
+                return y, True, "⚠️ OUTPUT LINEAR_LE: Missing c/d"
+            
+            y_flat = y.reshape(-1)
+            # Ensure dtype consistency for dot product
+            c_typed = self.c.to(dtype=y_flat.dtype, device=y_flat.device)
+            lhs = (c_typed @ y_flat).item()
+            satisfied = lhs <= self.d
+            
+            if satisfied:
+                margin = self.d - lhs
+                explanation = f"✅ OUTPUT LINEAR_LE: c^T·y={lhs:.4f}≤d={self.d:.4f} (margin={margin:.4f})"
+            else:
+                violation = lhs - self.d
+                explanation = f"❌ OUTPUT LINEAR_LE: c^T·y={lhs:.4f}>d={self.d:.4f} (violation={violation:.4f})"
+            
+            return y, satisfied, explanation
+        
+        elif self.kind == OutKind.RANGE:
+            # Range constraint: lb <= y <= ub
+            if self.lb is None or self.ub is None:
+                return y, True, "⚠️ OUTPUT RANGE: Missing lb/ub"
+            
+            lb_satisfied = (y >= self.lb).all()
+            ub_satisfied = (y <= self.ub).all()
+            satisfied = bool(lb_satisfied and ub_satisfied)
+            
+            if satisfied:
+                margin_lb = (y - self.lb).min().item()
+                margin_ub = (self.ub - y).min().item()
+                margin = min(margin_lb, margin_ub)
+                explanation = f"✅ OUTPUT RANGE: lb≤y≤ub (margin={margin:.4f})"
+            else:
+                lb_viol = (y < self.lb).sum().item()
+                ub_viol = (y > self.ub).sum().item()
+                explanation = f"❌ OUTPUT RANGE: {lb_viol} lb violations, {ub_viol} ub violations"
+            
+            return y, satisfied, explanation
+        
+        else:
+            return y, True, f"⚠️ OUTPUT: Unknown kind {self.kind}"

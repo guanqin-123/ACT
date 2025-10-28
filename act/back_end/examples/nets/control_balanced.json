@@ -1,0 +1,233 @@
+{
+  "format_version": "1.0",
+  "act_net": {
+    "layers": [
+      {
+        "id": 0,
+        "kind": "INPUT",
+        "params": {},
+        "meta": {
+          "shape": [
+            1,
+            8
+          ],
+          "dtype": "torch.float64",
+          "desc": "Control state",
+          "dataset_name": "control",
+          "value_range": [
+            -1.0,
+            1.0
+          ]
+        },
+        "in_vars": [],
+        "out_vars": [
+          1
+        ],
+        "cache": {}
+      },
+      {
+        "id": 1,
+        "kind": "INPUT_SPEC",
+        "params": {
+          "lb": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEsIDgpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAADwvwAAAAAAAPC/AAAAAAAA8L8AAAAAAADwvwAAAAAAAPC/AAAAAAAA8L8AAAAAAADwvwAAAAAAAPC/",
+            "dtype": "torch.float64",
+            "shape": [
+              1,
+              8
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "ub": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEsIDgpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAADwPwAAAAAAAPA/AAAAAAAA8D8AAAAAAADwPwAAAAAAAPA/AAAAAAAA8D8AAAAAAADwPwAAAAAAAPA/",
+            "dtype": "torch.float64",
+            "shape": [
+              1,
+              8
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "meta": {
+          "kind": "BOX",
+          "lb_val": -1.0,
+          "ub_val": 1.0
+        },
+        "in_vars": [
+          1
+        ],
+        "out_vars": [
+          2
+        ],
+        "cache": {}
+      },
+      {
+        "id": 2,
+        "kind": "DENSE",
+        "params": {
+          "W": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEyLCA4KSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAp08f7eWly8P3tf5vjVY8C/7Yfc9mbcvb/o0KCrLLqlP0XoB9rIBbW/uSHVGOkGwr/2MbN7VoSmv8RzSO35OLM/j1L7FtKjwz+kvi4kQa2jv4TTL25P5Lg/koWqB/zRuT8Sgm1uinq7v8DDLUyxbpO/lVPlXpj6pT/M53gyjvq8Pxb9tnAyD7A/zNKqsg4Psr+gUHhGp/C+P+gPkxnzlKi/gUl0Kdq7wD9+9iS2z3yhP94s7vcnpcA/KsXUZJtbpL8PksMezFSyv51kZ7WlYI+/9E2MnbJttT8gTcy2cFnFv4j8wAD+Qcm/DEHMOwOzrb8RTWeus2FiP0AARcNCKsS/owheCi9Cwb8Y1pj+DLxvP78e+h/h/ri/w8FTTIkasj9FyxFlAL68v3UbuzxZ780/hvAIkb4GtD+M+hqIwfS3v1wOxIxMLbk/CGfXIHPBuL/PTuuT2gG0vxoL+bSBFMG/xOi1m+/hqD/VMM4Zg0u6vwqXgbDRss4/v3nAXzZ8gL865Q3PMkWhP7TUPpB5xKS/41WvxdVUt7/3EXva4D+3P/AfXxRy3rS/XHNczxvItz8OphZ9qSrIP2ho6cH8X8a/7766It09nT8M7CilOkuVv5w6JfZMILi/mFzzsFzsq786sbk/zA+3P+jXiK4lyr+/kK/YqnsCfL+1XQPWB1Fmvxven2uGfpK/uGDFu8AQrb+NMci1oOq4v5l+Ri9o/oM/2IFgoVzzpj/3dY67vgm8vywiE4K6/Kq/Agpt6Ui2tD+ViUyQvnzEvwJe6aRjJLq/R1wkJxe7zD/kYX/aZOGoP7CifoaxeK4/ev9M6pfLuj/yLvdUbMGhv9AuvB4pvMW/cR6SRBZ2qD9eGMK8PpTAv6zEN8bYuLY/UMn47pq0tb8wSKJrDMC6P1bMPB+OeMC/KGII6+Fivr9vIFV1dN6Ov2tXC12sasI/RJdUiSZyrj+Ht72LIFe+Px7r2KWfG8W/f78taCFXez/iJq+hYmymv5GFFuMnJGU/A6epscmosj8=",
+            "dtype": "torch.float64",
+            "shape": [
+              12,
+              8
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "b": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEyLCksIH0gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "dtype": "torch.float64",
+            "shape": [
+              12
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "meta": {
+          "in_features": 8,
+          "out_features": 12,
+          "bias_enabled": true
+        },
+        "in_vars": [
+          2
+        ],
+        "out_vars": [
+          3
+        ],
+        "cache": {}
+      },
+      {
+        "id": 3,
+        "kind": "TANH",
+        "params": {},
+        "meta": {},
+        "in_vars": [
+          3
+        ],
+        "out_vars": [
+          4
+        ],
+        "cache": {}
+      },
+      {
+        "id": 4,
+        "kind": "DENSE",
+        "params": {
+          "W": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDQsIDEyKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAo/pqF3E+vDP/g6+c91Xqy/25k38iwNuD8S+79TSQbHv/BLUwj0Oqo/cZSxlAL+kr93E3ms6iCSv34KcoD/LJW/W5k2r38wcb/s9YgvCZ3FP+iwBdLwUXk/F3lZCVfkvL+csEBEwZ+Vv5jaKxquXHy/bOcCXd9PsT8owweQxO2HvxxXznP2z4A/d3HHrfItuT/I0nz5Ksl2PywWvSjktIs/Gm60Ejp+tL88z8dMslPEPwauYEklM7G/iFJxDm+Puz9I9f839zKmP/yw96mXL5E/DD93EQMFtr8tgDLSrQ2vv/1NfF1TErU/XvSu2AHRo79bfqaKGXChP6CBuEoSxce/OxpZSB2MmL9wBMoKT76vv8QuPyiLdqM/xqdZPgHmxD9DcN9QyH2Vvxwq2t81zZI/fPqO5wrSw7/J3f5N0T20P0SacuWlPrA/mKCOfnlYWz/G4QQgFUXCP2yhn/vWEZk/ajMOAtfxg79SlB3j0kGxP2OPANdhYZW/Oq/YGysXhz8=",
+            "dtype": "torch.float64",
+            "shape": [
+              4,
+              12
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "b": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDQsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "dtype": "torch.float64",
+            "shape": [
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "meta": {
+          "in_features": 12,
+          "out_features": 4,
+          "bias_enabled": true
+        },
+        "in_vars": [
+          4
+        ],
+        "out_vars": [
+          5
+        ],
+        "cache": {}
+      },
+      {
+        "id": 5,
+        "kind": "ASSERT",
+        "params": {
+          "c": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY0JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDQsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAA/AACAPwAAgD8AAAA/",
+            "dtype": "torch.float32",
+            "shape": [
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "meta": {
+          "kind": "LINEAR_LE",
+          "d": 3.0
+        },
+        "in_vars": [
+          5
+        ],
+        "out_vars": [
+          6
+        ],
+        "cache": {}
+      }
+    ],
+    "graph": {
+      "preds": {
+        "0": [],
+        "1": [
+          0
+        ],
+        "2": [
+          1
+        ],
+        "3": [
+          2
+        ],
+        "4": [
+          3
+        ],
+        "5": [
+          4
+        ]
+      },
+      "succs": {
+        "0": [
+          1
+        ],
+        "1": [
+          2
+        ],
+        "2": [
+          3
+        ],
+        "3": [
+          4
+        ],
+        "4": [
+          5
+        ],
+        "5": []
+      }
+    },
+    "metadata": {
+      "creation_time": "2025-10-28T22:16:57.111303",
+      "framework_version": "ACT-1.0",
+      "layer_count": 6,
+      "layer_kinds": [
+        "INPUT",
+        "INPUT_SPEC",
+        "DENSE",
+        "TANH",
+        "DENSE",
+        "ASSERT"
+      ],
+      "generated_by": "NetFactory"
+    }
+  }
+}

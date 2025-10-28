@@ -1,0 +1,233 @@
+{
+  "format_version": "1.0",
+  "act_net": {
+    "layers": [
+      {
+        "id": 0,
+        "kind": "INPUT",
+        "params": {},
+        "meta": {
+          "shape": [
+            1,
+            8
+          ],
+          "dtype": "torch.float64",
+          "desc": "Control state",
+          "dataset_name": "control",
+          "value_range": [
+            -1.0,
+            1.0
+          ]
+        },
+        "in_vars": [],
+        "out_vars": [
+          1
+        ],
+        "cache": {}
+      },
+      {
+        "id": 1,
+        "kind": "INPUT_SPEC",
+        "params": {
+          "lb": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEsIDgpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAADwvwAAAAAAAPC/AAAAAAAA8L8AAAAAAADwvwAAAAAAAPC/AAAAAAAA8L8AAAAAAADwvwAAAAAAAPC/",
+            "dtype": "torch.float64",
+            "shape": [
+              1,
+              8
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "ub": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEsIDgpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAADwPwAAAAAAAPA/AAAAAAAA8D8AAAAAAADwPwAAAAAAAPA/AAAAAAAA8D8AAAAAAADwPwAAAAAAAPA/",
+            "dtype": "torch.float64",
+            "shape": [
+              1,
+              8
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "meta": {
+          "kind": "BOX",
+          "lb_val": -1.0,
+          "ub_val": 1.0
+        },
+        "in_vars": [
+          1
+        ],
+        "out_vars": [
+          2
+        ],
+        "cache": {}
+      },
+      {
+        "id": 2,
+        "kind": "DENSE",
+        "params": {
+          "W": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDgsIDgpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAr9F7RznSGePzm+j+QXmce/SM8Kiaostj+gXGRsgV6nv8RCsEai4J0/EO4G0+QVtz9LTI3kcJKxP5/EvRNwLsI/T2o0bY2Lwr9iXEDmfua7P20jnxqnrJu/6RkM8HjtqL8IUgDHmuqlv1B5SGuXJ8k/YJTYF0aOxL8sK+8oYXWUPy15AOcAcsU/x4yRAfttk79GzTWYYDyCv0Fha3EM1ZC/uzkMvl1Oor8VzTFnzza1vyy+1noHcMU//yv7cMrXoD/5Wi0CjtSXv8dzso3QMKW/0IwPB6ulhb/OXObTrKCTP+dVMThUEqW/ZC1B12HQtT+priZhpBG4v0wWXoC6m6y/+zs4CfIhqL+4A+ubGji1PzAW7kL7mKk/ii1bwjMMrb/nBoA4rIucP/jlgEaZ9L6/RMIptuYywb+JK0f+Vba0P5IbSwKnF7g/FVzVz+cWuz+XjNNg1OGtvy+e/OXnJsk/nCKjxJQtQj+e380xKsm1v8Cac3cLH8O/3dnbgCbQyr9RdynE4Se3v7YFlOjYN8E/QlSH1GLVzj8fVDdvo3SWPztVgai7PqY/JcnbdNMLr7+YTEBAcLCvPwwTnM7Qd7Y/sJUBmj++pr+6MAAnhNC9vzVxmEjk+qo/bMUcv0cyrj99COAIacu8Pz8zfyQtTrM/l8scw3UmxL/uJw8FSGCzvw==",
+            "dtype": "torch.float64",
+            "shape": [
+              8,
+              8
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "b": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDgsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              8
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "meta": {
+          "in_features": 8,
+          "out_features": 8,
+          "bias_enabled": true
+        },
+        "in_vars": [
+          2
+        ],
+        "out_vars": [
+          3
+        ],
+        "cache": {}
+      },
+      {
+        "id": 3,
+        "kind": "TANH",
+        "params": {},
+        "meta": {},
+        "in_vars": [
+          3
+        ],
+        "out_vars": [
+          4
+        ],
+        "cache": {}
+      },
+      {
+        "id": 4,
+        "kind": "DENSE",
+        "params": {
+          "W": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDQsIDgpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIArYhJ3KnmK6P8mAOWE1F6C/mr9nxJCAvT8tURPAkkmtv3rXpFWv7o+/m5qhHanpsr/Wi3gVRPqRPwjQAkncNqO/nZL/4D3CvD/Cr54oczS6PxB8FRCmWMS/SnRb5rwxuz+vwA6ZjqKiP7guiP8FSK6/TSMdIhuTrD9vsYHiDB5hv9Atee8FE6q/sPii8WX/sL+DSrnDz3iEP84CO+5mZbE/hk0TNdBssD/SyeIhv5GbvyMSuENut8W/R97h0I63mz9aATqwzcCbP9eX34+CuLo/8WtgC8Myoz+lZ5EV3b6/P39/3BBszcK/5xSp2S5lhb8ltBj+IHW3v+fObcS1v7M/",
+            "dtype": "torch.float64",
+            "shape": [
+              4,
+              8
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "b": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDQsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "dtype": "torch.float64",
+            "shape": [
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "meta": {
+          "in_features": 8,
+          "out_features": 4,
+          "bias_enabled": true
+        },
+        "in_vars": [
+          4
+        ],
+        "out_vars": [
+          5
+        ],
+        "cache": {}
+      },
+      {
+        "id": 5,
+        "kind": "ASSERT",
+        "params": {
+          "c": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY0JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDQsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAABAAAAAQAAAAEAAAABA",
+            "dtype": "torch.float32",
+            "shape": [
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "meta": {
+          "kind": "LINEAR_LE",
+          "d": 1.0
+        },
+        "in_vars": [
+          5
+        ],
+        "out_vars": [
+          6
+        ],
+        "cache": {}
+      }
+    ],
+    "graph": {
+      "preds": {
+        "0": [],
+        "1": [
+          0
+        ],
+        "2": [
+          1
+        ],
+        "3": [
+          2
+        ],
+        "4": [
+          3
+        ],
+        "5": [
+          4
+        ]
+      },
+      "succs": {
+        "0": [
+          1
+        ],
+        "1": [
+          2
+        ],
+        "2": [
+          3
+        ],
+        "3": [
+          4
+        ],
+        "4": [
+          5
+        ],
+        "5": []
+      }
+    },
+    "metadata": {
+      "creation_time": "2025-10-28T22:16:57.111846",
+      "framework_version": "ACT-1.0",
+      "layer_count": 6,
+      "layer_kinds": [
+        "INPUT",
+        "INPUT_SPEC",
+        "DENSE",
+        "TANH",
+        "DENSE",
+        "ASSERT"
+      ],
+      "generated_by": "NetFactory"
+    }
+  }
+}
