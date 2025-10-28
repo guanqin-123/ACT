@@ -1,4 +1,4 @@
-#===- act/front_end/wrapper_layers.py - PyTorch Wrapper Layers ---------====#
+#===- act/front_end/verifiable_model.py - PyTorch Wrapper Layers -------====#
 # ACT: Abstract Constraint Transformer
 # Copyright (C) 2025– ACT Team
 #
@@ -93,6 +93,66 @@ def prod(seq: Tuple[int, ...]) -> int:
     for s in seq:
         p *= s
     return p
+
+
+class VerifiableModel(nn.Sequential):
+    """
+    Sequential model wrapper that provides spec-free verification.
+    
+    Automatically collects constraint checking results from InputSpecLayer
+    and OutputSpecLayer, returning a dict with both model output and
+    constraint satisfaction status.
+    
+    Returns:
+        Dict with keys:
+        - 'output': Model output tensor
+        - 'input_satisfied': True if input constraints satisfied
+        - 'input_explanation': Human-readable input constraint result
+        - 'output_satisfied': True if output constraints satisfied
+        - 'output_explanation': Human-readable output constraint result
+    """
+    
+    def forward(self, x):
+        """
+        Forward pass with automatic constraint checking.
+        
+        Intercepts tuple returns from InputSpecLayer/OutputSpecLayer
+        and collects verification results.
+        """
+        input_satisfied = True
+        input_explanation = "No INPUT_SPEC layer"
+        output_satisfied = True
+        output_explanation = "No OUTPUT_SPEC layer"
+        
+        # Process through all layers
+        for i, module in enumerate(self):
+            result = module(x)
+            
+            # Check if layer returned constraint checking tuple
+            if isinstance(result, tuple) and len(result) == 3:
+                x, satisfied, explanation = result
+                
+                # Identify if this is input or output spec layer
+                # Input spec layers typically appear early (first few layers)
+                # Output spec layers typically appear at the end
+                if i < len(self) // 2:  # First half = likely INPUT_SPEC
+                    input_satisfied = satisfied
+                    input_explanation = explanation
+                else:  # Second half = likely OUTPUT_SPEC
+                    output_satisfied = satisfied
+                    output_explanation = explanation
+            else:
+                # Regular layer, just pass through
+                x = result
+        
+        # Return comprehensive verification result
+        return {
+            'output': x,
+            'input_satisfied': input_satisfied,
+            'input_explanation': input_explanation,
+            'output_satisfied': output_satisfied,
+            'output_explanation': output_explanation
+        }
 
 
 class InputLayer(nn.Module):
@@ -531,8 +591,14 @@ class InputAdapterLayer(nn.Module):
 
 class InputSpecLayer(nn.Module):
     """
-    Wraps ACT's InputSpec AND is an nn.Module. No-op in forward; used by converters.
+    Wraps ACT's InputSpec AND is an nn.Module. Returns constraint checking tuple.
     The spec it carries should already be EXPRESSED IN POST-ADAPTER SPACE.
+    
+    Args:
+        spec: InputSpec object with constraint information
+    
+    Returns:
+        Tuple of (tensor, satisfied, explanation) for use with VerifiableModel.
     """
     def __init__(self, spec: Optional[InputSpec] = None, **kwargs):
         super().__init__()
@@ -590,46 +656,47 @@ class InputSpecLayer(nn.Module):
         )
         return [layer], in_vars
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, bool, str]:
+    def forward(self, x: torch.Tensor):
         """
         Forward pass with constraint checking.
         
         Returns:
-            Tuple of (tensor, satisfied, explanation):
-            - tensor: The input tensor (unchanged)
-            - satisfied: True if input satisfies all constraints
-            - explanation: Human-readable constraint check result
+            Tuple of (tensor, satisfied, explanation)
         """
         # If no spec, pass through without checking
         if self.spec is None:
-            return x, True, "✅ INPUT: No constraints"
+            return (x, True, "✅ INPUT: No constraints")
         
         # Check constraints based on kind
         if self.kind == InKind.BOX:
             # Box constraint: lb <= x <= ub
             if self.lb is None or self.ub is None:
-                return x, True, "⚠️ INPUT BOX: Missing lb/ub"
+                return (x, True, "⚠️ INPUT BOX: Missing lb/ub")
             
-            lb_satisfied = (x >= self.lb).all()
-            ub_satisfied = (x <= self.ub).all()
+            # Reshape bounds to match input shape (handles flat -> image reshape)
+            lb = self.lb.reshape(x.shape)
+            ub = self.ub.reshape(x.shape)
+            
+            lb_satisfied = (x >= lb).all()
+            ub_satisfied = (x <= ub).all()
             satisfied = bool(lb_satisfied and ub_satisfied)
             
             if satisfied:
-                margin_lb = (x - self.lb).min().item()
-                margin_ub = (self.ub - x).min().item()
+                margin_lb = (x - lb).min().item()
+                margin_ub = (ub - x).min().item()
                 margin = min(margin_lb, margin_ub)
                 explanation = f"✅ INPUT BOX: lb≤x≤ub (margin={margin:.4f})"
             else:
-                lb_viol = (x < self.lb).sum().item()
-                ub_viol = (x > self.ub).sum().item()
+                lb_viol = (x < lb).sum().item()
+                ub_viol = (x > ub).sum().item()
                 explanation = f"❌ INPUT BOX: {lb_viol} lb violations, {ub_viol} ub violations"
             
-            return x, satisfied, explanation
+            return (x, satisfied, explanation)
         
         elif self.kind == InKind.LINF_BALL:
             # L∞-ball constraint: ||x - center||∞ <= eps
             if self.center is None or self.eps is None:
-                return x, True, "⚠️ INPUT L∞: Missing center/eps"
+                return (x, True, "⚠️ INPUT L∞: Missing center/eps")
             
             center = self.center.reshape(x.shape)
             linf_dist = (x - center).abs().max().item()
@@ -640,12 +707,12 @@ class InputSpecLayer(nn.Module):
             else:
                 explanation = f"❌ INPUT L∞: ||x-c||∞={linf_dist:.4f}>ε={self.eps:.4f}"
             
-            return x, satisfied, explanation
+            return (x, satisfied, explanation)
         
         elif self.kind == InKind.LIN_POLY:
             # Linear polytope: Ax <= b
             if self.A is None or self.b is None:
-                return x, True, "⚠️ INPUT LIN_POLY: Missing A/b"
+                return (x, True, "⚠️ INPUT LIN_POLY: Missing A/b")
             
             x_flat = x.reshape(-1)
             residuals = self.A @ x_flat - self.b  # Should be <= 0
@@ -659,15 +726,21 @@ class InputSpecLayer(nn.Module):
                 num_violations = (residuals > 0).sum().item()
                 explanation = f"❌ INPUT LIN_POLY: {num_violations} constraints violated (max={max_violation:.4f})"
             
-            return x, satisfied, explanation
+            return (x, satisfied, explanation)
         
         else:
-            return x, True, f"⚠️ INPUT: Unknown kind {self.kind}"
+            return (x, True, f"⚠️ INPUT: Unknown kind {self.kind}")
 
 
 class OutputSpecLayer(nn.Module):
     """
-    Wraps ACT's OutputSpec AND is an nn.Module. No-op in forward; used by converters.
+    Wraps ACT's OutputSpec AND is an nn.Module. Returns constraint checking tuple.
+    
+    Args:
+        spec: OutputSpec object with constraint information
+    
+    Returns:
+        Tuple of (tensor, satisfied, explanation) for use with VerifiableModel.
     """
     def __init__(self, spec: Optional[OutputSpec] = None, **kwargs):
         super().__init__()
@@ -732,25 +805,22 @@ class OutputSpecLayer(nn.Module):
         )
         return [layer], in_vars
 
-    def forward(self, y: torch.Tensor) -> Tuple[torch.Tensor, bool, str]:
+    def forward(self, y: torch.Tensor):
         """
         Forward pass with constraint checking.
         
         Returns:
-            Tuple of (tensor, satisfied, explanation):
-            - tensor: The output tensor (unchanged)
-            - satisfied: True if output satisfies all constraints
-            - explanation: Human-readable constraint check result
+            Tuple of (tensor, satisfied, explanation)
         """
         # If no spec, pass through without checking
         if self.spec is None:
-            return y, True, "✅ OUTPUT: No constraints"
+            return (y, True, "✅ OUTPUT: No constraints")
         
         # Check constraints based on kind
         if self.kind == OutKind.TOP1_ROBUST:
             # Top-1 robustness: y_true class has highest score
             if self.y_true is None:
-                return y, True, "⚠️ OUTPUT TOP1: Missing y_true"
+                return (y, True, "⚠️ OUTPUT TOP1: Missing y_true")
             
             y_flat = y.reshape(-1)
             pred_class = y_flat.argmax().item()
@@ -765,12 +835,12 @@ class OutputSpecLayer(nn.Module):
             else:
                 explanation = f"❌ OUTPUT TOP1: Class {pred_class} wins, expected {self.y_true} (margin={margin:.4f})"
             
-            return y, satisfied, explanation
+            return (y, satisfied, explanation)
         
         elif self.kind == OutKind.MARGIN_ROBUST:
             # Margin robustness: y_true class score exceeds others by margin
             if self.y_true is None or self.margin is None:
-                return y, True, "⚠️ OUTPUT MARGIN: Missing y_true/margin"
+                return (y, True, "⚠️ OUTPUT MARGIN: Missing y_true/margin")
             
             y_flat = y.reshape(-1)
             y_true_score = y_flat[self.y_true].item()
@@ -784,12 +854,12 @@ class OutputSpecLayer(nn.Module):
             else:
                 explanation = f"❌ OUTPUT MARGIN: margin={actual_margin:.4f}<{self.margin:.4f}"
             
-            return y, satisfied, explanation
+            return (y, satisfied, explanation)
         
         elif self.kind == OutKind.LINEAR_LE:
             # Linear inequality: c^T y <= d
             if self.c is None or self.d is None:
-                return y, True, "⚠️ OUTPUT LINEAR_LE: Missing c/d"
+                return (y, True, "⚠️ OUTPUT LINEAR_LE: Missing c/d")
             
             y_flat = y.reshape(-1)
             # Ensure dtype consistency for dot product
@@ -804,12 +874,12 @@ class OutputSpecLayer(nn.Module):
                 violation = lhs - self.d
                 explanation = f"❌ OUTPUT LINEAR_LE: c^T·y={lhs:.4f}>d={self.d:.4f} (violation={violation:.4f})"
             
-            return y, satisfied, explanation
+            return (y, satisfied, explanation)
         
         elif self.kind == OutKind.RANGE:
             # Range constraint: lb <= y <= ub
             if self.lb is None or self.ub is None:
-                return y, True, "⚠️ OUTPUT RANGE: Missing lb/ub"
+                return (y, True, "⚠️ OUTPUT RANGE: Missing lb/ub")
             
             lb_satisfied = (y >= self.lb).all()
             ub_satisfied = (y <= self.ub).all()
@@ -825,7 +895,7 @@ class OutputSpecLayer(nn.Module):
                 ub_viol = (y > self.ub).sum().item()
                 explanation = f"❌ OUTPUT RANGE: {lb_viol} lb violations, {ub_viol} ub violations"
             
-            return y, satisfied, explanation
+            return (y, satisfied, explanation)
         
         else:
-            return y, True, f"⚠️ OUTPUT: Unknown kind {self.kind}"
+            return (y, True, f"⚠️ OUTPUT: Unknown kind {self.kind}")

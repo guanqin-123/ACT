@@ -26,7 +26,13 @@ from act.front_end.loaders.data_loader import DatasetLoader
 from act.front_end.loaders.model_loader import ModelLoader
 from act.front_end.loaders.spec_loader import SpecLoader
 from act.util.model_inference import model_inference
-from act.front_end.wrapper_layers import InputLayer, InputAdapterLayer, InputSpecLayer, OutputSpecLayer
+from act.front_end.verifiable_model import (
+    InputLayer,
+    InputAdapterLayer,
+    InputSpecLayer,
+    OutputSpecLayer,
+    VerifiableModel,
+)
 
 
 # -----------------------------------------------------------------------------
@@ -490,7 +496,7 @@ def synthesize_wrapped_models(
                     layers.append(model)
                     layers.append(OutputSpecLayer(spec=out_spec))
 
-                    wrapped = nn.Sequential(*layers)
+                    wrapped = VerifiableModel(*layers)
                     wrapped_models[combo_id] = wrapped
                     reports[combo_id] = WrapReport(
                         post_adapter_shape=post_shape,

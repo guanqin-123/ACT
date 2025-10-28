@@ -184,7 +184,7 @@ def validate_wrapper_graph(layers: List["Layer"]) -> None:
                 f"Unexpected {k} after the first INPUT_SPEC at index {i}."
             )
 
-def create_layer(id: int, kind: str, params: Dict[str, "Tensor"], meta: Dict[str, Any],
+def create_layer(id: int, kind: str, params: Dict[str, Any], meta: Dict[str, Any],
                  in_vars: List[int], out_vars: List[int]) -> "Layer":
     """Create and validate a layer."""
     try:

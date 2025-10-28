@@ -28,7 +28,7 @@ def infer_single_model(combo_id: str, model: nn.Sequential, input_tensor: torch.
     
     Args:
         combo_id: Model identifier (e.g., "m:mnist_mlp_small|x:mnist")
-        model: Synthesized wrapped model to test
+        model: Synthesized wrapped model to test (may return tensor or dict)
         input_tensor: Input tensor for model inference
         
     Returns:
@@ -40,6 +40,9 @@ def infer_single_model(combo_id: str, model: nn.Sequential, input_tensor: torch.
     try:
         with torch.no_grad():
             output = model(input_tensor)
+            # Extract tensor if model returns dict (VerifiableModel)
+            if isinstance(output, dict):
+                output = output['output']
             return True, output, None
     except Exception as e:
         return False, None, str(e)[:100]

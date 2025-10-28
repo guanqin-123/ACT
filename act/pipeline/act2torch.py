@@ -67,66 +67,6 @@ from act.back_end.core import Net, Layer
 logger = logging.getLogger(__name__)
 
 
-class VerifiableModel(nn.Sequential):
-    """
-    Sequential model wrapper that provides spec-free verification.
-    
-    Automatically collects constraint checking results from InputSpecLayer
-    and OutputSpecLayer, returning a dict with both model output and
-    constraint satisfaction status.
-    
-    Returns:
-        Dict with keys:
-        - 'output': Model output tensor
-        - 'input_satisfied': True if input constraints satisfied
-        - 'input_explanation': Human-readable input constraint result
-        - 'output_satisfied': True if output constraints satisfied
-        - 'output_explanation': Human-readable output constraint result
-    """
-    
-    def forward(self, x):
-        """
-        Forward pass with automatic constraint checking.
-        
-        Intercepts tuple returns from InputSpecLayer/OutputSpecLayer
-        and collects verification results.
-        """
-        input_satisfied = True
-        input_explanation = "No INPUT_SPEC layer"
-        output_satisfied = True
-        output_explanation = "No OUTPUT_SPEC layer"
-        
-        # Process through all layers
-        for i, module in enumerate(self):
-            result = module(x)
-            
-            # Check if layer returned constraint checking tuple
-            if isinstance(result, tuple) and len(result) == 3:
-                x, satisfied, explanation = result
-                
-                # Identify if this is input or output spec layer
-                # Input spec layers typically appear early (first few layers)
-                # Output spec layers typically appear at the end
-                if i < len(self) // 2:  # First half = likely INPUT_SPEC
-                    input_satisfied = satisfied
-                    input_explanation = explanation
-                else:  # Second half = likely OUTPUT_SPEC
-                    output_satisfied = satisfied
-                    output_explanation = explanation
-            else:
-                # Regular layer, just pass through
-                x = result
-        
-        # Return comprehensive verification result
-        return {
-            'output': x,
-            'input_satisfied': input_satisfied,
-            'input_explanation': input_explanation,
-            'output_satisfied': output_satisfied,
-            'output_explanation': output_explanation
-        }
-
-
 class ACTToTorch:
     """
     Convert ACT Net to PyTorch nn.Module.
@@ -185,9 +125,9 @@ class ACTToTorch:
             if kind == 'INPUT':
                 continue  # Skip INPUT layer (no-op)
             
-            elif kind == 'INPUT_SPEC':
+            if kind == 'INPUT_SPEC':
                 # Create InputSpecLayer for constraint checking
-                from act.front_end.wrapper_layers import InputSpecLayer
+                from act.front_end.verifiable_model import InputSpecLayer
                 from act.front_end.specs import InputSpec, InKind
                 
                 # Build InputSpec from ACT layer
@@ -201,13 +141,14 @@ class ACTToTorch:
                         spec_dict[param_key] = act_layer.params[param_key]
                 
                 spec = InputSpec(**spec_dict)
+                # InputSpecLayer now always returns tuples
                 torch_layers.append(InputSpecLayer(spec))
                 has_input_spec = True
                 continue
             
             elif kind == 'ASSERT':
                 # Create OutputSpecLayer for constraint checking
-                from act.front_end.wrapper_layers import OutputSpecLayer
+                from act.front_end.verifiable_model import OutputSpecLayer
                 from act.front_end.specs import OutputSpec, OutKind
                 
                 # Build OutputSpec from ACT layer
@@ -225,6 +166,7 @@ class ACTToTorch:
                         spec_dict[param_key] = act_layer.params[param_key]
                 
                 spec = OutputSpec(**spec_dict)
+                # OutputSpecLayer now always returns tuples
                 torch_layers.append(OutputSpecLayer(spec))
                 has_output_spec = True
                 continue
@@ -238,7 +180,8 @@ class ACTToTorch:
         if not torch_layers:
             raise ValueError("No valid PyTorch layers found in ACT Net")
         
-        # Return VerifiableModel model for automatic constraint checking
+        # Return VerifiableModel for automatic constraint checking
+        from act.front_end.verifiable_model import VerifiableModel
         model = VerifiableModel(*torch_layers)
         model.eval()  # Set to evaluation mode by default
         
