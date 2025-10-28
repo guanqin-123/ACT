@@ -135,64 +135,98 @@ def test_basic_serialization():
 
 
 def test_file_io():
-    """Test file input/output operations."""
+    """Test file input/output operations on all available networks."""
     print("🧪 Testing file I/O...")
     
     if not HAS_TORCH:
         print("⏭️  Skipping - PyTorch not available")
         return
     
-    # Create test networks
+    # Test all available networks
     test_nets = create_test_networks()
-    net = test_nets["adversarial_simple"]
     
-    # Test file save/load
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-        filepath = f.name
+    passed = 0
+    failed = 0
     
-    try:
-        # Save to file
-        metadata = {
-            "description": "Test adversarial network",
-            "input_size": 5,
-            "output_size": 2,
-            "test_case": "file_io"
-        }
-        save_net_to_file(net, filepath, metadata)
-        assert os.path.exists(filepath), "File not created"
+    for net_name, net in test_nets.items():
+        print(f"  Testing file I/O for '{net_name}'...")
         
-        # Check file size
-        file_size = os.path.getsize(filepath)
-        print(f"File size: {file_size:,} bytes")
+        # Test file save/load
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            filepath = f.name
         
-        # Load from file
-        net_restored, loaded_metadata = load_net_from_file(filepath)
-        
-        # Verify metadata preservation
-        assert loaded_metadata["description"] == metadata["description"]
-        assert loaded_metadata["test_case"] == metadata["test_case"]
-        
-        print("✅ File I/O test passed")
-        
-    finally:
-        # Cleanup
-        if os.path.exists(filepath):
-            os.unlink(filepath)
+        try:
+            # Save to file
+            metadata = {
+                "description": f"Test network: {net_name}",
+                "network_name": net_name,
+                "test_case": "file_io"
+            }
+            save_net_to_file(net, filepath, metadata)
+            assert os.path.exists(filepath), f"File not created for {net_name}"
+            
+            # Check file size
+            file_size = os.path.getsize(filepath)
+            print(f"    File size: {file_size:,} bytes")
+            
+            # Load from file
+            net_restored, loaded_metadata = load_net_from_file(filepath)
+            
+            # Verify metadata preservation
+            assert loaded_metadata["description"] == metadata["description"], f"Description mismatch for {net_name}"
+            assert loaded_metadata["test_case"] == metadata["test_case"], f"Test case mismatch for {net_name}"
+            assert loaded_metadata["network_name"] == net_name, f"Network name mismatch for {net_name}"
+            
+            # Verify structure
+            assert len(net.layers) == len(net_restored.layers), f"Layer count mismatch for {net_name}"
+            
+            print(f"    ✅ {net_name} passed")
+            passed += 1
+            
+        except Exception as e:
+            print(f"    ❌ {net_name} failed: {e}")
+            failed += 1
+            
+        finally:
+            # Cleanup
+            if os.path.exists(filepath):
+                os.unlink(filepath)
+    
+    print(f"✅ File I/O test completed: {passed} passed, {failed} failed")
+    assert passed > 0, "No networks passed file I/O testing"
 
 
 def test_device_migration():
-    """Test device migration during serialization and deserialization."""
+    """Test device migration during serialization and deserialization on all networks."""
     print("🧪 Testing device migration...")
     test_nets = create_test_networks()
     
-    # Use an available network name
-    net = test_nets["mnist_mlp_small"]
+    passed = 0
+    failed = 0
     
-    # Test serialization and deserialization
-    serialized = save_net_to_string(net, {"test": "device_migration"})
-    deserialized = load_net_from_string(serialized)
+    for net_name, net in test_nets.items():
+        print(f"  Testing device migration for '{net_name}'...")
+        
+        try:
+            # Test serialization and deserialization
+            metadata = {"test": "device_migration", "network_name": net_name}
+            serialized = save_net_to_string(net, metadata)
+            net_restored, loaded_metadata = load_net_from_string(serialized)
+            
+            # Verify metadata and structure
+            assert loaded_metadata["test"] == "device_migration", f"Metadata mismatch for {net_name}"
+            assert loaded_metadata["network_name"] == net_name, f"Network name mismatch for {net_name}"
+            assert len(net.layers) == len(net_restored.layers), f"Layer count mismatch for {net_name}"
+            
+            print(f"    ✅ {net_name} passed")
+            passed += 1
+            
+        except Exception as e:
+            print(f"    ❌ {net_name} failed: {e}")
+            failed += 1
     
-    print("✅ Device migration test passed")
+    print(f"✅ Device migration test completed: {passed} passed, {failed} failed")
+    assert passed > 0, "No networks passed device migration testing"
 
 
 def test_schema_validation():
@@ -244,40 +278,59 @@ def test_schema_validation():
 
 
 def test_complex_metadata():
-    """Test serialization of complex metadata structures."""
+    """Test serialization of complex metadata structures on all networks."""
     print("🧪 Testing complex metadata...")
     
     if not HAS_TORCH:
         print("⏭️  Skipping - PyTorch not available")
         return
     
-    # Use test network
+    # Test all available networks
     test_nets = create_test_networks()
-    net = test_nets["mnist_mlp_small"]
     
-    # Serialize with complex metadata at the net level
-    complex_metadata = {
-        "model_info": {
-            "optimizer": "adam",
-            "lr_schedule": [0.001, 0.0001, 0.00001],
-            "regularization": {"l2": 1e-4, "dropout": 0.5}
-        },
-        "tags": ["mlp", "test", "dense"],
-        "training_config": {
-            "batch_size": 32,
-            "epochs": 100
-        }
-    }
+    passed = 0
+    failed = 0
     
-    json_str = save_net_to_string(net, complex_metadata)
-    net_restored, metadata_restored = load_net_from_string(json_str)
+    for net_name, net in test_nets.items():
+        print(f"  Testing complex metadata for '{net_name}'...")
+        
+        try:
+            # Serialize with complex metadata at the net level
+            complex_metadata = {
+                "network_name": net_name,
+                "model_info": {
+                    "optimizer": "adam",
+                    "lr_schedule": [0.001, 0.0001, 0.00001],
+                    "regularization": {"l2": 1e-4, "dropout": 0.5}
+                },
+                "tags": ["test", "serialization", net_name.split('_')[0]],
+                "training_config": {
+                    "batch_size": 32,
+                    "epochs": 100
+                }
+            }
+            
+            json_str = save_net_to_string(net, complex_metadata)
+            net_restored, metadata_restored = load_net_from_string(json_str)
+            
+            # Verify complex metadata preservation
+            assert metadata_restored["network_name"] == net_name, f"Network name mismatch for {net_name}"
+            assert metadata_restored["model_info"]["optimizer"] == "adam", f"Optimizer mismatch for {net_name}"
+            assert metadata_restored["tags"][0] == "test", f"Tags mismatch for {net_name}"
+            assert metadata_restored["training_config"]["batch_size"] == 32, f"Batch size mismatch for {net_name}"
+            
+            # Verify structure
+            assert len(net.layers) == len(net_restored.layers), f"Layer count mismatch for {net_name}"
+            
+            print(f"    ✅ {net_name} passed")
+            passed += 1
+            
+        except Exception as e:
+            print(f"    ❌ {net_name} failed: {e}")
+            failed += 1
     
-    # Verify complex metadata preservation
-    assert metadata_restored["model_info"]["optimizer"] == "adam"
-    assert metadata_restored["tags"] == ["mlp", "test", "dense"]
-    assert metadata_restored["training_config"]["batch_size"] == 32
-    
-    print("✅ Complex metadata test passed")
+    print(f"✅ Complex metadata test completed: {passed} passed, {failed} failed")
+    assert passed > 0, "No networks passed complex metadata testing"
 
 
 def run_all_tests():
