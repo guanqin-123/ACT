@@ -80,4 +80,4 @@ jobs:
       - name: Run Validatinon Verifiers
         run: |
           cd ${{ github.workspace }}
-          python -m pytest act/pipeline/validate_verifier.py -v
+          python act/pipeline/validate_verifier.py
