@@ -14,7 +14,8 @@
 
 import torch
 from typing import Dict, Any, Tuple, Optional
-from act.back_end.core import Bounds
+from act.back_end.core import Bounds, ConSet
+from act.util.options import PerformanceOptions
 
 EPS = 1e-12
 
@@ -38,8 +39,45 @@ def update_cache(L, B: Bounds, masks: Optional[Dict[str, torch.Tensor]]):
     L.cache["masks"] = None if masks is None else {k: v.clone() for k,v in masks.items()}
 
 def affine_bounds(W_pos, W_neg, b, Bin: Bounds) -> Bounds:
-    lb = W_pos @ Bin.lb + W_neg @ Bin.ub + b
-    ub = W_pos @ Bin.ub + W_neg @ Bin.lb + b
+    """Compute bounds for affine transformation using interval arithmetic.
+    
+    Uses pre-computed W_pos/W_neg split for efficiency:
+    - W_pos = clamp(W, min=0): positive weights
+    - W_neg = clamp(W, max=0): negative weights
+    
+    Interval arithmetic:
+    - Lower bound: W_pos @ lb + W_neg @ ub + b
+    - Upper bound: W_pos @ ub + W_neg @ lb + b
+    
+    Args:
+        W_pos: Positive part of weight matrix [out_features, in_features]
+        W_neg: Negative part of weight matrix [out_features, in_features]
+        b: Bias vector [out_features]
+        Bin: Input bounds with shape [batch, in_features] or [in_features]
+    
+    Returns:
+        Output bounds with shape [out_features]
+    """
+    # Validate and squeeze batch dimension if present
+    if Bin.lb.ndim == 2:
+        batch_size = Bin.lb.shape[0]
+        assert batch_size == 1, (
+            f"affine_bounds expects batch_size=1 for symbolic verification, "
+            f"got batch_size={batch_size}. Bounds shape: {Bin.lb.shape}"
+        )
+        lb_vec = Bin.lb.squeeze(0)  # [1, in_features] → [in_features]
+        ub_vec = Bin.ub.squeeze(0)
+    elif Bin.lb.ndim == 1:
+        lb_vec = Bin.lb
+        ub_vec = Bin.ub
+    else:
+        raise ValueError(
+            f"affine_bounds expects 1D or 2D bounds, got {Bin.lb.ndim}D with shape {Bin.lb.shape}"
+        )
+    
+    # Compute bounds using interval arithmetic
+    lb = W_pos @ lb_vec + W_neg @ ub_vec + b
+    ub = W_pos @ ub_vec + W_neg @ lb_vec + b
     return Bounds(lb, ub)
 
 def pwl_meta(l: torch.Tensor, u: torch.Tensor, K: int) -> Dict[str, Any]:
@@ -52,3 +90,95 @@ def bound_var_interval(l: torch.Tensor, u: torch.Tensor) -> Tuple[float, float]:
 def scale_interval(cx_lo, cx_hi, inv_lo, inv_hi):
     cand = torch.stack([cx_lo*inv_lo, cx_lo*inv_hi, cx_hi*inv_lo, cx_hi*inv_hi], dim=0)
     return torch.min(cand, dim=0).values, torch.max(cand, dim=0).values
+
+
+def validate_constraints(globalC, after: Dict, net) -> bool:
+    """Validate constraint set for common errors (targeted validation).
+    
+    This function performs targeted validation by:
+    1. Collecting only the variable IDs referenced by constraints in globalC
+    2. Building var_bounds dict for only those variables from the 'after' facts
+    3. Validating constraint dimensions and bounds existence
+    
+    Checks (when enabled):
+    - All variable IDs referenced in constraints have bounds in 'after' facts
+    - LIN_POLY dimensions match variable count
+    - No NaN/Inf in constraint parameters
+    
+    Args:
+        globalC: Constraint set to validate (ConSet)
+        after: Dictionary mapping layer_id -> Fact (from analyze())
+        net: ACT network with layer definitions
+    
+    Returns:
+        True if all checks pass, False otherwise
+    """
+    from act.back_end.core import Bounds
+    from act.util.options import PerformanceOptions
+    
+    if not PerformanceOptions.validate_constraints:
+        return True  # Skip validation when disabled
+    
+    # Step 1: Collect all variable IDs referenced by constraints
+    var_ids_used = set()
+    for con in globalC:
+        var_ids_used.update(con.var_ids)
+    
+    # Step 2: Build var_bounds dict for only the variables referenced by constraints
+    var_bounds = {}
+    for layer_id, fact in after.items():
+        layer = net.by_id[layer_id]
+        for i, var_id in enumerate(layer.out_vars):
+            if var_id in var_ids_used:
+                # Extract individual bounds for this variable
+                var_bounds[var_id] = Bounds(
+                    lb=fact.bounds.lb[i:i+1],  # Keep as 1D tensor with single element
+                    ub=fact.bounds.ub[i:i+1]
+                )
+    
+    # Step 3: Validate constraints
+    all_valid = True
+    issues = []
+    
+    for i, con in enumerate(globalC):
+        # Check variable IDs exist
+        for var_id in con.var_ids:
+            if var_id not in var_bounds:
+                issues.append(f"Constraint {i}: Variable ID {var_id} not in var_bounds")
+                all_valid = False
+        
+        # Check LIN_POLY dimensions
+        if con.kind == 'LIN_POLY':
+            expected_vars = con.A.shape[1]
+            actual_vars = len(con.var_ids)
+            if expected_vars != actual_vars:
+                issues.append(
+                    f"Constraint {i}: A.shape[1]={expected_vars} != len(var_ids)={actual_vars}"
+                )
+                all_valid = False
+            
+            # Check for NaN/Inf
+            if torch.isnan(con.A).any() or torch.isinf(con.A).any():
+                issues.append(f"Constraint {i}: A matrix contains NaN/Inf")
+                all_valid = False
+            if torch.isnan(con.b).any() or torch.isinf(con.b).any():
+                issues.append(f"Constraint {i}: b vector contains NaN/Inf")
+                all_valid = False
+    
+    # Write to debug file (GUARDED - only if debug_tf is also enabled)
+    if PerformanceOptions.debug_tf:
+        with open(PerformanceOptions.debug_output_file, 'a') as f:
+            f.write(f"\n{'='*80}\n")
+            f.write(f"CONSTRAINT VALIDATION (Targeted)\n")
+            f.write(f"{'='*80}\n")
+            f.write(f"Total constraints: {len(globalC)}\n")
+            f.write(f"Unique variables referenced: {len(var_ids_used)}\n")
+            f.write(f"Variables with bounds found: {len(var_bounds)}\n")
+            f.write(f"Status: {'✅ VALID' if all_valid else '❌ INVALID'}\n")
+            if issues:
+                f.write(f"\nIssues found:\n")
+                for issue in issues:
+                    f.write(f"  - {issue}\n")
+            f.write("\n")
+    
+    return all_valid

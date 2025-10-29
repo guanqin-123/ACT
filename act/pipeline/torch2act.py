@@ -65,6 +65,7 @@ from act.back_end.layer_util import create_layer
 from act.back_end.solver.solver_torch import TorchLPSolver
 from act.back_end.solver.solver_gurobi import GurobiSolver
 from act.front_end.specs import InKind, OutKind
+from act.util.options import PerformanceOptions
 
 # -----------------------------------------------------------------------------
 # Public helper for solver interpretation (optional)
@@ -389,6 +390,14 @@ class TorchToACT:
 
     
 if __name__ == "__main__":
+    # Initialize debug file (GUARDED)
+    if PerformanceOptions.debug_tf:
+        debug_file = PerformanceOptions.debug_output_file
+        with open(debug_file, 'w') as f:
+            f.write(f"ACT Torch2ACT Conversion Debug Log\n")
+            f.write(f"{'='*80}\n\n")
+        print(f"Debug logging to: {debug_file}")
+    
     print("🚀 Starting Spec-Free, Input-Free Torch→ACT Verification Demo")
     
     # Step 1: Synthesize all wrapped models
@@ -482,7 +491,7 @@ if __name__ == "__main__":
     print(f"\n🔍 Step 5: Running verification on first model for debugging...")
     
     # Import verification functions here to avoid early import issues
-    from act.back_end.verifier import verify_once, verify_bab
+    from act.back_end.verifier import verify_once
     
     verification_results = {}
     
@@ -503,8 +512,8 @@ if __name__ == "__main__":
             print("    🎯 Running single-shot verification...")
             res = verify_once(net, solver=solver, timelimit=30.0)
             print(f"      Status: {res.status}")
-            if res.model_stats:
-                print(f"      Stats: {res.model_stats}")
+            if res.stats:
+                print(f"      Stats: {res.stats}")
             
             model_results[solver_name] = {
                 'single_shot': res.status
@@ -535,5 +544,9 @@ if __name__ == "__main__":
             else:
                 single_status = solver_results.get('single_shot', 'N/A')
                 print(f"    {solver_name}: Single={single_status}")
+    
+    # Print debug file location (GUARDED)
+    if PerformanceOptions.debug_tf:
+        print(f"\n📝 Debug log written to: {PerformanceOptions.debug_output_file}")
     
     print("\n🔍 Debug verification completed!")

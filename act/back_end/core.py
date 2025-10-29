@@ -81,9 +81,20 @@ class Con:
 @dataclass
 class ConSet:
     S: Dict[Tuple[str, Tuple[int, ...], str], Con] = field(default_factory=dict)
-    def replace(self, c: Con): self.S[c.signature()] = c
+    
+    def replace(self, c: Con): 
+        self.S[c.signature()] = c
+    
     def add_box(self, layer_id: int, var_ids: List[int], B: Bounds):
         self.replace(Con("INEQ", tuple(var_ids), {"tag": f"box:{layer_id}", "lb": B.lb.clone(), "ub": B.ub.clone()}))
+    
+    def __iter__(self):
+        """Iterate over constraints (Con objects). Makes ConSet iterable."""
+        return iter(self.S.values())
+    
+    def __len__(self):
+        """Return number of constraints. Enables len(ConSet)."""
+        return len(self.S)
 
 @dataclass
 class Fact:

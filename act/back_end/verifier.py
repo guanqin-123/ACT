@@ -42,6 +42,7 @@ import torch
 from act.back_end.core import Bounds, Con, ConSet, Fact
 from act.back_end.solver.solver_base import Solver, SolveStatus
 from act.back_end.layer_schema import LayerKind
+from act.back_end.utils import validate_constraints
 
 # Front-end enums (kinds)
 from act.front_end.specs import InKind, OutKind
@@ -254,6 +255,9 @@ def setup_and_solve(
     # Analyze with full input specification (propagates constraints)
     before, after, globalC = analyze(net, entry_id, entry_fact)
     
+    # Validate constraints (validation runs if enabled, logging only if debug_tf also enabled)
+    validate_constraints(globalC, after, net)
+    
     # Export all constraints to solver (including LIN_POLY)
     export_to_solver(globalC, solver, objective=None, sense="min")
     add_negated_assert_to_solver(solver, output_ids, assert_layer)
@@ -268,7 +272,7 @@ def setup_and_solve(
     if st == SolveStatus.SAT and solver.has_solution():
         ce_input = solver.get_values(input_ids)
     
-    stats = {"status": st, "ncons": len(globalC.S)}
+    stats = {"status": st, "ncons": len(globalC)}
     return st, ce_input, stats
 
 

@@ -72,7 +72,7 @@ def analyze(net: Net, entry_id: int, entry_fact: Fact, eps: float=1e-9) -> Tuple
             Cjoin = ConSet()
             for pid in net.preds[lid]:
                 Bjoin = box_join(Bjoin, after[pid].bounds)
-                for con in after[pid].cons.S.values(): Cjoin.replace(con)
+                for con in after[pid].cons: Cjoin.replace(con)
             before[lid] = Fact(Bjoin, Cjoin)
 
         out_fact = dispatch_tf(L, before, after, net)
@@ -80,7 +80,7 @@ def analyze(net: Net, entry_id: int, entry_fact: Fact, eps: float=1e-9) -> Tuple
         if changed_or_maskdiff(L, out_fact.bounds, None, eps):
             after[lid] = out_fact
             update_cache(L, out_fact.bounds, None)
-            for con in out_fact.cons.S.values(): globalC.replace(con)
+            for con in out_fact.cons: globalC.replace(con)
             for sid in net.succs.get(lid, []): WL.append(sid)
 
     return before, after, globalC
