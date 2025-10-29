@@ -76,3 +76,8 @@ jobs:
         run: |
           cd ${{ github.workspace }}
           python -m pytest act/back_end/serialization/test_serialization.py -v
+      
+      - name: Run Validatinon Verifiers
+        run: |
+          cd ${{ github.workspace }}
+          python -m pytest act/pipeline/validate_verifier.py -v

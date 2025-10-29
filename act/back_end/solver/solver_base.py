@@ -18,10 +18,10 @@ import numpy as np
 from typing import List, Optional
 
 class SolveStatus:
-    OPTIMAL = "OPTIMAL"
-    FEASIBLE = "FEASIBLE"
-    INFEASIBLE = "INFEASIBLE"
-    UNKNOWN = "UNKNOWN"
+    """Solver status codes (SAT/UNSAT terminology for verification)."""
+    SAT = "SAT"              # Satisfiable - solution found
+    UNSAT = "UNSAT"          # Unsatisfiable - no solution exists
+    UNKNOWN = "UNKNOWN"      # Inconclusive (timeout/spurious/error)
 
 class SolverCaps:
     def __init__(self, supports_gpu: bool = False):
