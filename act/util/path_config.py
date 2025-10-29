@@ -133,6 +133,15 @@ def get_abcrown_path() -> str:
     return os.path.join(get_modules_root(), 'abcrown')
 
 
+def get_pipeline_log_dir() -> str:
+    """Get the pipeline log directory path.
+    
+    Returns:
+        Absolute path to act/pipeline/log/ directory
+    """
+    return os.path.join(act_root, 'pipeline', 'log')
+
+
 def get_path_relative_to_project(relative_path: str) -> str:
     """Get absolute path for a path relative to project root.
     

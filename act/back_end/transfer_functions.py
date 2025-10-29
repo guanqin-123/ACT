@@ -49,6 +49,7 @@ import torch
 from abc import ABC, abstractmethod
 from typing import Dict, List
 from act.back_end.core import Bounds, Fact, Layer, Net
+from act.util.options import PerformanceOptions
 
 
 class AnalysisContext:
@@ -164,7 +165,53 @@ def dispatch_tf(L: Layer, before: Dict[int, Fact], after: Dict[int, Fact], net: 
     """Dispatch to current transfer function implementation.
     
     This is the main entry point called by analyze() for each layer.
+    Optionally logs detailed debug information to file when debug_tf is enabled.
     """
     tf_impl = get_transfer_function()
     input_bounds = before[L.id].bounds
-    return tf_impl.apply(L, input_bounds, net, before, after)
+    result = tf_impl.apply(L, input_bounds, net, before, after)
+    
+    # Debug logging to file (GUARDED)
+    if PerformanceOptions.debug_tf:
+        with open(PerformanceOptions.debug_output_file, 'a') as f:
+            f.write(f"\n{'='*80}\n")
+            f.write(f"Layer {L.id} ({L.kind})\n")
+            f.write(f"{'='*80}\n")
+            
+            # Input bounds info (single Bounds object)
+            lb_min, lb_max = input_bounds.lb.min().item(), input_bounds.lb.max().item()
+            ub_min, ub_max = input_bounds.ub.min().item(), input_bounds.ub.max().item()
+            f.write(f"Input bounds: shape={input_bounds.lb.shape}, "
+                   f"lb_range=[{lb_min:.4f}, {lb_max:.4f}], "
+                   f"ub_range=[{ub_min:.4f}, {ub_max:.4f}]\n")
+            
+            # Output bounds info (single Bounds object)
+            out_bounds = result.bounds
+            lb_min, lb_max = out_bounds.lb.min().item(), out_bounds.lb.max().item()
+            ub_min, ub_max = out_bounds.ub.min().item(), out_bounds.ub.max().item()
+            f.write(f"Output bounds: shape={out_bounds.lb.shape}, "
+                   f"lb_range=[{lb_min:.4f}, {lb_max:.4f}], "
+                   f"ub_range=[{ub_min:.4f}, {ub_max:.4f}]\n")
+            
+            # Parameter info
+            if L.kind == 'DENSE' and 'W' in L.params:
+                W = L.params['W']
+                b = L.params['b']
+                f.write(f"Parameters: W.shape={W.shape}, b.shape={b.shape}\n")
+            elif L.kind == 'CONV2D' and 'weight' in L.params:
+                weight = L.params['weight']
+                f.write(f"Parameters: weight.shape={weight.shape}\n")
+            
+            # Constraint info
+            cons = result.cons
+            f.write(f"Constraints generated: {len(cons)}\n")
+            max_to_show = PerformanceOptions.debug_tf_max_constraints
+            for i, con in enumerate(list(cons)[:max_to_show]):
+                if con.kind == 'LIN_POLY':
+                    f.write(f"  Con {i}: LIN_POLY, A.shape={con.A.shape}, b.shape={con.b.shape}, var_ids={con.var_ids}\n")
+                else:
+                    f.write(f"  Con {i}: {con.kind}, var_ids={con.var_ids}\n")
+            if len(cons) > max_to_show:
+                f.write(f"  ... and {len(cons) - max_to_show} more constraints\n")
+    
+    return result

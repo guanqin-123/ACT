@@ -69,6 +69,7 @@ from act.pipeline.torch2act import TorchToACT
 from act.back_end.verifier import verify_once
 from act.back_end.solver.solver_gurobi import GurobiSolver
 from act.back_end.solver.solver_torch import TorchLPSolver
+from act.util.options import PerformanceOptions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -80,6 +81,14 @@ class VerifierValidator:
     def __init__(self):
         self.factory = ModelFactory()
         self.validation_results = []
+        
+        # Initialize debug file (GUARDED)
+        if PerformanceOptions.debug_tf:
+            debug_file = PerformanceOptions.debug_output_file
+            with open(debug_file, 'w') as f:
+                f.write(f"ACT Verification Debug Log\n")
+                f.write(f"{'='*80}\n\n")
+            logger.info(f"Debug logging to: {debug_file}")
     
     def find_concrete_counterexample(
         self, 
@@ -394,6 +403,10 @@ def main():
     
     # Validate with both solvers
     summary = validator.validate_all_networks(solvers=['gurobi', 'torchlp'])
+    
+    # Print debug file location (GUARDED)
+    if PerformanceOptions.debug_tf:
+        logger.info(f"\n📝 Debug log written to: {PerformanceOptions.debug_output_file}")
     
     # Exit code: 0 if no critical bugs, 1 if soundness bugs detected
     exit_code = 1 if summary['failed'] > 0 else 0

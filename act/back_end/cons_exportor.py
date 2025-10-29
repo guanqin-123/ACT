@@ -52,7 +52,7 @@ def export_to_solver(globalC: ConSet, solver: Solver,
 
     # 1) global var set and merged boxes
     all_ids=set(); boxes={}
-    templates=list(globalC.S.values())
+    templates=list(globalC)
     for con in templates:
         all_ids.update(con.var_ids)
         tag = con.meta.get("tag","")
