@@ -209,7 +209,7 @@ class SpecLoader:
         project_root = Path(get_project_root())
         
         # Common specification directories
-        spec_dirs = ["data", "configs", "specs", "properties"]
+        spec_dirs = ["data", "configs", "specs", "properties","vnnlib"]
         
         for spec_dir in spec_dirs:
             spec_path = project_root / spec_dir
@@ -229,38 +229,130 @@ class SpecLoader:
         return specs
     
     def load_vnnlib_specs(self, vnnlib_path: str) -> List[Tuple[InputSpec, OutputSpec]]:
-        """Load VNNLIB specification file and convert to InputSpec/OutputSpec pairs"""
-        # Enhanced VNNLIB loading with tensor-based specifications
+        """
+        Load VNNLIB specification file and convert to InputSpec/OutputSpec pairs
+        
+        Parses SMT-LIB format VNNLIB files to extract:
+        - Input variable bounds (X_*) 
+        - Output constraints (Y_*) in various forms (DNF, linear, range)
+        
+        Returns:
+            List of (InputSpec, OutputSpec) tuples
+        """
         try:
+            import re
+            
             with open(vnnlib_path, 'r') as f:
-                content = f.read()
+                lines = f.readlines()
             
-            # For now, create a default tensor-based specification as an example
-            # In a full implementation, this would parse VNNLIB SMT-LIB format
-            print(f"📋 Loading VNNLIB {vnnlib_path} (simplified parsing)")
+            print(f"📋 Loading VNNLIB {vnnlib_path}")
             
-            # Create a default box input spec as placeholder
-            default_size = 10  # Default input dimension
-            lb_tensor = torch.full((default_size,), -1.0, device=self.device, dtype=self.dtype)
-            ub_tensor = torch.full((default_size,), 1.0, device=self.device, dtype=self.dtype)
+            # Remove comments and workaround for '<' vs '<='
+            lines = [line.strip() for line in lines if not line.strip().startswith(';')]
+            lines = [line.replace('< ', '<= ') if '< ' in line else line for line in lines]
+            content = '\n'.join(lines)
             
-            input_spec = InputSpec(
-                kind=InKind.BOX,
-                lb=lb_tensor,
-                ub=ub_tensor
-            )
+            # ===== PARSE INPUT VARIABLES AND BOUNDS =====
+            # Pattern: (declare-const X_i Real)
+            input_vars = re.findall(r'\(declare-const\s+(X_\d+)\s+Real\)', content)
             
-            # Create a default margin robust output spec
-            output_spec = OutputSpec(
-                kind=OutKind.MARGIN_ROBUST,
-                y_true=0,  # Default target class
-                margin=0.0
-            )
+            # Extract bounds for each input variable
+            input_bounds = {}
+            for var in input_vars:
+                # Find upper bound: (assert (<= X_i value))
+                ub_match = re.search(rf'\(assert\s+\(\<=\s+{re.escape(var)}\s+(-?[\d.eE+-]+)\)\)', content)
+                # Find lower bound: (assert (>= X_i value))
+                lb_match = re.search(rf'\(assert\s+\(\>=\s+{re.escape(var)}\s+(-?[\d.eE+-]+)\)\)', content)
+                
+                if ub_match and lb_match:
+                    input_bounds[var] = (float(lb_match.group(1)), float(ub_match.group(1)))
             
+            if not input_bounds:
+                print(f"⚠️  No input bounds found in VNNLIB")
+                return []
+            
+            # Sort input variables by index and create tensors
+            sorted_vars = sorted(input_bounds.keys(), key=lambda x: int(x.split('_')[1]))
+            lb_values = [input_bounds[var][0] for var in sorted_vars]
+            ub_values = [input_bounds[var][1] for var in sorted_vars]
+            
+            lb_tensor = torch.tensor(lb_values, device=self.device, dtype=self.dtype)
+            ub_tensor = torch.tensor(ub_values, device=self.device, dtype=self.dtype)
+            
+            input_spec = InputSpec(kind=InKind.BOX, lb=lb_tensor, ub=ub_tensor)
+            print(f"✅ Parsed {len(input_bounds)} input variables (X_0 to X_{len(input_bounds)-1})")
+            
+            # ===== PARSE OUTPUT CONSTRAINTS =====
+            output_vars = re.findall(r'\(declare-const\s+(Y_\d+)\s+Real\)', content)
+            num_outputs = len(output_vars)
+            
+            # Pattern 1: DNF robustness property - (assert (or (and (>= Y_i Y_j)) ...))
+            # This represents: "at least one class i != j has higher score than true class j"
+            dnf_pattern = r'\(assert\s+\(or\s+((?:\(and\s+\(\>=\s+Y_\d+\s+Y_\d+\)\)\s*)+)\)\)'
+            dnf_match = re.search(dnf_pattern, content)
+            
+            if dnf_match:
+                # Extract all comparisons of form (>= Y_i Y_j)
+                comparisons = re.findall(r'\(\>=\s+(Y_\d+)\s+(Y_\d+)\)', dnf_match.group(0))
+                
+                if comparisons:
+                    # Find the common Y_j that appears on the right side (true label)
+                    right_side_vars = [comp[1] for comp in comparisons]
+                    # The true label is the one that appears most frequently on right side
+                    from collections import Counter
+                    true_label_var = Counter(right_side_vars).most_common(1)[0][0]
+                    true_label = int(true_label_var.split('_')[1])
+                    
+                    print(f"✅ Parsed DNF robustness property: adversarial for class {true_label}")
+                    output_spec = OutputSpec(
+                        kind=OutKind.MARGIN_ROBUST,
+                        y_true=true_label,
+                        margin=0.0
+                    )
+                    return [(input_spec, output_spec)]
+            
+            # Pattern 2: Simple linear constraint - (assert (<= (+ (* c0 Y_0) (* c1 Y_1) ...) bound))
+            linear_pattern = r'\(assert\s+\(\<=\s+\(\+\s+((?:\(\*\s+[-\d.eE+]+\s+Y_\d+\)\s*)+)\)\s+([-\d.eE+]+)\)\)'
+            linear_match = re.search(linear_pattern, content)
+            
+            if linear_match:
+                # Extract coefficients
+                coeffs = re.findall(r'\(\*\s+([-\d.eE+]+)\s+(Y_(\d+))\)', linear_match.group(1))
+                bound = float(linear_match.group(2))
+                
+                # Build coefficient tensor
+                c = torch.zeros(num_outputs, device=self.device, dtype=self.dtype)
+                for coeff_val, y_var, y_idx in coeffs:
+                    c[int(y_idx)] = float(coeff_val)
+                
+                print(f"✅ Parsed linear constraint: c^T * Y <= {bound}")
+                output_spec = OutputSpec(kind=OutKind.LINEAR_LE, c=c, d=bound)
+                return [(input_spec, output_spec)]
+            
+            # Pattern 3: Range constraint - (assert (and (<= Y_i ub) (>= Y_i lb)))
+            range_pattern = r'\(assert\s+\(and\s+\(\<=\s+(Y_\d+)\s+([-\d.eE+]+)\)\s+\(\>=\s+(Y_\d+)\s+([-\d.eE+]+)\)\)\)'
+            range_match = re.search(range_pattern, content)
+            
+            if range_match:
+                ub = float(range_match.group(2))
+                lb = float(range_match.group(4))
+                print(f"✅ Parsed range constraint: {lb} <= Y <= {ub}")
+                output_spec = OutputSpec(
+                    kind=OutKind.RANGE,
+                    lb=torch.tensor([lb], device=self.device, dtype=self.dtype),
+                    ub=torch.tensor([ub], device=self.device, dtype=self.dtype)
+                )
+                return [(input_spec, output_spec)]
+            
+            # Default: assume margin robustness for class 0
+            print("⚠️  No specific output constraint pattern matched, using default margin robustness")
+            output_spec = OutputSpec(kind=OutKind.MARGIN_ROBUST, y_true=0, margin=0.0)
             return [(input_spec, output_spec)]
             
         except Exception as e:
+            import traceback
             print(f"⚠️  Could not parse VNNLIB {vnnlib_path}: {e}")
+            traceback.print_exc()
             return []
     
     def load_all_for_act_backend(self) -> Dict[str, Any]:
@@ -391,3 +483,34 @@ class SpecLoader:
                 print(f"❌ Failed to prepare JSON {json_path}: {e}")
                 
         return act_ready_specs
+
+
+
+if __name__ == "__main__":
+    # Simple test for VNNLIB loader
+    print("=" * 80)
+    print("VNNLIB Specification Loader Test")
+    print("=" * 80)
+
+    spec_loader = SpecLoader()
+    test_vnnlib = "/home/guanqizh/Data/postdoc/ACT/models/vnnmodels/relusplitter/vnnlib/cifar_biasfield_vnncomp2022_prop_0.vnnlib"
+
+    print(f"Testing file: {test_vnnlib}")
+    specs = spec_loader.load_vnnlib_specs(test_vnnlib)
+
+    if not specs:
+        print("❌ Failed to load specifications!")
+    else:
+        input_spec, output_spec = specs[0]
+        valid_bounds = (input_spec.lb < input_spec.ub).all()
+        print(f"Loaded {len(specs)} spec(s)")
+        print(f"Input: kind={input_spec.kind}, shape={input_spec.lb.shape}, bounds valid={valid_bounds}")
+        print(f"  lb[:5]={input_spec.lb[:5].tolist()} ... ub[:5]={input_spec.ub[:5].tolist()}")
+        print(f"Output: kind={output_spec.kind}")
+        if hasattr(output_spec, "y_true"):
+            print(f"  True label: {output_spec.y_true}, margin: {output_spec.margin}")
+        elif hasattr(output_spec, "c"):
+            print(f"  Coefficients shape: {output_spec.c.shape}, bound: {output_spec.d}")
+        elif hasattr(output_spec, "lb") and hasattr(output_spec, "ub"):
+            print(f"  Lower Bound: {output_spec.lb}, Upper Bound: {output_spec.ub}")
+        print("Test finished.")
