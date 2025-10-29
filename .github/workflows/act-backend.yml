@@ -39,7 +39,7 @@ jobs:
           cd ${{ github.workspace }}
           python -m pytest act/back_end/serialization/test_serialization.py -v
       
-        - name: Run Net Factory
+      - name: Run Net Factory
         run: |
           cd ${{ github.workspace }}
           python act/back_end/net_factory.py
