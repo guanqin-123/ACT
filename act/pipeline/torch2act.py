@@ -482,7 +482,7 @@ if __name__ == "__main__":
     print(f"\n🔍 Step 5: Running verification on first model for debugging...")
     
     # Import verification functions here to avoid early import issues
-    from act.back_end.verifier import verify_once, verify_bab
+    from act.back_end.verifier import verify_once
     
     verification_results = {}
     
@@ -503,8 +503,8 @@ if __name__ == "__main__":
             print("    🎯 Running single-shot verification...")
             res = verify_once(net, solver=solver, timelimit=30.0)
             print(f"      Status: {res.status}")
-            if res.model_stats:
-                print(f"      Stats: {res.model_stats}")
+            if res.stats:
+                print(f"      Stats: {res.stats}")
             
             model_results[solver_name] = {
                 'single_shot': res.status
