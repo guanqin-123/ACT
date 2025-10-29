@@ -1,4 +1,4 @@
-name: ACT Front-End Tests
+name: ACT Frontend Tests
 
 on:
   push:
@@ -16,9 +16,9 @@ env:
   ACT_CI_MODE: "true"
 
 jobs:
-  # Regression tests
-  regression-tests:
-    name: Regression Tests
+  # Frontend tests
+  frontend-tests:
+    name: Frontend Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
