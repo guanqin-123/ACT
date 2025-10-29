@@ -227,18 +227,18 @@ class TorchLPSolver(Solver):
                     max_viol = max(max_viol, float(torch.max(torch.relu(Ale_device @ self._x - ble_device)).item()))
 
             if max_viol <= self.tol_feas:
-                self._status = SolveStatus.OPTIMAL
+                self._status = SolveStatus.SAT
                 self._has_solution = True
                 self._sol = self._x.detach().clone()
                 break
 
             if t_end is not None and time.time() >= t_end:
-                self._status = SolveStatus.FEASIBLE if math.isfinite(max_viol) else SolveStatus.UNKNOWN
+                self._status = SolveStatus.SAT if math.isfinite(max_viol) else SolveStatus.UNKNOWN
                 self._has_solution = True
                 self._sol = self._x.detach().clone()
                 break
         else:
-            self._status = SolveStatus.FEASIBLE
+            self._status = SolveStatus.SAT
             self._has_solution = True
             self._sol = self._x.detach().clone()
 

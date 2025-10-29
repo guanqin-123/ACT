@@ -75,7 +75,7 @@ class ModelFactory:
                  config_path: str = "act/back_end/examples/examples_config.yaml",
                  nets_dir: str = "act/back_end/examples/nets"):
         """
-        Initialize factory with configuration file.
+        Initialize factory with configuration file and pre-load all ACT Nets.
         
         Args:
             config_path: Path to examples_config.yaml
@@ -84,6 +84,58 @@ class ModelFactory:
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
         self.nets_dir = Path(nets_dir)
+        
+        # Pre-load all ACT Nets for fast access (avoids repeated file I/O)
+        self.nets: Dict[str, Net] = {}
+        self._load_all_nets()
+    
+    def _load_all_nets(self) -> None:
+        """
+        Pre-load all ACT Nets from JSON files at initialization.
+        
+        This eager loading strategy:
+        - Avoids repeated file I/O during model creation
+        - Validates all nets exist and are valid at init time
+        - Enables O(1) lookup via get_act_net()
+        - Costs ~10-20MB memory for typical test suites
+        """
+        for name in self.config['networks'].keys():
+            net_path = self.nets_dir / f"{name}.json"
+            
+            if not net_path.exists():
+                logger.warning(f"ACT Net file not found: {net_path}. Skipping '{name}'.")
+                continue
+            
+            try:
+                with open(net_path, 'r') as f:
+                    net_dict = json.load(f)
+                act_net, _ = NetSerializer.deserialize_net(net_dict)
+                self.nets[name] = act_net
+                logger.debug(f"Pre-loaded ACT Net '{name}' from {net_path}")
+            except Exception as e:
+                logger.error(f"Failed to load ACT Net '{name}' from {net_path}: {e}")
+                continue
+        
+        logger.info(f"Pre-loaded {len(self.nets)} ACT Nets from {self.nets_dir}")
+    
+    def get_act_net(self, name: str) -> Net:
+        """
+        Get pre-loaded ACT Net by name.
+        
+        Args:
+            name: Network name from examples_config.yaml
+            
+        Returns:
+            Pre-loaded ACT Net
+            
+        Raises:
+            KeyError: If network name not found or failed to load
+        """
+        if name not in self.nets:
+            available = ", ".join(self.nets.keys())
+            raise KeyError(f"ACT Net '{name}' not available. Available: {available}")
+        
+        return self.nets[name]
     
     def create_model(self, name: str, load_weights: bool = True) -> nn.Module:
         """
@@ -106,17 +158,11 @@ class ModelFactory:
         
         spec = self.config['networks'][name]
         
-        # Load ACT Net if weights should be transferred
+        # Get pre-loaded ACT Net if weights should be transferred
         act_net = None
         if load_weights:
-            net_path = self.nets_dir / f"{name}.json"
-            if not net_path.exists():
-                raise ValueError(f"ACT Net file not found: {net_path}. Cannot load weights.")
-            
-            with open(net_path, 'r') as f:
-                net_dict = json.load(f)
-            act_net, _ = NetSerializer.deserialize_net(net_dict)
-            logger.info(f"Loaded ACT Net from {net_path}")
+            act_net = self.get_act_net(name)  # O(1) lookup, no file I/O
+            logger.debug(f"Using pre-loaded ACT Net '{name}'")
         
         # Build PyTorch module using ACTToTorch converter
         if act_net is not None:

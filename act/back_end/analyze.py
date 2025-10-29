@@ -25,7 +25,19 @@ def initialize_tf_mode(mode: str = "interval"):
     set_transfer_function_mode(mode)
 
 @torch.no_grad()
-def analyze(net: Net, entry_id: int, entry_bounds: Bounds, eps: float=1e-9) -> Tuple[Dict[int, Fact], Dict[int, Fact], ConSet]:
+def analyze(net: Net, entry_id: int, entry_fact: Fact, eps: float=1e-9) -> Tuple[Dict[int, Fact], Dict[int, Fact], ConSet]:
+    """
+    Perform abstract interpretation on the network starting from entry_fact.
+    
+    Args:
+        net: ACT network structure
+        entry_id: ID of the entry (INPUT) layer
+        entry_fact: Initial Fact containing bounds and constraints for the input
+        eps: Convergence epsilon for fixpoint iteration
+    
+    Returns:
+        Tuple of (before, after, globalC) containing propagated facts and global constraints
+    """
     # Auto-initialize transfer function mode if not set
     try:
         from act.back_end.transfer_functions import get_transfer_function
@@ -40,15 +52,14 @@ def analyze(net: Net, entry_id: int, entry_bounds: Bounds, eps: float=1e-9) -> T
     # init with +/- inf boxes (vector length per layer's out_vars)
     for L in net.layers:
         n = len(L.out_vars)
-        hi = torch.full((n,), -float("inf"), device=entry_bounds.lb.device, dtype=entry_bounds.lb.dtype)
-        lo = torch.full((n,), +float("inf"), device=entry_bounds.lb.device, dtype=entry_bounds.lb.dtype)
+        hi = torch.full((n,), -float("inf"), device=entry_fact.bounds.lb.device, dtype=entry_fact.bounds.lb.dtype)
+        lo = torch.full((n,), +float("inf"), device=entry_fact.bounds.lb.device, dtype=entry_fact.bounds.lb.dtype)
         before[L.id] = Fact(bounds=Bounds(lo.clone(), hi.clone()), cons=ConSet())
         after[L.id]  = Fact(bounds=Bounds(lo.clone(), hi.clone()), cons=ConSet())
         L.cache.clear()
 
-    # seed entry
-    before[entry_id].bounds = entry_bounds
-    before[entry_id].cons.add_box(entry_id, net.by_id[entry_id].in_vars, entry_bounds)
+    # Seed entry with provided Fact (includes all input constraints)
+    before[entry_id] = entry_fact
 
     WL = deque([entry_id])
     while WL:

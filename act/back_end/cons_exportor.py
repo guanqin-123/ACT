@@ -161,6 +161,15 @@ def export_to_solver(globalC: ConSet, solver: Solver,
             assert len(W)%rowsize==0
             for r in range(len(W)//rowsize):
                 row=W[r*rowsize:(r+1)*rowsize]; solver.add_ge_zero(row); solver.add_sum_eq(row, 1.0)
+        
+        elif tag == "in:linpoly":
+            # Input specification: A·x ≤ b (linear polytope constraint)
+            A = to_numpy(con.meta["A"])
+            b = to_numpy(con.meta["b"])
+            vids = list(con.var_ids)
+            for i in range(A.shape[0]):
+                solver.add_lin_le(vids, list(A[i, :]), float(b[i]))
+        
         else:
             pass
 
