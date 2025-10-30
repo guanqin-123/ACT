@@ -1,5 +1,5 @@
 
-#===- act/front_end/utils_image.py - Image Processing Utilities ---------====#
+#===- act/front_end/raw_processors/utils_image.py - Image Utilities -----====#
 # ACT: Abstract Constraint Transformer
 # Copyright (C) 2025– ACT Team
 #

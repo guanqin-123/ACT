@@ -50,7 +50,7 @@ from act.front_end.mocks import (
     mock_wrapped_mlp_mnist, mock_wrapped_cnn_mnist, mock_wrapped_mlp_cifar,
     mock_wrapped_models_collection
 )
-from act.front_end.utils_image import to_torch_image, resize_center_crop_chw, chw_to_hwc_uint8
+from act.front_end.raw_processors.utils_image import to_torch_image, resize_center_crop_chw, chw_to_hwc_uint8
 
 __all__ = [
     # Specifications

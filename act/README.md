@@ -2,6 +2,21 @@
 
 This directory contains the core verification framework for the Abstract Constraint Transformer (ACT) system. It implements a modern three-tier architecture: Front-End (data/model/spec processing), Back-End (verification core), and Pipeline (testing/integration) with PyTorch-native verification capabilities.
 
+## Recent Development Updates
+
+### Debugging and Performance Framework (October 2025)
+- **PerformanceOptions**: Global debugging flags with `debug_tf`, `validate_constraints`, and configurable logging
+- **Transfer Function Logging**: Detailed layer-by-layer analysis logging to `act/pipeline/log/act_debug_tf.log`
+- **Constraint Validation**: Targeted validation framework that checks only referenced variables
+- **ConSet Improvements**: Added `__iter__` and `__len__` methods for Pythonic container usage
+- **Path Management**: Centralized logging to `act/pipeline/log/` using `path_config.py`
+
+### Code Quality Improvements
+- **Batch Dimension Fix**: Fixed `affine_bounds()` with proper batch dimension handling and squeeze operations
+- **Cleaner Syntax**: Updated all code to use ConSet wrappers (`for con in cons` instead of `.S.values()`)
+- **Guarded File I/O**: All debug file operations protected by feature flags
+- **Modular Organization**: Moved `utils_image.py` to `raw_processors/` for better structure
+
 ## Directory Structure
 
 ```
@@ -14,13 +29,14 @@ act/
 │   │   ├── data_loader.py          # Dataset loading (MNIST/CIFAR/CSV/VNNLIB)
 │   │   ├── model_loader.py         # Neural network model loading (ONNX/PyTorch)
 │   │   └── spec_loader.py          # Specification loading and processing
+│   ├── raw_processors/             # Raw input processors
+│   │   ├── preprocessor_base.py    # Base preprocessor interface
+│   │   ├── preprocessor_image.py   # Image preprocessing and normalization
+│   │   ├── preprocessor_text.py    # Text preprocessing utilities
+│   │   └── utils_image.py          # Image utility functions
 │   ├── specs.py                    # InputSpec/OutputSpec with InKind/OutKind enums
 │   ├── verifiable_model.py         # PyTorch verification wrapper modules
 │   ├── model_synthesis.py          # Advanced model generation and optimization
-│   ├── preprocessor_image.py       # Image preprocessing and normalization
-│   ├── preprocessor_text.py        # Text preprocessing utilities
-│   ├── preprocessor_base.py        # Base preprocessor interface
-│   ├── utils_image.py              # Image utility functions
 │   ├── mocks.py                    # Mock data generation for testing
 │   └── README.md                   # Front-end documentation
 │
@@ -30,26 +46,43 @@ act/
 │   ├── layer_schema.py             # Layer type definitions and validation rules
 │   ├── layer_util.py               # Layer validation and creation utilities
 │   ├── bab.py                      # Branch-and-bound refinement with CE validation
-│   ├── utils.py                    # Backend utility functions
+│   ├── utils.py                    # Backend utilities (affine_bounds, validate_constraints)
 │   ├── analyze.py                  # Network analysis and bounds propagation
 │   ├── cons_exportor.py            # Constraint export to solvers
+│   ├── transfer_functions.py       # Transfer function interface and dispatch
+│   ├── net_factory.py              # YAML-driven network factory for examples
 │   ├── solver/                     # MILP/LP optimization solvers
 │   │   ├── solver_base.py          # Base solver interface
 │   │   ├── solver_gurobi.py        # Gurobi MILP solver integration
 │   │   └── solver_torch.py         # PyTorch-based LP solver
-│   ├── transfer_funs/              # Transfer functions for different layer types
-│   │   ├── tf_mlp.py               # MLP layer transfer functions
-│   │   ├── tf_cnn.py               # CNN layer transfer functions
-│   │   ├── tf_rnn.py               # RNN layer transfer functions
-│   │   └── tf_transformer.py       # Transformer layer transfer functions
+│   ├── interval_tf/                # Interval-based transfer functions
+│   │   ├── interval_tf.py          # Interval TF implementation
+│   │   ├── tf_mlp.py               # MLP layer interval analysis
+│   │   ├── tf_cnn.py               # CNN layer interval analysis
+│   │   ├── tf_rnn.py               # RNN layer interval analysis
+│   │   └── tf_transformer.py       # Transformer interval analysis
+│   ├── hybridz_tf/                 # HybridZ zonotope transfer functions
+│   │   ├── hybridz_tf.py           # HybridZ TF implementation
+│   │   ├── tf_mlp.py               # MLP layer zonotope analysis
+│   │   ├── tf_cnn.py               # CNN layer zonotope analysis
+│   │   ├── tf_rnn.py               # RNN layer zonotope analysis
+│   │   └── tf_transformer.py       # Transformer zonotope analysis
+│   ├── serialization/              # Net serialization and deserialization
+│   │   ├── serialization.py        # NetSerializer with tensor encoding
+│   │   └── test_serialization.py   # Serialization correctness tests
+│   ├── examples/                   # Example networks and configurations
+│   │   ├── examples_config.yaml    # YAML network definitions
+│   │   ├── nets/                   # Generated ACT Net JSON files
+│   │   └── README.md               # Examples documentation
 │   └── README.md                   # Back-end documentation
 │
 ├── pipeline/                       # Pipeline: Testing framework and integration
 │   ├── torch2act.py                # Automatic PyTorch→ACT Net conversion
-│   ├── correctness.py              # Verifier correctness validation
+│   ├── validate_verifier.py        # Verifier correctness validation with concrete tests
+│   ├── correctness.py              # Correctness validation utilities
 │   ├── regression.py               # Baseline capture and regression testing
 │   ├── integration.py              # Front-end integration bridge
-│   ├── mock_factory.py             # Configurable mock input generation
+│   ├── model_factory.py            # ACT Net factory for test networks
 │   ├── config.py                   # YAML-based test scenario management
 │   ├── reporting.py                # Results analysis and report generation
 │   ├── utils.py                    # Shared utilities and performance profiling
@@ -60,9 +93,14 @@ act/
 │   │   ├── solver_settings.yaml    # Solver configuration options
 │   │   └── baselines.json          # Performance baseline storage
 │   ├── examples/                   # Example usage and quick tests
-│   ├── log/                        # Test execution logs
-│   ├── reports/                    # Generated test reports
+│   ├── log/                        # Test execution logs (includes act_debug_tf.log)
 │   └── README.md                   # Pipeline documentation
+│
+├── util/                           # Shared Utilities
+│   ├── device_manager.py           # GPU-first CUDA device handling
+│   ├── path_config.py              # Project path configuration and management
+│   ├── options.py                  # Command-line arguments and PerformanceOptions
+│   └── stats.py                    # Statistics and performance tracking
 │
 └── wrapper_exts/                   # External verifier integrations
     ├── abcrown/                    # αβ-CROWN integration module
@@ -111,12 +149,30 @@ act/
   - `Net`: Network representation with layers and graph connectivity
   - `Layer`: Individual layer with params, metadata, and variable mappings
   - `Bounds`: Box constraints with lb/ub tensors for variable ranges
-  - `Con`/`ConSet`: Constraint representation and management
+  - `Con`/`ConSet`: Constraint representation with Pythonic iteration support (`__iter__`, `__len__`)
 
 - **`verifier.py`**: Spec-free verification engine
   - `verify_once()`: Single-shot verification using embedded ACT constraints
   - `verify_bab()`: Branch-and-bound refinement with counterexample validation
+  - Integrated constraint validation with targeted variable checking
   - No external input specs required - all constraints extracted from ACT Net
+
+- **`utils.py`**: Backend utility functions
+  - `affine_bounds()`: Affine transformation with proper batch dimension handling
+  - `validate_constraints()`: Targeted constraint validation (only checks referenced variables)
+  - Debug logging support with guarded file operations
+
+- **`transfer_functions.py`**: Transfer function interface and dispatch
+  - Abstract `TransferFunction` base class with `supports_layer()` and `apply()` methods
+  - Global transfer function registry with mode selection (interval/hybridz)
+  - `dispatch_tf()`: Main entry point with optional debug logging
+  - Configurable constraint logging (up to 50 constraints by default via `PerformanceOptions`)
+
+- **`net_factory.py`**: YAML-driven network factory
+  - Generates example ACT networks from YAML configurations
+  - Automatic parameter generation for INPUT_SPEC and ASSERT layers
+  - Comprehensive ASSERT specification guide (TOP1_ROBUST, MARGIN_ROBUST, LINEAR_LE, RANGE)
+  - Proper tensor serialization using NetSerializer
 
 - **`layer_schema.py`**: Layer type definitions and validation rules
   - Comprehensive schema definitions for all supported layer types
@@ -132,27 +188,45 @@ act/
   - **`solver_torch.py`**: PyTorch-based LP solver for lightweight optimization
   - **`solver_base.py`**: Unified solver interface and status handling
 
-- **`transfer_funs/`**: Layer-specific analysis functions
-  - **`tf_mlp.py`**: Multi-layer perceptron transfer functions
-  - **`tf_cnn.py`**: Convolutional neural network layer analysis
-  - **`tf_rnn.py`**: Recurrent neural network transfer functions
-  - **`tf_transformer.py`**: Transformer block analysis and attention handling
+- **Transfer Function Implementations**: Two precision/performance modes
+  - **`interval_tf/`**: Fast interval-based bounds propagation
+    - `IntervalTF`: Main implementation with layer-specific modules
+    - Separate modules for MLP, CNN, RNN, and Transformer layers
+  - **`hybridz_tf/`**: High-precision zonotope-based analysis
+    - `HybridzTF`: Enhanced precision with zonotope domains
+    - Separate modules for MLP, CNN, RNN, and Transformer layers
+
+- **`serialization/`**: Net persistence and loading
+  - **`serialization.py`**: `NetSerializer` with proper tensor encoding/decoding
+  - **`test_serialization.py`**: Serialization correctness validation
+
+- **`examples/`**: Example networks and test cases
+  - **`examples_config.yaml`**: YAML definitions for example networks
+  - **`nets/`**: Generated ACT Net JSON files (MNIST, CIFAR, control, reachability)
+  - Networks include embedded INPUT_SPEC and ASSERT layers for spec-free verification
 
 ### **`pipeline/` - Testing Framework and Integration**
 - **`torch2act.py`**: Automatic PyTorch→ACT Net conversion
   - Seamless conversion from PyTorch nn.Module to ACT Net representation
   - Preserves all verification constraints and model semantics
   - Support for complex wrapper layer patterns
+  - Debug logging support for conversion process
+
+- **`validate_verifier.py`**: Comprehensive verifier validation framework
+  - Tests 12 networks (MNIST, CIFAR, control, reachability) with 2 solvers (Gurobi, TorchLP)
+  - Concrete counterexample generation and validation
+  - Formal verification result checking (SAT/UNSAT/CERTIFIED)
+  - Detailed test reporting with pass/fail/inconclusive status
+
+- **`model_factory.py`**: ACT Net factory for test networks
+  - Pre-loads networks from `act/back_end/examples/nets/`
+  - PyTorch model generation from ACT Nets
+  - Integration with VerifiableModel wrapper layers
 
 - **Testing Framework**: Comprehensive validation and regression testing
   - **`correctness.py`**: Verifier correctness validation with property-based testing
   - **`regression.py`**: Baseline capture and performance regression detection
-  - **`mock_factory.py`**: Configurable mock input generation from YAML templates
-
-- **`integration.py`**: Front-end integration bridge
-  - Real ACT component integration for testing
-  - Bridge between pipeline framework and ACT front-end loaders
-  - Complete test case generation and validation
+  - **`integration.py`**: Front-end integration bridge for real ACT component testing
 
 - **`config.py`**: YAML-based test scenario management
   - Configuration loading and validation
@@ -163,6 +237,10 @@ act/
   - **`reporting.py`**: Results analysis and comprehensive report generation
   - **`run_tests.py`**: Command-line testing interface with parallel execution
 
+- **`log/`**: Centralized logging directory
+  - **`act_debug_tf.log`**: Transfer function debug output (layer-by-layer analysis, bounds, constraints)
+  - Test execution logs and validation results
+
 ### **`util/` - Shared Utilities**
 
 - **`device_manager.py`**: GPU-first CUDA device handling
@@ -170,16 +248,23 @@ act/
   - GPU memory optimization and fallback strategies
   - Global PyTorch device and dtype configuration
 
-- **`model_inference.py`**: Model inference and testing framework
-  - Wrapped model testing with execution statistics
-  - Architecture mismatch detection and analysis
-  - User-friendly error explanations for debugging
+- **`path_config.py`**: Project path configuration and management
+  - `get_project_root()`, `get_data_root()`, `get_config_root()`
+  - `get_pipeline_log_dir()`: Returns absolute path to `act/pipeline/log/`
+  - `ensure_gurobi_license()`: Automatic Gurobi license detection
+  - Centralized path management for all ACT modules
 
-- **`options.py`**: Command-line argument processing
+- **`options.py`**: Command-line arguments and performance configuration
   - Centralized CLI option definitions for all verifiers
+  - **`PerformanceOptions`**: Global debugging and performance flags
+    - `debug_tf`: Enable/disable transfer function debug logging (default: True)
+    - `validate_constraints`: Enable/disable constraint validation (default: True)
+    - `debug_output_file`: Path to debug log (default: `act/pipeline/log/act_debug_tf.log`)
+    - `debug_tf_max_constraints`: Max constraints to log per layer (default: 50)
+    - Methods: `enable_debug_tf()`, `disable_all()`, `set_debug_output_file()`
   - Parameter validation and default value management
 
-- **`stats.py`**: ACTLog statistics and performance tracking
+- **`stats.py`**: Statistics and performance tracking
   - Verification result logging and analysis
   - Performance metrics collection and reporting
 
@@ -220,24 +305,43 @@ The three-tier modular architecture provides several key advantages:
 - **PyTorch-Native**: Verification engine operates directly on PyTorch tensors for performance
 - **Automatic Conversion**: Seamless PyTorch→ACT Net conversion preserving all semantics
 - **GPU-First**: Optimized CUDA device management with automatic fallback strategies
+- **Debug Infrastructure**: Comprehensive debugging with transfer function logging and constraint validation
+
+### **Code Quality and Maintainability**
+- **Pythonic Containers**: ConSet with `__iter__` and `__len__` for natural iteration
+- **Type Safety**: Proper type hints and validation throughout codebase
+- **Guarded Operations**: Debug file I/O protected by feature flags to prevent performance impact
+- **Centralized Logging**: All debug output to `act/pipeline/log/` with configurable detail levels
+- **Batch Handling**: Proper tensor dimension management with assertions and squeeze operations
 
 ### **Modular Design**
 - **Clear Separation**: Front-end, back-end, and pipeline modules have distinct responsibilities
 - **Independent Development**: Modules can be developed, tested, and maintained separately
 - **Easy Extension**: Add new verifiers by creating new modules in `wrapper_exts/`
 - **Reusable Components**: Shared utilities and interfaces enable code reuse
+- **Transfer Function Modes**: Pluggable TF implementations (interval vs. hybridz) via global registry
 
 ### **Testing and Validation**
 - **Comprehensive Testing**: Pipeline framework provides correctness, regression, and performance testing
-- **Mock Generation**: Configurable mock input generation from YAML templates
+- **Validation Framework**: `validate_verifier.py` tests 12 networks across 2 solvers (24 test cases)
+- **Concrete Counterexamples**: Real input generation to validate formal verification results
 - **Integration Testing**: Real ACT component testing with front-end bridge
 - **Continuous Validation**: Baseline capture and regression detection for quality assurance
+- **Constraint Validation**: Targeted validation checks only variables referenced in constraints
 
 ### **Configuration Management**
 - **Centralized Defaults**: Configuration files in `../modules/configs/` provide optimal parameters
 - **Device Management**: Intelligent GPU/CPU device selection and memory optimization
 - **Environment Isolation**: Different verifiers can use separate conda environments
 - **Parameter Management**: Unified command-line interface with type validation
+- **Path Configuration**: Centralized path management via `path_config.py`
+
+### **Debugging and Development**
+- **PerformanceOptions**: Global flags for enabling/disabling debug features
+- **Transfer Function Logging**: Layer-by-layer analysis with bounds, parameters, and constraints
+- **Configurable Detail**: Control constraint logging depth (default: 50 per layer)
+- **Targeted Validation**: Efficient constraint validation focusing on referenced variables
+- **Guarded I/O**: All debug operations protected to minimize production overhead
 
 ### **Integration Flexibility**
 - **Unified Interface**: Single entry point (`main.py`) for all verification tasks
@@ -250,6 +354,7 @@ The three-tier modular architecture provides several key advantages:
 - **Utility Reuse**: Common operations centralized to eliminate code duplication
 - **Efficient Imports**: Modular structure reduces import overhead and circular dependencies
 - **GPU Acceleration**: PyTorch-native verification leverages GPU computation where beneficial
+- **Configurable Logging**: Disable debug features in production for optimal performance
 
 ## Examples and Network Generation
 Example ACT networks are stored as JSON under `act/back_end/examples/nets/`.

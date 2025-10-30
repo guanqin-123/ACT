@@ -1,5 +1,134 @@
-#!/usr/bin/env python3
-"""Concise YAML-driven network factory for ACT examples."""
+#===- act/back_end/net_factory.py - YAML-Driven Network Factory ----------====#
+# ACT: Abstract Constraint Transformer
+# Copyright (C) 2025– ACT Team
+#
+# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
+# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
+#===---------------------------------------------------------------------===#
+#
+# Purpose:
+#   YAML-driven network factory for generating ACT example networks with
+#   automatic parameter generation for INPUT_SPEC and ASSERT layers.
+#
+#===---------------------------------------------------------------------===#
+#
+# ASSERT Layer Specification Guide
+# =================================
+#
+# ASSERT layers define verification properties that the network output must satisfy.
+# They are used for spec-free verification where constraints are embedded directly
+# in the model, enabling single-call checking:
+#
+#     results = model(input)  # Returns dict with satisfaction status
+#
+# Four ASSERT kinds are supported, each with distinct verification semantics:
+#
+# 1. TOP1_ROBUST (Classification Robustness)
+#    -----------------------------------------------
+#    Purpose: Verify that the true class has the highest score
+#    Verification: argmax(y) == y_true
+#    
+#    Required meta:
+#    - y_true: Index of the ground truth class (int)
+#    
+#    Use cases:
+#    - Adversarial robustness: Ensure predictions remain correct under perturbations
+#    - Safety-critical classification: Verify correct class prediction
+#    - MNIST/CIFAR robustness benchmarks
+#    
+#    Expected outcome:
+#    - PASS: True class has highest logit/probability
+#    - FAIL: Different class has higher score (misclassification)
+#    
+#    Example:
+#    meta:
+#      kind: "TOP1_ROBUST"
+#      y_true: 7  # Verify output predicts class 7
+#
+# 2. MARGIN_ROBUST (Classification with Safety Margin)
+#    -----------------------------------------------
+#    Purpose: Verify true class exceeds others by a safety margin
+#    Verification: y[y_true] - max(y[i≠y_true]) >= margin
+#    
+#    Required meta:
+#    - y_true: Index of the ground truth class (int)
+#    - margin: Minimum required separation from other classes (float)
+#    
+#    Use cases:
+#    - High-confidence verification: Ensure robust predictions with buffer
+#    - Safety margins for critical applications
+#    - Confidence-based filtering
+#    
+#    Expected outcome:
+#    - PASS: True class exceeds others by at least margin
+#    - FAIL: Margin too small (weak confidence) or misclassification
+#    
+#    Example:
+#    meta:
+#      kind: "MARGIN_ROBUST"
+#      y_true: 3
+#      margin: 0.5  # Require 0.5 separation from other classes
+#
+# 3. LINEAR_LE (Linear Inequality Constraint)
+#    -----------------------------------------------
+#    Purpose: Verify linear combination of outputs satisfies inequality
+#    Verification: c^T · y <= d
+#    
+#    Required params:
+#    - c: Coefficient vector (list/tensor, shape matches output)
+#    - d: Threshold scalar (float)
+#    
+#    Use cases:
+#    - Control systems: Verify output stays within operational limits
+#    - Resource constraints: Total output bounded (e.g., sum of activations)
+#    - Custom safety properties: Linear combination constraints
+#    - Reachability analysis: Verify state space boundaries
+#    
+#    Expected outcome:
+#    - PASS: c^T · y <= d (constraint satisfied)
+#    - FAIL: c^T · y > d (constraint violated)
+#    
+#    Example (verify sum of outputs ≤ 5.0):
+#    params:
+#      c: [1.0, 1.0, 1.0, 1.0, 1.0]  # Sum all 5 outputs
+#    meta:
+#      kind: "LINEAR_LE"
+#      d: 5.0  # Upper bound
+#
+# 4. RANGE (Box Constraint on Outputs)
+#    -----------------------------------------------
+#    Purpose: Verify all outputs lie within specified bounds
+#    Verification: lb <= y <= ub (element-wise)
+#    
+#    Required params:
+#    - lb: Lower bound vector (list/tensor, shape matches output)
+#    - ub: Upper bound vector (list/tensor, shape matches output)
+#    
+#    Use cases:
+#    - Output range safety: Ensure values stay within physical limits
+#    - Control systems: Verify actuator outputs within safe range
+#    - Regression verification: Output predictions within expected bounds
+#    - Reachability: Verify state remains in safe region
+#    
+#    Expected outcome:
+#    - PASS: All elements satisfy lb <= y[i] <= ub (safe region)
+#    - FAIL: One or more elements outside bounds (unsafe region)
+#    
+#    Example (verify regression output in [0, 10]):
+#    params:
+#      lb: [0.0, 0.0, 0.0]  # 3 outputs, all >= 0
+#      ub: [10.0, 10.0, 10.0]  # All <= 10
+#    meta:
+#      kind: "RANGE"
+#
+# Notes:
+# - All params specified as lists in YAML are automatically converted to tensors
+# - TOP1_ROBUST and MARGIN_ROBUST are classification-specific (discrete classes)
+# - LINEAR_LE and RANGE are general (work with any output shape)
+# - Verification happens automatically in OutputSpecLayer.forward()
+# - Results returned in dict: {output, output_satisfied, output_explanation}
+#
+#===---------------------------------------------------------------------===#
 
 import json
 import yaml
@@ -79,121 +208,10 @@ class NetFactory:
         # LIN_POLY: skip (too complex, user must provide A and b matrices)
     
     def _generate_assert_params(self, params: Dict[str, Any], meta: Dict[str, Any], output_shape: Optional[List[int]]) -> None:
-        """
-        Generate ASSERT (OutputSpec) params based on kind and meta values.
+        """Generate ASSERT (OutputSpec) params based on kind and meta values.
         
-        ASSERT layers define verification properties that the network output
-        must satisfy. They are used for spec-free verification where constraints
-        are embedded directly in the model, enabling single-call checking:
-        
-            results = model(input)  # Returns dict with satisfaction status
-        
-        Four ASSERT kinds are supported, each with distinct verification semantics:
-        
-        1. TOP1_ROBUST (Classification Robustness)
-           -----------------------------------------------
-           Purpose: Verify that the true class has the highest score
-           Verification: argmax(y) == y_true
-           
-           Required meta:
-           - y_true: Index of the ground truth class (int)
-           
-           Use cases:
-           - Adversarial robustness: Ensure predictions remain correct under perturbations
-           - Safety-critical classification: Verify correct class prediction
-           - MNIST/CIFAR robustness benchmarks
-           
-           Expected outcome:
-           - PASS: True class has highest logit/probability
-           - FAIL: Different class has higher score (misclassification)
-           
-           Example:
-           meta:
-             kind: "TOP1_ROBUST"
-             y_true: 7  # Verify output predicts class 7
-        
-        2. MARGIN_ROBUST (Classification with Safety Margin)
-           -----------------------------------------------
-           Purpose: Verify true class exceeds others by a safety margin
-           Verification: y[y_true] - max(y[i≠y_true]) >= margin
-           
-           Required meta:
-           - y_true: Index of the ground truth class (int)
-           - margin: Minimum required separation from other classes (float)
-           
-           Use cases:
-           - High-confidence verification: Ensure robust predictions with buffer
-           - Safety margins for critical applications
-           - Confidence-based filtering
-           
-           Expected outcome:
-           - PASS: True class exceeds others by at least margin
-           - FAIL: Margin too small (weak confidence) or misclassification
-           
-           Example:
-           meta:
-             kind: "MARGIN_ROBUST"
-             y_true: 3
-             margin: 0.5  # Require 0.5 separation from other classes
-        
-        3. LINEAR_LE (Linear Inequality Constraint)
-           -----------------------------------------------
-           Purpose: Verify linear combination of outputs satisfies inequality
-           Verification: c^T · y <= d
-           
-           Required params:
-           - c: Coefficient vector (list/tensor, shape matches output)
-           - d: Threshold scalar (float)
-           
-           Use cases:
-           - Control systems: Verify output stays within operational limits
-           - Resource constraints: Total output bounded (e.g., sum of activations)
-           - Custom safety properties: Linear combination constraints
-           - Reachability analysis: Verify state space boundaries
-           
-           Expected outcome:
-           - PASS: c^T · y <= d (constraint satisfied)
-           - FAIL: c^T · y > d (constraint violated)
-           
-           Example (verify sum of outputs ≤ 5.0):
-           params:
-             c: [1.0, 1.0, 1.0, 1.0, 1.0]  # Sum all 5 outputs
-           meta:
-             kind: "LINEAR_LE"
-             d: 5.0  # Upper bound
-        
-        4. RANGE (Box Constraint on Outputs)
-           -----------------------------------------------
-           Purpose: Verify all outputs lie within specified bounds
-           Verification: lb <= y <= ub (element-wise)
-           
-           Required params:
-           - lb: Lower bound vector (list/tensor, shape matches output)
-           - ub: Upper bound vector (list/tensor, shape matches output)
-           
-           Use cases:
-           - Output range safety: Ensure values stay within physical limits
-           - Control systems: Verify actuator outputs within safe range
-           - Regression verification: Output predictions within expected bounds
-           - Reachability: Verify state remains in safe region
-           
-           Expected outcome:
-           - PASS: All elements satisfy lb <= y[i] <= ub (safe region)
-           - FAIL: One or more elements outside bounds (unsafe region)
-           
-           Example (verify regression output in [0, 10]):
-           params:
-             lb: [0.0, 0.0, 0.0]  # 3 outputs, all >= 0
-             ub: [10.0, 10.0, 10.0]  # All <= 10
-           meta:
-             kind: "RANGE"
-        
-        Notes:
-        - All params specified as lists in YAML are automatically converted to tensors
-        - TOP1_ROBUST and MARGIN_ROBUST are classification-specific (discrete classes)
-        - LINEAR_LE and RANGE are general (work with any output shape)
-        - Verification happens automatically in OutputSpecLayer.forward()
-        - Results returned in dict: {output, output_satisfied, output_explanation}
+        Supports four ASSERT kinds: TOP1_ROBUST, MARGIN_ROBUST, LINEAR_LE, and RANGE.
+        See file header for detailed documentation of each kind.
         """
         if not output_shape:
             raise ValueError("Cannot generate ASSERT params: output shape is required but not provided")

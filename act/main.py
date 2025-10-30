@@ -29,7 +29,6 @@ def run_act_native_verifier(args_dict):
     # Import torch2act components
     from act.front_end.model_synthesis import model_synthesis
     from act.util.model_inference import model_inference
-    from act.pipeline.torch2act import TorchToACT, interpret_validation
     from act.back_end.solver.solver_torch import TorchLPSolver
     from act.back_end.solver.solver_gurobi import GurobiSolver
     from act.back_end.verifier import verify_once, verify_bab

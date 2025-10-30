@@ -76,20 +76,6 @@ class SolveResult:
     UNSAT = "UNSAT"     # no counterexample → property VALID
     UNKNOWN = "UNKNOWN"
 
-
-def interpret_validation(net: Net, solve_status: str) -> Dict[str, Any]:
-    last = net.last_validation()
-    k = last.meta.get("kind") if last else None
-    verdict = "VALID" if solve_status == SolveResult.UNSAT else (
-              "VIOLATED" if solve_status == SolveResult.SAT else "UNKNOWN")
-    return {
-        "verdict": verdict,
-        "solver_status": solve_status,
-        "spec_kind": k,
-        "assert_layer_id": last.id if last else None,
-    }
-
-
 # -----------------------------------------------------------------------------
 # Torch → ACT converter
 # -----------------------------------------------------------------------------
