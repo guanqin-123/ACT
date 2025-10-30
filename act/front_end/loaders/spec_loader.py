@@ -286,9 +286,7 @@ class SpecLoader:
         # Load JSON specifications with comprehensive tensor conversion
         for json_path in discovered["json"]:
             try:
-                from act.front_end.loaders.data_loader import DatasetLoader
-                data_loader = DatasetLoader()  # For JSON loading capability
-                json_spec = data_loader.load_json_spec(json_path)
+                json_spec = self.load_json_spec(json_path)
                 spec_name = Path(json_path).stem
                 
                 # Convert to InputSpec/OutputSpec format based on available keys
@@ -391,3 +389,10 @@ class SpecLoader:
                 print(f"❌ Failed to prepare JSON {json_path}: {e}")
                 
         return act_ready_specs
+    
+    def load_json_spec(self, json_path: str) -> Dict[str, Any]:
+        """Load JSON specification file"""
+        import json
+        with open(json_path, 'r') as f:
+            spec_data = json.load(f)
+        return spec_data

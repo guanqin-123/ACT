@@ -4,6 +4,7 @@ __pycache__
 data/*
 models/*
 !data/*.py
+!data/*.ipynb
 !models/*.py
 !data/README.md
 !models/README.md

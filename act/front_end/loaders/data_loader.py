@@ -74,18 +74,11 @@ class DatasetLoader:
             
         df = pd.read_csv(csv_path)
         return self._load_csv_pandas_torch(df, label_column, skip_columns, csv_path)
-    
-    def load_mnist_csv(self, csv_path: str = None) -> List[Tuple[torch.Tensor, int]]:
-        """Convenience method for MNIST CSV loading with project defaults"""
-        if csv_path is None:
-            csv_path = "data/MNIST_csv/mnist_first_100_samples.csv"
-        return self.load_csv_torch(csv_path, label_column="label")
-    
+
     def discover_all_datasets(self) -> Dict[str, List[str]]:
         """Comprehensively discover all datasets in the project"""
         datasets = {
             "csv": [],
-            "json": [],
             "raw": [],
             "vnnlib": [],
             "other": []
@@ -99,8 +92,6 @@ class DatasetLoader:
                     suffix = file_path.suffix.lower()
                     if suffix == ".csv":
                         datasets["csv"].append(str(file_path))
-                    elif suffix == ".json":
-                        datasets["json"].append(str(file_path))
                     elif suffix == ".vnnlib":
                         datasets["vnnlib"].append(str(file_path))
                     elif suffix in [".txt", ".dat", ".bin"]:
@@ -108,18 +99,11 @@ class DatasetLoader:
                         
                 elif file_path.is_dir():
                     # Include data directories that might contain samples
-                    if any(child.suffix.lower() in [".csv", ".json", ".png", ".jpg"] 
+                    if any(child.suffix.lower() in [".csv", ".png", ".jpg"] 
                            for child in file_path.rglob("*") if child.is_file()):
                         datasets["raw"].append(str(file_path))
                     
         return datasets
-    
-    def load_json_spec(self, json_path: str) -> Dict[str, Any]:
-        """Load JSON specification file"""
-        import json
-        with open(json_path, 'r') as f:
-            spec_data = json.load(f)
-        return spec_data
     
     def load_for_act_backend(self, csv_path: str) -> Dict[str, torch.Tensor]:
         """Load data in format suitable for ACT backend"""
