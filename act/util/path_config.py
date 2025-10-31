@@ -112,6 +112,11 @@ def get_data_root() -> str:
     return os.path.join(get_project_root(), 'data')
 
 
+def get_torchvision_data_root() -> str:
+    """Get the torchvision dataset downloads directory path."""
+    return os.path.join(get_project_root(), 'data', 'torchvision')
+
+
 def get_config_root() -> str:
     """Get the configs directory path."""
     # After reorganizing repository, configs live under modules/configs
