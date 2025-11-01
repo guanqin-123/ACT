@@ -14,7 +14,6 @@ from typing import Dict, Any, List, Optional
 import os
 import json
 import torch
-import torchvision
 from pathlib import Path
 
 # Import path configuration
@@ -86,7 +85,7 @@ def download_dataset_model_pair(
         print(f"{'='*80}")
         
         from act.front_end.torchvision.cli import _test_single_dataset_model
-        import torchvision
+        import torchvision.models
         
         # Get dataset info to check if it's a classification dataset
         dataset_info = get_dataset_info(dataset_name)
@@ -213,6 +212,7 @@ def download_dataset_model_pair(
         if not dataset_exists:
             print(f"\n[1/3] Downloading dataset...")
             
+            import torchvision.datasets
             dataset_class = getattr(torchvision.datasets, dataset_name, None)
             
             if dataset_class is None:
@@ -259,6 +259,7 @@ def download_dataset_model_pair(
         print(f"\n[2/3] Saving model architecture...")
         model_path = models_dir / f"{model_name}.py"
         
+        import torchvision.models
         if hasattr(torchvision.models, model_name):
             # Standard TorchVision model
             model_code = f"""
@@ -609,6 +610,7 @@ def load_dataset_model_pair(
     preprocessing = create_preprocessing_pipeline(dataset_name)
     
     # Load dataset
+    import torchvision.datasets
     dataset_class = getattr(torchvision.datasets, dataset_name)
     is_train = (split == "train")
     
@@ -637,6 +639,9 @@ def load_dataset_model_pair(
     
     if not model_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
+    
+    # Import torchvision.models explicitly to avoid circular import issues
+    import torchvision.models
     
     # Load model based on type
     if hasattr(torchvision.models, model_name):

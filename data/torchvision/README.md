@@ -130,19 +130,104 @@ This directory contains downloaded TorchVision datasets and their compatible mod
 
 ## Usage
 
-To download a dataset-model pair:
+### CLI Commands
+
+The TorchVision module provides a comprehensive CLI accessible via:
 ```bash
-python act/front_end/torchvision/data_model_mapping.py --download DATASET MODEL [--split train|test|both]
+python -m act.front_end.torchvision [OPTIONS]
 ```
 
-To list downloaded pairs:
+#### Exploration Commands
+
+List all available datasets:
 ```bash
-python act/front_end/torchvision/data_model_mapping.py --list-downloads
+python -m act.front_end.torchvision --list
 ```
 
-To load a downloaded pair:
+Show datasets by category:
 ```bash
-python act/front_end/torchvision/data_model_mapping.py --load-torchvision DATASET MODEL
+python -m act.front_end.torchvision --category classification
+# Categories: classification, detection, segmentation, video, optical_flow
+```
+
+Show detailed information for a specific dataset:
+```bash
+python -m act.front_end.torchvision --dataset MNIST
+```
+
+Search for datasets by name:
+```bash
+python -m act.front_end.torchvision --search cifar
+```
+
+Show all recommended models for a dataset:
+```bash
+python -m act.front_end.torchvision --models-for MNIST
+```
+
+Show all datasets compatible with a model:
+```bash
+python -m act.front_end.torchvision --datasets-for resnet18
+```
+
+#### Download & Load Commands
+
+Download a dataset-model pair:
+```bash
+python -m act.front_end.torchvision --download DATASET MODEL [--split train|test|both]
+# Example: python -m act.front_end.torchvision --download MNIST resnet18 --split test
+```
+
+List all downloaded dataset-model pairs:
+```bash
+python -m act.front_end.torchvision --list-downloads
+```
+
+Load a downloaded pair into memory:
+```bash
+python -m act.front_end.torchvision --load-torchvision DATASET MODEL [--batch-size N]
+# Example: python -m act.front_end.torchvision --load-torchvision MNIST resnet18 --batch-size 32
+```
+
+#### Validation Commands
+
+Validate dataset-model compatibility:
+```bash
+python -m act.front_end.torchvision --validate DATASET MODEL
+# Example: python -m act.front_end.torchvision --validate MNIST resnet18
+```
+
+Show preprocessing requirements for a dataset:
+```bash
+python -m act.front_end.torchvision --show-preprocessing MNIST
+```
+
+Show aggregated preprocessing summary across all datasets:
+```bash
+python -m act.front_end.torchvision --preprocessing-summary
+```
+
+Test inference for a specific dataset-model pair:
+```bash
+python -m act.front_end.torchvision --inference DATASET MODEL [--inference-split train|test]
+# Example: python -m act.front_end.torchvision --inference CIFAR10 resnet18 --inference-split test
+```
+
+#### Comprehensive Testing
+
+Run alignment tests for all dataset-model pairs:
+```bash
+python -m act.front_end.torchvision --all
+```
+
+Run comprehensive tests with inference validation:
+```bash
+python -m act.front_end.torchvision --all-with-inference
+```
+
+Print complete mapping summary:
+```bash
+python -m act.front_end.torchvision --summary
 ```
 
 ## Directory Structure

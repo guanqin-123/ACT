@@ -11,7 +11,6 @@ License: AGPLv3+
 """
 
 from typing import Dict, Any, List, Optional
-import torchvision
 
 
 # Comprehensive torchvision dataset to model mapping
@@ -660,6 +659,7 @@ def find_model_name(user_input: str) -> str:
         The correctly-cased model name
     """
     import torchvision
+    import torchvision.models
     
     # Check exact match in torchvision first
     if hasattr(torchvision.models, user_input):

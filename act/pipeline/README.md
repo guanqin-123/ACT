@@ -230,11 +230,13 @@ perf_result = PerformanceResult(```
 
     execution_time=1.23,**Integration Points:**
 
-    memory_usage_mb=256.0,- **Dataset Loaders**: MNIST, CIFAR, custom CSV datasets
+### Testing Components
 
-    peak_memory_mb=300.0,- **Model Loaders**: ONNX models, PyTorch models
+The pipeline provides comprehensive testing infrastructure:
 
-    cpu_percent=85.5- **Specification Loaders**: VNNLIB, custom specifications
+- **Spec Creators**: TorchVision and VNNLIB spec generation
+- **Model Synthesis**: Wrapped model generation from specs
+- **Verification Tests**: Correctness validation and regression testing
 
 )- **Device Management**: CPU/GPU testing with proper device handling
 
@@ -680,38 +682,45 @@ pip install matplotlib seaborn
 
 ### Scalability Features
 
-The pipeline integrates with ACT's front-end loaders:- **Batch Processing**: Efficient handling of large test suites
+The pipeline integrates with ACT's spec creators for efficient testing:
 
+- **Batch Processing**: Efficient handling of large test suites
 - **Incremental Testing**: Only run tests affected by changes
+- **Resource Limits**: Configurable memory and time limits
 
-```python- **Resource Limits**: Configurable memory and time limits
+```python
+from act.front_end.torchvision.create_specs import TorchVisionSpecCreator
+from act.pipeline import ModelFactory
 
-from act.front_end.loaders import DatasetLoader, ModelLoader, SpecLoader
+# Create specs and load data-model pairs
+creator = TorchVisionSpecCreator(config_name="torchvision_classification")
+spec_results = creator.create_specs_for_data_model_pairs(num_samples=10)
+```
 
-from act.pipeline import ModelFactory## Integration with ACT Framework
+## Integration with ACT Framework
 
+The pipeline seamlessly integrates with ACT's core components:
 
+- **Back-End Integration**: Direct use of `act.back_end` verification components
+- **Front-End Bridge**: Integration with `act.front_end` spec creators and synthesis
+- **Device Management**: Proper CUDA/CPU device handling
+- **Configuration Compatibility**: Works with existing ACT configuration systems
 
-# Load datasetThe pipeline seamlessly integrates with ACT's core components:
+Example integration:
 
-data_loader = DatasetLoader()
+```python
+from act.front_end.torchvision.create_specs import TorchVisionSpecCreator
+from act.front_end.model_synthesis import synthesize_models_from_specs
 
-samples, labels = data_loader.load("mnist")- **Back-End Integration**: Direct use of `act.back_end` verification components
+# Create specs from TorchVision datasets
+creator = TorchVisionSpecCreator(config_name="torchvision_classification")
+spec_results = creator.create_specs_for_data_model_pairs(num_samples=10)
 
-- **Front-End Bridge**: Integration with `act.front_end` loaders and specifications  
-
-# Create PyTorch model- **Device Management**: Proper CUDA/CPU device handling
-
-factory = ModelFactory()- **Configuration Compatibility**: Works with existing ACT configuration systems
-
-pytorch_model = factory.create_model("mnist_cnn_small")
+# Synthesize wrapped models
+wrapped_models, reports, input_data = synthesize_models_from_specs(spec_results)
+```
 
 This design provides a robust, extensible testing framework that ensures the reliability and performance of the ACT abstraction verifier while being easy to use and extend.
-# Load specifications
-spec_loader = SpecLoader()
-input_spec = spec_loader.load_input_spec("local_lp", epsilon=0.1)
-output_spec = spec_loader.load_output_spec("classification")
-```
 
 ### Back-End Integration
 

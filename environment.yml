@@ -19,5 +19,7 @@ dependencies:
   - pip:
       - onnxconverter-common
       - onnxscript
+      - onnx2pytorch
+      - onnx-simplifier
       - transformers
       - scikit-learn

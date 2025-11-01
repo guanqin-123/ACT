@@ -15,7 +15,7 @@ This directory contains the core verification framework for the Abstract Constra
 - **Batch Dimension Fix**: Fixed `affine_bounds()` with proper batch dimension handling and squeeze operations
 - **Cleaner Syntax**: Updated all code to use ConSet wrappers (`for con in cons` instead of `.S.values()`)
 - **Guarded File I/O**: All debug file operations protected by feature flags
-- **Modular Organization**: Moved `utils_image.py` to `raw_processors/` for better structure
+- **Architecture Cleanup**: Removed legacy loaders and raw_processors, consolidated into spec creator system
 
 ## Directory Structure
 
@@ -25,19 +25,16 @@ act/
 ├── __init__.py                     # Package initialization
 │
 ├── front_end/                      # Front-End: User-facing data processing
-│   ├── loaders/                    # Data, model, and specification loaders
-│   │   ├── data_loader.py          # Dataset loading (MNIST/CIFAR/CSV/VNNLIB)
-│   │   ├── model_loader.py         # Neural network model loading (ONNX/PyTorch)
-│   │   └── spec_loader.py          # Specification loading and processing
-│   ├── raw_processors/             # Raw input processors
-│   │   ├── preprocessor_base.py    # Base preprocessor interface
-│   │   ├── preprocessor_image.py   # Image preprocessing and normalization
-│   │   ├── preprocessor_text.py    # Text preprocessing utilities
-│   │   └── utils_image.py          # Image utility functions
+│   ├── torchvision/                # TorchVision integration
+│   │   ├── create_specs.py         # TorchVisionSpecCreator for dataset-model pairs
+│   │   ├── data_model_loader.py    # TorchVision dataset and model loading
+│   │   └── data_model_mapping.py   # Dataset-model compatibility mappings
+│   ├── vnnlib/                     # VNNLIB integration
+│   │   └── create_specs.py         # VNNLibSpecCreator for VNNLIB specs
 │   ├── specs.py                    # InputSpec/OutputSpec with InKind/OutKind enums
+│   ├── spec_creator_base.py        # Base spec creator interface
 │   ├── verifiable_model.py         # PyTorch verification wrapper modules
-│   ├── model_synthesis.py          # Advanced model generation and optimization
-│   ├── mocks.py                    # Mock data generation for testing
+│   ├── model_synthesis.py          # Model synthesis using spec creators
 │   └── README.md                   # Front-end documentation
 │
 ├── back_end/                       # Back-End: Core verification engine
@@ -120,10 +117,10 @@ act/
   - Integration with configuration defaults from `../modules/configs/`
 
 ### **`front_end/` - User-Facing Data Processing**
-- **`loaders/`**: Comprehensive data loading and preprocessing
-  - **`data_loader.py`**: MNIST/CIFAR-10 dataset handlers with automatic download, CSV batch processing
-  - **`model_loader.py`**: ONNX/PyTorch model loading with validation and conversion
-  - **`spec_loader.py`**: VNNLIB specification loading and local robustness property handling
+- **Spec Creator System**: Unified framework for creating specifications from various sources
+  - **`TorchVisionSpecCreator`**: Creates specs from TorchVision datasets and models
+  - **`VNNLibSpecCreator`**: Creates specs from VNNLIB files
+  - **`BaseSpecCreator`**: Abstract interface for spec creators
 
 - **`specs.py`**: Specification data structures and enums
   - `InputSpec`/`OutputSpec` classes with `InKind`/`OutKind` type safety
@@ -131,13 +128,12 @@ act/
 
 - **`verifiable_model.py`**: PyTorch verification wrapper modules
   - `InputLayer`: Declares symbolic input blocks for verification
-  - `InputAdapterLayer`: Config-driven input preprocessing (permute/reorder/slice/pad/affine/linear-proj)
   - `InputSpecLayer`: Wraps ACT InputSpec as nn.Module for seamless integration
   - `OutputSpecLayer`: Wraps ACT OutputSpec as nn.Module for property specification
 
-- **`model_synthesis.py`**: Advanced model generation and optimization
-  - Neural architecture synthesis and domain-specific model generation
-  - Model optimization utilities and synthesis pipeline
+- **`model_synthesis.py`**: Model synthesis using spec creators
+  - Unified synthesis pipeline using spec creator system
+  - Automatic wrapped model generation from dataset-model pairs
 
 - **Preprocessors**: Modular preprocessing pipeline
   - **`preprocessor_image.py`**: Image normalization, augmentation, and format conversion

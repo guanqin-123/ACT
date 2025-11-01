@@ -44,7 +44,7 @@ jobs:
       - name: Run Model Synthesis Tests
         run: |
           cd ${{ github.workspace }}
-          timeout 60 python act/front_end/model_synthesis.py
+          timeout 60 python -m act.front_end.model_synthesis
 
       - name: Run ACT2Torch Pipeline Tests
         run: |

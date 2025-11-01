@@ -22,10 +22,12 @@
 # Architecture:
 #   Each model is wrapped with verification layers:
 #   1. InputLayer: Declares input shape/dtype/device
-#   2. [Optional] InputAdapterLayer: Preprocessing (normalize, flatten, etc.)
-#   3. InputSpecLayer: Input constraints (BOX, L_INF, LIN_POLY)
-#   4. Model layers: nn.Linear, nn.Conv2d, nn.ReLU, etc.
-#   5. OutputSpecLayer: Output constraints (SAFETY, TOP1_ROBUST, etc.)
+#   2. InputSpecLayer: Input constraints (BOX, L_INF, LIN_POLY)
+#   3. Model layers: nn.Linear, nn.Conv2d, nn.ReLU, etc.
+#   4. OutputSpecLayer: Output constraints (SAFETY, TOP1_ROBUST, etc.)
+#
+# Note: Preprocessing (normalization, flatten, etc.) should be handled by
+#   data loader (e.g., torchvision.transforms) before wrapping the model.
 #
 # Test Scenarios (examples_config.yaml):
 #   - mnist_robust_*: Classification robustness (ε-ball perturbations)

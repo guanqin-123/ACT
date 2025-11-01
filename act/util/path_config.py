@@ -172,3 +172,54 @@ def configure_torch_print(linewidth: int = 500,
         sci_mode=sci_mode,
         precision=precision
     )
+
+
+def get_vnnlib_data_root() -> str:
+    """Get the VNNLIB benchmark data directory path, creating if needed."""
+    from pathlib import Path
+    vnnlib_root = Path(get_project_root()) / 'data' / 'vnnlib'
+    vnnlib_root.mkdir(parents=True, exist_ok=True)
+    return str(vnnlib_root)
+
+
+def get_spec_config_root() -> str:
+    """Get spec configuration directory (configs/specs/), creating if needed."""
+    from pathlib import Path
+    config_root = Path(get_project_root()) / 'configs' / 'specs'
+    config_root.mkdir(parents=True, exist_ok=True)
+    return str(config_root)
+
+
+def get_default_spec_config_path() -> str:
+    """Get path to default spec configuration."""
+    from pathlib import Path
+    return str(Path(get_spec_config_root()) / 'default_spec_config.yaml')
+
+
+def get_spec_config_path(name: str) -> str:
+    """
+    Resolve named spec config to full path.
+    
+    Args:
+        name: Config name (with or without .yaml extension)
+    
+    Returns:
+        Full path to spec config file
+    
+    Raises:
+        FileNotFoundError: If config file doesn't exist
+    """
+    from pathlib import Path
+    if not name.endswith('.yaml'):
+        name = f"{name}.yaml"
+    path = Path(get_spec_config_root()) / name
+    if not path.exists():
+        raise FileNotFoundError(f"Spec config '{name}' not found in {get_spec_config_root()}")
+    return str(path)
+
+
+def list_spec_configs() -> list:
+    """List all available spec configuration files."""
+    from pathlib import Path
+    config_root = Path(get_spec_config_root())
+    return sorted([f.stem for f in config_root.glob('*.yaml')])

@@ -17,15 +17,16 @@ and run verification with **no external inputs or specs** passed at runtime.
 Your wrapped model is an `nn.Sequential` that includes:
 
 ```
-InputLayer → InputAdapterLayer → InputSpecLayer → [optional Flatten] → Model → OutputSpecLayer
+InputLayer → InputSpecLayer → [optional Flatten] → Model → OutputSpecLayer
 ```
 
 - `InputLayer(shape=(1,...), center=?)` — declares the input variable block (symbolic).
-- `InputAdapterLayer(...)` — deterministic preprocessing: permute/reorder/slice/pad/affine/linear-proj.
-- `InputSpecLayer(spec=InputSpec(...))` — **already in post-adapter space** (BOX, L∞ as BOX, or LIN_POLY).
+- `InputSpecLayer(spec=InputSpec(...))` — input constraints (BOX, L∞ as BOX, or LIN_POLY) directly on input space.
 - `[optional nn.Flatten]` — reshaping only.
 - `Model` — learned layers (e.g., `nn.Linear`, `nn.ReLU`).
 - `OutputSpecLayer(spec=OutputSpec(...))` — final property (`ASSERT`) over outputs.
+
+**Note**: Preprocessing (normalization, channel conversion, etc.) should be handled by data loader (e.g., `torchvision.transforms.Compose`) before wrapping the model.
 
 ---
 
@@ -43,7 +44,6 @@ InputLayer → InputAdapterLayer → InputSpecLayer → [optional Flatten] → M
 | Torch module | ACT kind | Notes |
 |--------------|----------|-------|
 | `InputLayer` | `INPUT` | allocates initial variable block; `params['shape']`[, `center`] |
-| `InputAdapterLayer` | `PERMUTE`, `REORDER`, `SLICE`, `PAD`, `SCALE_SHIFT`, `LINEAR_PROJ` | emitted in order |
 | `InputSpecLayer` | `INPUT_SPEC` | **constraint-only**, `out_vars == in_vars` |
 | `nn.Flatten` | `FLATTEN` | reshape only |
 | `nn.Linear` | `DENSE` | `params['W']`, `params['b']` |

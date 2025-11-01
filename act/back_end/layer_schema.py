@@ -44,12 +44,12 @@ HOW TO ADD NEW STUFF (READ THIS):
       or tells you to add the key to REGISTRY.
 
 WRAPPER LAYOUT (validated by `validate_wrapper_graph` in layer_util.py):
-InputLayer → InputAdapterLayer(s) → InputSpecLayer → Model → OutputSpecLayer
+InputLayer → InputSpecLayer → Model → OutputSpecLayer
 - Exactly one `INPUT`
 - ≥1 `INPUT_SPEC`
 - Final layer must be `ASSERT`
-- Adapters are deterministic ops: PERMUTE, REORDER, SLICE, PAD, SCALE_SHIFT, LINEAR_PROJ
-  (ADAPTER_KINDS defined in layer_util.py)
+- Preprocessing (normalization, resizing, channel conversion) handled by data loader
+  (e.g., torchvision.transforms.Compose or create_preprocessing_pipeline())
 """
 
 from __future__ import annotations
@@ -76,14 +76,6 @@ class LayerKind(str, enum.Enum):
     INPUT = "INPUT"           # meta: shape (required), params: center (optional)
     INPUT_SPEC = "INPUT_SPEC" # meta: kind ('BOX'|'LINF_BALL'|'LIN_POLY'), constraints in meta
     ASSERT = "ASSERT"         # meta: kind ('LINEAR_LE'|'TOP1_ROBUST'|'MARGIN_ROBUST'|'RANGE'), fields in meta
-
-    # Input adapters
-    PERMUTE = "PERMUTE"
-    REORDER = "REORDER"
-    SLICE = "SLICE"
-    PAD = "PAD"
-    SCALE_SHIFT = "SCALE_SHIFT"   # params: scale, shift
-    LINEAR_PROJ = "LINEAR_PROJ"   # params: A[, b]
 
     # Core MLP/CNN ops (subset can be extended easily)
     DENSE = "DENSE"
@@ -180,14 +172,6 @@ REGISTRY: Dict[str, Dict[str, List[str]]] = {
     },
     LayerKind.INPUT_SPEC.value:  {"params_required": [], "params_optional": ["lb","ub","center","A","b"], "meta_required": ["kind"], "meta_optional": ["eps","lb_val","ub_val","center_val"]},
     LayerKind.ASSERT.value:      {"params_required": [], "params_optional": ["c","lb","ub"], "meta_required": ["kind"], "meta_optional": ["d","y_true","margin"]},
-
-    # Adapters
-    LayerKind.PERMUTE.value:     {"params_required": [], "params_optional": [], "meta_required": [], "meta_optional": ["perm"]},
-    LayerKind.REORDER.value:     {"params_required": [], "params_optional": [], "meta_required": [], "meta_optional": ["order","mapping"]},
-    LayerKind.SLICE.value:       {"params_required": [], "params_optional": [], "meta_required": [], "meta_optional": ["starts","ends","axes","steps"]},
-    LayerKind.PAD.value:         {"params_required": [], "params_optional": [], "meta_required": [], "meta_optional": ["pads","mode","value"]},
-    LayerKind.SCALE_SHIFT.value: {"params_required": ["scale","shift"], "params_optional": [], "meta_required": [], "meta_optional": ["broadcast","axis"]},
-    LayerKind.LINEAR_PROJ.value: {"params_required": ["A"], "params_optional": ["b"], "meta_required": [], "meta_optional": ["input_shape","output_shape"]},
 
     # Dense/CNN
     LayerKind.DENSE.value:       {"params_required": ["W"], "params_optional": ["b","W_pos","W_neg"], "meta_required": [], "meta_optional": ["activation","input_shape","output_shape","bias_enabled","in_features","out_features"]},

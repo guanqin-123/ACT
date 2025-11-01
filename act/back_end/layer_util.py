@@ -41,13 +41,6 @@ if TYPE_CHECKING:
         # Will import at runtime when needed to avoid circular import
         pass
 
-# Wrapper-only constraints (moved from layer_schema.py to avoid circular imports)
-ADAPTER_KINDS = {
-    LayerKind.PERMUTE.value, LayerKind.REORDER.value, LayerKind.SLICE.value, LayerKind.PAD.value,
-    LayerKind.SCALE_SHIFT.value, LayerKind.LINEAR_PROJ.value,
-}
-
-
 try:
     import torch
     Tensor = torch.Tensor
@@ -170,11 +163,17 @@ def validate_wrapper_graph(layers: List["Layer"]) -> None:
     first_spec_idx = kinds.index(LayerKind.INPUT_SPEC.value)
     input_idx = kinds.index(LayerKind.INPUT.value)
 
-    # Adapters only between INPUT..first INPUT_SPEC
+    # INPUT_SPEC should come after INPUT
+    if first_spec_idx < input_idx:
+        raise ValueError("INPUT must come before INPUT_SPEC")
+    
+    # Between INPUT and INPUT_SPEC, only allow model layers (not wrapper types)
+    wrapper_types = {LayerKind.INPUT.value, LayerKind.INPUT_SPEC.value, LayerKind.ASSERT.value}
     for i in range(input_idx + 1, first_spec_idx):
-        if kinds[i] not in ADAPTER_KINDS:
+        if kinds[i] in wrapper_types:
             raise ValueError(
-                f"Only adapters {sorted(ADAPTER_KINDS)} allowed between INPUT and INPUT_SPEC; got {kinds[i]} at pos {i}."
+                f"Unexpected wrapper layer {kinds[i]} between INPUT and INPUT_SPEC at position {i}. "
+                f"Preprocessing should be handled by data loader (e.g., torchvision.transforms)."
             )
 
     # No INPUT/INPUT_SPEC after first spec (except final ASSERT at end)
@@ -225,34 +224,28 @@ if __name__ == "__main__":
             params={}, meta={"shape": (1,3,32,32), "dtype": "torch.float64"},
             in_vars=[0], out_vars=[0],
         ))
-        # Adapter
-        layers.append(create_layer(
-            id=1, kind=LayerKind.PERMUTE.value,
-            params={}, meta={"perm": (0,2,3,1)},
-            in_vars=[0], out_vars=[0],
-        ))
-        # SPEC
+        # SPEC (directly after INPUT - no adapters)
         lb_tensor = torch.full((1,3,32,32), -1.0)
         ub_tensor = torch.full((1,3,32,32), 1.0)
         layers.append(create_layer(
-            id=2, kind=LayerKind.INPUT_SPEC.value,
+            id=1, kind=LayerKind.INPUT_SPEC.value,
             params={"lb": lb_tensor, "ub": ub_tensor}, meta={"kind": InKind.BOX},
             in_vars=[0], out_vars=[0],
         ))
         # Model toy
         layers.append(create_layer(
-            id=3, kind=LayerKind.FLATTEN.value,
+            id=2, kind=LayerKind.FLATTEN.value,
             params={}, meta={"start_dim": 1, "end_dim": -1},
             in_vars=[0], out_vars=[1],
         ))
         W, b = torch.randn(10, 3072), torch.randn(10)
         layers.append(create_layer(
-            id=4, kind=LayerKind.DENSE.value,
+            id=3, kind=LayerKind.DENSE.value,
             params={"W": W, "b": b}, meta={},
             in_vars=[1], out_vars=[2],
         ))
         layers.append(create_layer(
-            id=5, kind=LayerKind.ASSERT.value,
+            id=4, kind=LayerKind.ASSERT.value,
             params={}, meta={"kind": OutKind.TOP1_ROBUST, "y_true": 3},
             in_vars=[2], out_vars=[2],
         ))

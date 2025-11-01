@@ -19,12 +19,14 @@
 #
 # Architecture:
 #   InputLayer           → INPUT      (declares input shape/dtype/device)
-#   InputAdapterLayer    → PERMUTE/REORDER/SLICE/PAD/SCALE_SHIFT/etc.
 #   InputSpecLayer       → INPUT_SPEC (input constraints: BOX, L_INF, LIN_POLY)
 #   nn.Linear            → DENSE      (fully connected layers)
 #   nn.Conv2d            → CONV2D     (convolutional layers)
 #   nn.ReLU              → RELU       (activation functions)
 #   OutputSpecLayer      → ASSERT     (output constraints: SAFETY, classification)
+#
+# Note: Preprocessing (normalization, reshaping, etc.) should be handled by
+#   data loader (e.g., torchvision.transforms) before wrapping the model.
 #
 # Contract:
 #   - Exactly one InputLayer must be present (defines input shape)
@@ -96,10 +98,11 @@ class TorchToACT:
       - Contains at least one InputSpecLayer.
       - Ends with an OutputSpecLayer (producing ASSERT).
     No input_shape is accepted; InputLayer provides it.
+    
+    Note: Preprocessing should be handled by data loader, not in the wrapper.
     """
     # Type names are matched by isinstance; these references are not imported here to avoid circular deps.
     _InputLayerTypeName = "InputLayer"
-    _InputAdapterLayerTypeName = "InputAdapterLayer"
     _InputSpecLayerTypeName = "InputSpecLayer"
     _OutputSpecLayerTypeName = "OutputSpecLayer"
 
@@ -113,7 +116,7 @@ class TorchToACT:
         has_input_spec = any(type(x).__name__ == self._InputSpecLayerTypeName for x in mods)
         has_output_spec = any(type(x).__name__ == self._OutputSpecLayerTypeName for x in mods)
         if not has_input_spec:
-            raise AssertionError("Wrapper must include an InputSpecLayer (post-adapter) — none found.")
+            raise AssertionError("Wrapper must include an InputSpecLayer — none found.")
         if not has_output_spec:
             raise AssertionError("Wrapper must include an OutputSpecLayer as the final assertion — none found.")
 
