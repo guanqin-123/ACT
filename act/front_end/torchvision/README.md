@@ -69,7 +69,7 @@ act/front_end/torchvision/
 - Version information
 
 **`__main__.py` (14 lines)**
-- Entry point for `python -m act.front_end.torchvision.cli`
+- Entry point for `python -m act.front_end.torchvision`
 - Delegates to CLI main function
 
 ## Installation
@@ -91,10 +91,10 @@ conda activate act-main
 The CLI can be executed in two ways:
 
 ```bash
-# Method 1: Direct module execution (recommended)
-python -m act.front_end.torchvision.cli [OPTIONS]
+# Method 1: Via package main (recommended)
+python -m act.front_end.torchvision [OPTIONS]
 
-# Method 2: Via package main
+# Method 2: Direct CLI module execution
 python -m act.front_end.torchvision [OPTIONS]
 ```
 
@@ -104,35 +104,35 @@ Both methods are equivalent and provide the same functionality.
 
 ```bash
 # List all datasets
-python -m act.front_end.torchvision.cli --list
+python -m act.front_end.torchvision --list
 
 # List datasets by category
-python -m act.front_end.torchvision.cli --category classification
-python -m act.front_end.torchvision.cli --category detection
-python -m act.front_end.torchvision.cli --category segmentation
-python -m act.front_end.torchvision.cli --category video
-python -m act.front_end.torchvision.cli --category optical_flow
+python -m act.front_end.torchvision --category classification
+python -m act.front_end.torchvision --category detection
+python -m act.front_end.torchvision --category segmentation
+python -m act.front_end.torchvision --category video
+python -m act.front_end.torchvision --category optical_flow
 
 # Search for datasets
-python -m act.front_end.torchvision.cli --search mnist
-python -m act.front_end.torchvision.cli --search cifar
+python -m act.front_end.torchvision --search mnist
+python -m act.front_end.torchvision --search cifar
 ```
 
 ### 2. Get Dataset Details
 
 ```bash
 # Show detailed information about a specific dataset
-python -m act.front_end.torchvision.cli --dataset MNIST
-python -m act.front_end.torchvision.cli --dataset CIFAR10
-python -m act.front_end.torchvision.cli --dataset ImageNet
+python -m act.front_end.torchvision --dataset MNIST
+python -m act.front_end.torchvision --dataset CIFAR10
+python -m act.front_end.torchvision --dataset ImageNet
 
 # Show all compatible models for a dataset
-python -m act.front_end.torchvision.cli --models-for MNIST
-python -m act.front_end.torchvision.cli --models-for CIFAR10
+python -m act.front_end.torchvision --models-for MNIST
+python -m act.front_end.torchvision --models-for CIFAR10
 
 # Show all datasets compatible with a model
-python -m act.front_end.torchvision.cli --datasets-for resnet18
-python -m act.front_end.torchvision.cli --datasets-for efficientnet_b0
+python -m act.front_end.torchvision --datasets-for resnet18
+python -m act.front_end.torchvision --datasets-for efficientnet_b0
 ```
 
 ### 3. Download Dataset-Model Pairs
@@ -147,47 +147,47 @@ python -m act.front_end.torchvision.cli --datasets-for efficientnet_b0
 ```bash
 # Download test split only (default)
 # These will be validated with inference tests before downloading
-python -m act.front_end.torchvision.cli --download MNIST resnet18
-python -m act.front_end.torchvision.cli --download CIFAR10 resnet18
-python -m act.front_end.torchvision.cli --download FashionMNIST resnet18
+python -m act.front_end.torchvision --download MNIST resnet18
+python -m act.front_end.torchvision --download CIFAR10 resnet18
+python -m act.front_end.torchvision --download FashionMNIST resnet18
 
 # Custom models are rejected (validation fails)
-# python -m act.front_end.torchvision.cli --download MNIST simple_cnn  # Will fail!
+# python -m act.front_end.torchvision --download MNIST simple_cnn  # Will fail!
 ```
 
 **Download Specific Split**
 ```bash
 # Download train split only
-python -m act.front_end.torchvision.cli --download MNIST resnet18 --split train
+python -m act.front_end.torchvision --download MNIST resnet18 --split train
 
 # Download test split only
-python -m act.front_end.torchvision.cli --download MNIST resnet18 --split test
+python -m act.front_end.torchvision --download MNIST resnet18 --split test
 
 # Download both splits
-python -m act.front_end.torchvision.cli --download MNIST resnet18 --split both
+python -m act.front_end.torchvision --download MNIST resnet18 --split both
 ```
 
 **Standard TorchVision Models (Validated)**
 ```bash
 # ResNet family
-python -m act.front_end.torchvision.cli --download CIFAR10 resnet18
-python -m act.front_end.torchvision.cli --download CIFAR10 resnet34
-python -m act.front_end.torchvision.cli --download CIFAR10 resnet50
-python -m act.front_end.torchvision.cli --download CIFAR100 resnet18
-python -m act.front_end.torchvision.cli --download STL10 resnet18
+python -m act.front_end.torchvision --download CIFAR10 resnet18
+python -m act.front_end.torchvision --download CIFAR10 resnet34
+python -m act.front_end.torchvision --download CIFAR10 resnet50
+python -m act.front_end.torchvision --download CIFAR100 resnet18
+python -m act.front_end.torchvision --download STL10 resnet18
 
 # EfficientNet family
-python -m act.front_end.torchvision.cli --download CIFAR10 efficientnet_b0
-python -m act.front_end.torchvision.cli --download SVHN efficientnet_b0
-python -m act.front_end.torchvision.cli --download Flowers102 efficientnet_b0
+python -m act.front_end.torchvision --download CIFAR10 efficientnet_b0
+python -m act.front_end.torchvision --download SVHN efficientnet_b0
+python -m act.front_end.torchvision --download Flowers102 efficientnet_b0
 
 # VGG family
-python -m act.front_end.torchvision.cli --download CIFAR10 vgg16
-python -m act.front_end.torchvision.cli --download SVHN vgg16
+python -m act.front_end.torchvision --download CIFAR10 vgg16
+python -m act.front_end.torchvision --download SVHN vgg16
 
 # MobileNet family
-python -m act.front_end.torchvision.cli --download CIFAR10 mobilenet_v2
-python -m act.front_end.torchvision.cli --download STL10 mobilenet_v2
+python -m act.front_end.torchvision --download CIFAR10 mobilenet_v2
+python -m act.front_end.torchvision --download STL10 mobilenet_v2
 ```
 
 **Validation Example Output:**
@@ -208,7 +208,7 @@ Validation Results:
 
 ```bash
 # List all downloaded dataset-model pairs with sizes
-python -m act.front_end.torchvision.cli --list-downloads
+python -m act.front_end.torchvision --list-downloads
 ```
 
 **Example Output:**
@@ -250,31 +250,31 @@ Total Size: 485.6 MB
 
 ```bash
 # Load with default settings (auto-download if not found)
-python -m act.front_end.torchvision.cli --load-torchvision MNIST resnet18
+python -m act.front_end.torchvision --load-torchvision MNIST resnet18
 
 # Load with custom batch size
-python -m act.front_end.torchvision.cli --load-torchvision CIFAR10 resnet18 --batch-size 64
+python -m act.front_end.torchvision --load-torchvision CIFAR10 resnet18 --batch-size 64
 ```
 
 ### 6. Validation and Testing
 
 ```bash
 # Validate dataset-model compatibility
-python -m act.front_end.torchvision.cli --validate MNIST resnet18
-python -m act.front_end.torchvision.cli --validate CIFAR10 efficientnet_b0
+python -m act.front_end.torchvision --validate MNIST resnet18
+python -m act.front_end.torchvision --validate CIFAR10 efficientnet_b0
 
 # Show preprocessing requirements
-python -m act.front_end.torchvision.cli --show-preprocessing MNIST
-python -m act.front_end.torchvision.cli --show-preprocessing CIFAR10
+python -m act.front_end.torchvision --show-preprocessing MNIST
+python -m act.front_end.torchvision --show-preprocessing CIFAR10
 
 # Show preprocessing summary for all datasets
-python -m act.front_end.torchvision.cli --preprocessing-summary
+python -m act.front_end.torchvision --preprocessing-summary
 
 # Test all dataset-model pairs (compatibility only)
-python -m act.front_end.torchvision.cli --all
+python -m act.front_end.torchvision --all
 
 # Test all with inference validation (classification datasets)
-python -m act.front_end.torchvision.cli --all-with-inference
+python -m act.front_end.torchvision --all-with-inference
 ```
 
 ## Quick Start Examples
@@ -283,27 +283,27 @@ python -m act.front_end.torchvision.cli --all-with-inference
 
 ```bash
 # Download MNIST with ResNet18 (automatically validated)
-python -m act.front_end.torchvision.cli --download MNIST resnet18 --split test
+python -m act.front_end.torchvision --download MNIST resnet18 --split test
 
 # Load it for use
-python -m act.front_end.torchvision.cli --load-torchvision MNIST resnet18
+python -m act.front_end.torchvision --load-torchvision MNIST resnet18
 ```
 
 ### Example 2: Explore Compatible Models
 
 ```bash
 # Find models for CIFAR10
-python -m act.front_end.torchvision.cli --models-for CIFAR10
+python -m act.front_end.torchvision --models-for CIFAR10
 
 # Find datasets for resnet50
-python -m act.front_end.torchvision.cli --datasets-for resnet50
+python -m act.front_end.torchvision --datasets-for resnet50
 ```
 
 ### Example 3: Test All Pairs with Inference
 
 ```bash
 # Run comprehensive test with inference validation
-python -m act.front_end.torchvision.cli --all-with-inference
+python -m act.front_end.torchvision --all-with-inference
 ```
 
 ## Recommended Dataset-Model Pairs
@@ -314,159 +314,159 @@ All pairs listed below have been validated with inference tests:
 
 ```bash
 # MNIST with all compatible models
-python -m act.front_end.torchvision.cli --download MNIST simple_cnn
-python -m act.front_end.torchvision.cli --download MNIST lenet5
-python -m act.front_end.torchvision.cli --download MNIST resnet18
-python -m act.front_end.torchvision.cli --download MNIST efficientnet_b0
+python -m act.front_end.torchvision --download MNIST simple_cnn
+python -m act.front_end.torchvision --download MNIST lenet5
+python -m act.front_end.torchvision --download MNIST resnet18
+python -m act.front_end.torchvision --download MNIST efficientnet_b0
 
 # FashionMNIST with all compatible models
-python -m act.front_end.torchvision.cli --download FashionMNIST simple_cnn
-python -m act.front_end.torchvision.cli --download FashionMNIST lenet5
-python -m act.front_end.torchvision.cli --download FashionMNIST resnet18
-python -m act.front_end.torchvision.cli --download FashionMNIST efficientnet_b0
+python -m act.front_end.torchvision --download FashionMNIST simple_cnn
+python -m act.front_end.torchvision --download FashionMNIST lenet5
+python -m act.front_end.torchvision --download FashionMNIST resnet18
+python -m act.front_end.torchvision --download FashionMNIST efficientnet_b0
 
 # KMNIST with all compatible models
-python -m act.front_end.torchvision.cli --download KMNIST simple_cnn
-python -m act.front_end.torchvision.cli --download KMNIST lenet5
-python -m act.front_end.torchvision.cli --download KMNIST resnet18
+python -m act.front_end.torchvision --download KMNIST simple_cnn
+python -m act.front_end.torchvision --download KMNIST lenet5
+python -m act.front_end.torchvision --download KMNIST resnet18
 
 # QMNIST with all compatible models
-python -m act.front_end.torchvision.cli --download QMNIST simple_cnn
-python -m act.front_end.torchvision.cli --download QMNIST lenet5
-python -m act.front_end.torchvision.cli --download QMNIST resnet18
+python -m act.front_end.torchvision --download QMNIST simple_cnn
+python -m act.front_end.torchvision --download QMNIST lenet5
+python -m act.front_end.torchvision --download QMNIST resnet18
 
 # EMNIST with all compatible models
-python -m act.front_end.torchvision.cli --download EMNIST simple_cnn
-python -m act.front_end.torchvision.cli --download EMNIST resnet18
+python -m act.front_end.torchvision --download EMNIST simple_cnn
+python -m act.front_end.torchvision --download EMNIST resnet18
 ```
 
 ### CIFAR Family (32×32 RGB)
 
 ```bash
 # CIFAR10 with all compatible models
-python -m act.front_end.torchvision.cli --download CIFAR10 resnet18
-python -m act.front_end.torchvision.cli --download CIFAR10 resnet34
-python -m act.front_end.torchvision.cli --download CIFAR10 resnet50
-python -m act.front_end.torchvision.cli --download CIFAR10 vgg16
-python -m act.front_end.torchvision.cli --download CIFAR10 mobilenet_v2
-python -m act.front_end.torchvision.cli --download CIFAR10 efficientnet_b0
+python -m act.front_end.torchvision --download CIFAR10 resnet18
+python -m act.front_end.torchvision --download CIFAR10 resnet34
+python -m act.front_end.torchvision --download CIFAR10 resnet50
+python -m act.front_end.torchvision --download CIFAR10 vgg16
+python -m act.front_end.torchvision --download CIFAR10 mobilenet_v2
+python -m act.front_end.torchvision --download CIFAR10 efficientnet_b0
 
 # CIFAR100 with all compatible models
-python -m act.front_end.torchvision.cli --download CIFAR100 resnet18
-python -m act.front_end.torchvision.cli --download CIFAR100 resnet34
-python -m act.front_end.torchvision.cli --download CIFAR100 resnet50
-python -m act.front_end.torchvision.cli --download CIFAR100 vgg16
-python -m act.front_end.torchvision.cli --download CIFAR100 mobilenet_v2
-python -m act.front_end.torchvision.cli --download CIFAR100 efficientnet_b0
+python -m act.front_end.torchvision --download CIFAR100 resnet18
+python -m act.front_end.torchvision --download CIFAR100 resnet34
+python -m act.front_end.torchvision --download CIFAR100 resnet50
+python -m act.front_end.torchvision --download CIFAR100 vgg16
+python -m act.front_end.torchvision --download CIFAR100 mobilenet_v2
+python -m act.front_end.torchvision --download CIFAR100 efficientnet_b0
 
 # STL10 with all compatible models
-python -m act.front_end.torchvision.cli --download STL10 resnet18
-python -m act.front_end.torchvision.cli --download STL10 resnet34
-python -m act.front_end.torchvision.cli --download STL10 resnet50
-python -m act.front_end.torchvision.cli --download STL10 mobilenet_v2
-python -m act.front_end.torchvision.cli --download STL10 efficientnet_b0
+python -m act.front_end.torchvision --download STL10 resnet18
+python -m act.front_end.torchvision --download STL10 resnet34
+python -m act.front_end.torchvision --download STL10 resnet50
+python -m act.front_end.torchvision --download STL10 mobilenet_v2
+python -m act.front_end.torchvision --download STL10 efficientnet_b0
 
 # SVHN with all compatible models
-python -m act.front_end.torchvision.cli --download SVHN resnet18
-python -m act.front_end.torchvision.cli --download SVHN resnet34
-python -m act.front_end.torchvision.cli --download SVHN vgg16
-python -m act.front_end.torchvision.cli --download SVHN mobilenet_v2
-python -m act.front_end.torchvision.cli --download SVHN efficientnet_b0
+python -m act.front_end.torchvision --download SVHN resnet18
+python -m act.front_end.torchvision --download SVHN resnet34
+python -m act.front_end.torchvision --download SVHN vgg16
+python -m act.front_end.torchvision --download SVHN mobilenet_v2
+python -m act.front_end.torchvision --download SVHN efficientnet_b0
 ```
 
 ### Fine-Grained Classification (224×224 RGB)
 
 ```bash
 # Flowers102 with compatible models
-python -m act.front_end.torchvision.cli --download Flowers102 resnet50
-python -m act.front_end.torchvision.cli --download Flowers102 efficientnet_b0
-python -m act.front_end.torchvision.cli --download Flowers102 vit_b_16
-python -m act.front_end.torchvision.cli --download Flowers102 convnext_tiny
+python -m act.front_end.torchvision --download Flowers102 resnet50
+python -m act.front_end.torchvision --download Flowers102 efficientnet_b0
+python -m act.front_end.torchvision --download Flowers102 vit_b_16
+python -m act.front_end.torchvision --download Flowers102 convnext_tiny
 
 # Food101 with compatible models
-python -m act.front_end.torchvision.cli --download Food101 resnet50
-python -m act.front_end.torchvision.cli --download Food101 resnet101
-python -m act.front_end.torchvision.cli --download Food101 efficientnet_b1
-python -m act.front_end.torchvision.cli --download Food101 vit_b_16
+python -m act.front_end.torchvision --download Food101 resnet50
+python -m act.front_end.torchvision --download Food101 resnet101
+python -m act.front_end.torchvision --download Food101 efficientnet_b1
+python -m act.front_end.torchvision --download Food101 vit_b_16
 
 # OxfordIIITPet with compatible models
-python -m act.front_end.torchvision.cli --download OxfordIIITPet resnet50
-python -m act.front_end.torchvision.cli --download OxfordIIITPet efficientnet_b0
-python -m act.front_end.torchvision.cli --download OxfordIIITPet mobilenet_v2
-python -m act.front_end.torchvision.cli --download OxfordIIITPet vit_b_16
+python -m act.front_end.torchvision --download OxfordIIITPet resnet50
+python -m act.front_end.torchvision --download OxfordIIITPet efficientnet_b0
+python -m act.front_end.torchvision --download OxfordIIITPet mobilenet_v2
+python -m act.front_end.torchvision --download OxfordIIITPet vit_b_16
 
 # StanfordCars with compatible models
-python -m act.front_end.torchvision.cli --download StanfordCars resnet50
-python -m act.front_end.torchvision.cli --download StanfordCars resnet101
-python -m act.front_end.torchvision.cli --download StanfordCars efficientnet_b3
-python -m act.front_end.torchvision.cli --download StanfordCars vit_b_16
-python -m act.front_end.torchvision.cli --download StanfordCars convnext_small
+python -m act.front_end.torchvision --download StanfordCars resnet50
+python -m act.front_end.torchvision --download StanfordCars resnet101
+python -m act.front_end.torchvision --download StanfordCars efficientnet_b3
+python -m act.front_end.torchvision --download StanfordCars vit_b_16
+python -m act.front_end.torchvision --download StanfordCars convnext_small
 
 # Caltech101 with compatible models
-python -m act.front_end.torchvision.cli --download Caltech101 resnet50
-python -m act.front_end.torchvision.cli --download Caltech101 efficientnet_b0
-python -m act.front_end.torchvision.cli --download Caltech101 vit_b_16
-python -m act.front_end.torchvision.cli --download Caltech101 convnext_tiny
+python -m act.front_end.torchvision --download Caltech101 resnet50
+python -m act.front_end.torchvision --download Caltech101 efficientnet_b0
+python -m act.front_end.torchvision --download Caltech101 vit_b_16
+python -m act.front_end.torchvision --download Caltech101 convnext_tiny
 
 # Caltech256 with compatible models
-python -m act.front_end.torchvision.cli --download Caltech256 resnet50
-python -m act.front_end.torchvision.cli --download Caltech256 resnet101
-python -m act.front_end.torchvision.cli --download Caltech256 efficientnet_b0
-python -m act.front_end.torchvision.cli --download Caltech256 vit_b_16
+python -m act.front_end.torchvision --download Caltech256 resnet50
+python -m act.front_end.torchvision --download Caltech256 resnet101
+python -m act.front_end.torchvision --download Caltech256 efficientnet_b0
+python -m act.front_end.torchvision --download Caltech256 vit_b_16
 
 # FGVCAircraft with compatible models
-python -m act.front_end.torchvision.cli --download FGVCAircraft resnet50
-python -m act.front_end.torchvision.cli --download FGVCAircraft resnet101
-python -m act.front_end.torchvision.cli --download FGVCAircraft efficientnet_b3
-python -m act.front_end.torchvision.cli --download FGVCAircraft vit_b_16
+python -m act.front_end.torchvision --download FGVCAircraft resnet50
+python -m act.front_end.torchvision --download FGVCAircraft resnet101
+python -m act.front_end.torchvision --download FGVCAircraft efficientnet_b3
+python -m act.front_end.torchvision --download FGVCAircraft vit_b_16
 
 # SUN397 with compatible models
-python -m act.front_end.torchvision.cli --download SUN397 resnet50
-python -m act.front_end.torchvision.cli --download SUN397 resnet101
-python -m act.front_end.torchvision.cli --download SUN397 vgg16
-python -m act.front_end.torchvision.cli --download SUN397 densenet161
+python -m act.front_end.torchvision --download SUN397 resnet50
+python -m act.front_end.torchvision --download SUN397 resnet101
+python -m act.front_end.torchvision --download SUN397 vgg16
+python -m act.front_end.torchvision --download SUN397 densenet161
 
 # Country211 with compatible models
-python -m act.front_end.torchvision.cli --download Country211 resnet50
-python -m act.front_end.torchvision.cli --download Country211 efficientnet_b0
-python -m act.front_end.torchvision.cli --download Country211 vit_b_16
+python -m act.front_end.torchvision --download Country211 resnet50
+python -m act.front_end.torchvision --download Country211 efficientnet_b0
+python -m act.front_end.torchvision --download Country211 vit_b_16
 ```
 
 ### Other Specialized Datasets
 
 ```bash
 # Omniglot (few-shot learning)
-python -m act.front_end.torchvision.cli --download Omniglot simple_cnn
-python -m act.front_end.torchvision.cli --download Omniglot resnet18
+python -m act.front_end.torchvision --download Omniglot simple_cnn
+python -m act.front_end.torchvision --download Omniglot resnet18
 
 # PCAM (medical imaging)
-python -m act.front_end.torchvision.cli --download PCAM resnet18
-python -m act.front_end.torchvision.cli --download PCAM resnet50
-python -m act.front_end.torchvision.cli --download PCAM efficientnet_b0
+python -m act.front_end.torchvision --download PCAM resnet18
+python -m act.front_end.torchvision --download PCAM resnet50
+python -m act.front_end.torchvision --download PCAM efficientnet_b0
 
 # EuroSAT (satellite imagery)
-python -m act.front_end.torchvision.cli --download EuroSAT resnet18
-python -m act.front_end.torchvision.cli --download EuroSAT resnet50
-python -m act.front_end.torchvision.cli --download EuroSAT efficientnet_b0
-python -m act.front_end.torchvision.cli --download EuroSAT vit_b_16
+python -m act.front_end.torchvision --download EuroSAT resnet18
+python -m act.front_end.torchvision --download EuroSAT resnet50
+python -m act.front_end.torchvision --download EuroSAT efficientnet_b0
+python -m act.front_end.torchvision --download EuroSAT vit_b_16
 
 # CelebA (face attributes)
-python -m act.front_end.torchvision.cli --download CelebA resnet34
-python -m act.front_end.torchvision.cli --download CelebA resnet50
-python -m act.front_end.torchvision.cli --download CelebA mobilenet_v2
-python -m act.front_end.torchvision.cli --download CelebA efficientnet_b0
+python -m act.front_end.torchvision --download CelebA resnet34
+python -m act.front_end.torchvision --download CelebA resnet50
+python -m act.front_end.torchvision --download CelebA mobilenet_v2
+python -m act.front_end.torchvision --download CelebA efficientnet_b0
 
 # LFWPeople (face recognition)
-python -m act.front_end.torchvision.cli --download LFWPeople resnet34
-python -m act.front_end.torchvision.cli --download LFWPeople resnet50
-python -m act.front_end.torchvision.cli --download LFWPeople mobilenet_v2
-python -m act.front_end.torchvision.cli --download LFWPeople efficientnet_b0
+python -m act.front_end.torchvision --download LFWPeople resnet34
+python -m act.front_end.torchvision --download LFWPeople resnet50
+python -m act.front_end.torchvision --download LFWPeople mobilenet_v2
+python -m act.front_end.torchvision --download LFWPeople efficientnet_b0
 
 # INaturalist (species classification)
-python -m act.front_end.torchvision.cli --download INaturalist resnet50
-python -m act.front_end.torchvision.cli --download INaturalist resnet101
-python -m act.front_end.torchvision.cli --download INaturalist efficientnet_b3
-python -m act.front_end.torchvision.cli --download INaturalist vit_b_16
+python -m act.front_end.torchvision --download INaturalist resnet50
+python -m act.front_end.torchvision --download INaturalist resnet101
+python -m act.front_end.torchvision --download INaturalist efficientnet_b3
+python -m act.front_end.torchvision --download INaturalist vit_b_16
 ```
 
 ## Python API Usage
@@ -635,7 +635,7 @@ Every `download_dataset_model_pair()` call automatically validates the pair **be
 
 **✓ Successful Validation:**
 ```bash
-python -m act.front_end.torchvision.cli --download MNIST resnet18
+python -m act.front_end.torchvision --download MNIST resnet18
 ```
 ```
 ================================================================================
@@ -651,7 +651,7 @@ Validation Results:
 
 **✗ Failed Validation (Custom Model):**
 ```bash
-python -m act.front_end.torchvision.cli --download MNIST simple_cnn
+python -m act.front_end.torchvision --download MNIST simple_cnn
 ```
 ```
 ================================================================================
@@ -708,8 +708,8 @@ The framework automatically handles:
 AssertionError: Model 'simple_cnn' is not available in torchvision.models
 
 # Solution: Use standard TorchVision models instead
-python -m act.front_end.torchvision.cli --download MNIST resnet18
-python -m act.front_end.torchvision.cli --download FashionMNIST efficientnet_b0
+python -m act.front_end.torchvision --download MNIST resnet18
+python -m act.front_end.torchvision --download FashionMNIST efficientnet_b0
 ```
 
 ### Validation Failed: Inference Test Failed
@@ -718,35 +718,35 @@ python -m act.front_end.torchvision.cli --download FashionMNIST efficientnet_b0
 AssertionError: Inference test failed for DATASET + MODEL
 
 # Solution: Check preprocessing requirements and model compatibility
-python -m act.front_end.torchvision.cli --validate DATASET MODEL
-python -m act.front_end.torchvision.cli --show-preprocessing DATASET
+python -m act.front_end.torchvision --validate DATASET MODEL
+python -m act.front_end.torchvision --show-preprocessing DATASET
 ```
 
 ### Dataset Not Found
 ```bash
 # Check if dataset exists
-python -m act.front_end.torchvision.cli --list | grep -i mnist
+python -m act.front_end.torchvision --list | grep -i mnist
 
 # Download it first (with validation)
-python -m act.front_end.torchvision.cli --download MNIST resnet18
+python -m act.front_end.torchvision --download MNIST resnet18
 ```
 
 ### Model Not Compatible
 ```bash
 # Validate before downloading
-python -m act.front_end.torchvision.cli --validate MNIST resnet18
+python -m act.front_end.torchvision --validate MNIST resnet18
 
 # Check recommended models
-python -m act.front_end.torchvision.cli --models-for MNIST
+python -m act.front_end.torchvision --models-for MNIST
 
 # Check compatible datasets for a model
-python -m act.front_end.torchvision.cli --datasets-for resnet18
+python -m act.front_end.torchvision --datasets-for resnet18
 ```
 
 ### Disk Space Issues
 ```bash
 # Check total size
-python -m act.front_end.torchvision.cli --list-downloads
+python -m act.front_end.torchvision --list-downloads
 
 # Remove old downloads manually
 rm -rf data/torchvision/MNIST

@@ -1,0 +1,562 @@
+#!/usr/bin/env python3
+"""
+Unified Command-Line Interface for ACT Front-End.
+
+Provides a unified CLI that supports both TorchVision datasets/models and VNNLIB
+verification benchmarks with automatic creator detection.
+
+Copyright (C) 2025 SVF-tools/ACT
+License: AGPLv3+
+"""
+
+import argparse
+from typing import Optional
+
+from act.front_end.creator_registry import detect_creator, list_creators, get_creator
+
+# Import domain-specific CLIs for delegation
+from act.front_end.torchvision import data_model_mapping as tv_mapping
+from act.front_end.torchvision import data_model_loader as tv_loader
+from act.front_end.vnnlib import category_mapping as vnnlib_mapping
+
+
+def print_unified_list(creator: Optional[str] = None):
+    """
+    Print unified list of all available datasets/categories.
+    
+    Args:
+        creator: If provided, only show items from this creator
+    """
+    print(f"\n{'='*100}")
+    print(f"ACT FRONT-END UNIFIED CATALOG")
+    print(f"{'='*100}")
+    
+    if creator is None or creator == 'torchvision':
+        # List TorchVision datasets
+        datasets = sorted(tv_mapping.DATASET_MODEL_MAPPING.keys())
+        print(f"\nTorchVision Datasets ({len(datasets)}):")
+        print('-' * 100)
+        for ds_name in datasets:
+            info = tv_mapping.DATASET_MODEL_MAPPING[ds_name]
+            category = info.get('category', 'N/A')
+            num_classes = info.get('num_classes', 'N/A')
+            print(f"  {ds_name:30s} [{category:15s}] - {num_classes} classes")
+    
+    if creator is None or creator == 'vnnlib':
+        # List VNNLIB categories
+        categories = vnnlib_mapping.list_categories()
+        print(f"\nVNNLIB Categories ({len(categories)}):")
+        print('-' * 100)
+        for cat_name in sorted(categories):
+            info = vnnlib_mapping.get_category_info(cat_name)
+            print(f"  {cat_name:30s} ({info['type']}) - {info['description']}")
+    
+    print(f"\n{'='*100}\n")
+
+
+def print_unified_search(query: str, creator: Optional[str] = None):
+    """
+    Search across both TorchVision and VNNLIB.
+    
+    Args:
+        query: Search query string
+        creator: If provided, only search this creator
+    """
+    print(f"\n{'='*100}")
+    print(f"SEARCH RESULTS: '{query}'")
+    print(f"{'='*100}")
+    
+    found_any = False
+    
+    if creator is None or creator == 'torchvision':
+        tv_matches = tv_mapping.search_datasets(query)
+        if tv_matches:
+            found_any = True
+            print(f"\nTorchVision Datasets ({len(tv_matches)}):")
+            print('-' * 100)
+            for ds_name in sorted(tv_matches):
+                info = tv_mapping.DATASET_MODEL_MAPPING[ds_name]
+                category = info.get('category', 'N/A')
+                print(f"  {ds_name:30s} [{category}]")
+    
+    if creator is None or creator == 'vnnlib':
+        vnnlib_matches = vnnlib_mapping.search_categories(query)
+        if vnnlib_matches:
+            found_any = True
+            print(f"\nVNNLIB Categories ({len(vnnlib_matches)}):")
+            print('-' * 100)
+            for cat_name in sorted(vnnlib_matches):
+                info = vnnlib_mapping.get_category_info(cat_name)
+                print(f"  {cat_name:30s} ({info['type']}) - {info['description']}")
+    
+    if not found_any:
+        print(f"\nNo results found for '{query}'")
+    
+    print(f"\n{'='*100}\n")
+
+
+def print_unified_info(name: str, explicit_creator: Optional[str] = None):
+    """
+    Show detailed information about a dataset/category with auto-detection.
+    
+    Args:
+        name: Name of dataset or category
+        explicit_creator: Override auto-detection
+    """
+    try:
+        creator_name, normalized_name = detect_creator(name, explicit_creator)
+        
+        print(f"\n{'='*100}")
+        print(f"DETECTED CREATOR: {creator_name.upper()}")
+        print(f"{'='*100}")
+        
+        if creator_name == 'torchvision':
+            info = tv_mapping.get_dataset_info(normalized_name)
+            print(f"\nDataset: {normalized_name}")
+            print(f"Category: {info.get('category', 'N/A')}")
+            print(f"Input Size: {info.get('input_size', 'N/A')}")
+            print(f"Classes: {info.get('num_classes', 'N/A')}")
+            print(f"Notes: {info.get('notes', 'N/A')}")
+            
+            # Show recommended models
+            models = info.get('models', [])
+            if models:
+                print(f"\nRecommended Models ({len(models)}):")
+                for model in models:
+                    print(f"  • {model}")
+            
+        elif creator_name == 'vnnlib':
+            info = vnnlib_mapping.get_category_info(normalized_name)
+            print(f"\nCategory: {normalized_name}")
+            print(f"Type: {info['type']}")
+            print(f"Year: {info['year']}")
+            print(f"Description: {info['description']}")
+            print(f"\nModel Information:")
+            print(f"  • Models: {info['models']}")
+            print(f"  • Properties: {info['properties']}")
+            print(f"  • Input Dim: {info['input_dim']}")
+            print(f"  • Output Dim: {info['output_dim']}")
+        
+        print(f"\n{'='*100}\n")
+        
+    except ValueError as e:
+        print(f"Error: {e}")
+        print(f"\nTip: Use --search to find available names or --creator to override detection")
+
+
+def handle_unified_download(name: str, explicit_creator: Optional[str] = None):
+    """
+    Download a dataset/category with auto-detection.
+    
+    Args:
+        name: Name of dataset or category
+        explicit_creator: Override auto-detection
+    """
+    try:
+        creator_name, normalized_name = detect_creator(name, explicit_creator)
+        
+        print(f"\n{'='*100}")
+        print(f"DOWNLOADING: {normalized_name} (creator: {creator_name})")
+        print(f"{'='*100}\n")
+        
+        if creator_name == 'torchvision':
+            # For TorchVision, download dataset + all recommended models
+            info = tv_mapping.get_dataset_info(normalized_name)
+            models = info.get('models', [])
+            
+            if not models:
+                print(f"⚠️  No models available for {normalized_name}")
+                return
+            
+            print(f"Downloading dataset '{normalized_name}' with {len(models)} models...\n")
+            
+            success_count = 0
+            for model in models:
+                try:
+                    result = tv_loader.download_dataset_model_pair(normalized_name, model)
+                    if result['status'] == 'success':
+                        print(f"✓ {normalized_name} + {model}")
+                        success_count += 1
+                    else:
+                        print(f"✗ {normalized_name} + {model} - {result['message']}")
+                except Exception as e:
+                    print(f"✗ {normalized_name} + {model} - Error: {e}")
+            
+            print(f"\n{'='*100}")
+            print(f"Downloaded {success_count}/{len(models)} model pairs")
+            print(f"{'='*100}\n")
+            
+        elif creator_name == 'vnnlib':
+            # Import VNNLIB loader
+            from act.front_end.vnnlib import data_model_loader as vnnlib_loader
+            
+            print(f"Downloading VNNLIB category '{normalized_name}'...")
+            print(f"This will download:")
+            print(f"  • ONNX model files")
+            print(f"  • VNNLIB property files")
+            print(f"  • instances.csv mapping\n")
+            
+            try:
+                result = vnnlib_loader.download_vnnlib_category(normalized_name)
+                
+                if result['status'] == 'success':
+                    print(f"\n{'='*100}")
+                    print(f"✓ Successfully downloaded category: {normalized_name}")
+                    print(f"  Location: {result['category_path']}")
+                    print(f"  Instances: {result['num_instances']}")
+                    print(f"{'='*100}\n")
+                else:
+                    print(f"\n{'='*100}")
+                    print(f"✗ Download failed: {result['message']}")
+                    print(f"\nNote: VNNLIB benchmarks must be downloaded manually from VNN-COMP.")
+                    print(f"Expected location: data/vnnlib/{normalized_name}/")
+                    print(f"\nManual download steps:")
+                    print(f"  1. Visit: https://github.com/ChristopherBrix/vnncomp_benchmarks")
+                    print(f"  2. Download the '{normalized_name}' benchmark")
+                    print(f"  3. Extract to: data/vnnlib/{normalized_name}/")
+                    print(f"  4. Ensure structure includes:")
+                    print(f"     - onnx/         (ONNX model files)")
+                    print(f"     - vnnlib/       (VNNLIB property files)")
+                    print(f"     - instances.csv (benchmark instances)")
+                    print(f"{'='*100}\n")
+                    
+            except Exception as e:
+                print(f"\n{'='*100}")
+                print(f"✗ Download error: {e}")
+                print(f"\nNote: VNNLIB benchmarks must be downloaded manually from VNN-COMP.")
+                print(f"Expected location: data/vnnlib/{normalized_name}/")
+                print(f"{'='*100}\n")
+        
+    except ValueError as e:
+        print(f"Error: {e}")
+
+
+def print_list_downloads(creator: Optional[str] = None):
+    """
+    List all downloaded datasets/categories.
+    
+    Args:
+        creator: If provided, only show downloads from this creator
+    """
+    print(f"\n{'='*100}")
+    print(f"DOWNLOADED ITEMS")
+    print(f"{'='*100}")
+    
+    if creator is None or creator == 'torchvision':
+        tv_downloads = tv_loader.list_downloaded_pairs()
+        if tv_downloads:
+            print(f"\nTorchVision Downloads ({len(tv_downloads)}):")
+            print('-' * 100)
+            for item in sorted(tv_downloads, key=lambda x: (x['dataset'], x['model'])):
+                print(f"  {item['dataset']:30s} + {item['model']}")
+        else:
+            print(f"\nNo TorchVision downloads found")
+    
+    if creator is None or creator == 'vnnlib':
+        from act.front_end.vnnlib import data_model_loader as vnnlib_loader
+        
+        vnnlib_downloads = vnnlib_loader.list_downloaded_pairs()
+        if vnnlib_downloads:
+            print(f"\nVNNLIB Downloads ({len(vnnlib_downloads)} instances):")
+            print('-' * 100)
+            
+            # Group by category
+            categories = {}
+            for item in vnnlib_downloads:
+                cat = item['category']
+                if cat not in categories:
+                    categories[cat] = []
+                categories[cat].append(item)
+            
+            for cat in sorted(categories.keys()):
+                instances = categories[cat]
+                print(f"  {cat:30s} ({len(instances)} instances)")
+        else:
+            print(f"\nNo VNNLIB downloads found")
+    
+    print(f"\n{'='*100}\n")
+
+
+def print_creators():
+    """Print information about all available creators."""
+    creators = list_creators()
+    
+    print(f"\n{'='*100}")
+    print(f"AVAILABLE CREATORS")
+    print(f"{'='*100}")
+    
+    for creator_name in sorted(creators):
+        print(f"\n{creator_name.upper()}")
+        print('-' * 100)
+        
+        if creator_name == 'torchvision':
+            datasets = list(tv_mapping.DATASET_MODEL_MAPPING.keys())
+            print(f"  Description: TorchVision datasets and models")
+            print(f"  Module: act.front_end.torchvision")
+            print(f"  Total Items: {len(datasets)}")
+        elif creator_name == 'vnnlib':
+            categories = vnnlib_mapping.list_categories()
+            print(f"  Description: VNNLIB verification benchmarks")
+            print(f"  Module: act.front_end.vnnlib")
+            print(f"  Total Items: {len(categories)}")
+    
+    print(f"\n{'='*100}\n")
+
+
+def main():
+    """Main unified CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description="ACT Front-End Unified CLI - Auto-detects TorchVision and VNNLIB",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # ============================================================================
+  # LISTING - Browse available datasets and categories
+  # ============================================================================
+  
+  # List all available items (40 TorchVision + 26 VNNLIB)
+  python -m act.front_end --list
+  
+  # List only TorchVision datasets
+  python -m act.front_end --list --creator torchvision
+  
+  # List only VNNLIB categories
+  python -m act.front_end --list --creator vnnlib
+  
+  # Show available creators with details
+  python -m act.front_end --list-creators
+  
+  # ============================================================================
+  # SEARCHING - Find specific datasets or categories
+  # ============================================================================
+  
+  # Search across both creators (auto-detects)
+  python -m act.front_end --search mnist         # Finds: MNIST, FashionMNIST, KMNIST, EMNIST
+  python -m act.front_end --search cifar         # Finds: CIFAR10, CIFAR100, cifar100_2024
+  python -m act.front_end --search imagenet      # Finds: ImageNet (TorchVision)
+  python -m act.front_end --search yolo          # Finds: yolo_2023 (VNNLIB)
+  python -m act.front_end --search transformer   # Finds: vit_2023, safenlp_2024 (VNNLIB)
+  python -m act.front_end --search acas          # Finds: acasxu_2023 (VNNLIB)
+  python -m act.front_end --search resnet        # Finds: resnet* (VNNLIB categories)
+  
+  # Search with creator filter
+  python -m act.front_end --search mnist --creator torchvision
+  python -m act.front_end --search cifar --creator vnnlib
+  
+  # ============================================================================
+  # INFO - Get detailed information about datasets/categories
+  # ============================================================================
+  
+  # Auto-detect and show info (TorchVision datasets)
+  python -m act.front_end --info MNIST           # Dataset info + recommended models
+  python -m act.front_end --info CIFAR10         # Shows: resnet18, mobilenet_v2, etc.
+  python -m act.front_end --info ImageNet        # Large-scale dataset info
+  python -m act.front_end --info FashionMNIST    # Fashion items dataset
+  
+  # Auto-detect and show info (VNNLIB categories)
+  python -m act.front_end --info acasxu_2023     # ACAS Xu collision avoidance
+  python -m act.front_end --info vit_2023        # Vision Transformer verification
+  python -m act.front_end --info yolo_2023       # YOLO object detection
+  python -m act.front_end --info cifar100_2024   # CIFAR100 VNNLIB benchmark
+  python -m act.front_end --info vggnet16_2022   # VGG-16 verification
+  
+  # Explicit creator override (when name could be ambiguous)
+  python -m act.front_end --info MNIST --creator torchvision
+  python -m act.front_end --info CIFAR10 --creator torchvision
+  python -m act.front_end --info cifar100_2024 --creator vnnlib
+  
+  # ============================================================================
+  # DOWNLOAD - Download datasets, models, and benchmarks
+  # ============================================================================
+  
+  # Auto-detect and download (TorchVision - downloads dataset + ALL recommended models)
+  python -m act.front_end --download MNIST              # Downloads MNIST + simple_cnn, lenet5, resnet18, etc.
+  python -m act.front_end --download CIFAR10            # Downloads CIFAR10 + resnet18, mobilenet_v2, etc.
+  python -m act.front_end --download FashionMNIST       # Downloads FashionMNIST + models
+  python -m act.front_end --download ImageNet           # Downloads ImageNet (large!)
+  python -m act.front_end --download SVHN               # Downloads Street View House Numbers
+  
+  # Auto-detect and download (VNNLIB - downloads ONNX models + VNNLIB properties)
+  python -m act.front_end --download acasxu_2023        # Downloads 45 ONNX models + properties
+  python -m act.front_end --download vit_2023           # Vision Transformer benchmarks
+  python -m act.front_end --download yolo_2023          # YOLO verification benchmarks
+  python -m act.front_end --download cifar100_2024      # CIFAR100 VNNLIB benchmarks
+  python -m act.front_end --download safenlp_2024       # NLP verification benchmarks
+  python -m act.front_end --download vggnet16_2022      # VGG-16 benchmarks
+  
+  # Force specific creator (if name could match multiple)
+  python -m act.front_end --download MNIST --creator torchvision
+  python -m act.front_end --download CIFAR10 --creator torchvision
+  python -m act.front_end --download cifar100_2024 --creator vnnlib
+  
+  # ============================================================================
+  # DOWNLOAD MANAGEMENT - Track what's been downloaded
+  # ============================================================================
+  
+  # List all downloaded items (grouped by creator)
+  python -m act.front_end --list-downloads
+  
+  # List only TorchVision downloads
+  python -m act.front_end --list-downloads --creator torchvision
+  
+  # List only VNNLIB downloads
+  python -m act.front_end --list-downloads --creator vnnlib
+  
+  # ============================================================================
+  # MODEL SYNTHESIS & INFERENCE - Creator-specific workflows
+  # ============================================================================
+  
+  # Run model synthesis (defaults to TorchVision)
+  python -m act.front_end --synthesis
+  
+  # Run synthesis for specific creator
+  python -m act.front_end --synthesis --creator torchvision   # PyTorch models with specs
+  python -m act.front_end --synthesis --creator vnnlib        # ONNX models with VNNLIB specs
+  
+  # Run inference on synthesized models (defaults to TorchVision)
+  python -m act.front_end --inference
+  
+  # Run inference for specific creator
+  python -m act.front_end --inference --creator torchvision   # Validates PyTorch models
+  python -m act.front_end --inference --creator vnnlib        # Validates ONNX→PyTorch models
+  
+  # ============================================================================
+  # ADVANCED WORKFLOWS
+  # ============================================================================
+  
+  # Download multiple categories sequentially
+  python -m act.front_end --download MNIST && \\
+  python -m act.front_end --download CIFAR10 && \\
+  python -m act.front_end --download acasxu_2023
+  
+  # Search and download pipeline
+  python -m act.front_end --search acas          # Find available ACAS benchmarks
+  python -m act.front_end --info acasxu_2023     # Check details
+  python -m act.front_end --download acasxu_2023 # Download it
+  
+  # Complete TorchVision workflow
+  python -m act.front_end --download MNIST       # Download dataset + models
+  python -m act.front_end --synthesis            # Generate wrapped models
+  python -m act.front_end --inference            # Validate correctness
+  
+  # Check what's available vs what's downloaded
+  python -m act.front_end --list                 # Show all available
+  python -m act.front_end --list-downloads       # Show what's downloaded
+        """
+    )
+    
+    # Common commands
+    parser.add_argument(
+        "--list", "-l",
+        action="store_true",
+        help="List all available datasets/categories from all creators"
+    )
+    parser.add_argument(
+        "--search", "-s",
+        type=str,
+        help="Search for datasets/categories by name across all creators"
+    )
+    parser.add_argument(
+        "--info", "-i",
+        type=str,
+        metavar="NAME",
+        help="Show detailed information (auto-detects creator)"
+    )
+    parser.add_argument(
+        "--download", "-d",
+        type=str,
+        metavar="NAME",
+        help="Download dataset/category (auto-detects creator)"
+    )
+    parser.add_argument(
+        "--list-downloads",
+        action="store_true",
+        dest="list_downloads",
+        help="List all downloaded items from all creators"
+    )
+    
+    # Creator management
+    parser.add_argument(
+        "--creator", "-c",
+        type=str,
+        choices=['torchvision', 'vnnlib'],
+        help="Override auto-detection and use specific creator"
+    )
+    parser.add_argument(
+        "--list-creators",
+        action="store_true",
+        dest="list_creators",
+        help="Show information about all available creators"
+    )
+    
+    # Model synthesis and inference
+    parser.add_argument(
+        "--synthesis",
+        action="store_true",
+        help="Run model synthesis to generate verification-ready models (defaults to TorchVision, use --creator to specify)"
+    )
+    parser.add_argument(
+        "--inference",
+        action="store_true",
+        help="Run inference on synthesized models to validate correctness (defaults to TorchVision, use --creator to specify)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Handle commands
+    if args.list:
+        print_unified_list(creator=args.creator)
+    
+    elif args.search:
+        print_unified_search(args.search, creator=args.creator)
+    
+    elif args.info:
+        print_unified_info(args.info, explicit_creator=args.creator)
+    
+    elif args.download:
+        handle_unified_download(args.download, explicit_creator=args.creator)
+    
+    elif args.list_downloads:
+        print_list_downloads(creator=args.creator)
+    
+    elif args.list_creators:
+        print_creators()
+    
+    elif args.synthesis:
+        creator_name = args.creator if args.creator else 'torchvision'
+        print(f"\n{'='*100}")
+        print(f"MODEL SYNTHESIS - {creator_name.upper()}")
+        print(f"{'='*100}\n")
+        
+        try:
+            from act.front_end.model_synthesis import model_synthesis
+            wrapped_models, input_data = model_synthesis(creator=creator_name)
+            print(f"\n✓ Successfully synthesized {len(wrapped_models)} models")
+            print(f"  Models are ready for verification")
+        except Exception as e:
+            print(f"\n✗ Synthesis failed: {e}")
+    
+    elif args.inference:
+        creator_name = args.creator if args.creator else 'torchvision'
+        print(f"\n{'='*100}")
+        print(f"MODEL INFERENCE - {creator_name.upper()}")
+        print(f"{'='*100}\n")
+        
+        try:
+            from act.front_end.model_synthesis import model_synthesis
+            from act.util.model_inference import model_inference
+            
+            wrapped_models, input_data = model_synthesis(creator=creator_name)
+            print(f"✓ Synthesized {len(wrapped_models)} models")
+            
+            successful_models = model_inference(wrapped_models, input_data)
+            print(f"✓ Successfully ran inference on {len(successful_models)}/{len(wrapped_models)} models")
+        except Exception as e:
+            print(f"\n✗ Inference failed: {e}")
+    
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

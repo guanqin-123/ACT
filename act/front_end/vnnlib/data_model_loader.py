@@ -20,6 +20,7 @@ import json
 import csv
 import urllib.request
 import shutil
+import gzip
 import torch
 import torch.nn as nn
 
@@ -38,8 +39,13 @@ from act.front_end.vnnlib.vnnlib_parser import (
 logger = logging.getLogger(__name__)
 
 
-# VNN-COMP GitHub repository base URL
-VNNCOMP_REPO_BASE = "https://raw.githubusercontent.com/ChristopherBrix/vnncomp_benchmarks/main"
+# VNN-COMP GitHub repository base URLs (try multiple sources)
+VNNCOMP_REPO_URLS = [
+    "https://raw.githubusercontent.com/VNN-COMP/vnncomp2024_benchmarks/main/benchmarks",
+    "https://raw.githubusercontent.com/stanleybak/vnncomp2024_benchmarks/main/benchmarks",
+    "https://raw.githubusercontent.com/ChristopherBrix/vnncomp2024_benchmarks/main/benchmarks",
+    "https://raw.githubusercontent.com/ChristopherBrix/vnncomp_benchmarks/main",
+]
 
 
 def download_vnnlib_category(
@@ -101,19 +107,28 @@ def download_vnnlib_category(
     
     logger.info(f"Downloading VNNLIB category: {category}")
     
-    try:
-        # Download instances.csv
-        instances_url = f"{VNNCOMP_REPO_BASE}/{category}/instances.csv"
-        logger.info(f"Downloading instances.csv from {instances_url}")
+    # Try multiple repository URLs
+    successful_base_url = None
+    for base_url in VNNCOMP_REPO_URLS:
+        instances_url = f"{base_url}/{category}/instances.csv"
+        logger.info(f"Trying: {instances_url}")
         
         try:
             urllib.request.urlretrieve(instances_url, instances_file)
+            successful_base_url = base_url
+            logger.info(f"✓ Successfully downloaded from {base_url}")
+            break
         except Exception as e:
-            return {
-                'status': 'error',
-                'message': f"Failed to download instances.csv: {str(e)}"
-            }
-        
+            logger.debug(f"Failed to download from {base_url}: {e}")
+            continue
+    
+    if successful_base_url is None:
+        return {
+            'status': 'error',
+            'message': f"Failed to download instances.csv from all sources. Tried {len(VNNCOMP_REPO_URLS)} repositories."
+        }
+    
+    try:
         # Parse instances.csv to get ONNX and VNNLIB files
         instances = []
         with open(instances_file, 'r') as f:
@@ -131,7 +146,7 @@ def download_vnnlib_category(
         
         logger.info(f"Found {len(instances)} instances in category '{category}'")
         
-        # Download ONNX and VNNLIB files
+        # Download ONNX and VNNLIB files using the successful base URL
         downloaded_onnx = set()
         downloaded_vnnlib = set()
         
@@ -139,28 +154,89 @@ def download_vnnlib_category(
             # Download ONNX model
             onnx_file = instance['onnx']
             if onnx_file not in downloaded_onnx:
-                onnx_url = f"{VNNCOMP_REPO_BASE}/{category}/{onnx_file}"
+                # Try both .onnx and .onnx.gz (gzipped files)
                 onnx_path = onnx_dir / Path(onnx_file).name
                 
-                try:
-                    logger.debug(f"[{idx}/{len(instances)}] Downloading {onnx_file}")
-                    urllib.request.urlretrieve(onnx_url, onnx_path)
-                    downloaded_onnx.add(onnx_file)
-                except Exception as e:
-                    logger.warning(f"Failed to download {onnx_file}: {e}")
+                # Try .onnx.gz first (compressed), then .onnx
+                tried_urls = []
+                success = False
+                
+                for extension in ['.gz', '']:
+                    onnx_url = f"{successful_base_url}/{category}/{onnx_file}{extension}"
+                    tried_urls.append(onnx_url)
+                    
+                    try:
+                        logger.debug(f"[{idx}/{len(instances)}] Trying {onnx_file}{extension}")
+                        
+                        if extension == '.gz':
+                            # Download compressed file
+                            gz_path = onnx_path.parent / f"{onnx_path.name}.gz"
+                            urllib.request.urlretrieve(onnx_url, gz_path)
+                            
+                            # Decompress
+                            with gzip.open(gz_path, 'rb') as f_in:
+                                with open(onnx_path, 'wb') as f_out:
+                                    shutil.copyfileobj(f_in, f_out)
+                            
+                            # Remove .gz file
+                            gz_path.unlink()
+                            logger.debug(f"  ✓ Decompressed {onnx_file}")
+                        else:
+                            # Download uncompressed file
+                            urllib.request.urlretrieve(onnx_url, onnx_path)
+                        
+                        downloaded_onnx.add(onnx_file)
+                        success = True
+                        break
+                    except Exception as e:
+                        logger.debug(f"  Failed with {extension}: {e}")
+                        continue
+                
+                if not success:
+                    logger.warning(f"Failed to download {onnx_file} from any URL")
             
             # Download VNNLIB spec
             vnnlib_file = instance['vnnlib']
             if vnnlib_file not in downloaded_vnnlib:
-                vnnlib_url = f"{VNNCOMP_REPO_BASE}/{category}/{vnnlib_file}"
                 vnnlib_path = vnnlib_dir / Path(vnnlib_file).name
                 
-                try:
-                    logger.debug(f"[{idx}/{len(instances)}] Downloading {vnnlib_file}")
-                    urllib.request.urlretrieve(vnnlib_url, vnnlib_path)
-                    downloaded_vnnlib.add(vnnlib_file)
-                except Exception as e:
-                    logger.warning(f"Failed to download {vnnlib_file}: {e}")
+                # Try both .vnnlib and .vnnlib.gz
+                tried_urls = []
+                success = False
+                
+                for extension in ['.gz', '']:
+                    vnnlib_url = f"{successful_base_url}/{category}/{vnnlib_file}{extension}"
+                    tried_urls.append(vnnlib_url)
+                    
+                    try:
+                        logger.debug(f"[{idx}/{len(instances)}] Trying {vnnlib_file}{extension}")
+                        
+                        if extension == '.gz':
+                            # Download compressed file
+                            gz_path = vnnlib_path.parent / f"{vnnlib_path.name}.gz"
+                            urllib.request.urlretrieve(vnnlib_url, gz_path)
+                            
+                            # Decompress
+                            with gzip.open(gz_path, 'rb') as f_in:
+                                with open(vnnlib_path, 'wb') as f_out:
+                                    shutil.copyfileobj(f_in, f_out)
+                            
+                            # Remove .gz file
+                            gz_path.unlink()
+                            logger.debug(f"  ✓ Decompressed {vnnlib_file}")
+                        else:
+                            # Download uncompressed file
+                            urllib.request.urlretrieve(vnnlib_url, vnnlib_path)
+                        
+                        downloaded_vnnlib.add(vnnlib_file)
+                        success = True
+                        break
+                    except Exception as e:
+                        logger.debug(f"  Failed with {extension}: {e}")
+                        continue
+                
+                if not success:
+                    logger.warning(f"Failed to download {vnnlib_file} from any URL")
         
         # Create metadata
         metadata = {
@@ -168,7 +244,7 @@ def download_vnnlib_category(
             'num_instances': len(instances),
             'num_onnx_models': len(downloaded_onnx),
             'num_vnnlib_specs': len(downloaded_vnnlib),
-            'source': VNNCOMP_REPO_BASE,
+            'source': successful_base_url,
             'paths': {
                 'onnx': str(onnx_dir),
                 'vnnlib': str(vnnlib_dir),

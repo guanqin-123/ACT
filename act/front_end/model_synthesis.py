@@ -230,12 +230,15 @@ def synthesize_models_from_specs(
 # -----------------------------------------------------------------------------
 # 4) Model synthesis main function
 # -----------------------------------------------------------------------------
-def model_synthesis() -> Tuple[Dict[str, nn.Sequential], Dict[str, Dict[str, torch.Tensor]]]:
+def model_synthesis(creator: str = 'torchvision') -> Tuple[Dict[str, nn.Sequential], Dict[str, Dict[str, torch.Tensor]]]:
     """
     Main model synthesis function using new spec creators.
     
     Simplified implementation that delegates spec creation to TorchVisionSpecCreator
     or VNNLibSpecCreator, then synthesizes wrapped models directly.
+    
+    Args:
+        creator: Creator to use ('torchvision' or 'vnnlib'). Defaults to 'torchvision'.
     
     Returns:
         wrapped_models: Dict[combo_id, nn.Sequential] - All synthesized wrapped models
@@ -243,34 +246,63 @@ def model_synthesis() -> Tuple[Dict[str, nn.Sequential], Dict[str, Dict[str, tor
         
     Raises:
         RuntimeError: If no spec creator can load data-model pairs or create specs
+        NotImplementedError: If VNNLIB creator is requested (not yet implemented)
     """
-    from act.front_end.torchvision.create_specs import TorchVisionSpecCreator
-    
     print(f"\n{'='*80}")
-    print(f"MODEL SYNTHESIS: Using New Spec Creators")
+    print(f"MODEL SYNTHESIS: Using New Spec Creators ({creator.upper()})")
     print(f"{'='*80}")
     
-    # Try TorchVision spec creator
-    print(f"\n📊 Attempting to use TorchVisionSpecCreator...")
-    creator = TorchVisionSpecCreator(config_name="torchvision_classification")
+    # Select creator based on parameter
+    if creator == 'vnnlib':
+        from act.front_end.vnnlib.create_specs import VNNLibSpecCreator
+        
+        print(f"\n📊 Attempting to use VNNLibSpecCreator...")
+        spec_creator = VNNLibSpecCreator(config_name="vnnlib_default")
+        
+        # Create specs for all downloaded VNNLIB instances
+        # Use max_instances=3 to limit for testing (185 total instances available)
+        spec_results = spec_creator.create_specs_for_data_model_pairs(
+            categories=None,  # All downloaded categories
+            max_instances=3,  # Limit to 3 instances per category for synthesis
+            validate_shapes=True
+        )
     
-    # Create specs for all downloaded dataset-model pairs
-    spec_results = creator.create_specs_for_data_model_pairs(
-        num_samples=3,  # Use 3 sample per pair for synthesis
-        validate_shapes=True
-    )
+    elif creator == 'torchvision':
+        from act.front_end.torchvision.create_specs import TorchVisionSpecCreator
+        
+        print(f"\n📊 Attempting to use TorchVisionSpecCreator...")
+        spec_creator = TorchVisionSpecCreator(config_name="torchvision_classification")
+        
+        # Create specs for all downloaded dataset-model pairs
+        spec_results = spec_creator.create_specs_for_data_model_pairs(
+            num_samples=3,  # Use 3 samples per pair for synthesis
+            validate_shapes=True
+        )
+    
+    else:
+        raise ValueError(f"Unknown creator: {creator}. Use 'torchvision' or 'vnnlib'.")
     
     # Validate results
     if not spec_results:
-        raise RuntimeError(
-            "No dataset-model pairs found! Please download datasets first.\n\n"
-            "Examples:\n"
-            "  python -m act.front_end.torchvision --download MNIST simple_cnn\n"
-            "  python -m act.front_end.torchvision --download CIFAR10 lenet5\n"
-            "  python -m act.front_end.torchvision --list  # Show available pairs\n"
-        )
+        if creator == 'vnnlib':
+            raise RuntimeError(
+                "No VNNLIB instances found! Please download VNNLIB benchmarks first.\n\n"
+                "Examples:\n"
+                "  python -m act.front_end --download acasxu_2023      # ACAS Xu collision avoidance\n"
+                "  python -m act.front_end --download vit_2023          # Vision Transformer\n"
+                "  python -m act.front_end --list-downloads             # Show what's downloaded\n"
+            )
+        else:
+            raise RuntimeError(
+                "No dataset-model pairs found! Please download datasets first.\n\n"
+                "Examples:\n"
+                "  python -m act.front_end --download MNIST              # Downloads MNIST + all models\n"
+                "  python -m act.front_end --download CIFAR10            # Downloads CIFAR10 + all models\n"
+                "  python -m act.front_end --list                        # Show all available datasets\n"
+                "  python -m act.front_end --list-downloads              # Show what's already downloaded\n"
+            )
     
-    print(f"✓ Successfully created specs using TorchVisionSpecCreator")
+    print(f"✓ Successfully created specs using {creator.upper()} spec creator")
     print(f"  Found {len(spec_results)} dataset-model pair(s)")
     
     # Calculate statistics from spec_results BEFORE synthesis

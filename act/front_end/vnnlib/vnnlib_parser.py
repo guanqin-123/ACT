@@ -251,48 +251,44 @@ def _extract_input_bounds(content: str, num_inputs: int) -> Dict[int, Tuple[floa
         bounds[i] = [float('-inf'), float('inf')]
     
     # Match lower bounds: (>= X_i value) or (>= value X_i)
-    lb_patterns = [
-        r'\(>=\s+X_(\d+)\s+([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\)',
-        r'\(>=\s+([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s+X_(\d+)\)'
-    ]
+    # Pattern 1: (>= X_i value) - groups[0]=idx, groups[1]=value
+    # Pattern 2: (>= value X_i) - groups[0]=value, groups[1]=idx
+    lb_pattern_1 = r'\(>=\s+X_(\d+)\s+([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\)'
+    lb_pattern_2 = r'\(>=\s+([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s+X_(\d+)\)'
     
-    for pattern in lb_patterns:
-        for match in re.finditer(pattern, content):
-            groups = match.groups()
-            # Handle both orderings
-            if groups[0].replace('.', '').replace('-', '').replace('+', '').replace('e', '').replace('E', '').isdigit():
-                # First group is number
-                idx = int(groups[1])
-                lb = float(groups[0])
-            else:
-                # Second group is number
-                idx = int(groups[0])
-                lb = float(groups[1])
-            
-            if idx < num_inputs:
-                bounds[idx][0] = max(bounds[idx][0], lb)
+    # Pattern 1: X_i comes first
+    for match in re.finditer(lb_pattern_1, content):
+        idx = int(match.group(1))  # Index
+        lb = float(match.group(2))  # Value
+        if idx < num_inputs:
+            bounds[idx][0] = max(bounds[idx][0], lb)
+    
+    # Pattern 2: Value comes first
+    for match in re.finditer(lb_pattern_2, content):
+        lb = float(match.group(1))  # Value
+        idx = int(match.group(2))  # Index
+        if idx < num_inputs:
+            bounds[idx][0] = max(bounds[idx][0], lb)
     
     # Match upper bounds: (<= X_i value) or (<= value X_i)
-    ub_patterns = [
-        r'\(<=\s+X_(\d+)\s+([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\)',
-        r'\(<=\s+([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s+X_(\d+)\)'
-    ]
+    # Pattern 1: (<= X_i value) - groups[0]=idx, groups[1]=value
+    # Pattern 2: (<= value X_i) - groups[0]=value, groups[1]=idx
+    ub_pattern_1 = r'\(<=\s+X_(\d+)\s+([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\)'
+    ub_pattern_2 = r'\(<=\s+([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s+X_(\d+)\)'
     
-    for pattern in ub_patterns:
-        for match in re.finditer(pattern, content):
-            groups = match.groups()
-            # Handle both orderings
-            if groups[0].replace('.', '').replace('-', '').replace('+', '').replace('e', '').replace('E', '').isdigit():
-                # First group is number
-                idx = int(groups[1])
-                ub = float(groups[0])
-            else:
-                # Second group is number
-                idx = int(groups[0])
-                ub = float(groups[1])
-            
-            if idx < num_inputs:
-                bounds[idx][1] = min(bounds[idx][1], ub)
+    # Pattern 1: X_i comes first
+    for match in re.finditer(ub_pattern_1, content):
+        idx = int(match.group(1))  # Index
+        ub = float(match.group(2))  # Value
+        if idx < num_inputs:
+            bounds[idx][1] = min(bounds[idx][1], ub)
+    
+    # Pattern 2: Value comes first
+    for match in re.finditer(ub_pattern_2, content):
+        ub = float(match.group(1))  # Value
+        idx = int(match.group(2))  # Index
+        if idx < num_inputs:
+            bounds[idx][1] = min(bounds[idx][1], ub)
     
     # Convert to tuples and filter infinite bounds
     result = {}

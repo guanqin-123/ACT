@@ -34,17 +34,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install torch torchvision onnx onnx2pytorch tensorflow pandas numpy pyyaml tqdm pytest
 
-      - name: Run TorchVision Data Model Loader Tests
+      - name: Run VNNLIB Data-Model and Synthesis
         run: |
           cd ${{ github.workspace }}
-          timeout 60 python -m act.front_end.torchvision.cli --download MNIST resnet18
-          timeout 60 python -m act.front_end.torchvision.cli --download MNIST simple_cnn
-          timeout 60 python act/front_end/torchvision/data_model_loader.py
+          python -m act.front_end --download acasxu_2023
+          python -m act.front_end --list-downloads
+          python -m act.front_end --synthesis --creator vnnlib
 
-      - name: Run Model Synthesis Tests
+      - name: Run TorchVision Data-Model and Synthesis
         run: |
           cd ${{ github.workspace }}
-          timeout 60 python -m act.front_end.model_synthesis
+          python -m act.front_end --download MNIST
+          python -m act.front_end --download CIFAR10
+          python -m act.front_end --list-downloads
+          python -m act.front_end --synthesis --creator torchvision
 
       - name: Run ACT2Torch Pipeline Tests
         run: |

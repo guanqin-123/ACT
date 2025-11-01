@@ -417,17 +417,44 @@ def print_dataset_detail(dataset_name: str):
 
 
 def main():
-    """Main CLI entry point for dataset-model mapping tool."""
+    """
+    Main CLI entry point for TorchVision-specific operations.
+    
+    Note: For common operations like --list, --search, --download, and --info,
+    use the unified CLI: python -m act.front_end
+    
+    This CLI provides TorchVision-specific functionality like preprocessing
+    details, compatibility validation, and comprehensive testing.
+    """
     parser = argparse.ArgumentParser(
-        description="TorchVision Dataset to Model Mapping Tool",
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        description="TorchVision-Specific Dataset/Model Operations (use 'python -m act.front_end' for common operations)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+TorchVision-Specific Commands:
+  --category CATEGORY       Show datasets in a specific category
+  --dataset DATASET         Show detailed dataset information
+  --summary                 Show complete mapping summary with all datasets
+  --preprocessing-summary   Show preprocessing requirements across datasets
+  --show-preprocessing DS   Show specific preprocessing for a dataset
+  --validate DS MODEL       Validate dataset-model compatibility
+  --models-for DATASET      Show recommended models for a dataset
+  --datasets-for MODEL      Show compatible datasets for a model
+  --load-torchvision DS M   Load downloaded dataset-model pair
+  --inference DS MODEL      Test inference on a dataset-model pair
+  --all                     Run comprehensive alignment tests
+  --all-with-inference      Run tests with inference validation
+
+For Common Operations (list, search, download, info):
+  Use the unified CLI: python -m act.front_end
+  Examples:
+    python -m act.front_end --list
+    python -m act.front_end --search mnist
+    python -m act.front_end --download MNIST
+    python -m act.front_end --info CIFAR10
+        """
     )
     
-    parser.add_argument(
-        "--list", "-l",
-        action="store_true",
-        help="List all available datasets"
-    )
+    # Domain-specific commands (keep in TorchVision CLI)
     parser.add_argument(
         "--category", "-c",
         type=str,
@@ -439,27 +466,17 @@ def main():
         help="Show detailed information for a specific dataset"
     )
     parser.add_argument(
-        "--search", "-s",
-        type=str,
-        help="Search for datasets by name"
-    )
-    parser.add_argument(
         "--summary",
         action="store_true",
-        help="Print complete mapping summary"
+        help="Print complete mapping summary with all datasets and categories"
     )
-    parser.add_argument(
-        "--validate",
-        nargs=2,
-        metavar=("DATASET", "MODEL"),
-        help="Validate dataset-model compatibility (e.g., --validate MNIST resnet18)"
-    )
+    # Preprocessing analysis commands
     parser.add_argument(
         "--show-preprocessing",
         dest="show_preprocessing",
         type=str,
         metavar="DATASET",
-        help="Show preprocessing requirements for a dataset"
+        help="Show preprocessing requirements for a specific dataset"
     )
     parser.add_argument(
         "--preprocessing-summary",
@@ -467,18 +484,14 @@ def main():
         dest="preprocessing_summary",
         help="Show aggregated preprocessing requirements across all datasets"
     )
+    # Compatibility and validation commands
     parser.add_argument(
-        "--all",
-        action="store_true",
-        dest="test_all",
-        help="Run comprehensive alignment tests with tables for all dataset-model pairs"
+        "--validate",
+        nargs=2,
+        metavar=("DATASET", "MODEL"),
+        help="Validate dataset-model compatibility (e.g., --validate MNIST resnet18)"
     )
-    parser.add_argument(
-        "--all-with-inference",
-        action="store_true",
-        dest="test_with_inference",
-        help="Run comprehensive tests with inference validation (classification only)"
-    )
+    # Model/dataset relationship queries
     parser.add_argument(
         "--models-for",
         type=str,
@@ -493,11 +506,25 @@ def main():
         dest="datasets_for",
         help="Show all datasets that can run inference with a specific model"
     )
+    # Comprehensive testing
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        dest="test_all",
+        help="Run comprehensive alignment tests with tables for all dataset-model pairs"
+    )
+    parser.add_argument(
+        "--all-with-inference",
+        action="store_true",
+        dest="test_with_inference",
+        help="Run comprehensive tests with inference validation (classification only)"
+    )
+    # Download/load commands (kept for backward compatibility and advanced options)
     parser.add_argument(
         "--download",
         nargs=2,
         metavar=("DATASET", "MODEL"),
-        help="Download a dataset-model pair to data/torchvision/ (e.g., --download MNIST simple_cnn)"
+        help="Download a dataset-model pair (for basic usage, prefer: python -m act.front_end --download DATASET)"
     )
     parser.add_argument(
         "--split",
@@ -510,8 +537,9 @@ def main():
         "--list-downloads",
         action="store_true",
         dest="list_downloads",
-        help="List all downloaded dataset-model pairs"
+        help="List downloaded pairs (for simple listing, prefer: python -m act.front_end --list-downloads)"
     )
+    # Loading and inference commands
     parser.add_argument(
         "--load-torchvision",
         nargs=2,
@@ -543,13 +571,8 @@ def main():
     
     args = parser.parse_args()
     
-    if args.list:
-        print("Available Datasets:")
-        for name in sorted(DATASET_MODEL_MAPPING.keys()):
-            info = DATASET_MODEL_MAPPING[name]
-            print(f"  {name:25s} [{info['category']:15s}] - {info['num_classes'] or 'N/A':>5} classes")
-    
-    elif args.category:
+    # Handle commands
+    if args.category:
         try:
             datasets = list_datasets_by_category(args.category)
             print(f"\nDatasets in category '{args.category}':")
@@ -563,15 +586,6 @@ def main():
             print_dataset_detail(args.dataset)
         except ValueError as e:
             print(f"Error: {e}")
-    
-    elif args.search:
-        matches = search_datasets(args.search)
-        if matches:
-            print(f"\nDatasets matching '{args.search}':")
-            for name in sorted(matches):
-                print(f"  • {name}")
-        else:
-            print(f"No datasets found matching '{args.search}'")
     
     elif args.summary:
         print_mapping_summary()
@@ -964,37 +978,28 @@ def main():
     else:
         # Default: show quick examples
         print("\n" + "=" * 100)
-        print("QUICK EXAMPLES")
+        print("TORCHVISION DOMAIN-SPECIFIC CLI")
         print("=" * 100)
+        print("\nFor common operations, use the unified CLI:")
+        print("  python -m act.front_end --list              # List all datasets/categories")
+        print("  python -m act.front_end --search mnist      # Search across all")
+        print("  python -m act.front_end --info CIFAR10      # Show dataset info")
+        print("  python -m act.front_end --download MNIST    # Download dataset + models")
         
-        examples = ["MNIST", "CIFAR10", "ImageNet", "CocoDetection"]
-        for dataset in examples:
-            info = get_dataset_info(dataset)
-            print(f"\n{dataset}:")
-            print(f"  Category: {info['category']}")
-            print(f"  Models: {', '.join(info['models'][:3])}...")
-            print(f"  Input: {info['input_size']}, Classes: {info['num_classes']}")
-        
-        print("\n" + "=" * 100)
-        print("Use --help to see all available options")
-        print("Examples:")
-        print("  python -m act.front_end.torchvision.cli --list")
-        print("  python -m act.front_end.torchvision.cli --dataset CIFAR10")
-        print("  python -m act.front_end.torchvision.cli --category classification")
-        print("  python -m act.front_end.torchvision.cli --search mnist")
-        print("  python -m act.front_end.torchvision.cli --summary")
-        print("  python -m act.front_end.torchvision.cli --preprocessing-summary")
-        print("  python -m act.front_end.torchvision.cli --show-preprocessing MNIST")
-        print("  python -m act.front_end.torchvision.cli --validate MNIST resnet18")
-        print("  python -m act.front_end.torchvision.cli --models-for CIFAR10")
-        print("  python -m act.front_end.torchvision.cli --datasets-for resnet18")
-        print("  python -m act.front_end.torchvision.cli --download MNIST simple_cnn")
-        print("  python -m act.front_end.torchvision.cli --download CIFAR10 resnet18 --split both")
-        print("  python -m act.front_end.torchvision.cli --list-downloads")
-        print("  python -m act.front_end.torchvision.cli --inference MNIST resnet18")
-        print("  python -m act.front_end.torchvision.cli --inference CIFAR10 resnet50 --inference-split test")
-        print("  python -m act.front_end.torchvision.cli --all")
-        print("  python -m act.front_end.torchvision.cli --all-with-inference")
+        print("\n" + "-" * 100)
+        print("TorchVision-Specific Commands (use --help for full list):")
+        print("  python -m act.front_end.torchvision --category classification")
+        print("  python -m act.front_end.torchvision --dataset CIFAR10")
+        print("  python -m act.front_end.torchvision --summary")
+        print("  python -m act.front_end.torchvision --preprocessing-summary")
+        print("  python -m act.front_end.torchvision --show-preprocessing MNIST")
+        print("  python -m act.front_end.torchvision --validate MNIST resnet18")
+        print("  python -m act.front_end.torchvision --models-for CIFAR10")
+        print("  python -m act.front_end.torchvision --datasets-for resnet18")
+        print("  python -m act.front_end.torchvision --inference MNIST resnet18")
+        print("  python -m act.front_end.torchvision --all")
+        print("  python -m act.front_end.torchvision --all-with-inference")
+        print("=" * 100)
 
 
 if __name__ == "__main__":
