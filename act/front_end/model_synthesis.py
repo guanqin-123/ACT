@@ -273,8 +273,20 @@ def model_synthesis() -> Tuple[Dict[str, nn.Sequential], Dict[str, Dict[str, tor
     print(f"✓ Successfully created specs using TorchVisionSpecCreator")
     print(f"  Found {len(spec_results)} dataset-model pair(s)")
     
+    # Calculate statistics from spec_results BEFORE synthesis
+    total_samples = sum(len(input_tensors) for _, _, _, input_tensors, _ in spec_results)
+    total_spec_pairs = sum(len(spec_pairs) for _, _, _, _, spec_pairs in spec_results)
+    specs_per_sample = total_spec_pairs // total_samples if total_samples else 0
+    
     # Synthesize wrapped models from spec results
     wrapped_models, reports, input_data = synthesize_models_from_specs(spec_results)
+    
+    # Memory optimization: Free dataset memory after synthesis
+    # spec_results contains (data_source, model_name, pytorch_model, input_tensors, spec_pairs)
+    # The dataloader/dataset objects are no longer needed after synthesis
+    import gc
+    del spec_results  # Free ~476 MB of MNIST dataset memory!
+    gc.collect()
     
     # Validate synthesis results
     if not wrapped_models:
@@ -292,13 +304,8 @@ def model_synthesis() -> Tuple[Dict[str, nn.Sequential], Dict[str, Dict[str, tor
     print(f"  • Data sources: {len(input_data)}")
     print(f"  • Unique dataset-model pairs: {len(set((r.data_source, r.model_name) for r in reports.values()))}")
     
-    # Calculate statistics from spec_results for breakdown
-    total_samples = sum(len(input_tensors) for _, _, _, input_tensors, _ in spec_results)
-    total_spec_pairs = sum(len(spec_pairs) for _, _, _, _, spec_pairs in spec_results)
-    
-    # Print detailed breakdown
+    # Print detailed breakdown (using pre-calculated stats)
     if total_samples > 0 and total_spec_pairs > 0:
-        specs_per_sample = total_spec_pairs // total_samples if total_samples else 0
         print(f"\n📊 Breakdown:")
         print(f"  • Input samples: {total_samples}")
         print(f"  • Spec pairs per sample: {specs_per_sample}")

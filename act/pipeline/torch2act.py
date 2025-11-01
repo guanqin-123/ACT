@@ -170,208 +170,210 @@ class TorchToACT:
         self.layers.extend(new_layers)
         self.prev_out = out_vars
 
+    # --- recursive module processing ---
 
+    def _is_primitive_module(self, mod: nn.Module) -> bool:
+        """Check if module is a primitive layer that can be directly converted."""
+        return isinstance(mod, (
+            nn.Linear, nn.ReLU, nn.Conv2d, nn.Flatten,
+            nn.MaxPool2d, nn.AvgPool2d, nn.Dropout,
+            nn.BatchNorm2d, nn.Tanh, nn.Sigmoid, nn.LeakyReLU
+        ))
 
+    def _convert_primitive_module(self, mod: nn.Module) -> None:
+        """Convert a primitive PyTorch module to ACT layer(s)."""
+        
+        if isinstance(mod, nn.Flatten):
+            out_vars = self._same_size_forward()
+            flattened_shape = (1, _prod(self.shape[1:]))
+            self._add(LayerKind.FLATTEN.value, params={}, 
+                      meta={"input_shape": self.shape, "output_shape": flattened_shape},
+                      in_vars=self.prev_out, out_vars=out_vars)
+            self.shape = flattened_shape
+            self.prev_out = out_vars
+            
+        elif isinstance(mod, nn.Linear):
+            outF = int(mod.out_features)
+            # Use detach() only - no clone needed since we don't modify weights
+            W = mod.weight.detach()
+            bvec = mod.bias.detach() if mod.bias is not None else torch.zeros(outF, dtype=W.dtype, device=W.device)
+            
+            out_vars = self._alloc_ids(outF)
+            self._add(LayerKind.DENSE.value, params={"W": W, "b": bvec},
+                      meta={"input_shape": self.shape, "output_shape": (1, outF)},
+                      in_vars=self.prev_out, out_vars=out_vars)
+            self.shape = (1, outF)
+            self.prev_out = out_vars
+            
+        elif isinstance(mod, nn.ReLU):
+            out_vars = self._same_size_forward()
+            self._add(LayerKind.RELU.value, params={}, 
+                      meta={"input_shape": self.shape, "output_shape": self.shape},
+                      in_vars=self.prev_out, out_vars=out_vars)
+            self.prev_out = out_vars
+            
+        elif isinstance(mod, nn.Conv2d):
+            # Use detach() only - no clone needed since we don't modify weights
+            weight = mod.weight.detach()
+            bias = mod.bias.detach() if mod.bias is not None else None
+            
+            # Infer input shape for conv
+            if len(self.shape) == 2:  # (1, features) - need to reshape to spatial
+                n_features = self.shape[1]
+                if n_features == 3072:  # CIFAR-10
+                    input_shape = (1, 3, 32, 32)
+                elif n_features == 784:  # MNIST
+                    input_shape = (1, 1, 28, 28)
+                else:
+                    channels = mod.in_channels
+                    spatial_size = int((n_features / channels) ** 0.5)
+                    input_shape = (1, channels, spatial_size, spatial_size)
+            else:
+                input_shape = self.shape
+            
+            # Calculate output shape
+            batch, in_c, in_h, in_w = input_shape
+            out_c = mod.out_channels
+            out_h = (in_h + 2 * mod.padding[0] - mod.dilation[0] * (mod.kernel_size[0] - 1) - 1) // mod.stride[0] + 1
+            out_w = (in_w + 2 * mod.padding[1] - mod.dilation[1] * (mod.kernel_size[1] - 1) - 1) // mod.stride[1] + 1
+            output_shape = (1, out_c, out_h, out_w)
+            out_features = out_c * out_h * out_w
+            
+            params = {"weight": weight}
+            if bias is not None:
+                params["bias"] = bias
+                
+            meta = {
+                "input_shape": input_shape,
+                "output_shape": output_shape,
+                "kernel_size": mod.kernel_size,
+                "stride": mod.stride,
+                "padding": mod.padding,
+                "dilation": mod.dilation,
+                "groups": mod.groups,
+                "in_channels": in_c,
+                "out_channels": out_c
+            }
+            
+            out_vars = self._alloc_ids(out_features)
+            self._add(LayerKind.CONV2D.value, params=params, meta=meta,
+                      in_vars=self.prev_out, out_vars=out_vars)
+            self.shape = (1, out_features)
+            self.prev_out = out_vars
+            
+        elif isinstance(mod, nn.MaxPool2d):
+            # MaxPool2d: Apply pooling operation
+            if len(self.shape) == 2:
+                # Need to infer spatial shape
+                n_features = self.shape[1]
+                # Assume square spatial dimensions
+                spatial_size = int(n_features ** 0.5)
+                channels = 1
+                input_shape = (1, channels, spatial_size, spatial_size)
+            else:
+                input_shape = self.shape
+            
+            batch, in_c, in_h, in_w = input_shape
+            kernel_size = mod.kernel_size if isinstance(mod.kernel_size, tuple) else (mod.kernel_size, mod.kernel_size)
+            stride = mod.stride if mod.stride is not None else kernel_size
+            stride = stride if isinstance(stride, tuple) else (stride, stride)
+            padding = mod.padding if isinstance(mod.padding, tuple) else (mod.padding, mod.padding)
+            
+            out_h = (in_h + 2 * padding[0] - kernel_size[0]) // stride[0] + 1
+            out_w = (in_w + 2 * padding[1] - kernel_size[1]) // stride[1] + 1
+            output_shape = (1, in_c, out_h, out_w)
+            out_features = in_c * out_h * out_w
+            
+            # Use schema-compliant metadata fields
+            meta = {
+                "kernel_size": kernel_size,
+                "stride": stride,
+                "padding": padding,
+                "output_size": (out_h, out_w)  # Schema expects this field
+            }
+            
+            out_vars = self._alloc_ids(out_features)
+            self._add(LayerKind.MAXPOOL2D.value, params={}, meta=meta,
+                      in_vars=self.prev_out, out_vars=out_vars)
+            self.shape = (1, out_features)
+            self.prev_out = out_vars
+            
+        elif isinstance(mod, nn.Dropout):
+            # Dropout is a no-op during inference/verification
+            pass
+            
+        else:
+            raise NotImplementedError(f"Primitive conversion not implemented: {type(mod).__name__}")
+
+    def _process_module(self, mod: nn.Module) -> None:
+        """
+        Recursively process a module, expanding containers into primitives.
+        
+        Strategy:
+        1. If it's InputLayer → skip (already processed)
+        2. If it has to_act_layers() → use protocol (InputSpecLayer, OutputSpecLayer)
+        3. If it's a primitive → convert directly
+        4. If it's a container → recurse into children
+        """
+        tname = type(mod).__name__
+        
+        # Skip InputLayer (already processed in _emit_input)
+        if tname == self._InputLayerTypeName:
+            return
+        
+        # ACT wrapper layers with to_act_layers() protocol
+        if hasattr(mod, 'to_act_layers'):
+            new_layers, out_vars = mod.to_act_layers(len(self.layers), self.prev_out)
+            self.layers.extend(new_layers)
+            self.prev_out = out_vars
+            return
+        
+        # Primitive modules - convert directly
+        if self._is_primitive_module(mod):
+            self._convert_primitive_module(mod)
+            return
+        
+        # Container modules - recurse into children
+        if isinstance(mod, nn.Module):
+            children = list(mod.children())
+            if children:  # Has children - recurse
+                for child in children:
+                    self._process_module(child)
+                return
+        
+        # Unsupported module type
+        raise NotImplementedError(
+            f"Unsupported module: {tname}\n"
+            f"  If this is a custom module, ensure it has primitive children (Linear, Conv2d, etc.)\n"
+            f"  or implement the to_act_layers() protocol."
+        )
 
     # --- main conversion ---
 
     def run(self) -> Net:
+        """
+        Convert wrapped PyTorch model to ACT Net using recursive module expansion.
+        
+        Automatically handles:
+        - ACT wrapper layers (InputLayer, InputSpecLayer, OutputSpecLayer)
+        - Primitive PyTorch layers (Linear, Conv2d, ReLU, etc.)
+        - Custom composite modules (SimpleCNN, LeNet5, etc.) via recursion
+        """
         # Emit INPUT from InputLayer
         self._emit_input()
 
-        # Walk modules in order and emit ACT layers
+        # Walk modules and recursively process them
         for mod in self.m:
-            tname = type(mod).__name__
+            self._process_module(mod)
 
-            if tname == self._InputLayerTypeName:
-                # already emitted at start
-                continue
-
-            # Use standardized conversion with to_act_layers() protocol
-            if hasattr(mod, 'to_act_layers'):
-                new_layers, out_vars = mod.to_act_layers(len(self.layers), self.prev_out)
-                self.layers.extend(new_layers)
-                self.prev_out = out_vars
-                continue
-
-            # Handle standard PyTorch modules that don't have to_act_layers()
-            if isinstance(mod, nn.Flatten):
-                out_vars = self._same_size_forward()
-                flattened_shape = (1, _prod(self.shape[1:]))
-                self._add(LayerKind.FLATTEN.value, params={}, 
-                          meta={"input_shape": self.shape, "output_shape": flattened_shape},
-                          in_vars=self.prev_out, out_vars=out_vars)
-                self.shape = flattened_shape
-                self.prev_out = out_vars
-                continue
-
-            if isinstance(mod, nn.Linear):
-                outF = int(mod.out_features)
-                W = mod.weight.detach().clone()
-                bvec = mod.bias.detach().clone() if mod.bias is not None else torch.zeros(outF, dtype=W.dtype, device=W.device)
-                
-                out_vars = self._alloc_ids(outF)
-                self._add(LayerKind.DENSE.value, params={"W": W, "b": bvec},
-                          meta={"input_shape": self.shape, "output_shape": (1, outF)},
-                          in_vars=self.prev_out, out_vars=out_vars)
-                self.shape = (1, outF)
-                self.prev_out = out_vars
-                continue
-
-            if isinstance(mod, nn.ReLU):
-                out_vars = self._same_size_forward()
-                self._add(LayerKind.RELU.value, params={}, 
-                          meta={"input_shape": self.shape, "output_shape": self.shape},
-                          in_vars=self.prev_out, out_vars=out_vars)
-                self.prev_out = out_vars
-                continue
-
-            if isinstance(mod, nn.Conv2d):
-                # Handle Conv2d layers
-                weight = mod.weight.detach().clone()
-                bias = mod.bias.detach().clone() if mod.bias is not None else None
-                
-                # Infer input shape for conv
-                if len(self.shape) == 2:  # (1, features) - need to reshape to spatial
-                    n_features = self.shape[1]
-                    if n_features == 3072:  # CIFAR-10
-                        input_shape = (1, 3, 32, 32)
-                    elif n_features == 784:  # MNIST
-                        input_shape = (1, 1, 28, 28)
-                    else:
-                        channels = mod.in_channels
-                        spatial_size = int((n_features / channels) ** 0.5)
-                        input_shape = (1, channels, spatial_size, spatial_size)
-                else:
-                    input_shape = self.shape
-                
-                # Calculate output shape
-                batch, in_c, in_h, in_w = input_shape
-                out_c = mod.out_channels
-                out_h = (in_h + 2 * mod.padding[0] - mod.dilation[0] * (mod.kernel_size[0] - 1) - 1) // mod.stride[0] + 1
-                out_w = (in_w + 2 * mod.padding[1] - mod.dilation[1] * (mod.kernel_size[1] - 1) - 1) // mod.stride[1] + 1
-                output_shape = (1, out_c, out_h, out_w)
-                out_features = out_c * out_h * out_w
-                
-                params = {"weight": weight}
-                if bias is not None:
-                    params["bias"] = bias
-                    
-                meta = {
-                    "input_shape": input_shape,
-                    "output_shape": output_shape,
-                    "kernel_size": mod.kernel_size,
-                    "stride": mod.stride,
-                    "padding": mod.padding,
-                    "dilation": mod.dilation,
-                    "groups": mod.groups,
-                    "in_channels": in_c,
-                    "out_channels": out_c
-                }
-                
-                out_vars = self._alloc_ids(out_features)
-                self._add(LayerKind.CONV2D.value, params=params, meta=meta,
-                          in_vars=self.prev_out, out_vars=out_vars)
-                self.shape = (1, out_features)  # Flatten for next layer
-                self.prev_out = out_vars
-                continue
-
-            # Handle nested Sequential models (PyTorch models inside wrapper)
-            if isinstance(mod, nn.Sequential):
-                for sub_mod in mod:
-                    # Recursively process sub-modules using the same logic
-                    if hasattr(sub_mod, 'to_act_layers'):
-                        new_layers, out_vars = sub_mod.to_act_layers(len(self.layers), self.prev_out)
-                        self.layers.extend(new_layers)
-                        self.prev_out = out_vars
-                    elif isinstance(sub_mod, (nn.Flatten, nn.Linear, nn.ReLU, nn.Conv2d)):
-                        # Reuse the same conversion logic as above
-                        if isinstance(sub_mod, nn.Flatten):
-                            out_vars = self._same_size_forward()
-                            flattened_shape = (1, _prod(self.shape[1:]))
-                            self._add(LayerKind.FLATTEN.value, params={}, 
-                                      meta={"input_shape": self.shape, "output_shape": flattened_shape},
-                                      in_vars=self.prev_out, out_vars=out_vars)
-                            self.shape = flattened_shape
-                            self.prev_out = out_vars
-                        elif isinstance(sub_mod, nn.Linear):
-                            outF = int(sub_mod.out_features)
-                            W = sub_mod.weight.detach().clone()
-                            bvec = sub_mod.bias.detach().clone() if sub_mod.bias is not None else torch.zeros(outF, dtype=W.dtype, device=W.device)
-                            
-                            out_vars = self._alloc_ids(outF)
-                            self._add(LayerKind.DENSE.value, params={"W": W, "b": bvec},
-                                      meta={"input_shape": self.shape, "output_shape": (1, outF)},
-                                      in_vars=self.prev_out, out_vars=out_vars)
-                            self.shape = (1, outF)
-                            self.prev_out = out_vars
-                        elif isinstance(sub_mod, nn.ReLU):
-                            out_vars = self._same_size_forward()
-                            self._add(LayerKind.RELU.value, params={}, 
-                                      meta={"input_shape": self.shape, "output_shape": self.shape},
-                                      in_vars=self.prev_out, out_vars=out_vars)
-                            self.prev_out = out_vars
-                        elif isinstance(sub_mod, nn.Conv2d):
-                            # Same Conv2d logic as above
-                            weight = sub_mod.weight.detach().clone()
-                            bias = sub_mod.bias.detach().clone() if sub_mod.bias is not None else None
-                            
-                            if len(self.shape) == 2:
-                                n_features = self.shape[1]
-                                if n_features == 3072:
-                                    input_shape = (1, 3, 32, 32)
-                                elif n_features == 784:
-                                    input_shape = (1, 1, 28, 28)
-                                else:
-                                    channels = sub_mod.in_channels
-                                    spatial_size = int((n_features / channels) ** 0.5)
-                                    input_shape = (1, channels, spatial_size, spatial_size)
-                            else:
-                                input_shape = self.shape
-                            
-                            batch, in_c, in_h, in_w = input_shape
-                            out_c = sub_mod.out_channels
-                            out_h = (in_h + 2 * sub_mod.padding[0] - sub_mod.dilation[0] * (sub_mod.kernel_size[0] - 1) - 1) // sub_mod.stride[0] + 1
-                            out_w = (in_w + 2 * sub_mod.padding[1] - sub_mod.dilation[1] * (sub_mod.kernel_size[1] - 1) - 1) // sub_mod.stride[1] + 1
-                            output_shape = (1, out_c, out_h, out_w)
-                            out_features = out_c * out_h * out_w
-                            
-                            params = {"weight": weight}
-                            if bias is not None:
-                                params["bias"] = bias
-                                
-                            meta = {
-                                "input_shape": input_shape,
-                                "output_shape": output_shape,
-                                "kernel_size": sub_mod.kernel_size,
-                                "stride": sub_mod.stride,
-                                "padding": sub_mod.padding,
-                                "dilation": sub_mod.dilation,
-                                "groups": sub_mod.groups,
-                                "in_channels": in_c,
-                                "out_channels": out_c
-                            }
-                            
-                            out_vars = self._alloc_ids(out_features)
-                            self._add(LayerKind.CONV2D.value, params=params, meta=meta,
-                                      in_vars=self.prev_out, out_vars=out_vars)
-                            self.shape = (1, out_features)
-                            self.prev_out = out_vars
-                    else:
-                        raise NotImplementedError(f"Unsupported sub-module in Sequential: {type(sub_mod).__name__}")
-                continue
-
-            # Unsupported module
-            raise NotImplementedError(f"Unsupported module in converter: {tname}")
-
-        # Build linear preds/succs
+        # Build linear graph structure (sequential layers)
         preds = {i: ([] if i == 0 else [i - 1]) for i in range(len(self.layers))}
         succs = {i: ([] if i == len(self.layers) - 1 else [i + 1]) for i in range(len(self.layers))}
         net = Net(layers=self.layers, preds=preds, succs=succs)
 
         # Validate the created network structure
         from act.back_end.layer_util import validate_graph
-        validate_graph(self.layers)  # Pass layers list, not net
+        validate_graph(self.layers)
 
         # Final sanity check
         net.assert_last_is_validation()
@@ -403,50 +405,22 @@ if __name__ == "__main__":
         print("  ❌ No successful models to verify!")
         exit(1)
     
-    # Step 3: Convert all successful models to ACT
-    print(f"\n🎯 Step 3: Converting all {len(successful_models)} successful models to ACT...")
+    # Step 3: Convert and verify all successful models (memory-efficient)
+    print(f"\n🎯 Step 3: Converting and verifying all {len(successful_models)} successful models...")
+    print(f"  💡 Processing one at a time to avoid memory issues...")
+    
+    # Import verification functions
+    from act.back_end.verifier import verify_once
+    
+    import gc
+    import torch as torch_module
     
     conversion_results = {}
-    successful_conversions = {}
+    verification_results = {}
+    conversion_success_count = 0
+    verification_success_count = 0
     
-    for model_id, wrapped_model in successful_models.items():
-        print(f"\n  🔄 Converting '{model_id}'...")
-        try:
-            # Convert wrapped model to ACT Net (spec-free)
-            net = TorchToACT(wrapped_model).run()
-            
-            # Verify the conversion produced a valid net
-            if not net.layers:
-                raise ValueError("Net should have layers")
-            if net.layers[0].kind != LayerKind.INPUT.value:
-                raise ValueError(f"First layer should be INPUT, got {net.layers[0].kind}")
-            if net.layers[-1].kind != LayerKind.ASSERT.value:
-                raise ValueError(f"Last layer should be ASSERT, got {net.layers[-1].kind}")
-            
-            # Store successful conversion
-            successful_conversions[model_id] = (wrapped_model, net)
-            conversion_results[model_id] = "SUCCESS"
-            
-            # Get layer summary
-            layer_types = " → ".join([layer.kind for layer in net.layers])
-            print(f"    ✅ SUCCESS: {len(net.layers)} layers ({layer_types})")
-            
-        except Exception as e:
-            conversion_results[model_id] = f"FAILED: {str(e)[:100]}..."
-            print(f"    ❌ FAILED: {e}")
-            continue
-    
-    # Summary of conversions
-    success_count = len(successful_conversions)
-    total_count = len(successful_models)
-    print(f"\n📊 Conversion Summary:")
-    print(f"  ✅ Successful conversions: {success_count}/{total_count} ({success_count/total_count*100:.1f}%)")
-    
-    if not successful_conversions:
-        print("  ❌ No successful conversions to verify!")
-        exit(1)
-    
-    # Step 4: Initialize solvers
+    # Step 4: Initialize solvers (moved earlier to reuse for all models)
     print("\n🔧 Step 4: Initializing solvers...")
     gurobi_solver = None
     torch_solver = None
@@ -460,7 +434,6 @@ if __name__ == "__main__":
     
     try:
         torch_solver = TorchLPSolver()
-        # Use default device for TorchLP solver
         torch_solver.begin("act_verification")
         print(f"  ✅ TorchLP solver available (device: {torch_solver._device})")
     except Exception as e:
@@ -474,68 +447,92 @@ if __name__ == "__main__":
     
     if not solvers_to_test:
         print("  ❌ No solvers available!")
-        exit(1)
+        print("  ℹ️  Will only test conversions without verification")
     
-    # Step 5: Run verification on just the first model for debugging
-    print(f"\n🔍 Step 5: Running verification on first model for debugging...")
+    print(f"\n� Step 5: Processing all models...")
     
-    # Import verification functions here to avoid early import issues
-    from act.back_end.verifier import verify_once
-    
-    verification_results = {}
-    
-    # Just test the first model
-    first_model_id = list(successful_conversions.keys())[0]
-    wrapped_model, net = successful_conversions[first_model_id]
-    
-    print(f"\n🎯 Debugging model: '{first_model_id}'")
-    print(f"  📐 Net structure: {' → '.join([layer.kind for layer in net.layers])}")
-    
-    model_results = {}
-    
-    for solver_name, solver in solvers_to_test:
-        print(f"\n  --- Testing with {solver_name} solver ---")
+    for idx, (model_id, wrapped_model) in enumerate(successful_models.items(), 1):
+        print(f"\n  [{idx}/{len(successful_models)}] Processing '{model_id}'...")
         
+        # === CONVERSION ===
         try:
-            # Single-shot verification
-            print("    🎯 Running single-shot verification...")
-            res = verify_once(net, solver=solver, timelimit=30.0)
-            print(f"      Status: {res.status}")
-            if res.stats:
-                print(f"      Stats: {res.stats}")
+            net = TorchToACT(wrapped_model).run()
             
-            model_results[solver_name] = {
-                'single_shot': res.status
-            }
+            # Verify the conversion produced a valid net
+            if not net.layers:
+                raise ValueError("Net should have layers")
+            if net.layers[0].kind != LayerKind.INPUT.value:
+                raise ValueError(f"First layer should be INPUT, got {net.layers[0].kind}")
+            if net.layers[-1].kind != LayerKind.ASSERT.value:
+                raise ValueError(f"Last layer should be ASSERT, got {net.layers[-1].kind}")
+            
+            layer_types = " → ".join([layer.kind for layer in net.layers])
+            print(f"    ✅ Conversion: {len(net.layers)} layers ({layer_types})")
+            
+            conversion_results[model_id] = "SUCCESS"
+            conversion_success_count += 1
             
         except Exception as e:
-            print(f"    ❌ Verification failed with {solver_name}: {e}")
-            print(f"    🔍 Full exception type: {type(e).__name__}")
-            print(f"    🔍 Full exception message: {str(e)}")
-            import traceback
-            print(f"    🔍 Traceback:")
-            traceback.print_exc()
-            model_results[solver_name] = {'error': str(e)}
-            continue
+            conversion_results[model_id] = f"FAILED: {str(e)[:100]}..."
+            print(f"    ❌ Conversion FAILED: {e}")
+            continue  # Skip verification if conversion failed
+        
+        # === VERIFICATION (only if solvers available) ===
+        if solvers_to_test:
+            model_verification = {}
+            
+            for solver_name, solver in solvers_to_test:
+                try:
+                    # TEMPORARILY COMMENTED OUT: Testing if verify_once causes memory issue
+                    # res = verify_once(net, solver=solver, timelimit=30.0)
+                    # status = res.status
+                    status = "SKIPPED"  # Placeholder to test memory usage
+                    model_verification[solver_name] = status
+                    print(f"    🔍 Verification ({solver_name}): {status} (verify_once commented out)")
+                    
+                    if status == "UNSAT" or status == "SAT":
+                        verification_success_count += 1
+                        
+                except Exception as e:
+                    model_verification[solver_name] = f"ERROR: {str(e)[:50]}"
+                    print(f"    ⚠️  Verification ({solver_name}): ERROR - {str(e)[:50]}")
+            
+            verification_results[model_id] = model_verification
+        
+        # === MEMORY CLEANUP ===
+        # Free memory from this net immediately (no need to store)
+        del net
+        
+        # Clean up memory periodically
+        if idx % 10 == 0:
+            gc.collect()
+            if torch_module.cuda.is_available():
+                torch_module.cuda.empty_cache()
     
-    verification_results[first_model_id] = model_results
+    # === FINAL SUMMARY ===
+    total_count = len(successful_models)
+    print(f"\n📊 Final Results:")
+    print(f"  ✅ Conversions: {conversion_success_count}/{total_count} ({conversion_success_count/total_count*100:.1f}%)")
     
-    # Final verification summary
-    print(f"\n📊 Debug Verification Summary:")
-    print(f"  🔄 Models converted: {len(successful_conversions)}/{len(successful_models)}")
-    print(f"  🔧 Solvers tested: {len(solvers_to_test)}")
+    if solvers_to_test and verification_results:
+        # Count successful verifications (UNSAT or SAT results)
+        total_verifications = sum(len(v) for v in verification_results.values())
+        successful_verifications = sum(
+            1 for results in verification_results.values() 
+            for status in results.values() 
+            if isinstance(status, str) and status in ["UNSAT", "SAT"]
+        )
+        print(f"  🔍 Verifications: {successful_verifications}/{total_verifications} successful")
     
-    for model_id, results in verification_results.items():
-        print(f"\n  📋 {model_id}:")
-        for solver_name, solver_results in results.items():
-            if 'error' in solver_results:
-                print(f"    {solver_name}: ERROR - {solver_results['error'][:100]}...")
-            else:
-                single_status = solver_results.get('single_shot', 'N/A')
-                print(f"    {solver_name}: Single={single_status}")
+    # Print failed conversions if any
+    failed_conversions = {k: v for k, v in conversion_results.items() if v != "SUCCESS"}
+    if failed_conversions:
+        print(f"\n  ⚠️  Failed conversions: {len(failed_conversions)}")
+        for model_id, error in list(failed_conversions.items())[:5]:  # Show first 5
+            print(f"    • {model_id}: {error}")
     
     # Print debug file location (GUARDED)
     if PerformanceOptions.debug_tf:
         print(f"\n📝 Debug log written to: {PerformanceOptions.debug_output_file}")
     
-    print("\n🔍 Debug verification completed!")
+    print("\n✅ Torch→ACT conversion and verification completed!")

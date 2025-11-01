@@ -175,6 +175,12 @@ class VNNLibSpecCreator(BaseSpecCreator):
                 if result is not None:
                     results.append(result)
                 
+                # Memory optimization: Free instance_data after extracting model/specs
+                # instance_data may contain large ONNX models and intermediate tensors
+                import gc
+                del instance_data
+                gc.collect()
+                
             except Exception as e:
                 logger.error(
                     f"Failed to create specs for {category}/{instance_id}: {e}"

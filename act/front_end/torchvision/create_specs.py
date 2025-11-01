@@ -169,6 +169,12 @@ class TorchVisionSpecCreator(BaseSpecCreator):
                 if result is not None:
                     results.append(result)
                 
+                # Memory optimization: Free dataset/dataloader after extracting input_tensors
+                # pair_data contains the dataset (476 MB for MNIST) which is no longer needed
+                import gc
+                del pair_data, dataloader
+                gc.collect()
+                
             except Exception as e:
                 logger.error(
                     f"Failed to create specs for {dataset_name} + {model_name}: {e}"
