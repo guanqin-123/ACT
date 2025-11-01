@@ -52,7 +52,7 @@ conda activate act-main
 ### Running Verification
 ```bash
 python act/wrapper_exts/ext_runner.py \
-  --model_path models/vnnmodels/MNIST/small_relu_mnist_cnn_model_1.onnx \
+  --model_path act/wrapper_exts/models/vnnmodels/MNIST/small_relu_mnist_cnn_model_1.onnx \
   --dataset mnist --spec_type local_lp \
   --start 0 --end 1 --epsilon 0.03 --norm inf \
   --mean 0.1307 --std 0.3081
@@ -82,7 +82,7 @@ spec_type = "local_lp"
 
 ### Path Handling
 - **Project root**: Always use project root as working directory
-- **Model paths**: Relative to project root (`models/vnnmodels/...`)
+- **Model paths**: Relative to project root (`act/wrapper_exts/models/vnnmodels/...`)
 - **Import structure**: Hierarchical imports following `act/front_end`, `act/back_end`, `act/pipeline`
 
 ### Memory Patterns
@@ -100,7 +100,7 @@ spec_type = "local_lp"
 ### External Tools
 - **ERAN**: Subprocess execution with parameter translation
 - **αβ-CROWN**: YAML config generation and temp file management  
-- **Gurobi**: License required in `gurobi/gurobi.lic` for MILP optimization
+- **Gurobi**: License required in `modules/gurobi/gurobi.lic` for MILP optimization
 
 ### VNNLIB Compatibility
 Full SMT-LIB format support with:

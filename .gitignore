@@ -9,5 +9,6 @@ models/*
 !data/README.md
 !models/README.md
 gurobi/gurobi.lic
+modules/gurobi/gurobi.lic
 verifier/out.txt
 Abstract-Constraint-Transformer.wiki/

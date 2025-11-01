@@ -72,7 +72,7 @@ def ensure_gurobi_license() -> Optional[str]:
     if 'ACTHOME' in os.environ:
         acthome = os.environ['ACTHOME']
         print(f"[ACT] Using ACTHOME environment variable: {acthome}")
-        license_path = os.path.abspath(os.path.join(acthome, 'gurobi', 'gurobi.lic'))
+        license_path = os.path.abspath(os.path.join(acthome, 'modules', 'gurobi', 'gurobi.lic'))
         if os.path.exists(license_path):
             os.environ['GRB_LICENSE_FILE'] = license_path
             print(f"[ACT] Gurobi license found and set: {license_path}")
@@ -82,7 +82,7 @@ def ensure_gurobi_license() -> Optional[str]:
             print(f"[INFO] Please ensure gurobi.lic is placed in: {os.path.dirname(license_path)}")
 
     print(f"[ACT] Auto-detecting project root from path_config")
-    license_path = os.path.abspath(os.path.join(project_root, 'gurobi', 'gurobi.lic'))
+    license_path = os.path.abspath(os.path.join(project_root, 'modules', 'gurobi', 'gurobi.lic'))
     if os.path.exists(license_path):
         os.environ['GRB_LICENSE_FILE'] = license_path
         print(f"[ACT] Gurobi license found and set: {license_path}")

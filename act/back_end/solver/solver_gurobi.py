@@ -18,11 +18,11 @@ def setup_gurobi_license():
     """Setup Gurobi license path based on current folder layout."""
     if 'GRB_LICENSE_FILE' not in os.environ:
         if 'ACTHOME' in os.environ:
-            license_path = os.path.join(os.environ['ACTHOME'], 'gurobi', 'gurobi.lic')
+            license_path = os.path.join(os.environ['ACTHOME'], 'modules', 'gurobi', 'gurobi.lic')
             print(f"[ACT] Using ACTHOME environment variable: {os.environ['ACTHOME']}")
         else:
             project_root = get_project_root()
-            license_path = os.path.join(project_root, 'gurobi', 'gurobi.lic')
+            license_path = os.path.join(project_root, 'modules', 'gurobi', 'gurobi.lic')
             print(f"[ACT] Auto-detecting project root: {project_root}")
         
         license_path = os.path.abspath(license_path)

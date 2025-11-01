@@ -153,7 +153,7 @@ esac
 # Final setup steps (for all or when not in CI mode)
 if [ "$ACT_CI_MODE" = "false" ] && [ "$COMPONENT" = "all" ]; then
     export ACTHOME=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-    export GRB_LICENSE_FILE=$ACTHOME/gurobi/gurobi.lic
+    export GRB_LICENSE_FILE=$ACTHOME/modules/gurobi/gurobi.lic
     echo "[ACT] Gurobi license path configured for this shell: $GRB_LICENSE_FILE"
 fi
 

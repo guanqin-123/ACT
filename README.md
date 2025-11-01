@@ -18,8 +18,8 @@ git clone --recursive https://github.com/SVF-tools/ACT.git
 cd ACT
 
 # 2. Place Gurobi license (Required for MILP optimization)
-# Place your gurobi.lic file in ./gurobi/ directory
-cp /path/to/your/gurobi.lic ./gurobi/gurobi.lic
+# Place your gurobi.lic file in ./modules/gurobi/ directory
+cp /path/to/your/gurobi.lic ./modules/gurobi/gurobi.lic
 
 # 3. Run ACT native verification
 cd ../act
