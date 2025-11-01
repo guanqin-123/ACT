@@ -51,10 +51,10 @@ class CreatorRegistry:
         if name not in cls._creators:
             # Lazy initialization
             if name == 'torchvision':
-                from act.front_end.torchvision.create_specs import TorchVisionSpecCreator
+                from act.front_end.torchvision_loader.create_specs import TorchVisionSpecCreator
                 cls._creators[name] = TorchVisionSpecCreator()
             elif name == 'vnnlib':
-                from act.front_end.vnnlib.create_specs import VNNLibSpecCreator
+                from act.front_end.vnnlib_loader.create_specs import VNNLibSpecCreator
                 cls._creators[name] = VNNLibSpecCreator()
             else:
                 raise ValueError(
@@ -114,7 +114,7 @@ class CreatorRegistry:
                 )
             
             if explicit_creator == 'torchvision':
-                from act.front_end.torchvision.data_model_mapping import find_dataset_name
+                from act.front_end.torchvision_loader.data_model_mapping import find_dataset_name
                 try:
                     normalized = find_dataset_name(name)
                     return ('torchvision', normalized)
@@ -123,7 +123,7 @@ class CreatorRegistry:
                         f"Dataset '{name}' not found in TorchVision creator.\n{str(e)}"
                     )
             else:  # vnnlib
-                from act.front_end.vnnlib.category_mapping import find_category_name
+                from act.front_end.vnnlib_loader.category_mapping import find_category_name
                 try:
                     normalized = find_category_name(name)
                     return ('vnnlib', normalized)
@@ -140,7 +140,7 @@ class CreatorRegistry:
         
         # Try TorchVision
         try:
-            from act.front_end.torchvision.data_model_mapping import find_dataset_name
+            from act.front_end.torchvision_loader.data_model_mapping import find_dataset_name
             tv_name = find_dataset_name(name)
             torchvision_match = True
         except ValueError:
@@ -148,7 +148,7 @@ class CreatorRegistry:
         
         # Try VNNLIB
         try:
-            from act.front_end.vnnlib.category_mapping import find_category_name
+            from act.front_end.vnnlib_loader.category_mapping import find_category_name
             vnnlib_name = find_category_name(name)
             vnnlib_match = True
         except ValueError:

@@ -254,7 +254,7 @@ def model_synthesis(creator: str = 'torchvision') -> Tuple[Dict[str, nn.Sequenti
     
     # Select creator based on parameter
     if creator == 'vnnlib':
-        from act.front_end.vnnlib.create_specs import VNNLibSpecCreator
+        from act.front_end.vnnlib_loader.create_specs import VNNLibSpecCreator
         
         print(f"\n📊 Attempting to use VNNLibSpecCreator...")
         spec_creator = VNNLibSpecCreator(config_name="vnnlib_default")
@@ -268,7 +268,7 @@ def model_synthesis(creator: str = 'torchvision') -> Tuple[Dict[str, nn.Sequenti
         )
     
     elif creator == 'torchvision':
-        from act.front_end.torchvision.create_specs import TorchVisionSpecCreator
+        from act.front_end.torchvision_loader.create_specs import TorchVisionSpecCreator
         
         print(f"\n📊 Attempting to use TorchVisionSpecCreator...")
         spec_creator = TorchVisionSpecCreator(config_name="torchvision_classification")

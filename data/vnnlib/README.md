@@ -124,22 +124,22 @@ python -m act.front_end.cli --search yolo
 
 ```bash
 # Download specific category
-python -m act.front_end.vnnlib.cli --download acasxu_2023
+python -m act.front_end.vnnlib_loader.cli --download acasxu_2023
 
 # Download with instance limit
-python -m act.front_end.vnnlib.cli --download cifar100_2024 --max 10
+python -m act.front_end.vnnlib_loader.cli --download cifar100_2024 --max 10
 
 # List all VNNLIB categories
-python -m act.front_end.vnnlib.cli --list
+python -m act.front_end.vnnlib_loader.cli --list
 
 # List downloads
-python -m act.front_end.vnnlib.cli --list-downloads
+python -m act.front_end.vnnlib_loader.cli --list-downloads
 ```
 
 ### Programmatic Download
 
 ```python
-from act.front_end.vnnlib.data_model_loader import download_vnnlib_category
+from act.front_end.vnnlib_loader.data_model_loader import download_vnnlib_category
 
 # Download category
 result = download_vnnlib_category(
@@ -222,7 +222,7 @@ All benchmarks are sourced from VNN-COMP:
 ### Loading Downloaded Data
 
 ```python
-from act.front_end.vnnlib.data_model_loader import load_vnnlib_pair
+from act.front_end.vnnlib_loader.data_model_loader import load_vnnlib_pair
 
 # Load a specific instance
 result = load_vnnlib_pair(
@@ -238,7 +238,7 @@ output_spec = result['output_spec']  # LINEAR_LE constraints
 ### Creating Specifications
 
 ```python
-from act.front_end.vnnlib.create_specs import VNNLibSpecCreator
+from act.front_end.vnnlib_loader.create_specs import VNNLibSpecCreator
 
 # Create specs from downloaded data
 creator = VNNLibSpecCreator()

@@ -689,7 +689,7 @@ The pipeline integrates with ACT's spec creators for efficient testing:
 - **Resource Limits**: Configurable memory and time limits
 
 ```python
-from act.front_end.torchvision.create_specs import TorchVisionSpecCreator
+from act.front_end.torchvision_loader.create_specs import TorchVisionSpecCreator
 from act.pipeline import ModelFactory
 
 # Create specs and load data-model pairs
@@ -709,7 +709,7 @@ The pipeline seamlessly integrates with ACT's core components:
 Example integration:
 
 ```python
-from act.front_end.torchvision.create_specs import TorchVisionSpecCreator
+from act.front_end.torchvision_loader.create_specs import TorchVisionSpecCreator
 from act.front_end.model_synthesis import synthesize_models_from_specs
 
 # Create specs from TorchVision datasets

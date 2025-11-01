@@ -174,30 +174,30 @@ python -m act.front_end --list --creator torchvision
 ### TorchVision CLI (`torchvision/cli.py`)
 ```bash
 # TorchVision-specific features
-python -m act.front_end.torchvision --models-for CIFAR10
-python -m act.front_end.torchvision --datasets-for resnet18
-python -m act.front_end.torchvision --validate MNIST resnet18
-python -m act.front_end.torchvision --preprocessing-summary
-python -m act.front_end.torchvision --all-with-inference
+python -m act.front_end.torchvision_loader --models-for CIFAR10
+python -m act.front_end.torchvision_loader --datasets-for resnet18
+python -m act.front_end.torchvision_loader --validate MNIST resnet18
+python -m act.front_end.torchvision_loader --preprocessing-summary
+python -m act.front_end.torchvision_loader --all-with-inference
 
 # Download specific dataset-model pair (not all models)
-python -m act.front_end.torchvision --download MNIST simple_cnn
+python -m act.front_end.torchvision_loader --download MNIST simple_cnn
 ```
 
 ### VNNLIB CLI (`vnnlib/cli.py`)
 ```bash
 # VNNLIB-specific features
-python -m act.front_end.vnnlib --list
-python -m act.front_end.vnnlib --info acasxu_2023
-python -m act.front_end.vnnlib --download cifar100_2024 --max 10
-python -m act.front_end.vnnlib --parse-vnnlib path/to/file.vnnlib
+python -m act.front_end.vnnlib_loader --list
+python -m act.front_end.vnnlib_loader --info acasxu_2023
+python -m act.front_end.vnnlib_loader --download cifar100_2024 --max 10
+python -m act.front_end.vnnlib_loader --parse-vnnlib path/to/file.vnnlib
 ```
 
 ## Programmatic Usage
 
 ### TorchVision Creator
 ```python
-from act.front_end.torchvision.create_specs import TorchVisionSpecCreator
+from act.front_end.torchvision_loader.create_specs import TorchVisionSpecCreator
 
 creator = TorchVisionSpecCreator()
 results = creator.create_specs_for_data_model_pairs(
@@ -212,7 +212,7 @@ results = creator.create_specs_for_data_model_pairs(
 
 ### VNNLIB Creator
 ```python
-from act.front_end.vnnlib.create_specs import VNNLibSpecCreator
+from act.front_end.vnnlib_loader.create_specs import VNNLibSpecCreator
 
 creator = VNNLibSpecCreator()
 results = creator.create_specs_for_data_model_pairs(
@@ -246,7 +246,7 @@ front_end/
 ├── model_synthesis.py           # Wrap models with specs
 │
 ├── torchvision/                 # TorchVision Creator
-│   ├── __main__.py              # Entry point: python -m act.front_end.torchvision
+│   ├── __main__.py              # Entry point: python -m act.front_end.torchvision_loader
 │   ├── README.md
 │   ├── cli.py                   # Domain-specific CLI
 │   ├── create_specs.py
@@ -254,7 +254,7 @@ front_end/
 │   └── data_model_loader.py
 │
 └── vnnlib/                      # VNNLIB Creator  
-    ├── __main__.py              # 🆕 Entry point: python -m act.front_end.vnnlib
+    ├── __main__.py              # 🆕 Entry point: python -m act.front_end.vnnlib_loader
     ├── README.md                # 🆕
     ├── cli.py                   # 🆕 Domain-specific CLI
     ├── create_specs.py
@@ -270,7 +270,7 @@ front_end/
 
 ```python
 # 1. Create specs (either creator)
-from act.front_end.torchvision.create_specs import TorchVisionSpecCreator
+from act.front_end.torchvision_loader.create_specs import TorchVisionSpecCreator
 creator = TorchVisionSpecCreator()
 results = creator.create_specs_for_data_model_pairs(...)
 

@@ -10,14 +10,17 @@ License: AGPLv3+
 """
 
 import argparse
+from pathlib import Path
 from typing import Optional
+
+import torch
 
 from act.front_end.creator_registry import detect_creator, list_creators, get_creator
 
 # Import domain-specific CLIs for delegation
-from act.front_end.torchvision import data_model_mapping as tv_mapping
-from act.front_end.torchvision import data_model_loader as tv_loader
-from act.front_end.vnnlib import category_mapping as vnnlib_mapping
+from act.front_end.torchvision_loader import data_model_mapping as tv_mapping
+from act.front_end.torchvision_loader import data_model_loader as tv_loader
+from act.front_end.vnnlib_loader import category_mapping as vnnlib_mapping
 
 
 def print_unified_list(creator: Optional[str] = None):
@@ -188,7 +191,7 @@ def handle_unified_download(name: str, explicit_creator: Optional[str] = None):
             
         elif creator_name == 'vnnlib':
             # Import VNNLIB loader
-            from act.front_end.vnnlib import data_model_loader as vnnlib_loader
+            from act.front_end.vnnlib_loader import data_model_loader as vnnlib_loader
             
             print(f"Downloading VNNLIB category '{normalized_name}'...")
             print(f"This will download:")
@@ -253,7 +256,7 @@ def print_list_downloads(creator: Optional[str] = None):
             print(f"\nNo TorchVision downloads found")
     
     if creator is None or creator == 'vnnlib':
-        from act.front_end.vnnlib import data_model_loader as vnnlib_loader
+        from act.front_end.vnnlib_loader import data_model_loader as vnnlib_loader
         
         vnnlib_downloads = vnnlib_loader.list_downloaded_pairs()
         if vnnlib_downloads:
@@ -292,12 +295,12 @@ def print_creators():
         if creator_name == 'torchvision':
             datasets = list(tv_mapping.DATASET_MODEL_MAPPING.keys())
             print(f"  Description: TorchVision datasets and models")
-            print(f"  Module: act.front_end.torchvision")
+            print(f"  Module: act.front_end.torchvision_loader")
             print(f"  Total Items: {len(datasets)}")
         elif creator_name == 'vnnlib':
             categories = vnnlib_mapping.list_categories()
             print(f"  Description: VNNLIB verification benchmarks")
-            print(f"  Module: act.front_end.vnnlib")
+            print(f"  Module: act.front_end.vnnlib_loader")
             print(f"  Total Items: {len(categories)}")
     
     print(f"\n{'='*100}\n")
@@ -530,11 +533,21 @@ Examples:
         
         try:
             from act.front_end.model_synthesis import model_synthesis
+            from act.util.model_inference import model_inference
+            
             wrapped_models, input_data = model_synthesis(creator=creator_name)
             print(f"\n✓ Successfully synthesized {len(wrapped_models)} models")
+            
+            # Automatically run inference after synthesis
+            print(f"\n{'='*100}")
+            print(f"MODEL INFERENCE - {creator_name.upper()}")
+            print(f"{'='*100}\n")
+            
+            successful_models = model_inference(wrapped_models, input_data)
+            print(f"\n✓ Successfully ran inference on {len(successful_models)}/{len(wrapped_models)} models")
             print(f"  Models are ready for verification")
         except Exception as e:
-            print(f"\n✗ Synthesis failed: {e}")
+            print(f"\n✗ Synthesis/Inference failed: {e}")
     
     elif args.inference:
         creator_name = args.creator if args.creator else 'torchvision'
@@ -543,16 +556,85 @@ Examples:
         print(f"{'='*100}\n")
         
         try:
-            from act.front_end.model_synthesis import model_synthesis
-            from act.util.model_inference import model_inference
+            # Get downloaded pairs for the creator
+            downloaded_pairs = []
+            if creator_name == 'torchvision':
+                downloaded_pairs = tv_loader.list_downloaded_pairs()
+            elif creator_name == 'vnnlib':
+                from act.front_end.vnnlib_loader import data_model_loader as vnnlib_loader
+                downloaded_pairs = vnnlib_loader.list_downloaded_pairs()
             
-            wrapped_models, input_data = model_synthesis(creator=creator_name)
-            print(f"✓ Synthesized {len(wrapped_models)} models")
-            
-            successful_models = model_inference(wrapped_models, input_data)
-            print(f"✓ Successfully ran inference on {len(successful_models)}/{len(wrapped_models)} models")
+            if not downloaded_pairs:
+                print(f"⚠️  No downloaded models found for creator '{creator_name}'")
+                print(f"   Use --download to download datasets/categories first")
+                print(f"   Example: python -m act.front_end --download MNIST --creator {creator_name}")
+            else:
+                print(f"Found {len(downloaded_pairs)} downloaded pair(s) for {creator_name}")
+                print(f"Running inference on downloaded models...\n")
+                
+                results = []
+                
+                # Run inference on each downloaded pair
+                if creator_name == 'torchvision':
+                    for pair_info in downloaded_pairs:
+                        dataset_name = pair_info['dataset']
+                        model_name = pair_info['model']
+                        
+                        # Test the pair
+                        result = tv_loader.model_inference_with_dataset(
+                            dataset_name=dataset_name,
+                            model_name=model_name,
+                            split='test',
+                            verbose=False
+                        )
+                        results.append(result)
+                        
+                        # Print result
+                        if result['status'] == 'success':
+                            print(f"✓ {dataset_name:20s} + {model_name:20s} - Output: {result['output_shape']}")
+                        else:
+                            print(f"✗ {dataset_name:20s} + {model_name:20s} - Error: {result.get('error', 'Unknown')[:50]}")
+                
+                elif creator_name == 'vnnlib':
+                    from act.front_end.vnnlib_loader import data_model_loader as vnnlib_loader
+                    
+                    for pair_info in downloaded_pairs:
+                        category = pair_info['category']
+                        onnx_model = pair_info['onnx_model']
+                        vnnlib_spec = pair_info['vnnlib_spec']
+                        
+                        # Test the pair
+                        result = vnnlib_loader.model_inference_with_vnnlib(
+                            category=category,
+                            onnx_model=onnx_model,
+                            vnnlib_spec=vnnlib_spec,
+                            verbose=False
+                        )
+                        results.append(result)
+                        
+                        # Print result
+                        if result['status'] == 'success':
+                            print(f"✓ {category:20s} + {result['model']:30s} - Output: {result['output_shape']}")
+                        else:
+                            print(f"✗ {category:20s} + {result['model']:30s} - Error: {result.get('error', 'Unknown')[:50]}")
+                
+                # Summary
+                successful = sum(1 for r in results if r['status'] == 'success')
+                failed = len(results) - successful
+                
+                print(f"\n{'='*100}")
+                print(f"INFERENCE SUMMARY")
+                print(f"{'='*100}")
+                print(f"✓ Successful: {successful}/{len(results)}")
+                if failed > 0:
+                    print(f"✗ Failed: {failed}/{len(results)}")
+                print(f"{'='*100}\n")
+                
         except Exception as e:
+            import traceback
             print(f"\n✗ Inference failed: {e}")
+            print(f"\nTraceback:")
+            traceback.print_exc()
     
     else:
         parser.print_help()

@@ -134,100 +134,100 @@ This directory contains downloaded TorchVision datasets and their compatible mod
 
 The TorchVision module provides a comprehensive CLI accessible via:
 ```bash
-python -m act.front_end.torchvision [OPTIONS]
+python -m act.front_end.torchvision_loader [OPTIONS]
 ```
 
 #### Exploration Commands
 
 List all available datasets:
 ```bash
-python -m act.front_end.torchvision --list
+python -m act.front_end.torchvision_loader --list
 ```
 
 Show datasets by category:
 ```bash
-python -m act.front_end.torchvision --category classification
+python -m act.front_end.torchvision_loader --category classification
 # Categories: classification, detection, segmentation, video, optical_flow
 ```
 
 Show detailed information for a specific dataset:
 ```bash
-python -m act.front_end.torchvision --dataset MNIST
+python -m act.front_end.torchvision_loader --dataset MNIST
 ```
 
 Search for datasets by name:
 ```bash
-python -m act.front_end.torchvision --search cifar
+python -m act.front_end.torchvision_loader --search cifar
 ```
 
 Show all recommended models for a dataset:
 ```bash
-python -m act.front_end.torchvision --models-for MNIST
+python -m act.front_end.torchvision_loader --models-for MNIST
 ```
 
 Show all datasets compatible with a model:
 ```bash
-python -m act.front_end.torchvision --datasets-for resnet18
+python -m act.front_end.torchvision_loader --datasets-for resnet18
 ```
 
 #### Download & Load Commands
 
 Download a dataset-model pair:
 ```bash
-python -m act.front_end.torchvision --download DATASET MODEL [--split train|test|both]
-# Example: python -m act.front_end.torchvision --download MNIST resnet18 --split test
+python -m act.front_end.torchvision_loader --download DATASET MODEL [--split train|test|both]
+# Example: python -m act.front_end.torchvision_loader --download MNIST resnet18 --split test
 ```
 
 List all downloaded dataset-model pairs:
 ```bash
-python -m act.front_end.torchvision --list-downloads
+python -m act.front_end.torchvision_loader --list-downloads
 ```
 
 Load a downloaded pair into memory:
 ```bash
-python -m act.front_end.torchvision --load-torchvision DATASET MODEL [--batch-size N]
-# Example: python -m act.front_end.torchvision --load-torchvision MNIST resnet18 --batch-size 32
+python -m act.front_end.torchvision_loader --load-torchvision DATASET MODEL [--batch-size N]
+# Example: python -m act.front_end.torchvision_loader --load-torchvision MNIST resnet18 --batch-size 32
 ```
 
 #### Validation Commands
 
 Validate dataset-model compatibility:
 ```bash
-python -m act.front_end.torchvision --validate DATASET MODEL
-# Example: python -m act.front_end.torchvision --validate MNIST resnet18
+python -m act.front_end.torchvision_loader --validate DATASET MODEL
+# Example: python -m act.front_end.torchvision_loader --validate MNIST resnet18
 ```
 
 Show preprocessing requirements for a dataset:
 ```bash
-python -m act.front_end.torchvision --show-preprocessing MNIST
+python -m act.front_end.torchvision_loader --show-preprocessing MNIST
 ```
 
 Show aggregated preprocessing summary across all datasets:
 ```bash
-python -m act.front_end.torchvision --preprocessing-summary
+python -m act.front_end.torchvision_loader --preprocessing-summary
 ```
 
 Test inference for a specific dataset-model pair:
 ```bash
-python -m act.front_end.torchvision --inference DATASET MODEL [--inference-split train|test]
-# Example: python -m act.front_end.torchvision --inference CIFAR10 resnet18 --inference-split test
+python -m act.front_end.torchvision_loader --inference DATASET MODEL [--inference-split train|test]
+# Example: python -m act.front_end.torchvision_loader --inference CIFAR10 resnet18 --inference-split test
 ```
 
 #### Comprehensive Testing
 
 Run alignment tests for all dataset-model pairs:
 ```bash
-python -m act.front_end.torchvision --all
+python -m act.front_end.torchvision_loader --all
 ```
 
 Run comprehensive tests with inference validation:
 ```bash
-python -m act.front_end.torchvision --all-with-inference
+python -m act.front_end.torchvision_loader --all-with-inference
 ```
 
 Print complete mapping summary:
 ```bash
-python -m act.front_end.torchvision --summary
+python -m act.front_end.torchvision_loader --summary
 ```
 
 ## Directory Structure
