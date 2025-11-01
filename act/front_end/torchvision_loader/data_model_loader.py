@@ -269,8 +269,8 @@ def download_dataset_model_pair(
 import torch
 import torchvision.models as models
 
-# Load model architecture (no pretrained weights)
-model = models.{model_name}(weights=None)
+# Load model architecture with pre-trained weights
+model = models.{model_name}(weights="DEFAULT")
 
 # Modify final layer for {dataset_info['num_classes']} classes if needed
 # Example for ResNet:
@@ -647,7 +647,8 @@ def load_dataset_model_pair(
     if hasattr(torchvision.models, model_name):
         # Standard TorchVision model
         model_fn = getattr(torchvision.models, model_name)
-        model = model_fn(weights=None)
+        model = model_fn(weights="DEFAULT")
+        print(f"  ✓ Loaded {model_name} with pre-trained weights")
         
         # Adjust final layer for number of classes if needed
         num_classes = metadata['num_classes']

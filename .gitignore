@@ -11,4 +11,6 @@ models/*
 gurobi/gurobi.lic
 modules/gurobi/gurobi.lic
 verifier/out.txt
+ipynb/*
+!ipynb/*.ipynb
 Abstract-Constraint-Transformer.wiki/

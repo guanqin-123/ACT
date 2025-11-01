@@ -22,6 +22,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": 5,
         "output_dim": 5,
         "year": 2023,
+        "repo_name": "acasxu_2023",
     },
     "cctsdb_yolo_2023": {
         "type": "object_detection",
@@ -31,6 +32,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "3×640×640",
         "output_dim": "Variable",
         "year": 2023,
+        "repo_name": "cctsdb_yolo_2023",
     },
     "cersyve": {
         "type": "image_classification",
@@ -40,6 +42,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Variable",
         "output_dim": "Variable",
         "year": 2024,
+        "repo_name": "cersyve",  # Not in vnncomp2024, may need alternative source
     },
     "cgan_2023": {
         "type": "generative",
@@ -49,6 +52,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Variable",
         "output_dim": "Variable",
         "year": 2023,
+        "repo_name": "cgan_2023",
     },
     "cifar100_2024": {
         "type": "image_classification",
@@ -58,6 +62,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "3×32×32",
         "output_dim": 100,
         "year": 2024,
+        "repo_name": "cifar100",  # Actual name in VNN-COMP repository
     },
     "collins_aerospace_benchmark": {
         "type": "aerospace",
@@ -67,6 +72,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Variable",
         "output_dim": "Variable",
         "year": 2024,
+        "repo_name": "collins_aerospace_benchmark",
     },
     "collins_rul_cnn_2022": {
         "type": "remaining_useful_life",
@@ -76,6 +82,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Time series",
         "output_dim": 1,
         "year": 2022,
+        "repo_name": "collins_rul_cnn_2023",  # Year mismatch in repo
     },
     "cora_2024": {
         "type": "reachability",
@@ -85,6 +92,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Variable",
         "output_dim": "Variable",
         "year": 2024,
+        "repo_name": "cora",
     },
     "dist_shift_2023": {
         "type": "distribution_shift",
@@ -94,6 +102,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Variable",
         "output_dim": "Variable",
         "year": 2023,
+        "repo_name": "dist_shift_2023",
     },
     "linearizenn_2024": {
         "type": "linearization",
@@ -103,6 +112,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Variable",
         "output_dim": "Variable",
         "year": 2024,
+        "repo_name": "linearizenn",
     },
     "lsnc_relu": {
         "type": "control",
@@ -112,6 +122,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Variable",
         "output_dim": "Variable",
         "year": 2024,
+        "repo_name": "lsnc",
     },
     "malbeware": {
         "type": "malware_detection",
@@ -121,6 +132,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Variable",
         "output_dim": "Binary",
         "year": 2024,
+        "repo_name": "malbeware",  # Not in vnncomp2024, may need alternative source
     },
     "metaroom_2023": {
         "type": "3d_reconstruction",
@@ -130,6 +142,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Variable",
         "output_dim": "Variable",
         "year": 2023,
+        "repo_name": "metaroom_2023",
     },
     "ml4acopf_2024": {
         "type": "power_systems",
@@ -139,6 +152,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Variable",
         "output_dim": "Variable",
         "year": 2024,
+        "repo_name": "ml4acopf_2024",
     },
     "nn4sys": {
         "type": "systems",
@@ -148,6 +162,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Variable",
         "output_dim": "Variable",
         "year": 2024,
+        "repo_name": "nn4sys_2023",
     },
     "relusplitter": {
         "type": "verification_algorithm",
@@ -157,6 +172,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Variable",
         "output_dim": "Variable",
         "year": 2024,
+        "repo_name": "relusplitter",  # Not in vnncomp2024, may need alternative source
     },
     "safenlp_2024": {
         "type": "nlp",
@@ -166,6 +182,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Token sequences",
         "output_dim": "Token sequences",
         "year": 2024,
+        "repo_name": "safenlp",
     },
     "sat_relu": {
         "type": "sat_encoding",
@@ -175,6 +192,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Variable",
         "output_dim": "Variable",
         "year": 2024,
+        "repo_name": "sat_relu",  # Not in vnncomp2024, may need alternative source
     },
     "soundnessbench": {
         "type": "soundness_testing",
@@ -184,6 +202,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Variable",
         "output_dim": "Variable",
         "year": 2024,
+        "repo_name": "soundnessbench",  # Not in vnncomp2024, may need alternative source
     },
     "test": {
         "type": "testing",
@@ -193,6 +212,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Variable",
         "output_dim": "Variable",
         "year": 2024,
+        "repo_name": "test",
     },
     "tinyimagenet_2024": {
         "type": "image_classification",
@@ -202,6 +222,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "3×64×64",
         "output_dim": 200,
         "year": 2024,
+        "repo_name": "tinyimagenet",
     },
     "tllverifybench_2023": {
         "type": "transfer_learning",
@@ -211,6 +232,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "Variable",
         "output_dim": "Variable",
         "year": 2023,
+        "repo_name": "tllverifybench_2023",
     },
     "traffic_signs_recognition_2023": {
         "type": "traffic_sign_recognition",
@@ -220,6 +242,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "3×32×32",
         "output_dim": "Variable",
         "year": 2023,
+        "repo_name": "traffic_signs_recognition_2023",
     },
     "vggnet16_2022": {
         "type": "image_classification",
@@ -229,6 +252,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "3×224×224",
         "output_dim": 1000,
         "year": 2022,
+        "repo_name": "vggnet16_2023",  # Year mismatch in repo
     },
     "vit_2023": {
         "type": "vision_transformer",
@@ -238,6 +262,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "3×224×224",
         "output_dim": "Variable",
         "year": 2023,
+        "repo_name": "vit_2023",
     },
     "yolo_2023": {
         "type": "object_detection",
@@ -247,6 +272,7 @@ CATEGORY_MAPPING: Dict[str, Dict] = {
         "input_dim": "3×640×640",
         "output_dim": "Variable",
         "year": 2023,
+        "repo_name": "yolo_2023",
     },
 }
 

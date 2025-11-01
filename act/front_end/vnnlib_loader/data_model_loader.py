@@ -79,6 +79,14 @@ def download_vnnlib_category(
     if root_dir is None:
         root_dir = get_vnnlib_data_root()
     
+    # Import here to avoid circular dependency
+    from act.front_end.vnnlib_loader.category_mapping import CATEGORY_MAPPING
+    
+    # Get repo name (may differ from category name)
+    repo_name = category
+    if category in CATEGORY_MAPPING:
+        repo_name = CATEGORY_MAPPING[category].get('repo_name', category)
+    
     category_dir = Path(root_dir) / category
     onnx_dir = category_dir / "onnx"
     vnnlib_dir = category_dir / "vnnlib"
@@ -105,12 +113,12 @@ def download_vnnlib_category(
     onnx_dir.mkdir(parents=True, exist_ok=True)
     vnnlib_dir.mkdir(parents=True, exist_ok=True)
     
-    logger.info(f"Downloading VNNLIB category: {category}")
+    logger.info(f"Downloading VNNLIB category: {category} (repo: {repo_name})")
     
     # Try multiple repository URLs
     successful_base_url = None
     for base_url in VNNCOMP_REPO_URLS:
-        instances_url = f"{base_url}/{category}/instances.csv"
+        instances_url = f"{base_url}/{repo_name}/instances.csv"
         logger.info(f"Trying: {instances_url}")
         
         try:
@@ -162,7 +170,7 @@ def download_vnnlib_category(
                 success = False
                 
                 for extension in ['.gz', '']:
-                    onnx_url = f"{successful_base_url}/{category}/{onnx_file}{extension}"
+                    onnx_url = f"{successful_base_url}/{repo_name}/{onnx_file}{extension}"
                     tried_urls.append(onnx_url)
                     
                     try:
@@ -205,7 +213,7 @@ def download_vnnlib_category(
                 success = False
                 
                 for extension in ['.gz', '']:
-                    vnnlib_url = f"{successful_base_url}/{category}/{vnnlib_file}{extension}"
+                    vnnlib_url = f"{successful_base_url}/{repo_name}/{vnnlib_file}{extension}"
                     tried_urls.append(vnnlib_url)
                     
                     try:

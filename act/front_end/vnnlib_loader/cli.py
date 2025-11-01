@@ -22,6 +22,10 @@ from act.front_end.vnnlib_loader.category_mapping import (
     find_category_name,
     get_summary_statistics,
 )
+from act.front_end.vnnlib_loader.data_model_loader import (
+    download_vnnlib_category,
+    list_downloaded_pairs,
+)
 
 
 def print_category_list(category_type: Optional[str] = None):
@@ -156,18 +160,30 @@ def main():
         help="List all available category types"
     )
     
-    # Download and management commands (placeholders for future implementation)
+    # Download and management commands
     parser.add_argument(
         "--download",
         type=str,
         metavar="CATEGORY",
-        help="Download a VNNLIB category (ONNX + VNNLIB files) [NOT IMPLEMENTED]"
+        help="Download a VNNLIB category (ONNX + VNNLIB files)"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force re-download even if files exist (use with --download)"
+    )
+    parser.add_argument(
+        "--max-instances",
+        type=int,
+        metavar="N",
+        dest="max_instances",
+        help="Maximum number of instances to download (use with --download)"
     )
     parser.add_argument(
         "--list-downloads",
         action="store_true",
         dest="list_downloads",
-        help="List all downloaded categories [NOT IMPLEMENTED]"
+        help="List all downloaded categories"
     )
     parser.add_argument(
         "--load",
@@ -237,17 +253,106 @@ def main():
             print(f"  • {cat_type:30s} ({count} categories)")
     
     elif args.download:
-        print(f"\n⚠️  Download functionality not yet implemented.")
-        print(f"    Category: {args.download}")
-        print(f"\n    This feature will download:")
-        print(f"    • ONNX model files")
-        print(f"    • VNNLIB property files")
-        print(f"    • instances.csv mapping file")
-        print(f"\n    Coming soon!")
+        # Download VNNLIB category
+        category = args.download
+        
+        try:
+            # Validate category exists
+            actual_name = find_category_name(category)
+            info = get_category_info(actual_name)
+            
+            print(f"\n{'='*100}")
+            print(f"DOWNLOADING VNNLIB CATEGORY: {actual_name}")
+            print(f"{'='*100}")
+            print(f"Type: {info['type']}")
+            print(f"Description: {info['description']}")
+            print(f"Year: {info['year']}")
+            
+            if args.max_instances:
+                print(f"Max instances: {args.max_instances}")
+            if args.force:
+                print(f"Force re-download: Yes")
+            
+            print(f"\nDownloading from VNN-COMP GitHub repository...")
+            print(f"{'='*100}\n")
+            
+            # Download the category
+            result = download_vnnlib_category(
+                category=actual_name,
+                force_redownload=args.force
+            )
+            
+            if result['status'] == 'success':
+                print(f"\n{'='*100}")
+                print(f"✓ DOWNLOAD SUCCESSFUL")
+                print(f"{'='*100}")
+                print(f"Category: {actual_name}")
+                print(f"Path: {result['category_path']}")
+                print(f"Instances: {result['num_instances']}")
+                if 'num_onnx_models' in result:
+                    print(f"ONNX models: {result['num_onnx_models']}")
+                if 'num_vnnlib_specs' in result:
+                    print(f"VNNLIB specs: {result['num_vnnlib_specs']}")
+                print(f"{'='*100}\n")
+            else:
+                print(f"\n{'='*100}")
+                print(f"⚠️  DOWNLOAD FAILED")
+                print(f"{'='*100}")
+                print(f"Error: {result.get('message', 'Unknown error')}")
+                print(f"{'='*100}\n")
+                
+        except ValueError as e:
+            print(f"\n{'='*100}")
+            print(f"⚠️  INVALID CATEGORY")
+            print(f"{'='*100}")
+            print(f"Error: {e}")
+            print(f"\nUse --list to see available categories")
+            print(f"{'='*100}\n")
+        except Exception as e:
+            print(f"\n{'='*100}")
+            print(f"⚠️  DOWNLOAD ERROR")
+            print(f"{'='*100}")
+            print(f"Error: {e}")
+            print(f"{'='*100}\n")
     
     elif args.list_downloads:
-        print(f"\n⚠️  List downloads functionality not yet implemented.")
-        print(f"    This will show all downloaded VNNLIB categories.")
+        # List downloaded categories
+        try:
+            downloaded = list_downloaded_pairs()
+            
+            if not downloaded:
+                print(f"\nNo downloaded VNNLIB categories found.")
+                print(f"Use --download <category> to download a benchmark.")
+                return
+            
+            # Group by category
+            by_category = {}
+            for pair in downloaded:
+                cat = pair['category']
+                if cat not in by_category:
+                    by_category[cat] = []
+                by_category[cat].append(pair)
+            
+            print(f"\n{'='*100}")
+            print(f"DOWNLOADED VNNLIB CATEGORIES ({len(by_category)})")
+            print(f"{'='*100}")
+            
+            for category in sorted(by_category.keys()):
+                instances = by_category[category]
+                info = CATEGORY_MAPPING.get(category, {})
+                
+                print(f"\n{category} ({len(instances)} instances)")
+                if info:
+                    print(f"  Type: {info.get('type', 'N/A')}")
+                    print(f"  Description: {info.get('description', 'N/A')}")
+                print(f"  Path: {instances[0]['category_path']}")
+            
+            print(f"\n{'='*100}")
+            print(f"Total instances: {len(downloaded)}")
+            print(f"{'='*100}\n")
+            
+        except Exception as e:
+            print(f"Error listing downloads: {e}")
     
     elif args.load:
         category, instance_id = args.load

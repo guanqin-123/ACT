@@ -19,7 +19,12 @@ class SimpleCNN(nn.Module):
     Compatible with the same preprocessing pipeline as standard TorchVision models.
     """
     
-    def __init__(self, num_classes: int = 10):
+    def __init__(self, num_classes: int = 10, weights=None):
+        """
+        Args:
+            num_classes: Number of output classes
+            weights: Ignored (custom model has no pre-trained weights)
+        """
         super(SimpleCNN, self).__init__()
         # Accept 3 channels (RGB) after standard preprocessing
         self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
@@ -48,7 +53,12 @@ class LeNet5(nn.Module):
     Compatible with the same preprocessing pipeline as standard TorchVision models.
     """
     
-    def __init__(self, num_classes: int = 10):
+    def __init__(self, num_classes: int = 10, weights=None):
+        """
+        Args:
+            num_classes: Number of output classes
+            weights: Ignored (custom model has no pre-trained weights)
+        """
         super(LeNet5, self).__init__()
         # Accept 3 channels (RGB) after standard preprocessing
         self.conv1 = nn.Conv2d(3, 6, kernel_size=5)
@@ -70,13 +80,14 @@ class LeNet5(nn.Module):
         return x
 
 
-def get_model(model_name: str, num_classes: int = 10):
+def get_model(model_name: str, num_classes: int = 10, weights=None):
     """
     Get a custom model instance by name.
     
     Args:
-        model_name: Name of the custom model (simple_cnn or lenet5, case-insensitive)
+        model_name: Name of the custom model (lenet5, case-insensitive)
         num_classes: Number of output classes
+        weights: Ignored (custom models have no pre-trained weights)
         
     Returns:
         Model instance
@@ -87,9 +98,9 @@ def get_model(model_name: str, num_classes: int = 10):
     model_name_lower = model_name.lower()
     
     if model_name_lower == "simple_cnn" or model_name_lower == "simplecnn":
-        return SimpleCNN(num_classes=num_classes)
+        return SimpleCNN(num_classes=num_classes, weights=weights)
     elif model_name_lower == "lenet5":
-        return LeNet5(num_classes=num_classes)
+        return LeNet5(num_classes=num_classes, weights=weights)
     else:
         raise ValueError(
             f"Unknown custom model: {model_name}. "
@@ -114,8 +125,9 @@ import torch.nn as nn
 
 class SimpleCNN(nn.Module):
     \"\"\"Simple CNN that adapts to standard preprocessing (3-channel RGB, 224×224).\"\"\"
-    def __init__(self, num_classes={num_classes}):
+    def __init__(self, num_classes={num_classes}, weights=None):
         super(SimpleCNN, self).__init__()
+        # weights parameter ignored - custom model has no pre-trained weights
         self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
         self.pool = nn.MaxPool2d(2, 2)
@@ -142,8 +154,9 @@ import torch.nn as nn
 
 class LeNet5(nn.Module):
     \"\"\"LeNet-5 adapted for standard preprocessing (3-channel RGB, 224×224).\"\"\"
-    def __init__(self, num_classes={num_classes}):
+    def __init__(self, num_classes={num_classes}, weights=None):
         super(LeNet5, self).__init__()
+        # weights parameter ignored - custom model has no pre-trained weights
         self.conv1 = nn.Conv2d(3, 6, kernel_size=5)
         self.conv2 = nn.Conv2d(6, 16, kernel_size=5)
         self.fc1 = nn.Linear(16 * 53 * 53, 120)  # After convs and pooling on 224x224

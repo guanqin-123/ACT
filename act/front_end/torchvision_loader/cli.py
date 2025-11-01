@@ -157,7 +157,7 @@ def _test_single_dataset_model(
             # Try standard TorchVision model first
             if hasattr(torchvision.models, model_name):
                 model_fn = getattr(torchvision.models, model_name)
-                model = model_fn(weights=None)
+                model = model_fn(weights="DEFAULT")
                 
                 # Adjust final layer for dataset's number of classes
                 if hasattr(model, 'fc'):
