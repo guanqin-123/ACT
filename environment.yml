@@ -17,11 +17,15 @@ dependencies:
   - gurobi
   - ipykernel
   - matplotlib
+  - pyyaml  # Config loading (specs, models, abcrown)
+  - psutil  # Memory monitoring in pipeline
   - pip
   - pip:
+      # ONNX ecosystem - for VNNLib benchmarks
+      - onnx2pytorch
       - onnxconverter-common
       - onnxscript
-      - onnx2pytorch
-      - onnx-simplifier
+      - onnx-simplifier  # Optional optimizer, may have build issues on some systems
+      # ML frameworks (pipeline/llm_probe.py)
       - transformers
       - scikit-learn
