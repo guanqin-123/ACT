@@ -5,14 +5,191 @@ Copyright (C) 2025 SVF-tools/ACT
 License: AGPLv3+
 """
 
+from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import List, Tuple, Dict, Any, Optional, Callable
+from dataclasses import dataclass
+from typing import List, Tuple, Dict, Any, Optional, Callable, Union
 import yaml
 import torch
 from pathlib import Path
 
 from act.front_end.specs import InputSpec, OutputSpec, InKind, OutKind
 from act.util.path_config import get_spec_config_path, get_default_spec_config_path
+
+
+@dataclass
+class LabeledInputTensor:
+    """
+    Pairs an input tensor with its ground truth label.
+    
+    This unified data structure ensures tensor-label consistency throughout
+    the verification pipeline, from data loading to spec generation.
+    
+    Attributes:
+        tensor: Input tensor (image, sequence, or any torch.Tensor)
+        label: Ground truth label (None if unavailable, e.g., for unlabeled data)
+    
+    Examples:
+        >>> # Create from tensor and label
+        >>> tensor = torch.randn(3, 32, 32)
+        >>> labeled = LabeledInputTensor(tensor, label=5)
+        
+        >>> # Tuple unpacking
+        >>> img, lbl = labeled
+        >>> assert torch.equal(img, tensor) and lbl == 5
+        
+        >>> # Property access
+        >>> assert labeled.tensor.shape == (3, 32, 32)
+        >>> assert labeled.label == 5
+        
+        >>> # Device management
+        >>> cuda_labeled = labeled.to('cuda')
+        >>> assert cuda_labeled.tensor.device.type == 'cuda'
+        
+        >>> # Unlabeled data
+        >>> unlabeled = LabeledInputTensor(tensor, label=None)
+        >>> _, lbl = unlabeled
+        >>> assert lbl is None
+    """
+    
+    tensor: torch.Tensor
+    label: Optional[int] = None
+    
+    def __post_init__(self):
+        """Validate inputs after initialization."""
+        if not isinstance(self.tensor, torch.Tensor):
+            raise TypeError(
+                f"tensor must be torch.Tensor, got {type(self.tensor).__name__}"
+            )
+        
+        if self.label is not None and not isinstance(self.label, int):
+            raise TypeError(
+                f"label must be int or None, got {type(self.label).__name__}"
+            )
+    
+    def __getitem__(self, key: int) -> Union[torch.Tensor, Optional[int]]:
+        """
+        Enable tuple-like unpacking.
+        
+        Args:
+            key: Index (0 for tensor, 1 for label)
+        
+        Returns:
+            tensor if key==0, label if key==1
+        
+        Raises:
+            IndexError: If key not in [0, 1]
+        
+        Examples:
+            >>> labeled = LabeledInputTensor(torch.randn(3, 32, 32), label=5)
+            >>> tensor, label = labeled  # Unpacks via __getitem__
+            >>> assert tensor.shape == (3, 32, 32)
+            >>> assert label == 5
+        """
+        if key == 0:
+            return self.tensor
+        elif key == 1:
+            return self.label
+        else:
+            raise IndexError(
+                f"LabeledInputTensor index must be 0 (tensor) or 1 (label), got {key}"
+            )
+    
+    def __len__(self) -> int:
+        """Return length for tuple unpacking (always 2)."""
+        return 2
+    
+    def to(self, device: Union[str, torch.device]) -> LabeledInputTensor:
+        """
+        Move tensor to specified device.
+        
+        Args:
+            device: Target device ('cpu', 'cuda', torch.device, etc.)
+        
+        Returns:
+            New LabeledInputTensor with tensor on target device
+        
+        Examples:
+            >>> labeled = LabeledInputTensor(torch.randn(3, 32, 32), label=5)
+            >>> cuda_labeled = labeled.to('cuda')
+            >>> assert cuda_labeled.tensor.device.type == 'cuda'
+            >>> assert cuda_labeled.label == 5
+        """
+        return LabeledInputTensor(
+            tensor=self.tensor.to(device),
+            label=self.label
+        )
+    
+    def cpu(self) -> LabeledInputTensor:
+        """
+        Move tensor to CPU.
+        
+        Returns:
+            New LabeledInputTensor with tensor on CPU
+        """
+        return self.to('cpu')
+    
+    def cuda(self, device: Optional[int] = None) -> LabeledInputTensor:
+        """
+        Move tensor to CUDA device.
+        
+        Args:
+            device: CUDA device index (None for current device)
+        
+        Returns:
+            New LabeledInputTensor with tensor on CUDA device
+        """
+        if device is None:
+            return self.to('cuda')
+        else:
+            return self.to(f'cuda:{device}')
+    
+    def detach(self) -> LabeledInputTensor:
+        """
+        Detach tensor from computation graph.
+        
+        Returns:
+            New LabeledInputTensor with detached tensor
+        """
+        return LabeledInputTensor(
+            tensor=self.tensor.detach(),
+            label=self.label
+        )
+    
+    def clone(self) -> LabeledInputTensor:
+        """
+        Create a deep copy.
+        
+        Returns:
+            New LabeledInputTensor with cloned tensor
+        """
+        return LabeledInputTensor(
+            tensor=self.tensor.clone(),
+            label=self.label
+        )
+    
+    @property
+    def shape(self) -> torch.Size:
+        """Convenience property for tensor shape."""
+        return self.tensor.shape
+    
+    @property
+    def device(self) -> torch.device:
+        """Convenience property for tensor device."""
+        return self.tensor.device
+    
+    @property
+    def dtype(self) -> torch.dtype:
+        """Convenience property for tensor dtype."""
+        return self.tensor.dtype
+    
+    def __repr__(self) -> str:
+        """String representation for debugging."""
+        label_str = f"label={self.label}" if self.label is not None else "label=None"
+        return (
+            f"LabeledInputTensor(shape={tuple(self.tensor.shape)}, "
+            f"{label_str}, device={self.tensor.device})"
+        )
 
 
 class BaseSpecCreator(ABC):

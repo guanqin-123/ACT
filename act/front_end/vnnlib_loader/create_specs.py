@@ -19,7 +19,7 @@ import logging
 import torch
 import torch.nn as nn
 
-from act.front_end.spec_creator_base import BaseSpecCreator
+from act.front_end.spec_creator_base import BaseSpecCreator, LabeledInputTensor
 from act.front_end.specs import InputSpec, OutputSpec
 from act.front_end.vnnlib_loader.data_model_loader import (
     list_downloaded_pairs,
@@ -47,7 +47,7 @@ class VNNLibSpecCreator(BaseSpecCreator):
         ...     max_instances=10
         ... )
         >>> 
-        >>> for category, instance_id, pytorch_model, input_tensors, spec_pairs in results:
+        >>> for category, instance_id, pytorch_model, labeled_tensors, spec_pairs in results:
         ...     print(f"{category}/{instance_id}: {len(spec_pairs)} spec pairs")
     """
     
@@ -70,17 +70,17 @@ class VNNLibSpecCreator(BaseSpecCreator):
         categories: Optional[List[str]] = None,
         max_instances: Optional[int] = None,
         validate_shapes: bool = True
-    ) -> List[Tuple[str, str, nn.Module, List[torch.Tensor], List[Tuple[InputSpec, OutputSpec]]]]:
+    ) -> List[Tuple[str, str, nn.Module, List[LabeledInputTensor], List[Tuple[InputSpec, OutputSpec]]]]:
         """
         Create specs for VNNLIB benchmark instances.
         
-        Unified return format: List of (data_source, model_name, pytorch_model, input_tensors, spec_pairs)
+        Unified return format: List of (data_source, model_name, pytorch_model, labeled_tensors, spec_pairs)
         
         For VNNLIB:
         - data_source: Category name (e.g., "mnist_fc")
         - model_name: Instance identifier (e.g., "model_0_spec_5")
         - pytorch_model: ONNX model converted to PyTorch
-        - input_tensors: List with single tensor from VNNLIB constraints
+        - labeled_tensors: List with single LabeledInputTensor from VNNLIB constraints
         - spec_pairs: List with single (InputSpec, OutputSpec) from VNNLIB
         
         Args:
@@ -93,7 +93,7 @@ class VNNLibSpecCreator(BaseSpecCreator):
             - data_source: Category name
             - model_name: Instance identifier
             - pytorch_model: torch.nn.Module (converted from ONNX)
-            - input_tensors: List containing single input tensor
+            - labeled_tensors: List containing single LabeledInputTensor
             - spec_pairs: List containing single (InputSpec, OutputSpec)
             
         Example:
@@ -195,18 +195,18 @@ class VNNLibSpecCreator(BaseSpecCreator):
         instance_id: str,
         instance_data: Dict,
         validate_shapes: bool
-    ) -> Optional[Tuple[str, str, nn.Module, List[torch.Tensor], List[Tuple[InputSpec, OutputSpec]]]]:
+    ) -> Optional[Tuple[str, str, nn.Module, List[LabeledInputTensor], List[Tuple[InputSpec, OutputSpec]]]]:
         """
         Create specs for a single VNNLIB instance.
         
         Returns:
-            Tuple of (category, instance_id, pytorch_model, input_tensors, spec_pairs)
+            Tuple of (category, instance_id, pytorch_model, labeled_tensors, spec_pairs)
             or None if failed
         """
         logger.info(f"Generating specs for {category}/{instance_id}")
         
         pytorch_model = instance_data['model']
-        input_tensor = instance_data['input_tensor']
+        labeled_tensor = instance_data['labeled_tensor']
         vnnlib_path = Path(instance_data['vnnlib_path'])
         
         # Parse VNNLIB to create specs
@@ -227,7 +227,7 @@ class VNNLibSpecCreator(BaseSpecCreator):
             validated_pairs = self._validate_and_filter_specs(
                 spec_pairs,
                 pytorch_model,
-                input_tensor
+                labeled_tensor.tensor
             )
             
             if not validated_pairs:
@@ -236,10 +236,10 @@ class VNNLibSpecCreator(BaseSpecCreator):
             
             spec_pairs = validated_pairs
         
-        # Return in unified format with input_tensors as list
-        input_tensors = [input_tensor]
+        # Return in unified format with labeled_tensors as list
+        labeled_tensors = [labeled_tensor]
         
-        return (category, instance_id, pytorch_model, input_tensors, spec_pairs)
+        return (category, instance_id, pytorch_model, labeled_tensors, spec_pairs)
     
     def _validate_and_filter_specs(
         self,
@@ -303,7 +303,7 @@ def create_vnnlib_specs(
     categories: Optional[List[str]] = None,
     max_instances: Optional[int] = None,
     config_name: str = "vnnlib_default"
-) -> List[Tuple[str, str, nn.Module, List[torch.Tensor], List[Tuple[InputSpec, OutputSpec]]]]:
+) -> List[Tuple[str, str, nn.Module, List[LabeledInputTensor], List[Tuple[InputSpec, OutputSpec]]]]:
     """
     Convenience function to create VNNLIB specs with default settings.
     
@@ -313,7 +313,7 @@ def create_vnnlib_specs(
         config_name: Configuration preset name
         
     Returns:
-        List of (category, instance_id, pytorch_model, input_tensors, spec_pairs)
+        List of (category, instance_id, pytorch_model, labeled_tensors, spec_pairs)
         
     Example:
         >>> results = create_vnnlib_specs(["mnist_fc"], max_instances=10)

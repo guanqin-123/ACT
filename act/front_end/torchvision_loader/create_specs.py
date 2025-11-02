@@ -19,7 +19,7 @@ import logging
 import torch
 import torch.nn as nn
 
-from act.front_end.spec_creator_base import BaseSpecCreator
+from act.front_end.spec_creator_base import BaseSpecCreator, LabeledInputTensor
 from act.front_end.specs import InputSpec, OutputSpec, InKind, OutKind
 from act.front_end.torchvision_loader.data_model_loader import (
     list_downloaded_pairs,
@@ -45,7 +45,7 @@ class TorchVisionSpecCreator(BaseSpecCreator):
         ...     num_samples=10
         ... )
         >>> 
-        >>> for data_source, model_name, pytorch_model, input_tensors, spec_pairs in results:
+        >>> for data_source, model_name, pytorch_model, labeled_tensors, spec_pairs in results:
         ...     print(f"{data_source} + {model_name}: {len(spec_pairs)} spec pairs")
     """
     
@@ -71,11 +71,11 @@ class TorchVisionSpecCreator(BaseSpecCreator):
         start_index: int = 0,
         split: str = "test",
         validate_shapes: bool = True
-    ) -> List[Tuple[str, str, nn.Module, List[torch.Tensor], List[Tuple[InputSpec, OutputSpec]]]]:
+    ) -> List[Tuple[str, str, nn.Module, List[LabeledInputTensor], List[Tuple[InputSpec, OutputSpec]]]]:
         """
         Create specs for TorchVision dataset-model pairs.
         
-        Unified return format: List of (data_source, model_name, pytorch_model, input_tensors, spec_pairs)
+        Unified return format: List of (data_source, model_name, pytorch_model, labeled_tensors, spec_pairs)
         
         Args:
             dataset_names: List of dataset names (None = all downloaded)
@@ -90,7 +90,7 @@ class TorchVisionSpecCreator(BaseSpecCreator):
             - data_source: Dataset name (e.g., "MNIST")
             - model_name: Model name (e.g., "simple_cnn")
             - pytorch_model: torch.nn.Module
-            - input_tensors: List of input sample tensors
+            - labeled_tensors: List of LabeledInputTensor instances
             - spec_pairs: List of (InputSpec, OutputSpec) tuples
             
         Example:
@@ -192,42 +192,45 @@ class TorchVisionSpecCreator(BaseSpecCreator):
         num_samples: int,
         start_index: int,
         validate_shapes: bool
-    ) -> Optional[Tuple[str, str, nn.Module, List[torch.Tensor], List[Tuple[InputSpec, OutputSpec]]]]:
+    ) -> Optional[Tuple[str, str, nn.Module, List[LabeledInputTensor], List[Tuple[InputSpec, OutputSpec]]]]:
         """
         Create specs for a single dataset-model pair.
         
         Returns:
-            Tuple of (data_source, model_name, pytorch_model, input_tensors, spec_pairs)
+            Tuple of (data_source, model_name, pytorch_model, labeled_tensors, spec_pairs)
             or None if failed
         """
         logger.info(f"Generating specs for {data_source} + {model_name}")
         
-        # Collect samples
-        input_tensors = []
-        labels = []
+        # Collect samples as LabeledInputTensors
+        labeled_tensors = []
         
         for idx, (images, targets) in enumerate(dataloader):
             if idx < start_index:
                 continue
-            if len(input_tensors) >= num_samples:
+            if len(labeled_tensors) >= num_samples:
                 break
             
-            # Store single sample (batch_size=1)
-            input_tensors.append(images.squeeze(0))
-            labels.append(targets.item())
+            # Create LabeledInputTensor pairing image with label
+            tensor = images.squeeze(0)
+            label = targets.item()
+            labeled_tensors.append(LabeledInputTensor(tensor=tensor, label=label))
         
-        if not input_tensors:
+        if not labeled_tensors:
             logger.warning(f"No samples collected for {data_source}")
             return None
         
-        logger.info(f"Collected {len(input_tensors)} samples")
+        logger.info(f"Collected {len(labeled_tensors)} samples")
         
         # Generate spec pairs for EACH sample
         all_spec_pairs = []
         
-        for idx, (input_tensor, label) in enumerate(zip(input_tensors, labels)):
+        for labeled_tensor in labeled_tensors:
+            # Unpack tensor and label
+            tensor, label = labeled_tensor
+            
             # Generate input specs for this sample
-            sample_input_specs = self._generate_input_specs_for_sample(input_tensor)
+            sample_input_specs = self._generate_input_specs_for_sample(tensor)
             
             # Generate output specs for this sample's label
             sample_output_specs = self._generate_output_specs_for_label(label)
@@ -246,7 +249,7 @@ class TorchVisionSpecCreator(BaseSpecCreator):
             validated_pairs = self._validate_and_filter_specs(
                 spec_pairs,
                 pytorch_model,
-                input_tensors[0]  # Use first sample for shape
+                labeled_tensors[0].tensor  # Use first sample for shape
             )
             
             if len(validated_pairs) < len(spec_pairs):
@@ -260,7 +263,7 @@ class TorchVisionSpecCreator(BaseSpecCreator):
             logger.warning(f"No valid specs generated for {data_source} + {model_name}")
             return None
         
-        return (data_source, model_name, pytorch_model, input_tensors, spec_pairs)
+        return (data_source, model_name, pytorch_model, labeled_tensors, spec_pairs)
     
     def _generate_input_specs_for_sample(self, sample_tensor: torch.Tensor) -> List[InputSpec]:
         """
@@ -485,7 +488,7 @@ def create_torchvision_specs(
     model_names: Optional[List[str]] = None,
     num_samples: int = 10,
     config_name: str = "torchvision_classification"
-) -> List[Tuple[str, str, nn.Module, List[torch.Tensor], List[Tuple[InputSpec, OutputSpec]]]]:
+) -> List[Tuple[str, str, nn.Module, List[LabeledInputTensor], List[Tuple[InputSpec, OutputSpec]]]]:
     """
     Convenience function to create TorchVision specs with default settings.
     
@@ -496,7 +499,7 @@ def create_torchvision_specs(
         config_name: Configuration preset name
         
     Returns:
-        List of (data_source, model_name, pytorch_model, input_tensors, spec_pairs)
+        List of (data_source, model_name, pytorch_model, labeled_tensors, spec_pairs)
         
     Example:
         >>> results = create_torchvision_specs(["MNIST"], ["simple_cnn"], num_samples=5)

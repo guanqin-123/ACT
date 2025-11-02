@@ -33,8 +33,10 @@ from act.front_end.vnnlib_loader.onnx_converter import (
 )
 from act.front_end.vnnlib_loader.vnnlib_parser import (
     parse_vnnlib_to_tensors,
+    extract_label_from_vnnlib,
     VNNLibParseError
 )
+from act.front_end.spec_creator_base import LabeledInputTensor
 
 logger = logging.getLogger(__name__)
 
@@ -368,7 +370,7 @@ def load_vnnlib_pair(
     Load a VNNLIB benchmark instance (ONNX model + VNNLIB spec).
     
     Mirrors torchvision/data_model_loader.load_dataset_model_pair() interface.
-    Returns PyTorch model and input tensors from VNNLIB constraints.
+    Returns PyTorch model and LabeledInputTensor from VNNLIB constraints.
     
     Args:
         category: Benchmark category
@@ -380,7 +382,7 @@ def load_vnnlib_pair(
     Returns:
         Dict containing:
         - model: PyTorch nn.Module (converted from ONNX)
-        - input_tensor: torch.Tensor from VNNLIB constraints
+        - labeled_tensor: LabeledInputTensor with input tensor and ground truth label
         - vnnlib_metadata: Dict with constraint information
         - onnx_path: Path to ONNX file
         - vnnlib_path: Path to VNNLIB file
@@ -389,8 +391,9 @@ def load_vnnlib_pair(
     Example:
         >>> result = load_vnnlib_pair("mnist_fc", "model.onnx", "spec.vnnlib")
         >>> model = result['model']
-        >>> input_tensor = result['input_tensor']
-        >>> output = model(input_tensor.unsqueeze(0))
+        >>> labeled_tensor = result['labeled_tensor']
+        >>> tensor, label = labeled_tensor
+        >>> output = model(tensor.unsqueeze(0))
     """
     if root_dir is None:
         root_dir = get_vnnlib_data_root()
@@ -459,11 +462,19 @@ def load_vnnlib_pair(
     except VNNLibParseError as e:
         raise RuntimeError(f"VNNLIB parsing failed: {e}")
     
+    # Extract ground truth label from VNNLIB comment (if available)
+    ground_truth_label = extract_label_from_vnnlib(vnnlib_path)
+    if ground_truth_label is not None:
+        logger.info(f"  ✓ Ground truth label: {ground_truth_label}")
+    
+    # Create LabeledInputTensor pairing input with label
+    labeled_tensor = LabeledInputTensor(tensor=input_tensor, label=ground_truth_label)
+    
     logger.info(f"Successfully loaded VNNLIB instance from '{category}'")
     
     return {
         'model': pytorch_model,
-        'input_tensor': input_tensor,
+        'labeled_tensor': labeled_tensor,
         'vnnlib_metadata': vnnlib_metadata,
         'onnx_path': str(onnx_path),
         'vnnlib_path': str(vnnlib_path),
@@ -527,7 +538,8 @@ def model_inference_with_vnnlib(
         )
         
         model = result['model']
-        input_tensor = result['input_tensor']
+        labeled_tensor = result['labeled_tensor']
+        input_tensor = labeled_tensor.tensor
         
         # Run inference
         success, output, error_msg = infer_single_model(

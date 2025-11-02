@@ -20,6 +20,7 @@ import torch
 import re
 
 from act.front_end.specs import InputSpec, OutputSpec, InKind, OutKind
+from act.util.device_manager import get_default_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ def parse_vnnlib_to_tensors(
                 center = 0.0
             input_values.append(center)
         
-        input_tensor = torch.tensor(input_values, dtype=torch.float32)
+        input_tensor = torch.tensor(input_values, dtype=get_default_dtype())
         
         # Reshape if shape provided
         if input_shape is not None:
@@ -148,8 +149,8 @@ def parse_vnnlib_to_specs(
             lb_values.append(lb)
             ub_values.append(ub)
         
-        lb_tensor = torch.tensor(lb_values, dtype=torch.float32)
-        ub_tensor = torch.tensor(ub_values, dtype=torch.float32)
+        lb_tensor = torch.tensor(lb_values, dtype=get_default_dtype())
+        ub_tensor = torch.tensor(ub_values, dtype=get_default_dtype())
         
         if input_shape is not None:
             lb_tensor = lb_tensor.view(*input_shape)
@@ -169,7 +170,7 @@ def parse_vnnlib_to_specs(
             c, d = output_constraints[0]
             output_spec = OutputSpec(
                 kind=OutKind.LINEAR_LE,
-                c=torch.tensor(c, dtype=torch.float32),
+                c=torch.tensor(c, dtype=get_default_dtype()),
                 d=float(d),
                 meta={'all_constraints': output_constraints}
             )
@@ -177,8 +178,8 @@ def parse_vnnlib_to_specs(
             # Fallback: RANGE with no specific bounds
             output_spec = OutputSpec(
                 kind=OutKind.RANGE,
-                lb=torch.tensor([float('-inf')] * num_outputs, dtype=torch.float32),
-                ub=torch.tensor([float('inf')] * num_outputs, dtype=torch.float32)
+                lb=torch.tensor([float('-inf')] * num_outputs, dtype=get_default_dtype()),
+                ub=torch.tensor([float('inf')] * num_outputs, dtype=get_default_dtype())
             )
         
         logger.info(f"Created specs from VNNLIB: {input_spec.kind}, {output_spec.kind}")
@@ -380,3 +381,40 @@ def list_vnnlib_variables(vnnlib_path: Path) -> Dict[str, int]:
     except Exception as e:
         logger.error(f"Failed to list variables: {e}")
         return {'num_inputs': 0, 'num_outputs': 0}
+
+
+def extract_label_from_vnnlib(vnnlib_path: Path) -> Optional[int]:
+    """
+    Extract ground truth label from VNNLIB file comment.
+    
+    Many VNNLIB files (e.g., CIFAR-100) include ground truth labels in comments:
+    ; CIFAR100 property with label: 14.
+    
+    Args:
+        vnnlib_path: Path to .vnnlib file
+        
+    Returns:
+        Ground truth label as integer, or None if not found
+        
+    Example:
+        >>> label = extract_label_from_vnnlib(Path("spec.vnnlib"))
+        >>> print(label)
+        14
+    """
+    try:
+        with open(vnnlib_path, 'r') as f:
+            # Read first few lines (label is typically in first comment)
+            for _ in range(5):
+                line = f.readline()
+                if not line:
+                    break
+                
+                # Match patterns like: ; CIFAR100 property with label: 14.
+                match = re.search(r'label:\s*(\d+)', line, re.IGNORECASE)
+                if match:
+                    return int(match.group(1))
+        
+        return None
+    except Exception as e:
+        logger.debug(f"Failed to extract label from {vnnlib_path}: {e}")
+        return None

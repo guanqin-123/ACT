@@ -30,6 +30,7 @@ from typing import Dict, Any, Optional, List, Tuple, Union
 
 # Import ACT components
 from act.front_end.specs import InputSpec, OutputSpec, InKind, OutKind
+from act.front_end.spec_creator_base import LabeledInputTensor
 from act.front_end.verifiable_model import (
     InputLayer,
     InputSpecLayer,
@@ -81,7 +82,7 @@ class WrapReport:
 
 
 def synthesize_models_from_specs(
-    spec_results: List[Tuple[str, str, nn.Module, List[torch.Tensor], List[Tuple[InputSpec, OutputSpec]]]]
+    spec_results: List[Tuple[str, str, nn.Module, List[LabeledInputTensor], List[Tuple[InputSpec, OutputSpec]]]]
 ) -> Tuple[Dict[str, nn.Sequential], Dict[str, WrapReport], Dict[str, Dict[str, torch.Tensor]]]:
     """
     Synthesize wrapped models directly from spec creator results.
@@ -91,12 +92,12 @@ def synthesize_models_from_specs(
     
     Args:
         spec_results: Output from create_specs_for_data_model_pairs()
-            List of (data_source, model_name, pytorch_model, input_tensors, spec_pairs)
+            List of (data_source, model_name, pytorch_model, labeled_tensors, spec_pairs)
             where:
             - data_source: Dataset/category name (e.g., "MNIST", "mnist_fc")
             - model_name: Model name (e.g., "simple_cnn", "instance_0")
             - pytorch_model: torch.nn.Module
-            - input_tensors: List of input sample tensors
+            - labeled_tensors: List[LabeledInputTensor] - Input tensors paired with labels
             - spec_pairs: List of (InputSpec, OutputSpec) tuples
     
     Returns:
@@ -112,9 +113,9 @@ def synthesize_models_from_specs(
     
     print(f"\n🧬 Synthesizing models from {len(spec_results)} spec result(s)...")
     
-    for data_source, model_name, pytorch_model, input_tensors, spec_pairs in spec_results:
-        if not input_tensors:
-            print(f"⚠️  Skipping {data_source} + {model_name}: No input tensors")
+    for data_source, model_name, pytorch_model, labeled_tensors, spec_pairs in spec_results:
+        if not labeled_tensors:
+            print(f"⚠️  Skipping {data_source} + {model_name}: No labeled tensors")
             continue
         
         if not spec_pairs:
@@ -122,14 +123,15 @@ def synthesize_models_from_specs(
             continue
         
         # Calculate specs per sample (assumes uniform distribution)
-        specs_per_sample = len(spec_pairs) // len(input_tensors) if input_tensors else 0
+        specs_per_sample = len(spec_pairs) // len(labeled_tensors) if labeled_tensors else 0
         
         # Create wrapped models for each spec pair
         for spec_idx, (input_spec, output_spec) in enumerate(spec_pairs):
-            # Determine which input tensor this spec corresponds to
+            # Determine which labeled tensor this spec corresponds to
             sample_idx = spec_idx // specs_per_sample if specs_per_sample > 0 else 0
-            sample_idx = min(sample_idx, len(input_tensors) - 1)  # Clamp to valid range
-            input_tensor = input_tensors[sample_idx]
+            sample_idx = min(sample_idx, len(labeled_tensors) - 1)  # Clamp to valid range
+            labeled_tensor = labeled_tensors[sample_idx]
+            input_tensor = labeled_tensor.tensor  # Extract tensor from LabeledInputTensor
             
             # Ensure batch dimension
             if input_tensor.dim() == len(input_tensor.shape):
@@ -161,7 +163,8 @@ def synthesize_models_from_specs(
             
             # Store in input_data for testing (use first sample as representative)
             if data_source not in input_data:
-                first_tensor = input_tensors[0]
+                first_labeled_tensor = labeled_tensors[0]
+                first_tensor = first_labeled_tensor.tensor
                 first_x = first_tensor.unsqueeze(0) if first_tensor.dim() == 3 else first_tensor
                 input_data[data_source] = {
                     "x": first_x,

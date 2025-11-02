@@ -74,6 +74,18 @@ def convert_onnx_to_pytorch(
         pytorch_model = ConvertModel(onnx_model)
         pytorch_model.eval()
         
+        # Convert model to match device_manager settings
+        try:
+            from act.util.device_manager import get_default_device, get_default_dtype
+            target_device = get_default_device()
+            target_dtype = get_default_dtype()
+            
+            # Move model to target device and dtype
+            pytorch_model = pytorch_model.to(device=target_device, dtype=target_dtype)
+            logger.info(f"Converted model to device={target_device}, dtype={target_dtype}")
+        except Exception as e:
+            logger.warning(f"Could not apply device_manager settings: {e}")
+        
         logger.info(f"Successfully converted ONNX model: {onnx_path.name}")
         return pytorch_model
         
