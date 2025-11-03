@@ -52,36 +52,6 @@ from act.back_end.core import Bounds, Fact, Layer, Net
 from act.util.options import PerformanceOptions
 
 
-class AnalysisContext:
-    """Context object providing access to network state during transfer function dispatch."""
-    
-    def __init__(self, net: Net, before: Dict[int, Fact], after: Dict[int, Fact]):
-        self.net = net
-        self.before = before 
-        self.after = after
-        
-    def get_predecessor_bounds(self, layer_id: int, pred_index: int = 0) -> Bounds:
-        """Get bounds from specific predecessor by index."""
-        if layer_id not in self.net.preds or pred_index >= len(self.net.preds[layer_id]):
-            raise IndexError(f"Layer {layer_id} has no predecessor at index {pred_index}")
-        
-        pred_id = self.net.preds[layer_id][pred_index]
-        return self.after[pred_id].bounds if pred_id in self.after else self.before[pred_id].bounds
-        
-    def get_all_predecessor_bounds(self, layer_id: int) -> List[Bounds]:
-        """Get bounds from all predecessors of the given layer."""
-        if layer_id not in self.net.preds:
-            return []
-        return [self.get_predecessor_bounds(layer_id, i) 
-                for i in range(len(self.net.preds[layer_id]))]
-                
-    def get_layer_bounds(self, layer_id: int, use_after: bool = True) -> Bounds:
-        """Get current bounds for a specific layer."""
-        facts = self.after if use_after else self.before
-        return facts[layer_id].bounds if layer_id in facts else self.before[layer_id].bounds
-
-
-
 class TransferFunction(ABC):
     """Abstract base class for transfer function implementations.
     

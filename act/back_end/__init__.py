@@ -41,7 +41,7 @@ from .utils import pwl_meta, bound_var_interval, scale_interval
 
 # Transfer function interface
 from .transfer_functions import (
-    TransferFunction, AnalysisContext, 
+    TransferFunction, 
     set_transfer_function, get_transfer_function, set_transfer_function_mode,
     dispatch_tf
 )
@@ -74,7 +74,7 @@ __all__ = [
     'box_join', 'changed_or_maskdiff', 'update_cache', 'affine_bounds',
     'pwl_meta', 'bound_var_interval', 'scale_interval',
     # Transfer function interface
-    'TransferFunction', 'AnalysisContext', 'IntervalTF', 'HybridzTF',
+    'TransferFunction', 'IntervalTF', 'HybridzTF',
     'set_transfer_function', 'get_transfer_function', 'set_transfer_function_mode',
     'dispatch_tf',
     # Analysis

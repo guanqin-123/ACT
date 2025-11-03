@@ -37,6 +37,62 @@ class Layer:
     def is_validation(self) -> bool:
         return self.kind == "ASSERT"
     
+    def get_bounds_for_var(self, fact: 'Fact', var_id: int, is_output: bool = True) -> Tuple[float, float]:
+        """
+        Retrieve bounds for a specific variable ID from this layer's Fact.
+        
+        Args:
+            fact: The Fact containing bounds (typically from before/after dict)
+            var_id: The variable ID to look up
+            is_output: True if looking in out_vars, False for in_vars
+        
+        Returns:
+            Tuple of (lower_bound, upper_bound)
+        
+        Example:
+            layer = net.by_id[layer_id]
+            lb, ub = layer.get_bounds_for_var(after[layer_id], var_id=5, is_output=True)
+        """
+        var_list = self.out_vars if is_output else self.in_vars
+        
+        if var_id not in var_list:
+            raise ValueError(
+                f"Variable {var_id} not in layer {self.id} "
+                f"{'output' if is_output else 'input'} vars {var_list}"
+            )
+        
+        # Find position of var_id in the list
+        position = var_list.index(var_id)
+        
+        # Retrieve bounds at that position
+        lb = fact.bounds.lb[position].item()
+        ub = fact.bounds.ub[position].item()
+        
+        return lb, ub
+    
+    def get_all_var_bounds(self, fact: 'Fact', is_output: bool = True) -> Dict[int, Tuple[float, float]]:
+        """
+        Get bounds for all variables in this layer as a dictionary.
+        
+        Args:
+            fact: The Fact containing bounds (typically from before/after dict)
+            is_output: True for out_vars, False for in_vars
+        
+        Returns:
+            Dict mapping variable_id -> (lower_bound, upper_bound)
+        
+        Example:
+            layer = net.by_id[layer_id]
+            bounds_dict = layer.get_all_var_bounds(after[layer_id], is_output=True)
+            # Returns: {4: (0.0, 1.0), 5: (0.2, 0.8), ...}
+        """
+        var_list = self.out_vars if is_output else self.in_vars
+        
+        bounds_dict = {}
+        for var_id in var_list:
+            bounds_dict[var_id] = self.get_bounds_for_var(fact, var_id, is_output)
+        
+        return bounds_dict
 
 @dataclass
 class Net:
@@ -60,6 +116,50 @@ class Net:
     def assert_last_is_validation(self) -> None:
         if not self.layers or not self.layers[-1].is_validation():
             raise ValueError(f"Expected last layer to be ASSERT, got {self.layers[-1].kind if self.layers else 'EMPTY'}")
+    
+    def get_predecessor_bounds(self, layer_id: int, after: Dict[int, 'Fact'], 
+                                before: Dict[int, 'Fact'], pred_index: int = 0) -> 'Bounds':
+        """
+        Get bounds from specific predecessor of a layer by index.
+        
+        Args:
+            layer_id: ID of the layer whose predecessor to get
+            after: Dictionary of Facts after each layer
+            before: Dictionary of Facts before each layer
+            pred_index: Index of the predecessor (default 0)
+        
+        Returns:
+            Bounds object from the specified predecessor
+        
+        Example:
+            pred_bounds = net.get_predecessor_bounds(layer_id, after, before, pred_index=0)
+        """
+        if layer_id not in self.preds or pred_index >= len(self.preds[layer_id]):
+            raise IndexError(f"Layer {layer_id} has no predecessor at index {pred_index}")
+        
+        pred_id = self.preds[layer_id][pred_index]
+        return after[pred_id].bounds if pred_id in after else before[pred_id].bounds
+    
+    def get_all_predecessor_bounds(self, layer_id: int, after: Dict[int, 'Fact'], 
+                                     before: Dict[int, 'Fact']) -> List['Bounds']:
+        """
+        Get bounds from all predecessors of a layer.
+        
+        Args:
+            layer_id: ID of the layer whose predecessors to get
+            after: Dictionary of Facts after each layer
+            before: Dictionary of Facts before each layer
+        
+        Returns:
+            List of Bounds objects from all predecessors
+        
+        Example:
+            all_pred_bounds = net.get_all_predecessor_bounds(layer_id, after, before)
+        """
+        if layer_id not in self.preds:
+            return []
+        return [self.get_predecessor_bounds(layer_id, after, before, i) 
+                for i in range(len(self.preds[layer_id]))]
         
         
 @dataclass(eq=True, frozen=True)

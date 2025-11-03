@@ -19,7 +19,7 @@
 import torch
 from typing import Dict, List
 from act.back_end.core import Bounds, Fact, Layer, Net, ConSet
-from act.back_end.transfer_functions import TransferFunction, AnalysisContext
+from act.back_end.transfer_functions import TransferFunction
 from act.back_end.hybridz_tf.tf_mlp import *
 from act.back_end.hybridz_tf.tf_cnn import *
 from act.back_end.hybridz_tf.tf_rnn import *
@@ -32,44 +32,44 @@ class HybridzTF(TransferFunction):
     # Layer kind to function mapping for HybridZ operations
     _LAYER_REGISTRY = {
         # Identity/constraint layers
-        "INPUT": lambda L, bounds, ctx: Fact(bounds=bounds, cons=ConSet()),
-        "INPUT_SPEC": lambda L, bounds, ctx: Fact(bounds=bounds, cons=ConSet()),
-        "ASSERT": lambda L, bounds, ctx: Fact(bounds=bounds, cons=ConSet()),
+        "INPUT": lambda L, bounds, tf: Fact(bounds=bounds, cons=ConSet()),
+        "INPUT_SPEC": lambda L, bounds, tf: Fact(bounds=bounds, cons=ConSet()),
+        "ASSERT": lambda L, bounds, tf: Fact(bounds=bounds, cons=ConSet()),
         
         # MLP operations (with HybridZ precision)
-        "DENSE": lambda L, bounds, ctx: hybridz_tf_dense(L, bounds),
-        "BIAS": lambda L, bounds, ctx: hybridz_tf_bias(L, bounds),
-        "SCALE": lambda L, bounds, ctx: hybridz_tf_scale(L, bounds),
-        "RELU": lambda L, bounds, ctx: hybridz_tf_relu(L, bounds),
-        "LRELU": lambda L, bounds, ctx: hybridz_tf_lrelu(L, bounds),
-        "ABS": lambda L, bounds, ctx: hybridz_tf_abs(L, bounds),
+        "DENSE": lambda L, bounds, tf: hybridz_tf_dense(L, bounds),
+        "BIAS": lambda L, bounds, tf: hybridz_tf_bias(L, bounds),
+        "SCALE": lambda L, bounds, tf: hybridz_tf_scale(L, bounds),
+        "RELU": lambda L, bounds, tf: hybridz_tf_relu(L, bounds),
+        "LRELU": lambda L, bounds, tf: hybridz_tf_lrelu(L, bounds),
+        "ABS": lambda L, bounds, tf: hybridz_tf_abs(L, bounds),
         
         # Multi-input operations  
-        "ADD": lambda L, bounds, ctx: hybridz_tf_add(L, 
-            ctx.get_predecessor_bounds(L.id, 0), 
-            ctx.get_predecessor_bounds(L.id, 1)),
-        "MUL": lambda L, bounds, ctx: hybridz_tf_mul(L,
-            ctx.get_predecessor_bounds(L.id, 0),
-            ctx.get_predecessor_bounds(L.id, 1)),
+        "ADD": lambda L, bounds, tf: hybridz_tf_add(L, 
+            tf._net.get_predecessor_bounds(L.id, tf._after, tf._before, 0), 
+            tf._net.get_predecessor_bounds(L.id, tf._after, tf._before, 1)),
+        "MUL": lambda L, bounds, tf: hybridz_tf_mul(L,
+            tf._net.get_predecessor_bounds(L.id, tf._after, tf._before, 0),
+            tf._net.get_predecessor_bounds(L.id, tf._after, tf._before, 1)),
         
         # CNN operations
-        "CONV2D": lambda L, bounds, ctx: hybridz_tf_conv2d(L, bounds),
-        "MAXPOOL2D": lambda L, bounds, ctx: hybridz_tf_maxpool2d(L, bounds),
-        "AVGPOOL2D": lambda L, bounds, ctx: hybridz_tf_avgpool2d(L, bounds),
-        "FLATTEN": lambda L, bounds, ctx: hybridz_tf_flatten(L, bounds),
-        "RESHAPE": lambda L, bounds, ctx: hybridz_tf_reshape(L, bounds),
+        "CONV2D": lambda L, bounds, tf: hybridz_tf_conv2d(L, bounds),
+        "MAXPOOL2D": lambda L, bounds, tf: hybridz_tf_maxpool2d(L, bounds),
+        "AVGPOOL2D": lambda L, bounds, tf: hybridz_tf_avgpool2d(L, bounds),
+        "FLATTEN": lambda L, bounds, tf: hybridz_tf_flatten(L, bounds),
+        "RESHAPE": lambda L, bounds, tf: hybridz_tf_reshape(L, bounds),
         
         # RNN operations
-        "LSTM": lambda L, bounds, ctx: hybridz_tf_lstm(L, bounds),
-        "GRU": lambda L, bounds, ctx: hybridz_tf_gru(L, bounds),
-        "RNN": lambda L, bounds, ctx: hybridz_tf_rnn(L, bounds),
-        "EMBEDDING": lambda L, bounds, ctx: hybridz_tf_embedding(L, bounds),
+        "LSTM": lambda L, bounds, tf: hybridz_tf_lstm(L, bounds),
+        "GRU": lambda L, bounds, tf: hybridz_tf_gru(L, bounds),
+        "RNN": lambda L, bounds, tf: hybridz_tf_rnn(L, bounds),
+        "EMBEDDING": lambda L, bounds, tf: hybridz_tf_embedding(L, bounds),
         
         # Transformer operations
-        "LAYERNORM": lambda L, bounds, ctx: hybridz_tf_layernorm(L, bounds),
-        "GELU": lambda L, bounds, ctx: hybridz_tf_gelu(L, bounds),
-        "SOFTMAX": lambda L, bounds, ctx: hybridz_tf_softmax(L, bounds),
-        "POSENC": lambda L, bounds, ctx: hybridz_tf_posenc(L, bounds),
+        "LAYERNORM": lambda L, bounds, tf: hybridz_tf_layernorm(L, bounds),
+        "GELU": lambda L, bounds, tf: hybridz_tf_gelu(L, bounds),
+        "SOFTMAX": lambda L, bounds, tf: hybridz_tf_softmax(L, bounds),
+        "POSENC": lambda L, bounds, tf: hybridz_tf_posenc(L, bounds),
     }
     
     @property
@@ -87,6 +87,10 @@ class HybridzTF(TransferFunction):
         if k not in self._LAYER_REGISTRY:
             raise NotImplementedError(f"HybridzTF: Unsupported layer kind '{k}'")
             
-        ctx = AnalysisContext(net, before, after)
+        # Store context for lambdas
+        self._net = net
+        self._before = before
+        self._after = after
+        
         transfer_fn = self._LAYER_REGISTRY[k]
-        return transfer_fn(L, input_bounds, ctx)
+        return transfer_fn(L, input_bounds, self)
