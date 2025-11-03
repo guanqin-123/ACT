@@ -604,6 +604,11 @@ Examples:
     
     args = parser.parse_args()
     
+    # Handle --dataset as alias for --category (for VNNLIB)
+    # This provides a more intuitive interface: python -m act.pipeline --fuzz --dataset cifar100_2024
+    if args.creator == 'vnnlib' and args.dataset and not args.category:
+        args.category = args.dataset
+    
     # Execute command
     try:
         if args.list:

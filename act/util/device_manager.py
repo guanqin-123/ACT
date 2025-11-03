@@ -50,18 +50,27 @@ def _auto_initialize():
             import sys
             from act.util.options import get_parser
             
-            parser = get_parser()
-            args, _ = parser.parse_known_args(sys.argv[1:])
-            preferred_device = args.device
-            preferred_dtype = args.dtype
-            
-            # Handle gpu/cuda aliasing
-            if preferred_device == 'gpu':
-                preferred_device = 'cuda'
-                print(f"🔄 Device alias: 'gpu' → 'cuda'")
+            # Skip argument parsing if --help is requested (let the actual CLI handle it)
+            if '--help' in sys.argv or '-h' in sys.argv:
+                # Don't parse args, use defaults
+                pass
+            else:
+                parser = get_parser()
+                args, _ = parser.parse_known_args(sys.argv[1:])
+                preferred_device = args.device
+                preferred_dtype = args.dtype
                 
+                # Handle gpu/cuda aliasing
+                if preferred_device == 'gpu':
+                    preferred_device = 'cuda'
+                    print(f"🔄 Device alias: 'gpu' → 'cuda'")
+                
+        except SystemExit:
+            # Argparse caught --help or similar, let it propagate (but don't initialize yet)
+            # This happens when running with --help before our actual CLI takes over
+            raise
         except Exception:
-            # If parsing fails, use default
+            # If parsing fails for other reasons, use defaults
             pass
         
         # Initialize device
