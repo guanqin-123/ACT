@@ -211,8 +211,8 @@ class TorchVisionSpecCreator(BaseSpecCreator):
             if len(labeled_tensors) >= num_samples:
                 break
             
-            # Create LabeledInputTensor pairing image with label
-            tensor = images.squeeze(0)
+            # Create LabeledInputTensor pairing image with label (keep batch dimension)
+            tensor = images  # Keep batch dimension (1, C, H, W)
             label = targets.item()
             labeled_tensors.append(LabeledInputTensor(tensor=tensor, label=label))
         

@@ -212,10 +212,8 @@ class ACTFuzzer:
         # 1. Select seed
         seed = self.seed_corpus.select()
         
-        # 2. Ensure batch dimension (required for models)
-        seed_tensor = seed.tensor
-        if seed_tensor.dim() == 3:  # CHW without batch
-            seed_tensor = seed_tensor.unsqueeze(0)  # Add batch dimension
+        # 2. Get seed tensor (already has batch dimension)
+        seed_tensor = seed.tensor  # Already (1, C, H, W)
         
         # 3. Mutate with feedback
         candidate = self.mutation_engine.mutate(seed_tensor)

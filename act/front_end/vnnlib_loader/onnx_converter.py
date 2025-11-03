@@ -106,7 +106,7 @@ def get_onnx_input_shape(onnx_path: Path) -> Tuple[int, ...]:
         onnx_path: Path to .onnx file
         
     Returns:
-        Input shape tuple (excluding batch dimension)
+        Input shape tuple WITH batch=1 (normalized to (1, C, H, W) format)
         
     Raises:
         ONNXConversionError: If shape extraction fails
@@ -124,11 +124,23 @@ def get_onnx_input_shape(onnx_path: Path) -> Tuple[int, ...]:
         input_tensor = graph.input[0]
         shape = _extract_shape_from_tensor(input_tensor)
         
-        # Remove batch dimension if present (usually first dimension)
-        if shape and (shape[0] == -1 or shape[0] == 1):
-            shape = shape[1:]
+        # Handle batch dimension - keep original, but normalize dynamic batch
+        if not shape:
+            raise ONNXConversionError("Failed to extract valid shape from ONNX model")
         
-        logger.info(f"Extracted input shape: {shape}")
+        if shape[0] == -1:
+            # Dynamic batch: normalize to 1 for verification (requires concrete shape)
+            shape = (1,) + tuple(shape[1:])
+            logger.info(f"Normalized dynamic batch to 1: {shape}")
+        else:
+            # Keep original batch dimension (whether 1, 32, etc.)
+            logger.info(f"Extracted input shape: {shape}")
+            if shape[0] != 1:
+                logger.warning(
+                    f"ONNX model has batch size {shape[0]}, but verification "
+                    f"assumes batch=1. Results may be incorrect."
+                )
+        
         return tuple(shape)
         
     except ImportError:
@@ -145,7 +157,7 @@ def get_onnx_output_shape(onnx_path: Path) -> Tuple[int, ...]:
         onnx_path: Path to .onnx file
         
     Returns:
-        Output shape tuple (excluding batch dimension)
+        Output shape tuple WITH batch=1 (normalized to (1, num_classes) format)
         
     Raises:
         ONNXConversionError: If shape extraction fails
@@ -163,11 +175,23 @@ def get_onnx_output_shape(onnx_path: Path) -> Tuple[int, ...]:
         output_tensor = graph.output[0]
         shape = _extract_shape_from_tensor(output_tensor)
         
-        # Remove batch dimension if present
-        if shape and (shape[0] == -1 or shape[0] == 1):
-            shape = shape[1:]
+        # Handle batch dimension - keep original, but normalize dynamic batch
+        if not shape:
+            raise ONNXConversionError("Failed to extract valid shape from ONNX model")
         
-        logger.info(f"Extracted output shape: {shape}")
+        if shape[0] == -1:
+            # Dynamic batch: normalize to 1 for verification (requires concrete shape)
+            shape = (1,) + tuple(shape[1:])
+            logger.info(f"Normalized dynamic batch to 1: {shape}")
+        else:
+            # Keep original batch dimension
+            logger.info(f"Extracted output shape: {shape}")
+            if shape[0] != 1:
+                logger.warning(
+                    f"ONNX model has output batch size {shape[0]}, but verification "
+                    f"assumes batch=1. Results may be incorrect."
+                )
+        
         return tuple(shape)
         
     except ImportError:

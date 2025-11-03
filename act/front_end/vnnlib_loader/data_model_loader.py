@@ -539,13 +539,13 @@ def model_inference_with_vnnlib(
         
         model = result['model']
         labeled_tensor = result['labeled_tensor']
-        input_tensor = labeled_tensor.tensor
+        input_tensor = labeled_tensor.tensor  # Already has batch dimension
         
         # Run inference
         success, output, error_msg = infer_single_model(
             combo_id, 
             model, 
-            input_tensor.unsqueeze(0)
+            input_tensor  # Already (1, C, H, W)
         )
         
         if success:

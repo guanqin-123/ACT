@@ -131,18 +131,10 @@ def synthesize_models_from_specs(
             sample_idx = spec_idx // specs_per_sample if specs_per_sample > 0 else 0
             sample_idx = min(sample_idx, len(labeled_tensors) - 1)  # Clamp to valid range
             labeled_tensor = labeled_tensors[sample_idx]
-            input_tensor = labeled_tensor.tensor  # Extract tensor from LabeledInputTensor
+            input_tensor = labeled_tensor.tensor  # Already has batch dimension (1, C, H, W)
             
-            # Ensure batch dimension
-            if input_tensor.dim() == len(input_tensor.shape):
-                # Already has proper dimensions, add batch if needed
-                if input_tensor.shape[0] != 1:
-                    x = input_tensor.unsqueeze(0)
-                else:
-                    x = input_tensor
-            else:
-                x = input_tensor.unsqueeze(0)
-            
+            # No need to add batch dimension - tensor already has it
+            x = input_tensor
             input_shape = tuple(x.shape)
             
             # Infer metadata from tensor
@@ -164,8 +156,8 @@ def synthesize_models_from_specs(
             # Store in input_data for testing (use first sample as representative)
             if data_source not in input_data:
                 first_labeled_tensor = labeled_tensors[0]
-                first_tensor = first_labeled_tensor.tensor
-                first_x = first_tensor.unsqueeze(0) if first_tensor.dim() == 3 else first_tensor
+                first_tensor = first_labeled_tensor.tensor  # Already (1, C, H, W)
+                first_x = first_tensor  # No unsqueeze needed
                 input_data[data_source] = {
                     "x": first_x,
                     "layout": infer_layout_from_tensor(first_x),

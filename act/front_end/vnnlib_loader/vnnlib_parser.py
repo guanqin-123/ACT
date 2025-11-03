@@ -42,11 +42,12 @@ def parse_vnnlib_to_tensors(
     
     Args:
         vnnlib_path: Path to .vnnlib file
-        input_shape: Expected input shape (optional, can be inferred)
+        input_shape: Expected input shape INCLUDING batch dimension (e.g., (1, 3, 32, 32))
+                    If None, will be inferred or use flat shape
         
     Returns:
         Tuple of (input_tensor, metadata_dict) where:
-        - input_tensor: torch.Tensor representing input sample
+        - input_tensor: torch.Tensor with batch dimension (e.g., shape (1, 3, 32, 32))
         - metadata_dict: Contains 'input_bounds', 'num_outputs', 'property_type'
         
     Raises:
@@ -79,7 +80,7 @@ def parse_vnnlib_to_tensors(
         
         input_tensor = torch.tensor(input_values, dtype=get_default_dtype())
         
-        # Reshape if shape provided
+        # Reshape if shape provided (shape now includes batch dimension)
         if input_shape is not None:
             expected_numel = 1
             for dim in input_shape:
@@ -89,6 +90,7 @@ def parse_vnnlib_to_tensors(
                     f"Input size mismatch: got {input_tensor.numel()} "
                     f"values but expected {expected_numel} from shape {input_shape}"
                 )
+            # Reshape directly - input_shape already includes batch dimension
             input_tensor = input_tensor.view(*input_shape)
         
         # Infer property type
@@ -153,6 +155,7 @@ def parse_vnnlib_to_specs(
         ub_tensor = torch.tensor(ub_values, dtype=get_default_dtype())
         
         if input_shape is not None:
+            # Reshape bounds to match input shape (which now includes batch dimension)
             lb_tensor = lb_tensor.view(*input_shape)
             ub_tensor = ub_tensor.view(*input_shape)
         

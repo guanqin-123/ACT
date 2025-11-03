@@ -25,13 +25,17 @@ class LabeledInputTensor:
     This unified data structure ensures tensor-label consistency throughout
     the verification pipeline, from data loading to spec generation.
     
+    IMPORTANT: Tensors must include batch dimension (batch=1) following
+    PyTorch convention for model inference.
+    
     Attributes:
-        tensor: Input tensor (image, sequence, or any torch.Tensor)
+        tensor: Input tensor WITH batch dimension (1, C, H, W) or (1, F)
+               Following PyTorch DataLoader convention for model inference
         label: Ground truth label (None if unavailable, e.g., for unlabeled data)
     
     Examples:
-        >>> # Create from tensor and label
-        >>> tensor = torch.randn(3, 32, 32)
+        >>> # Create from tensor and label (with batch dimension)
+        >>> tensor = torch.randn(1, 3, 32, 32)  # (B=1, C=3, H=32, W=32)
         >>> labeled = LabeledInputTensor(tensor, label=5)
         
         >>> # Tuple unpacking
@@ -39,7 +43,7 @@ class LabeledInputTensor:
         >>> assert torch.equal(img, tensor) and lbl == 5
         
         >>> # Property access
-        >>> assert labeled.tensor.shape == (3, 32, 32)
+        >>> assert labeled.tensor.shape == (1, 3, 32, 32)  # Batch dimension included
         >>> assert labeled.label == 5
         
         >>> # Device management
@@ -50,6 +54,12 @@ class LabeledInputTensor:
         >>> unlabeled = LabeledInputTensor(tensor, label=None)
         >>> _, lbl = unlabeled
         >>> assert lbl is None
+        
+        Note:
+            The batch dimension (first dimension = 1) is REQUIRED for:
+            - PyTorch model inference (CNN layers expect BCHW format)
+            - Consistency with PyTorch DataLoader convention
+            - Direct use in model.forward() without shape manipulation
     """
     
     tensor: torch.Tensor
@@ -81,9 +91,9 @@ class LabeledInputTensor:
             IndexError: If key not in [0, 1]
         
         Examples:
-            >>> labeled = LabeledInputTensor(torch.randn(3, 32, 32), label=5)
+            >>> labeled = LabeledInputTensor(torch.randn(1, 3, 32, 32), label=5)
             >>> tensor, label = labeled  # Unpacks via __getitem__
-            >>> assert tensor.shape == (3, 32, 32)
+            >>> assert tensor.shape == (1, 3, 32, 32)
             >>> assert label == 5
         """
         if key == 0:
@@ -110,10 +120,9 @@ class LabeledInputTensor:
             New LabeledInputTensor with tensor on target device
         
         Examples:
-            >>> labeled = LabeledInputTensor(torch.randn(3, 32, 32), label=5)
+            >>> labeled = LabeledInputTensor(torch.randn(1, 3, 32, 32), label=5)
             >>> cuda_labeled = labeled.to('cuda')
             >>> assert cuda_labeled.tensor.device.type == 'cuda'
-            >>> assert cuda_labeled.label == 5
         """
         return LabeledInputTensor(
             tensor=self.tensor.to(device),
@@ -258,12 +267,8 @@ class BaseSpecCreator(ABC):
         """
         model.eval()
         with torch.no_grad():
-            # Handle batch dimension
-            if sample_input.dim() == 3:  # Single image without batch
-                test_input = sample_input.unsqueeze(0)
-            else:
-                test_input = sample_input
-            
+            # sample_input already has batch dimension (1, C, H, W)
+            test_input = sample_input
             output = model(test_input)
         
         return sample_input.shape, output.shape
