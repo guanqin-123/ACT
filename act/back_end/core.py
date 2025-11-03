@@ -38,21 +38,7 @@ class Layer:
         return self.kind == "ASSERT"
     
     def get_bounds_for_var(self, fact: 'Fact', var_id: int, is_output: bool = True) -> Tuple[float, float]:
-        """
-        Retrieve bounds for a specific variable ID from this layer's Fact.
-        
-        Args:
-            fact: The Fact containing bounds (typically from before/after dict)
-            var_id: The variable ID to look up
-            is_output: True if looking in out_vars, False for in_vars
-        
-        Returns:
-            Tuple of (lower_bound, upper_bound)
-        
-        Example:
-            layer = net.by_id[layer_id]
-            lb, ub = layer.get_bounds_for_var(after[layer_id], var_id=5, is_output=True)
-        """
+        """Get (lb, ub) for variable var_id from fact. Use is_output=True for out_vars, False for in_vars."""
         var_list = self.out_vars if is_output else self.in_vars
         
         if var_id not in var_list:
@@ -71,21 +57,7 @@ class Layer:
         return lb, ub
     
     def get_all_var_bounds(self, fact: 'Fact', is_output: bool = True) -> Dict[int, Tuple[float, float]]:
-        """
-        Get bounds for all variables in this layer as a dictionary.
-        
-        Args:
-            fact: The Fact containing bounds (typically from before/after dict)
-            is_output: True for out_vars, False for in_vars
-        
-        Returns:
-            Dict mapping variable_id -> (lower_bound, upper_bound)
-        
-        Example:
-            layer = net.by_id[layer_id]
-            bounds_dict = layer.get_all_var_bounds(after[layer_id], is_output=True)
-            # Returns: {4: (0.0, 1.0), 5: (0.2, 0.8), ...}
-        """
+        """Get dict of {var_id: (lb, ub)} for all variables. Use is_output=True for out_vars, False for in_vars."""
         var_list = self.out_vars if is_output else self.in_vars
         
         bounds_dict = {}
@@ -93,6 +65,26 @@ class Layer:
             bounds_dict[var_id] = self.get_bounds_for_var(fact, var_id, is_output)
         
         return bounds_dict
+    
+    def get_input_shape(self) -> Optional[Tuple[int, ...]]:
+        """Get input shape from metadata, or None if not stored."""
+        if self.kind == "INPUT":
+            return self.meta.get("shape")
+        return self.meta.get("input_shape")
+    
+    def get_output_shape(self) -> Optional[Tuple[int, ...]]:
+        """Get output shape from metadata, or None if not stored."""
+        if self.kind == "INPUT":
+            return self.meta.get("shape")
+        return self.meta.get("output_shape")
+    
+    def get_num_input_vars(self) -> int:
+        """Get number of input variables (flattened dimension)."""
+        return len(self.in_vars)
+    
+    def get_num_output_vars(self) -> int:
+        """Get number of output variables (flattened dimension)."""
+        return len(self.out_vars)
 
 @dataclass
 class Net:
@@ -119,21 +111,7 @@ class Net:
     
     def get_predecessor_bounds(self, layer_id: int, after: Dict[int, 'Fact'], 
                                 before: Dict[int, 'Fact'], pred_index: int = 0) -> 'Bounds':
-        """
-        Get bounds from specific predecessor of a layer by index.
-        
-        Args:
-            layer_id: ID of the layer whose predecessor to get
-            after: Dictionary of Facts after each layer
-            before: Dictionary of Facts before each layer
-            pred_index: Index of the predecessor (default 0)
-        
-        Returns:
-            Bounds object from the specified predecessor
-        
-        Example:
-            pred_bounds = net.get_predecessor_bounds(layer_id, after, before, pred_index=0)
-        """
+        """Get bounds from predecessor at pred_index (default 0) of layer_id."""
         if layer_id not in self.preds or pred_index >= len(self.preds[layer_id]):
             raise IndexError(f"Layer {layer_id} has no predecessor at index {pred_index}")
         
@@ -142,24 +120,18 @@ class Net:
     
     def get_all_predecessor_bounds(self, layer_id: int, after: Dict[int, 'Fact'], 
                                      before: Dict[int, 'Fact']) -> List['Bounds']:
-        """
-        Get bounds from all predecessors of a layer.
-        
-        Args:
-            layer_id: ID of the layer whose predecessors to get
-            after: Dictionary of Facts after each layer
-            before: Dictionary of Facts before each layer
-        
-        Returns:
-            List of Bounds objects from all predecessors
-        
-        Example:
-            all_pred_bounds = net.get_all_predecessor_bounds(layer_id, after, before)
-        """
+        """Get list of bounds from all predecessors of layer_id."""
         if layer_id not in self.preds:
             return []
         return [self.get_predecessor_bounds(layer_id, after, before, i) 
                 for i in range(len(self.preds[layer_id]))]
+    
+    def get_layer_shape(self, layer_id: int, facts: Dict[int, 'Fact'], 
+                        is_output: bool = True) -> Tuple[int, ...]:
+        """Get shape from bounds tensor in facts dict. Use is_output=True for output shape, False for input."""
+        if layer_id not in facts:
+            raise KeyError(f"Layer {layer_id} not found in facts dictionary")
+        return facts[layer_id].bounds.lb.shape
         
         
 @dataclass(eq=True, frozen=True)
