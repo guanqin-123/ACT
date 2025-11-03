@@ -210,8 +210,12 @@ class VNNLibSpecCreator(BaseSpecCreator):
         vnnlib_path = Path(instance_data['vnnlib_path'])
         
         # Parse VNNLIB to create specs
+        # Pass input_shape to ensure specs match tensor shape (not flattened)
         try:
-            input_spec, output_spec = parse_vnnlib_to_specs(vnnlib_path)
+            input_spec, output_spec = parse_vnnlib_to_specs(
+                vnnlib_path,
+                input_shape=labeled_tensor.tensor.shape
+            )
             logger.info(
                 f"Parsed VNNLIB specs: {input_spec.kind}, {output_spec.kind}"
             )
