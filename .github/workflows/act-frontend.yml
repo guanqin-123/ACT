@@ -52,9 +52,9 @@ jobs:
       - name: Run ACT2Torch Pipeline Tests
         run: |
           cd ${{ github.workspace }}
-          python act/pipeline/model_factory.py
+          python -m act.pipeline --verify act2torch --device cpu --dtype float64
 
       - name: Run Torch2ACT Pipeline Tests
         run: |
           cd ${{ github.workspace }}
-          python act/pipeline/torch2act.py
+          python -m act.pipeline --verify torch2act --device cpu --dtype float64

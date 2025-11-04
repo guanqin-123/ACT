@@ -302,6 +302,74 @@ class TorchToACT:
             # Dropout is a no-op during inference/verification
             pass
             
+        elif isinstance(mod, nn.BatchNorm2d):
+            # BatchNorm2d during inference: y = gamma * (x - running_mean) / sqrt(running_var + eps) + beta
+            # This is equivalent to: y = scale * x + bias
+            # where scale = gamma / sqrt(running_var + eps) and bias = beta - scale * running_mean
+            
+            # Extract BatchNorm parameters (all should be present in eval mode)
+            gamma = mod.weight.detach() if mod.weight is not None else torch.ones(mod.num_features, dtype=mod.running_mean.dtype, device=mod.running_mean.device)
+            beta = mod.bias.detach() if mod.bias is not None else torch.zeros(mod.num_features, dtype=mod.running_mean.dtype, device=mod.running_mean.device)
+            running_mean = mod.running_mean.detach()
+            running_var = mod.running_var.detach()
+            eps = mod.eps
+            
+            # Compute affine transformation parameters
+            scale = gamma / torch.sqrt(running_var + eps)
+            bias = beta - scale * running_mean
+            
+            # BatchNorm is applied channel-wise, so we need to expand scale/bias to match input shape
+            # For spatial data: (1, C, H, W) → scale/bias are (C,) → expand to (1, C, H, W)
+            if len(self.shape) == 2:
+                # Flattened input: (1, C*H*W) - need to track channel dimension
+                # This is tricky, so we'll represent as element-wise multiplication + addition
+                # Assuming the input was flattened from (1, C, H, W)
+                n_features = self.shape[1]
+                n_channels = mod.num_features
+                spatial_size = n_features // n_channels
+                
+                # Expand scale and bias to match flattened shape
+                scale_expanded = scale.repeat_interleave(spatial_size)
+                bias_expanded = bias.repeat_interleave(spatial_size)
+                
+                # Create element-wise multiplication and addition layers
+                out_vars = self._same_size_forward()
+                self._add(LayerKind.MUL.value, params={"scale": scale_expanded},
+                         meta={"input_shape": self.shape, "output_shape": self.shape},
+                         in_vars=self.prev_out, out_vars=out_vars)
+                self.prev_out = out_vars
+                
+                out_vars = self._same_size_forward()
+                self._add(LayerKind.ADD.value, params={"bias": bias_expanded},
+                         meta={"input_shape": self.shape, "output_shape": self.shape},
+                         in_vars=self.prev_out, out_vars=out_vars)
+                self.prev_out = out_vars
+            else:
+                # Spatial input: (1, C, H, W)
+                batch, channels, height, width = self.shape
+                
+                # Expand scale and bias to spatial dimensions
+                scale_expanded = scale.view(1, -1, 1, 1).expand(1, channels, height, width).flatten()
+                bias_expanded = bias.view(1, -1, 1, 1).expand(1, channels, height, width).flatten()
+                
+                # Flatten shape for computation
+                flat_size = channels * height * width
+                
+                # Create element-wise multiplication and addition layers
+                out_vars = self._same_size_forward()
+                self._add(LayerKind.MUL.value, params={"scale": scale_expanded},
+                         meta={"input_shape": (1, flat_size), "output_shape": (1, flat_size),
+                               "original_shape": self.shape},
+                         in_vars=self.prev_out, out_vars=out_vars)
+                self.prev_out = out_vars
+                
+                out_vars = self._same_size_forward()
+                self._add(LayerKind.ADD.value, params={"bias": bias_expanded},
+                         meta={"input_shape": (1, flat_size), "output_shape": (1, flat_size),
+                               "original_shape": self.shape},
+                         in_vars=self.prev_out, out_vars=out_vars)
+                self.prev_out = out_vars
+            
         else:
             raise NotImplementedError(f"Primitive conversion not implemented: {type(mod).__name__}")
 
@@ -379,8 +447,9 @@ class TorchToACT:
         net.assert_last_is_validation()
         return net
 
-    
-if __name__ == "__main__":
+
+def main():
+    """Main entry point for PyTorch→ACT conversion and verification testing."""
     # Initialize debug file (GUARDED)
     if PerformanceOptions.debug_tf:
         debug_file = PerformanceOptions.debug_output_file
@@ -536,3 +605,7 @@ if __name__ == "__main__":
         print(f"\n📝 Debug log written to: {PerformanceOptions.debug_output_file}")
     
     print("\n✅ Torch→ACT conversion and verification completed!")
+
+
+if __name__ == "__main__":
+    main()

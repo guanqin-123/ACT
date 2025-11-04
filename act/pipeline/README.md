@@ -658,7 +658,7 @@ import logging
 
 - `seaborn` - Enhanced visualizations (for reporting)# Memory debugging
 
-from act.pipeline.utils import print_memory_usage
+from act.pipeline.verification.utils import print_memory_usage
 
 Install optional dependencies:print_memory_usage("Before verification")
 

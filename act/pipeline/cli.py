@@ -454,6 +454,96 @@ def cmd_fuzz(args):
         return
 
 
+# ============================================================================
+# Verification Commands
+# ============================================================================
+
+def cmd_list_verifications():
+    """List available verification tests."""
+    print(f"\n{'='*80}")
+    print(f"AVAILABLE VERIFICATION TESTS")
+    print(f"{'='*80}\n")
+    
+    tests = [
+        ("act2torch", "ACT→PyTorch conversion validation (model_factory)"),
+        ("torch2act", "PyTorch→ACT conversion validation (torch2act)"),
+        ("validate_verifier", "Verifier correctness validation with concrete tests"),
+        ("all", "Run all verification tests"),
+    ]
+    
+    for name, description in tests:
+        print(f"  {name:25s} - {description}")
+    
+    print(f"\n{'='*80}\n")
+
+
+def cmd_verify(target: str, args):
+    """Run verification tests from the verification submodule."""
+    print_header()
+    
+    # Import verification test modules
+    from act.pipeline.verification import model_factory, torch2act, validate_verifier
+    
+    tests_to_run = []
+    if target == 'all':
+        tests_to_run = ['act2torch', 'torch2act', 'validate_verifier']
+    else:
+        tests_to_run = [target]
+    
+    results = {}
+    
+    for test_name in tests_to_run:
+        print(f"\n{'='*80}")
+        if test_name == 'act2torch':
+            print(f"VERIFICATION TEST: ACT→PyTorch Conversion")
+            print(f"{'='*80}\n")
+            try:
+                model_factory.main()
+                results[test_name] = 'PASSED'
+            except Exception as e:
+                print(f"\n❌ Test failed: {e}")
+                import traceback
+                traceback.print_exc()
+                results[test_name] = 'FAILED'
+        
+        elif test_name == 'torch2act':
+            print(f"VERIFICATION TEST: PyTorch→ACT Conversion")
+            print(f"{'='*80}\n")
+            try:
+                torch2act.main()
+                results[test_name] = 'PASSED'
+            except Exception as e:
+                print(f"\n❌ Test failed: {e}")
+                import traceback
+                traceback.print_exc()
+                results[test_name] = 'FAILED'
+        
+        elif test_name == 'validate_verifier':
+            print(f"VERIFICATION TEST: Verifier Validation")
+            print(f"{'='*80}\n")
+            try:
+                validate_verifier.main()
+                results[test_name] = 'PASSED'
+            except Exception as e:
+                print(f"\n❌ Test failed: {e}")
+                import traceback
+                traceback.print_exc()
+                results[test_name] = 'FAILED'
+    
+    # Print summary
+    print(f"\n{'='*80}")
+    print(f"VERIFICATION TEST SUMMARY")
+    print(f"{'='*80}")
+    for test_name, result in results.items():
+        status = "✅" if result == "PASSED" else "❌"
+        print(f"  {status} {test_name:25s} {result}")
+    print(f"{'='*80}\n")
+    
+    # Exit with error if any test failed
+    if any(r == 'FAILED' for r in results.values()):
+        sys.exit(1)
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -482,6 +572,12 @@ Examples:
   
   # Fuzz TorchVision dataset
   python -m act.pipeline --fuzz --creator torchvision --dataset MNIST
+  
+  # Run verification tests
+  python -m act.pipeline --verify act2torch --device cpu
+  python -m act.pipeline --verify torch2act --device cpu
+  python -m act.pipeline --verify validate_verifier --device cpu
+  python -m act.pipeline --verify all --device cpu
         """
     )
     
@@ -519,6 +615,18 @@ Examples:
         "--fuzz", "-f",
         action="store_true",
         help="Run ACTFuzzer"
+    )
+    cmd_group.add_argument(
+        "--verify",
+        type=str,
+        metavar="TARGET",
+        choices=['act2torch', 'torch2act', 'validate_verifier', 'all'],
+        help="Run verification tests: act2torch, torch2act, validate_verifier, or all"
+    )
+    cmd_group.add_argument(
+        "--list-verifications",
+        action="store_true",
+        help="List available verification tests"
     )
     
     # Creator selection
@@ -622,6 +730,10 @@ Examples:
             cmd_list_downloaded(args.creator)
         elif args.fuzz:
             cmd_fuzz(args)
+        elif args.verify:
+            cmd_verify(args.verify, args)
+        elif args.list_verifications:
+            cmd_list_verifications()
     except KeyboardInterrupt:
         print("\n\n⚠️  Interrupted by user")
         sys.exit(1)

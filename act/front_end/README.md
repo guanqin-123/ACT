@@ -279,7 +279,7 @@ from act.front_end.model_synthesis import model_synthesis
 wrapped_models, input_data = model_synthesis(spec_results=results)
 
 # 3. Convert to ACT Net
-from act.pipeline.torch2act import torch_to_act_net
+from act.pipeline.verification.torch2act import torch_to_act_net
 act_net = torch_to_act_net(wrapped_model, input_data[model_id][0])
 
 # 4. Verify
@@ -451,7 +451,7 @@ def verify_bab(net, solver: Solver, model_fn: Callable[[torch.Tensor], torch.Ten
 
 ```python
 # Convert (spec-free)
-from act.pipeline.torch2act import TorchToACT
+from act.pipeline.verification.torch2act import TorchToACT
 net = TorchToACT(wrapped).run()
 
 # Solve once

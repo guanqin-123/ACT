@@ -63,6 +63,7 @@ import torch.nn as nn
 import logging
 
 from act.back_end.core import Net, Layer
+from act.util.device_manager import get_default_dtype, get_default_device
 
 logger = logging.getLogger(__name__)
 
@@ -136,9 +137,14 @@ class ACTToTorch:
                 spec_dict = {'kind': spec_kind}
                 if 'eps' in meta:
                     spec_dict['eps'] = meta['eps']
+                
+                # Convert parameter tensors to device_manager dtype for consistency
+                target_dtype = get_default_dtype()
+                target_device = get_default_device()
                 for param_key in ['lb', 'ub', 'center', 'A', 'b']:
                     if param_key in act_layer.params:
-                        spec_dict[param_key] = act_layer.params[param_key]
+                        tensor = act_layer.params[param_key]
+                        spec_dict[param_key] = tensor.to(dtype=target_dtype, device=target_device)
                 
                 spec = InputSpec(**spec_dict)
                 # InputSpecLayer now always returns tuples
@@ -161,9 +167,14 @@ class ACTToTorch:
                     spec_dict['margin'] = meta['margin']
                 if 'd' in meta:
                     spec_dict['d'] = meta['d']
+                
+                # Convert parameter tensors to device_manager dtype for consistency
+                target_dtype = get_default_dtype()
+                target_device = get_default_device()
                 for param_key in ['c', 'lb', 'ub']:
                     if param_key in act_layer.params:
-                        spec_dict[param_key] = act_layer.params[param_key]
+                        tensor = act_layer.params[param_key]
+                        spec_dict[param_key] = tensor.to(dtype=target_dtype, device=target_device)
                 
                 spec = OutputSpec(**spec_dict)
                 # OutputSpecLayer now always returns tuples

@@ -255,6 +255,11 @@ class NetFactory:
     
     def create_network(self, name: str, spec: Dict[str, Any]) -> Net:
         """Create network from YAML spec."""
+        from act.util.device_manager import get_default_dtype
+        
+        # Get current device_manager dtype for consistency
+        current_dtype = str(get_default_dtype())
+        
         layers = []
         
         for i, layer_spec in enumerate(spec['layers']):
@@ -264,8 +269,12 @@ class NetFactory:
             
             # Copy params and add required weight tensors if needed
             params = layer_spec.get('params', {}).copy()
-            meta = layer_spec.get('meta', {})
+            meta = layer_spec.get('meta', {}).copy()  # Use copy() to avoid modifying YAML
             kind = layer_spec['kind']
+            
+            # Update INPUT layer dtype to match current device_manager
+            if kind == "INPUT" and 'dtype' in meta:
+                meta['dtype'] = current_dtype
             
             # Get input shape for INPUT_SPEC generation
             input_shape = None

@@ -65,7 +65,7 @@ import logging
 
 from act.back_end.core import Net, Layer
 from act.back_end.serialization.serialization import NetSerializer
-from act.pipeline.act2torch import ACTToTorch
+from act.pipeline.verification.act2torch import ACTToTorch
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +194,8 @@ class ModelFactory:
         - boundary: Input near boundary of constraints (expected UNCERTAIN/FAIL)
         - random: Random input in constraint region (expected varied results)
         """
+        from act.util.device_manager import get_default_dtype, get_default_device
+        
         if name not in self.config['networks']:
             raise KeyError(f"Network '{name}' not found")
         
@@ -218,13 +220,10 @@ class ModelFactory:
         if shape is None:
             raise ValueError(f"INPUT layer missing 'shape' in network '{name}'")
         
-        dtype_str = input_meta.get('dtype', 'torch.float32').replace('torch.', '')
-        dtype_map = {
-            'float16': torch.float16, 'float32': torch.float32, 'float64': torch.float64,
-            'int8': torch.int8, 'int16': torch.int16, 'int32': torch.int32, 'int64': torch.int64,
-            'uint8': torch.uint8,
-        }
-        dtype = dtype_map.get(dtype_str, torch.float32)
+        # Use device_manager's dtype instead of INPUT metadata dtype
+        # This ensures test inputs match the model's dtype configuration
+        dtype = get_default_dtype()
+        device = get_default_device()
         
         # Get INPUT_SPEC constraints if present
         if input_spec_layer is not None:

@@ -781,7 +781,7 @@ The VNNLIB creator integrates seamlessly with ACT's verification pipeline:
 ```python
 from act.front_end.vnnlib_loader import VNNLibSpecCreator
 from act.front_end.model_synthesis import model_synthesis
-from act.pipeline.torch2act import torch_to_act_net
+from act.pipeline.verification.torch2act import torch_to_act_net
 from act.back_end.verifier import verify_once
 
 # 1. Create specs from VNNLIB benchmarks
@@ -856,7 +856,7 @@ for model_id, wrapped_model in wrapped_models.items():
 #### Step 3: Torch → ACT Conversion
 
 ```python
-from act.pipeline.torch2act import torch_to_act_net
+from act.pipeline.verification.torch2act import torch_to_act_net
 
 # Convert each wrapped model to ACT representation
 for model_id, wrapped_model in wrapped_models.items():
@@ -901,7 +901,7 @@ elif result.status == VerifyResult.UNKNOWN:
 ```python
 from act.front_end.vnnlib_loader import VNNLibSpecCreator
 from act.front_end.model_synthesis import model_synthesis
-from act.pipeline.torch2act import torch_to_act_net
+from act.pipeline.verification.torch2act import torch_to_act_net
 from act.back_end.verifier import verify_once
 from act.back_end.core import VerifyResult
 

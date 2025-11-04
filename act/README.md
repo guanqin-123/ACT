@@ -90,18 +90,19 @@ act/
 │
 ├── pipeline/                       # Pipeline: Testing framework and integration
 │   ├── cli.py                      # Pipeline CLI with unified device/dtype args
-│   ├── torch2act.py                # Automatic PyTorch→ACT Net conversion
-│   ├── validate_verifier.py        # Verifier correctness validation with concrete tests
-│   ├── model_factory.py            # ACT Net factory for test networks
-│   ├── regression.py               # Baseline capture and regression testing
-│   ├── reporting.py                # Results analysis and report generation
-│   ├── utils.py                    # Shared utilities and performance profiling
-│   ├── config.py                   # YAML-based test scenario management
+│   ├── verification/               # Verification utilities submodule
+│   │   ├── __init__.py             # Verification module initialization
+│   │   ├── torch2act.py            # Automatic PyTorch→ACT Net conversion
+│   │   ├── act2torch.py            # ACT Net→PyTorch conversion utilities
+│   │   ├── validate_verifier.py    # Verifier correctness validation with concrete tests
+│   │   ├── model_factory.py        # ACT Net factory for test networks
+│   │   ├── utils.py                # Shared utilities and performance profiling
+│   │   └── llm_probe.py            # LLM-based verification probing and analysis
+│   ├── fuzzing/                    # Fuzzing utilities
 │   ├── configs/                    # Configuration files
 │   │   ├── mock_inputs.yaml        # Mock data generation templates
 │   │   ├── test_scenarios.yaml     # Complete test scenario definitions
-│   │   ├── solver_settings.yaml    # Solver configuration options
-│   │   └── baselines.json          # Performance baseline storage
+│   │   └── solver_settings.yaml    # Solver configuration options
 │   ├── examples/                   # Example usage and quick tests
 │   ├── log/                        # Test execution logs (includes act_debug_tf.log)
 │   └── README.md                   # Pipeline documentation

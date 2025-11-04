@@ -64,8 +64,8 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
-from act.pipeline.model_factory import ModelFactory
-from act.pipeline.torch2act import TorchToACT
+from act.pipeline.verification.model_factory import ModelFactory
+from act.pipeline.verification.torch2act import TorchToACT
 from act.back_end.verifier import verify_once
 from act.back_end.solver.solver_gurobi import GurobiSolver
 from act.back_end.solver.solver_torch import TorchLPSolver

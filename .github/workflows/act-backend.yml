@@ -34,17 +34,60 @@ jobs:
           python -m pip install --upgrade pip
           pip install torch torchvision onnx onnx2pytorch tensorflow pandas numpy pyyaml tqdm pytest
 
-      - name: Run Serialization Tests
-        run: |
-          cd ${{ github.workspace }}
-          python -m pytest act/back_end/serialization/test_serialization.py -v
+      # ========================================================================
+      # FLOAT64 TESTING SUITE
+      # ========================================================================
       
-      - name: Run Net Factory
+      - name: Generate Networks (float64)
         run: |
           cd ${{ github.workspace }}
-          python act/back_end/net_factory.py
+          python -m act.back_end --generate --device cpu --dtype float64
+      
+      - name: Run Serialization Tests (float64)
+        run: |
+          cd ${{ github.workspace }}
+          python -m act.back_end --test-serialization --device cpu --dtype float64
+      
+      - name: Run ACT2Torch Tests (float64)
+        run: |
+          cd ${{ github.workspace }}
+          python -m act.pipeline --verify act2torch --device cpu --dtype float64
 
-      - name: Run Validation Verifiers
+      - name: Run Torch2ACT Tests (float64)
         run: |
           cd ${{ github.workspace }}
-          python act/pipeline/validate_verifier.py
+          python -m act.pipeline --verify torch2act --device cpu --dtype float64
+
+      - name: Run Validation Verifiers (float64)
+        run: |
+          cd ${{ github.workspace }}
+          python -m act.pipeline --verify validate_verifier --device cpu --dtype float64
+      
+      # ========================================================================
+      # FLOAT32 TESTING SUITE
+      # ========================================================================
+      
+      - name: Generate Networks (float32)
+        run: |
+          cd ${{ github.workspace }}
+          python -m act.back_end --generate --device cpu --dtype float32
+      
+      - name: Run Serialization Tests (float32)
+        run: |
+          cd ${{ github.workspace }}
+          python -m act.back_end --test-serialization --device cpu --dtype float32
+      
+      - name: Run ACT2Torch Tests (float32)
+        run: |
+          cd ${{ github.workspace }}
+          python -m act.pipeline --verify act2torch --device cpu --dtype float32
+
+      - name: Run Torch2ACT Tests (float32)
+        run: |
+          cd ${{ github.workspace }}
+          python -m act.pipeline --verify torch2act --device cpu --dtype float32
+
+      - name: Run Validation Verifiers (float32)
+        run: |
+          cd ${{ github.workspace }}
+          python -m act.pipeline --verify validate_verifier --device cpu --dtype float32
