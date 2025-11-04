@@ -1,6 +1,7 @@
 # Core dependencies - REQUIRED
-torch>=2.0.0,<2.4.0
-torchvision>=0.12.0,<0.19.0
+# Note: Python 3.12+ recommended (matches environment.yml)
+torch>=2.0.0
+torchvision>=0.12.0
 numpy>=1.20,<2.0
 pyyaml>=6.0
 termcolor>=2.3.0
@@ -28,6 +29,10 @@ ninja>=1.10,<1.11.1.2
 
 # Model loading (for Keras/TF models) - REQUIRED
 tensorflow>=2.13.0
+
+# ML frameworks (for pipeline/llm_probe.py) - REQUIRED
+transformers>=4.30.0
+scikit-learn>=1.0.0
 
 # Note: The following are transitive dependencies (auto-installed):
 # - scipy, requests, pillow (via torch/torchvision)
