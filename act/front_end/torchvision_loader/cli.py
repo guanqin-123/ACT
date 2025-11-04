@@ -12,6 +12,8 @@ License: AGPLv3+
 import argparse
 from typing import Optional
 
+from act.util.cli_utils import add_device_args, initialize_from_args
+
 from act.front_end.torchvision_loader.data_model_mapping import (
     DATASET_MODEL_MAPPING,
     get_dataset_info,
@@ -569,7 +571,13 @@ For Common Operations (list, search, download, info):
         help="Dataset split for inference testing (default: test)"
     )
     
+    # Add standard device/dtype arguments
+    add_device_args(parser)
+    
     args = parser.parse_args()
+    
+    # Initialize device manager from CLI arguments
+    initialize_from_args(args)
     
     # Handle commands
     if args.category:

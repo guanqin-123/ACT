@@ -12,6 +12,8 @@ License: AGPLv3+
 import argparse
 from typing import Optional
 
+from act.util.cli_utils import add_device_args, initialize_from_args
+
 from act.front_end.vnnlib_loader.category_mapping import (
     CATEGORY_MAPPING,
     get_category_info,
@@ -215,7 +217,13 @@ def main():
         help="Show details about a specific instance [NOT IMPLEMENTED]"
     )
     
+    # Add standard device/dtype arguments
+    add_device_args(parser)
+    
     args = parser.parse_args()
+    
+    # Initialize device manager from CLI arguments
+    initialize_from_args(args)
     
     # Handle commands
     if args.list:

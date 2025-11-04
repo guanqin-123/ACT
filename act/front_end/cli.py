@@ -13,9 +13,8 @@ import argparse
 from pathlib import Path
 from typing import Optional
 
-import torch
-
 from act.front_end.creator_registry import detect_creator, list_creators, get_creator
+from act.util.cli_utils import add_device_args, initialize_from_args
 
 # Import domain-specific CLIs for delegation
 from act.front_end.torchvision_loader import data_model_mapping as tv_mapping
@@ -504,7 +503,13 @@ Examples:
         help="Run inference on synthesized models to validate correctness (defaults to TorchVision, use --creator to specify)"
     )
     
+    # Add standard device/dtype arguments
+    add_device_args(parser)
+    
     args = parser.parse_args()
+    
+    # Initialize device manager from CLI arguments
+    initialize_from_args(args)
     
     # Handle commands
     if args.list:

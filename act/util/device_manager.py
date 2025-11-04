@@ -1,21 +1,94 @@
 # device_manager.py
 # Simplified device/dtype management using PyTorch global defaults.
+# Now with explicit initialization API (no argparse dependency).
 
 import torch
-from typing import Tuple
+from typing import Tuple, Optional
 
 # Global initialization state
 _INITIALIZED = False
 
+
+def initialize_device(device: str = 'cuda', dtype: str = 'float64') -> None:
+    """
+    Explicitly initialize device and dtype settings.
+    
+    This should be called ONCE at the entry point of your application
+    (e.g., in CLI main() after parsing arguments).
+    
+    Args:
+        device: Computation device - 'cpu', 'cuda', or 'gpu' (gpu aliased to cuda)
+        dtype: PyTorch data type - 'float32' or 'float64'
+    
+    Examples:
+        # In CLI after parsing args:
+        from act.util.device_manager import initialize_device
+        initialize_device(device=args.device, dtype=args.dtype)
+        
+        # For testing with specific settings:
+        initialize_device(device='cpu', dtype='float32')
+    """
+    global _INITIALIZED
+    
+    try:
+        # Handle gpu/cuda aliasing
+        if device == 'gpu':
+            device = 'cuda'
+            print(f"🔄 Device alias: 'gpu' → 'cuda'")
+        
+        # Determine target device
+        if device == 'cpu':
+            target_device = torch.device("cpu")
+        elif device == 'cuda':
+            if torch.cuda.is_available():
+                target_device = torch.device("cuda:0")
+            else:
+                target_device = torch.device("cpu")
+                print(f"⚠️ CUDA not available, falling back to CPU")
+        else:
+            # Unknown device, default to CPU
+            target_device = torch.device("cpu")
+            print(f"⚠️ Unknown device '{device}', using CPU")
+        
+        # Determine target dtype
+        if dtype == 'float32':
+            target_dtype = torch.float32
+        elif dtype == 'float64':
+            target_dtype = torch.float64
+        else:
+            # Unknown dtype, default to float64
+            target_dtype = torch.float64
+            print(f"⚠️ Unknown dtype '{dtype}', using float64")
+        
+        # Set PyTorch global defaults
+        torch.set_default_dtype(target_dtype)
+        if hasattr(torch, 'set_default_device'):
+            torch.set_default_device(target_device)
+        
+        print(f"✅ Device Manager Initialized: device={target_device}, dtype={target_dtype}")
+        _INITIALIZED = True
+        
+    except Exception as e:
+        print(f"❌ Device initialization failed: {e}")
+        print(f"   Falling back to CPU + float64")
+        torch.set_default_dtype(torch.float64)
+        _INITIALIZED = True
+
+
 def get_default_device() -> torch.device:
-    """Get current PyTorch default device."""
-    _auto_initialize()  # Ensure initialization before returning
+    """
+    Get current PyTorch default device.
+    
+    Auto-initializes with sensible defaults if not yet initialized
+    (CUDA if available, else CPU).
+    """
+    _ensure_initialized()
     
     if hasattr(torch, 'get_default_device'):
         try:
             return torch.get_default_device()
         except:
-            return torch.device("cpu")  # Fallback
+            return torch.device("cpu")
     else:
         # For older PyTorch versions, check where a test tensor is created
         test_tensor = torch.zeros(1)
@@ -23,83 +96,59 @@ def get_default_device() -> torch.device:
         del test_tensor
         return device
 
+
 def get_default_dtype() -> torch.dtype:
-    """Get current PyTorch default dtype."""
-    _auto_initialize()  # Ensure initialization before returning
+    """
+    Get current PyTorch default dtype.
+    
+    Auto-initializes with sensible defaults if not yet initialized (float64).
+    """
+    _ensure_initialized()
     return torch.get_default_dtype()
 
+
 def get_current_settings() -> Tuple[torch.device, torch.dtype]:
-    """Get current PyTorch default device and dtype settings."""
-    _auto_initialize()  # Ensure initialization before returning
+    """
+    Get current PyTorch default device and dtype settings.
+    
+    Auto-initializes with sensible defaults if not yet initialized.
+    
+    Returns:
+        Tuple of (device, dtype)
+    """
+    _ensure_initialized()
     return get_default_device(), get_default_dtype()
 
-# Auto-initialize with sensible defaults when module is imported
-def _auto_initialize():
-    """Automatic initialization with sensible defaults."""
+
+def _ensure_initialized():
+    """
+    Lazy initialization with sensible defaults if not explicitly initialized.
+    
+    This is called automatically by get_default_device() and get_default_dtype()
+    to ensure the device manager is always ready to use.
+    
+    Default behavior:
+    - Device: CUDA if available, else CPU
+    - Dtype: float64
+    """
     global _INITIALIZED
     
-    # Skip if already initialized
-    if _INITIALIZED:
-        return
-    
-    try:
-        # Get device and dtype preferences from command line arguments
-        preferred_device = 'cuda'  # Default value from options.py
-        preferred_dtype = 'float64'  # Default value from options.py
+    if not _INITIALIZED:
+        # Auto-detect best device
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        dtype = 'float64'
+        
+        # Initialize with defaults (no print statements for lazy init)
         try:
-            import sys
-            from act.util.options import get_parser
+            target_device = torch.device("cuda:0") if device == 'cuda' else torch.device("cpu")
+            target_dtype = torch.float64
             
-            # Skip argument parsing if --help is requested (let the actual CLI handle it)
-            if '--help' in sys.argv or '-h' in sys.argv:
-                # Don't parse args, use defaults
-                pass
-            else:
-                parser = get_parser()
-                args, _ = parser.parse_known_args(sys.argv[1:])
-                preferred_device = args.device
-                preferred_dtype = args.dtype
-                
-                # Handle gpu/cuda aliasing
-                if preferred_device == 'gpu':
-                    preferred_device = 'cuda'
-                    print(f"🔄 Device alias: 'gpu' → 'cuda'")
-                
-        except SystemExit:
-            # Argparse caught --help or similar, let it propagate (but don't initialize yet)
-            # This happens when running with --help before our actual CLI takes over
-            raise
+            torch.set_default_dtype(target_dtype)
+            if hasattr(torch, 'set_default_device'):
+                torch.set_default_device(target_device)
+            
+            _INITIALIZED = True
         except Exception:
-            # If parsing fails for other reasons, use defaults
-            pass
-        
-        # Initialize device
-        if preferred_device == 'cpu':
-            target_device = torch.device("cpu")
-            print(f"Using command line device: cpu")
-        else:  # cuda or any other value
-            if torch.cuda.is_available():
-                target_device = torch.device("cuda:0")
-                print(f"Using command line device: cuda:0")
-            else:
-                target_device = torch.device("cpu")
-                print(f"CUDA not available, using CPU")
-        
-        # Set PyTorch global defaults
-        target_dtype = torch.float64 if preferred_dtype == 'float64' else torch.float32
-        torch.set_default_dtype(target_dtype)
-        if hasattr(torch, 'set_default_device'):
-            torch.set_default_device(target_device)
-        print(f"✅ Initialized: device={target_device}, dtype={target_dtype}")
-            
-    except Exception as e:
-        # Last resort fallback
-        print(f"Device initialization failed ({e}), using CPU + float64")
-        torch.set_default_dtype(torch.float64)
-    
-    finally:
-        # Mark as initialized regardless of success/failure
-        _INITIALIZED = True
-
-# Auto-initialize when module is imported
-_auto_initialize()
+            # Silent fallback to CPU + float64
+            torch.set_default_dtype(torch.float64)
+            _INITIALIZED = True

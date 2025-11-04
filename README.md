@@ -21,9 +21,9 @@ cd ACT
 # Place your gurobi.lic file in ./modules/gurobi/ directory
 cp /path/to/your/gurobi.lic ./modules/gurobi/gurobi.lic
 
-# 3. Run ACT native verification
+# 3. Run ACT phases
 cd ../act
-python main.py --verifier act
+python -m act.pipeline --help
 
 
 ## License

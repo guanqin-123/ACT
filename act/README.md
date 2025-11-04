@@ -4,6 +4,16 @@ This directory contains the core verification framework for the Abstract Constra
 
 ## Recent Development Updates
 
+### Unified CLI Architecture (November 2025)
+- **Shared CLI Utilities**: Created `act/util/cli_utils.py` with `add_device_args()` and `initialize_from_args()` for consistent device/dtype handling
+- **Comprehensive CLI Coverage**: All ACT modules now have dedicated CLIs with unified interface
+  - `act.front_end` - Main front-end CLI and loader-specific CLIs
+  - `act.pipeline` - Pipeline testing and integration CLI
+  - `act.back_end` - Back-end verification and network generation CLI (NEW)
+- **Architecture Separation**: Clean separation between ACT native components (use cli_utils) and external verifiers (use local get_parser())
+- **Back-End CLI**: New comprehensive CLI supporting network generation, verification, inspection, and serialization testing
+- **Deprecated Code Removal**: Removed `act/main.py` in favor of modern modular CLI architecture
+
 ### Debugging and Performance Framework (October 2025)
 - **PerformanceOptions**: Global debugging flags with `debug_tf`, `validate_constraints`, and configurable logging
 - **Transfer Function Logging**: Detailed layer-by-layer analysis logging to `act/pipeline/log/act_debug_tf.log`
@@ -21,23 +31,28 @@ This directory contains the core verification framework for the Abstract Constra
 
 ```
 act/
-├── main.py                         # Main unified verification interface
 ├── __init__.py                     # Package initialization
 │
 ├── front_end/                      # Front-End: User-facing data processing
-│   ├── torchvision/                # TorchVision integration
+│   ├── cli.py                      # Main front-end CLI with unified device/dtype args
+│   ├── torchvision_loader/         # TorchVision integration
+│   │   ├── cli.py                  # TorchVision-specific CLI
 │   │   ├── create_specs.py         # TorchVisionSpecCreator for dataset-model pairs
 │   │   ├── data_model_loader.py    # TorchVision dataset and model loading
 │   │   └── data_model_mapping.py   # Dataset-model compatibility mappings
-│   ├── vnnlib/                     # VNNLIB integration
+│   ├── vnnlib_loader/              # VNNLIB integration
+│   │   ├── cli.py                  # VNNLIB-specific CLI
 │   │   └── create_specs.py         # VNNLibSpecCreator for VNNLIB specs
 │   ├── specs.py                    # InputSpec/OutputSpec with InKind/OutKind enums
 │   ├── spec_creator_base.py        # Base spec creator interface
+│   ├── creator_registry.py         # Spec creator registration and discovery
 │   ├── verifiable_model.py         # PyTorch verification wrapper modules
 │   ├── model_synthesis.py          # Model synthesis using spec creators
 │   └── README.md                   # Front-end documentation
 │
 ├── back_end/                       # Back-End: Core verification engine
+│   ├── cli.py                      # Back-end CLI (generate, verify, info, test)
+│   ├── __main__.py                 # Entry point for python -m act.back_end
 │   ├── core.py                     # Net, Layer, Bounds, Con, ConSet data structures
 │   ├── verifier.py                 # Spec-free verification: verify_once(), verify_bab()
 │   ├── layer_schema.py             # Layer type definitions and validation rules
@@ -74,16 +89,14 @@ act/
 │   └── README.md                   # Back-end documentation
 │
 ├── pipeline/                       # Pipeline: Testing framework and integration
+│   ├── cli.py                      # Pipeline CLI with unified device/dtype args
 │   ├── torch2act.py                # Automatic PyTorch→ACT Net conversion
 │   ├── validate_verifier.py        # Verifier correctness validation with concrete tests
-│   ├── correctness.py              # Correctness validation utilities
-│   ├── regression.py               # Baseline capture and regression testing
-│   ├── integration.py              # Front-end integration bridge
 │   ├── model_factory.py            # ACT Net factory for test networks
-│   ├── config.py                   # YAML-based test scenario management
+│   ├── regression.py               # Baseline capture and regression testing
 │   ├── reporting.py                # Results analysis and report generation
 │   ├── utils.py                    # Shared utilities and performance profiling
-│   ├── run_tests.py                # Command-line testing interface
+│   ├── config.py                   # YAML-based test scenario management
 │   ├── configs/                    # Configuration files
 │   │   ├── mock_inputs.yaml        # Mock data generation templates
 │   │   ├── test_scenarios.yaml     # Complete test scenario definitions
@@ -94,12 +107,16 @@ act/
 │   └── README.md                   # Pipeline documentation
 │
 ├── util/                           # Shared Utilities
+│   ├── cli_utils.py                # Shared CLI utilities (add_device_args, initialize_from_args)
 │   ├── device_manager.py           # GPU-first CUDA device handling
 │   ├── path_config.py              # Project path configuration and management
-│   ├── options.py                  # Command-line arguments and PerformanceOptions
-│   └── stats.py                    # Statistics and performance tracking
+│   ├── options.py                  # PerformanceOptions and debugging configuration
+│   ├── stats.py                    # Statistics and performance tracking
+│   └── model_inference.py          # Model inference utilities
 │
 └── wrapper_exts/                   # External verifier integrations
+    ├── ext_config.py               # External verifier configuration
+    ├── ext_runner.py               # External verifier CLI runner (ERAN, αβ-CROWN)
     ├── abcrown/                    # αβ-CROWN integration module
     │   ├── abcrown_verifier.py     # αβ-CROWN wrapper and interface
     │   └── abcrown_runner.py       # αβ-CROWN backend execution script
@@ -109,12 +126,68 @@ act/
 
 ## Module Documentation
 
-### **Main Interface**
-- **`main.py`**: Primary entry point for all verification tasks
-  - Unified command-line interface supporting all verifiers
-  - Parameter parsing, validation, and backend routing
-  - Comprehensive argument compatibility across different verification tools
-  - Integration with configuration defaults from `../modules/configs/`
+### **Command-Line Interfaces**
+All ACT modules now have unified CLI architecture with consistent device/dtype handling:
+
+#### **Front-End CLIs**
+- **`front_end/cli.py`**: Main front-end CLI
+  - Commands: `--list`, `--create`, `--validate`
+  - Unified device/dtype arguments via `cli_utils`
+  - Usage: `python -m act.front_end [options]`
+
+- **`front_end/torchvision_loader/cli.py`**: TorchVision-specific CLI
+  - Dataset and model listing, spec creation
+  - Usage: `python -m act.front_end.torchvision_loader [options]`
+
+- **`front_end/vnnlib_loader/cli.py`**: VNNLIB-specific CLI
+  - VNNLIB file parsing and validation
+  - Usage: `python -m act.front_end.vnnlib_loader [options]`
+
+#### **Pipeline CLI**
+- **`pipeline/cli.py`**: Pipeline testing and integration CLI
+  - Commands: Testing, validation, regression, reporting
+  - Unified device/dtype arguments via `cli_utils`
+  - Usage: `python -m act.pipeline [options]`
+
+#### **Back-End CLI**
+- **`back_end/cli.py`**: Comprehensive back-end verification CLI
+  - Commands:
+    - `--generate`: Generate example networks from YAML config
+    - `--list-examples`: List all available example networks
+    - `--info`: Display network structure and details
+    - `--verify`: Run verification (single-shot or branch-and-bound)
+    - `--test-serialization`: Test save/load round-trip
+  - Unified device/dtype arguments via `cli_utils`
+  - Usage: `python -m act.back_end [options]`
+  - Examples:
+    ```bash
+    # Generate all example networks
+    python -m act.back_end --generate --device cpu --dtype float64
+    
+    # List available networks
+    python -m act.back_end --list-examples
+    
+    # Show network info
+    python -m act.back_end --info --network mnist_robust_easy.json --verbose
+    
+    # Run verification
+    python -m act.back_end --verify --network mnist_robust_easy.json --device cpu
+    
+    # Test serialization
+    python -m act.back_end --test-serialization --device cpu
+    ```
+
+#### **External Verifier CLI**
+- **`wrapper_exts/ext_runner.py`**: External verifier CLI (ERAN, αβ-CROWN)
+  - Uses local `get_parser()` for external verifier compatibility
+  - Separate from ACT native CLI architecture
+  - Usage: `python act/wrapper_exts/ext_runner.py [options]`
+
+#### **Shared CLI Utilities**
+- **`util/cli_utils.py`**: Shared CLI infrastructure for all ACT native modules
+  - `add_device_args(parser)`: Adds `--device {cpu,cuda,gpu}` and `--dtype {float32,float64}`
+  - `initialize_from_args(args)`: Calls `device_manager.initialize_device()` with parsed args
+  - Used by: front_end, pipeline, back_end (not external verifiers)
 
 ### **`front_end/` - User-Facing Data Processing**
 - **Spec Creator System**: Unified framework for creating specifications from various sources
@@ -239,10 +312,17 @@ act/
 
 ### **`util/` - Shared Utilities**
 
+- **`cli_utils.py`**: Shared CLI utilities for unified device/dtype handling
+  - `add_device_args(parser)`: Adds `--device` and `--dtype` arguments to ArgumentParser
+  - `initialize_from_args(args)`: Initializes device_manager with parsed arguments
+  - Used by all ACT native modules (front_end, pipeline, back_end)
+  - Ensures consistent CLI interface across the entire ACT framework
+
 - **`device_manager.py`**: GPU-first CUDA device handling
   - Automatic device detection and management
   - GPU memory optimization and fallback strategies
   - Global PyTorch device and dtype configuration
+  - `initialize_device(device_str, dtype_str)`: Main initialization function
 
 - **`path_config.py`**: Project path configuration and management
   - `get_project_root()`, `get_data_root()`, `get_config_root()`
@@ -250,19 +330,21 @@ act/
   - `ensure_gurobi_license()`: Automatic Gurobi license detection
   - Centralized path management for all ACT modules
 
-- **`options.py`**: Command-line arguments and performance configuration
-  - Centralized CLI option definitions for all verifiers
+- **`options.py`**: Performance configuration (PerformanceOptions only)
   - **`PerformanceOptions`**: Global debugging and performance flags
     - `debug_tf`: Enable/disable transfer function debug logging (default: True)
     - `validate_constraints`: Enable/disable constraint validation (default: True)
     - `debug_output_file`: Path to debug log (default: `act/pipeline/log/act_debug_tf.log`)
     - `debug_tf_max_constraints`: Max constraints to log per layer (default: 50)
     - Methods: `enable_debug_tf()`, `disable_all()`, `set_debug_output_file()`
-  - Parameter validation and default value management
+  - Note: CLI argument parsing moved to individual module CLIs and cli_utils
 
 - **`stats.py`**: Statistics and performance tracking
   - Verification result logging and analysis
   - Performance metrics collection and reporting
+
+- **`model_inference.py`**: Model inference utilities
+  - Helper functions for model execution and testing
 
 ### **`wrapper_exts/` - External Verifier Integrations**
 
@@ -290,11 +372,19 @@ act/
 
 The three-tier modular architecture provides several key advantages:
 
-### **Three-Tier Design**
+### **Three-Tier Design with Unified CLI**
 - **Front-End Separation**: User-facing data processing isolated from core verification logic
 - **Back-End Focus**: Pure verification engine with PyTorch-native analysis and optimization
 - **Pipeline Integration**: Comprehensive testing framework and Torch→ACT conversion bridge
 - **Clean Boundaries**: Clear interfaces between data processing, verification, and testing
+- **Unified CLI**: Consistent device/dtype handling across all ACT native modules via `cli_utils`
+
+### **Modern CLI Architecture**
+- **Modular CLIs**: Each major component (front_end, pipeline, back_end) has dedicated CLI
+- **Shared Utilities**: `cli_utils.py` provides consistent `--device` and `--dtype` arguments
+- **Clean Separation**: ACT native components use `cli_utils`, external verifiers use local `get_parser()`
+- **Entry Points**: All CLIs executable via `python -m act.<module>` pattern
+- **Command Discovery**: `--help` shows available commands and options for each module
 
 ### **Modern Verification Features**
 - **Spec-Free Verification**: All constraints embedded in PyTorch models via wrapper layers
@@ -327,10 +417,12 @@ The three-tier modular architecture provides several key advantages:
 
 ### **Configuration Management**
 - **Centralized Defaults**: Configuration files in `../modules/configs/` provide optimal parameters
-- **Device Management**: Intelligent GPU/CPU device selection and memory optimization
+- **Device Management**: Intelligent GPU/CPU device selection via unified CLI arguments
+- **Memory Optimization**: Automatic memory tracking and optimization strategies
 - **Environment Isolation**: Different verifiers can use separate conda environments
-- **Parameter Management**: Unified command-line interface with type validation
+- **Parameter Management**: Unified command-line interface with type validation across all modules
 - **Path Configuration**: Centralized path management via `path_config.py`
+- **Consistent Interface**: All ACT native CLIs accept `--device {cpu,cuda,gpu}` and `--dtype {float32,float64}`
 
 ### **Debugging and Development**
 - **PerformanceOptions**: Global flags for enabling/disabling debug features
@@ -352,9 +444,76 @@ The three-tier modular architecture provides several key advantages:
 - **GPU Acceleration**: PyTorch-native verification leverages GPU computation where beneficial
 - **Configurable Logging**: Disable debug features in production for optimal performance
 
+## Usage Examples
+
+### Front-End CLI Examples
+```bash
+# List available TorchVision datasets and models
+python -m act.front_end.torchvision_loader --list --device cpu
+
+# List available VNNLIB files
+python -m act.front_end.vnnlib_loader --list --device cpu
+
+# Create specifications from TorchVision
+python -m act.front_end --create --dataset mnist --model resnet18 --device cuda
+```
+
+### Pipeline CLI Examples
+```bash
+# Run pipeline tests
+python -m act.pipeline --test --device cpu --dtype float32
+
+# Run validation
+python -m act.pipeline --validate --device cuda
+```
+
+### Back-End CLI Examples
+```bash
+# Generate all example networks from YAML
+python -m act.back_end --generate --device cpu --dtype float64
+
+# List all available example networks
+python -m act.back_end --list-examples
+
+# Display network structure (basic)
+python -m act.back_end --info --network mnist_robust_easy.json --device cpu
+
+# Display detailed network information
+python -m act.back_end --info --network mnist_robust_easy.json --verbose --device cpu --dtype float64
+
+# Run single-shot verification
+python -m act.back_end --verify --network mnist_robust_easy.json --device cpu --dtype float64
+
+# Run branch-and-bound verification
+python -m act.back_end --verify --network mnist_robust_hard.json --bab --device cpu
+
+# Test serialization round-trip
+python -m act.back_end --test-serialization --device cpu --dtype float64
+```
+
+### External Verifier Examples
+```bash
+# Run ERAN verification
+python act/wrapper_exts/ext_runner.py --verifier eran --model model.onnx --dataset mnist
+
+# Run αβ-CROWN verification
+python act/wrapper_exts/ext_runner.py --verifier abcrown --model model.onnx --dataset cifar10
+```
+
 ## Examples and Network Generation
 Example ACT networks are stored as JSON under `act/back_end/examples/nets/`.
 These files are generated from the YAML configuration `act/back_end/examples/examples_config.yaml`
 using the YAML-driven network factory. The test suite and serializer load networks
 from the `examples/nets` directory. When authoring new example networks prefer the
 YAML configuration and the factory rather than hand-editing the JSON files.
+
+### Using the Back-End CLI for Network Generation
+The back-end CLI provides comprehensive tools for working with ACT networks:
+
+1. **Generate Networks**: `--generate` creates all networks defined in `examples_config.yaml`
+2. **List Networks**: `--list-examples` shows all available networks organized by category
+3. **Inspect Networks**: `--info` displays structure, use `--verbose` for detailed layer information
+4. **Verify Networks**: `--verify` runs verification with optional `--bab` for branch-and-bound
+5. **Test Serialization**: `--test-serialization` validates save/load functionality
+
+All commands support unified `--device {cpu,cuda,gpu}` and `--dtype {float32,float64}` arguments.

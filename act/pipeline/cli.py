@@ -15,8 +15,7 @@ from pathlib import Path
 from typing import List, Optional
 import sys
 
-import torch
-
+from act.util.cli_utils import add_device_args, initialize_from_args
 from act.front_end.spec_creator_base import LabeledInputTensor
 from act.front_end.vnnlib_loader.create_specs import VNNLibSpecCreator
 from act.front_end.vnnlib_loader import data_model_loader as vnnlib_loader
@@ -579,12 +578,6 @@ Examples:
         help="Timeout in seconds (default: 3600)"
     )
     fuzz_group.add_argument(
-        "--device",
-        type=str,
-        default="cuda" if torch.cuda.is_available() else "cpu",
-        help="Device (default: cuda if available)"
-    )
-    fuzz_group.add_argument(
         "--output",
         type=str,
         default="fuzzing_results",
@@ -602,7 +595,13 @@ Examples:
         help="Report progress every N iterations (default: 100)"
     )
     
+    # Add standard device/dtype arguments (shared across all ACT CLIs)
+    add_device_args(parser)
+    
     args = parser.parse_args()
+    
+    # Initialize device manager from CLI arguments
+    initialize_from_args(args)
     
     # Handle --dataset as alias for --category (for VNNLIB)
     # This provides a more intuitive interface: python -m act.pipeline --fuzz --dataset cifar100_2024
