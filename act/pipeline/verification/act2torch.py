@@ -118,6 +118,10 @@ class ACTToTorch:
         has_input_spec = False
         has_output_spec = False
         
+        # Get target dtype/device once for all tensor conversions
+        target_dtype = get_default_dtype()
+        target_device = get_default_device()
+        
         for i, act_layer in enumerate(self.act_net.layers):
             kind = act_layer.kind
             meta = act_layer.meta
@@ -139,8 +143,6 @@ class ACTToTorch:
                     spec_dict['eps'] = meta['eps']
                 
                 # Convert parameter tensors to device_manager dtype for consistency
-                target_dtype = get_default_dtype()
-                target_device = get_default_device()
                 for param_key in ['lb', 'ub', 'center', 'A', 'b']:
                     if param_key in act_layer.params:
                         tensor = act_layer.params[param_key]
@@ -169,8 +171,6 @@ class ACTToTorch:
                     spec_dict['d'] = meta['d']
                 
                 # Convert parameter tensors to device_manager dtype for consistency
-                target_dtype = get_default_dtype()
-                target_device = get_default_device()
                 for param_key in ['c', 'lb', 'ub']:
                     if param_key in act_layer.params:
                         tensor = act_layer.params[param_key]

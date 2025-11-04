@@ -139,6 +139,7 @@ from typing import Dict, Any, List, Optional
 from act.back_end.core import Layer, Net
 from act.back_end.serialization.serialization import NetSerializer
 from act.front_end.specs import InKind, OutKind
+from act.util.device_manager import get_default_dtype
 
 
 class NetFactory:
@@ -255,9 +256,7 @@ class NetFactory:
     
     def create_network(self, name: str, spec: Dict[str, Any]) -> Net:
         """Create network from YAML spec."""
-        from act.util.device_manager import get_default_dtype
-        
-        # Get current device_manager dtype for consistency
+        # Get current device_manager dtype for INPUT layer consistency
         current_dtype = str(get_default_dtype())
         
         layers = []
