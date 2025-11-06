@@ -77,7 +77,7 @@
 #   3. Run abstract analysis through ACT → get abstract bounds for each layer
 #   4. Check: concrete_value ∈ [lb, ub] for all layers and all neurons
 #
-# Validation Matrix (Level 3):
+# Validation Matrix (Level 2):
 #   ┌──────────────────────┬────────────────────────┬──────────────┐
 #   │ Concrete Values      │ Abstract Bounds        │ Validation   │
 #   ├──────────────────────┼────────────────────────┼──────────────┤
@@ -112,7 +112,7 @@
 #   python -m act.pipeline --validate-verifier --mode counterexample --solvers gurobi
 #   python -m act.pipeline --validate-verifier --mode counterexample --solvers gurobi torchlp
 #   
-#   # Test with transfer function modes (Level 3):
+#   # Test with transfer function modes (Level 2):
 #   python -m act.pipeline --validate-verifier --mode bounds --tf-modes interval
 #   python -m act.pipeline --validate-verifier --mode bounds --tf-modes interval hybridz
 #   
@@ -131,7 +131,7 @@
 #
 # Exit Codes:
 #   0 - All validations passed
-#   1 - Soundness bugs detected (Level 1) or unsound bounds (Level 3)
+#   1 - Soundness bugs detected (Level 1) or unsound bounds (Level 2)
 #
 #===---------------------------------------------------------------------===#
 
@@ -415,7 +415,7 @@ class VerificationValidator:
         num_samples: int = 10
     ) -> Dict[str, Any]:
         """
-        Level 3: Validate abstract bounds overapproximate concrete values.
+        Level 2: Validate abstract bounds overapproximate concrete values.
         
         Args:
             networks: List of network names (None = all networks)
@@ -429,7 +429,7 @@ class VerificationValidator:
             networks = self.factory.list_networks()
         
         logger.info(f"\n{'='*80}")
-        logger.info(f"LEVEL 3: BOUNDS/NUMERICAL VALIDATION")
+        logger.info(f"LEVEL 2: BOUNDS/NUMERICAL VALIDATION")
         logger.info(f"{'='*80}")
         logger.info(f"Testing {len(networks)} networks with {len(tf_modes)} TF modes")
         logger.info(f"Samples per network: {num_samples}")
@@ -464,7 +464,7 @@ class VerificationValidator:
         num_samples: int
     ) -> Dict[str, Any]:
         """
-        Validate bounds for a single network (Level 3).
+        Validate bounds for a single network (Level 2).
         
         Args:
             name: Network name
@@ -636,13 +636,13 @@ class VerificationValidator:
         num_samples: int = 10
     ) -> Dict[str, Any]:
         """
-        Run both Level 1 and Level 3 validations.
+        Run both Level 1 and Level 2 validations.
         
         Args:
             networks: List of network names (None = all networks)
             solvers: List of solver names for Level 1
-            tf_modes: Transfer function modes for Level 3
-            num_samples: Number of samples for Level 3
+            tf_modes: Transfer function modes for Level 2
+            num_samples: Number of samples for Level 2
             
         Returns:
             Combined summary dictionary
@@ -650,14 +650,14 @@ class VerificationValidator:
         logger.info(f"\n{'='*80}")
         logger.info(f"COMPREHENSIVE VERIFICATION VALIDATION")
         logger.info(f"{'='*80}")
-        logger.info(f"Running both Level 1 (Counterexample) and Level 3 (Bounds) validation")
+        logger.info(f"Running both Level 1 (Counterexample) and Level 2 (Bounds) validation")
         logger.info(f"Device: {self.device}, Dtype: {self.dtype}")
         logger.info(f"{'='*80}\n")
         
         # Run Level 1
         summary_l1 = self.validate_counterexamples(networks=networks, solvers=solvers)
         
-        # Run Level 3
+        # Run Level 2
         summary_l3 = self.validate_bounds(networks=networks, tf_modes=tf_modes, num_samples=num_samples)
         
         # Combine summaries - FAILED if any failures OR errors
@@ -795,7 +795,7 @@ class VerificationValidator:
         l3 = combined['level3_bounds']
         
         print(f"\nLevel 1 (Counterexample): {l1['passed']}/{l1['total']} passed, {l1['failed']} failed, {l1['errors']} errors")
-        print(f"Level 3 (Bounds):         {l3['passed']}/{l3['total']} passed, {l3['failed']} failed, {l3['errors']} errors")
+        print(f"Level 2 (Bounds):         {l3['passed']}/{l3['total']} passed, {l3['failed']} failed, {l3['errors']} errors")
         print()
         print(f"Overall Status: {combined['overall_status']}")
         print("="*80)
@@ -815,9 +815,9 @@ def main():
     parser.add_argument('--solvers', nargs='+', default=['gurobi', 'torchlp'],
                        help='Solvers for Level 1')
     parser.add_argument('--tf-modes', nargs='+', default=['interval'],
-                       help='Transfer function modes for Level 3')
+                       help='Transfer function modes for Level 2')
     parser.add_argument('--samples', type=int, default=10,
-                       help='Number of samples for Level 3')
+                       help='Number of samples for Level 2')
     
     args = parser.parse_args()
     
