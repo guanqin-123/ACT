@@ -482,11 +482,11 @@ def cmd_verify(target: str, args):
     print_header()
     
     # Import verification test modules
-    from act.pipeline.verification import model_factory, torch2act, validate_verifier
+    from act.pipeline.verification import model_factory, torch2act
     
     tests_to_run = []
     if target == 'all':
-        tests_to_run = ['act2torch', 'torch2act', 'validate_verifier']
+        tests_to_run = ['act2torch', 'torch2act']
     else:
         tests_to_run = [target]
     
@@ -517,18 +517,6 @@ def cmd_verify(target: str, args):
                 import traceback
                 traceback.print_exc()
                 results[test_name] = 'FAILED'
-        
-        elif test_name == 'validate_verifier':
-            print(f"VERIFICATION TEST: Verifier Validation")
-            print(f"{'='*80}\n")
-            try:
-                validate_verifier.main()
-                results[test_name] = 'PASSED'
-            except Exception as e:
-                print(f"\n❌ Test failed: {e}")
-                import traceback
-                traceback.print_exc()
-                results[test_name] = 'FAILED'
     
     # Print summary
     print(f"\n{'='*80}")
@@ -541,6 +529,55 @@ def cmd_verify(target: str, args):
     
     # Exit with error if any test failed
     if any(r == 'FAILED' for r in results.values()):
+        sys.exit(1)
+
+
+def cmd_validate_verifier(args):
+    """Run verifier validation with specified mode."""
+    import torch
+    from act.pipeline.verification.validate_verifier import VerificationValidator
+    
+    print_header()
+    
+    # Convert dtype string to torch dtype
+    dtype = torch.float64 if args.dtype == 'float64' else torch.float32
+    
+    # Create validator
+    validator = VerificationValidator(device=args.device, dtype=dtype)
+    
+    # Parse networks if specified
+    networks = args.networks.split(',') if args.networks else None
+    
+    # Run validation based on mode
+    try:
+        if args.mode == 'counterexample':
+            summary = validator.validate_counterexamples(
+                networks=networks,
+                solvers=args.solvers
+            )
+            exit_code = 1 if summary['failed'] > 0 else 0
+        elif args.mode == 'bounds':
+            summary = validator.validate_bounds(
+                networks=networks,
+                tf_modes=args.tf_modes,
+                num_samples=args.samples
+            )
+            exit_code = 1 if summary['failed'] > 0 else 0
+        else:  # comprehensive
+            combined = validator.validate_comprehensive(
+                networks=networks,
+                solvers=args.solvers,
+                tf_modes=args.tf_modes,
+                num_samples=args.samples
+            )
+            exit_code = 1 if combined['overall_status'] == 'FAILED' else 0
+        
+        sys.exit(exit_code)
+    
+    except Exception as e:
+        print(f"\n❌ Validation failed: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
@@ -576,8 +613,12 @@ Examples:
   # Run verification tests
   python -m act.pipeline --verify act2torch --device cpu
   python -m act.pipeline --verify torch2act --device cpu
-  python -m act.pipeline --verify validate_verifier --device cpu
   python -m act.pipeline --verify all --device cpu
+  
+  # Run verifier validation (comprehensive by default)
+  python -m act.pipeline --validate-verifier --device cpu --dtype float64
+  python -m act.pipeline --validate-verifier --mode counterexample
+  python -m act.pipeline --validate-verifier --mode bounds --samples 20
         """
     )
     
@@ -620,8 +661,13 @@ Examples:
         "--verify",
         type=str,
         metavar="TARGET",
-        choices=['act2torch', 'torch2act', 'validate_verifier', 'all'],
-        help="Run verification tests: act2torch, torch2act, validate_verifier, or all"
+        choices=['act2torch', 'torch2act', 'all'],
+        help="Run verification tests: act2torch, torch2act, or all"
+    )
+    cmd_group.add_argument(
+        "--validate-verifier",
+        action="store_true",
+        help="Run verifier validation (counterexample and bounds checking)"
     )
     cmd_group.add_argument(
         "--list-verifications",
@@ -703,6 +749,39 @@ Examples:
         help="Report progress every N iterations (default: 100)"
     )
     
+    # Validation options
+    validation_group = parser.add_argument_group('Validation Options')
+    validation_group.add_argument(
+        "--mode",
+        type=str,
+        choices=['counterexample', 'bounds', 'comprehensive'],
+        default='comprehensive',
+        help="Validation mode (default: comprehensive)"
+    )
+    validation_group.add_argument(
+        "--networks",
+        type=str,
+        help="Comma-separated list of networks to validate (default: all)"
+    )
+    validation_group.add_argument(
+        "--solvers",
+        nargs='+',
+        default=['gurobi', 'torchlp'],
+        help="Solvers for Level 1 validation (default: gurobi torchlp)"
+    )
+    validation_group.add_argument(
+        "--tf-modes",
+        nargs='+',
+        default=['interval'],
+        help="Transfer function modes for Level 3 (default: interval)"
+    )
+    validation_group.add_argument(
+        "--samples",
+        type=int,
+        default=10,
+        help="Number of samples for Level 3 validation (default: 10)"
+    )
+    
     # Add standard device/dtype arguments (shared across all ACT CLIs)
     add_device_args(parser)
     
@@ -732,6 +811,8 @@ Examples:
             cmd_fuzz(args)
         elif args.verify:
             cmd_verify(args.verify, args)
+        elif args.validate_verifier:
+            cmd_validate_verifier(args)
         elif args.list_verifications:
             cmd_list_verifications()
     except KeyboardInterrupt:

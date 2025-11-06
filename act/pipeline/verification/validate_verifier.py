@@ -8,9 +8,20 @@
 #===---------------------------------------------------------------------===#
 #
 # Purpose:
-#   Validate formal verifier correctness using concrete counterexamples.
-#   If concrete inference finds a counterexample, the formal verifier MUST
-#   report SAT/COUNTEREXAMPLE (not CERTIFIED), otherwise verifier is unsound.
+#   Unified verification validation framework with two validation levels:
+#
+#   Level 1: Counterexample/Soundness Validation
+#     - Validates that verifier doesn't claim CERTIFIED when concrete 
+#       counterexamples exist
+#
+#   Level 3: Bounds/Numerical Validation
+#     - Validates that abstract bounds correctly overapproximate concrete 
+#       activation values
+#
+#===---------------------------------------------------------------------===#
+#
+# Level 1: Counterexample/Soundness Validation
+# ============================================
 #
 # Key Insight:
 #   Concrete execution provides ground truth - if we find a real counterexample
@@ -27,7 +38,7 @@
 #   3. If counterexample found, run formal verification
 #   4. Cross-validate using matrix below
 #
-# Validation Matrix:
+# Validation Matrix (Level 1):
 #   ┌─────────────────────────┬────────────────────────────────────┬──────────────┐
 #   │ Concrete Counterexample │ Verifier Result                    │ Validation   │
 #   ├─────────────────────────┼────────────────────────────────────┼──────────────┤
@@ -50,23 +61,89 @@
 #     ACCEPTABLE   - Verifier incomplete but sound (conservative)
 #     INCONCLUSIVE - No concrete counterexample to validate against
 #
+#===---------------------------------------------------------------------===#
+#
+# Level 3: Bounds/Numerical Validation
+# ====================================
+#
+# Key Insight:
+#   Abstract interpretation must overapproximate concrete values. If any
+#   concrete activation value falls outside its abstract bounds [lb, ub],
+#   the transfer function is unsound.
+#
+# Validation Strategy:
+#   1. Sample concrete inputs from input specification
+#   2. Run concrete forward pass through PyTorch model → get concrete activations
+#   3. Run abstract analysis through ACT → get abstract bounds for each layer
+#   4. Check: concrete_value ∈ [lb, ub] for all layers and all neurons
+#
+# Validation Matrix (Level 3):
+#   ┌──────────────────────┬────────────────────────┬──────────────┐
+#   │ Concrete Values      │ Abstract Bounds        │ Validation   │
+#   ├──────────────────────┼────────────────────────┼──────────────┤
+#   │ value ∈ [lb, ub]     │ All layers/neurons     │ ✅ PASSED    │
+#   │ (Sound bounds)       │                        │              │
+#   ├──────────────────────┼────────────────────────┼──────────────┤
+#   │ value ∉ [lb, ub]     │ Any layer/neuron       │ ❌ FAILED    │
+#   │ (Unsound bounds)     │ (Transfer function bug)│              │
+#   └──────────────────────┴────────────────────────┴──────────────┘
+#
+#   Legend:
+#     PASSED - All concrete values within abstract bounds (sound)
+#     FAILED - Concrete value outside bounds (unsound transfer function)
+#
+#===---------------------------------------------------------------------===#
+#
 # Usage:
-#   python act/pipeline/validate_verifier.py
+#   # Via CLI (recommended):
+#   python -m act.pipeline --validate-verifier --mode comprehensive
+#   python -m act.pipeline --validate-verifier --mode counterexample
+#   python -m act.pipeline --validate-verifier --mode bounds
+#   
+#   # With device and dtype specification:
+#   python -m act.pipeline --validate-verifier --device cpu --dtype float64
+#   python -m act.pipeline --validate-verifier --device cuda --dtype float32
+#   
+#   # Test specific networks:
+#   python -m act.pipeline --validate-verifier --networks mnist_mlp_small
+#   python -m act.pipeline --validate-verifier --networks mnist_mlp_small,mnist_cnn_small
+#   
+#   # Test with specific solvers (Level 1):
+#   python -m act.pipeline --validate-verifier --mode counterexample --solvers gurobi
+#   python -m act.pipeline --validate-verifier --mode counterexample --solvers gurobi torchlp
+#   
+#   # Test with transfer function modes (Level 3):
+#   python -m act.pipeline --validate-verifier --mode bounds --tf-modes interval
+#   python -m act.pipeline --validate-verifier --mode bounds --tf-modes interval hybridz
+#   
+#   # Adjust number of samples for bounds validation:
+#   python -m act.pipeline --validate-verifier --mode bounds --samples 20
+#   
+#   # Combined options:
+#   python -m act.pipeline --validate-verifier --mode comprehensive \
+#       --networks mnist_mlp_small,mnist_cnn_small \
+#       --solvers gurobi --tf-modes interval --samples 10 \
+#       --device cpu --dtype float64
+#
+#   # Direct execution (legacy):
+#   python act/pipeline/verification/validate_verifier.py
+#   python act/pipeline/verification/validate_verifier.py --mode bounds --samples 5
 #
 # Exit Codes:
-#   0 - All validations passed (no soundness bugs)
-#   1 - Soundness bugs detected (verifier claimed safety despite counterexample)
+#   0 - All validations passed
+#   1 - Soundness bugs detected (Level 1) or unsound bounds (Level 3)
 #
 #===---------------------------------------------------------------------===#
 
 import torch
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 from act.pipeline.verification.model_factory import ModelFactory
 from act.pipeline.verification.torch2act import TorchToACT
 from act.back_end.verifier import verify_once
+from act.back_end.analyze import analyze
 from act.back_end.solver.solver_gurobi import GurobiSolver
 from act.back_end.solver.solver_torch import TorchLPSolver
 from act.util.options import PerformanceOptions
@@ -75,11 +152,24 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class VerifierValidator:
-    """Validate formal verifier correctness using concrete counterexamples."""
+class VerificationValidator:
+    """Unified verification validation framework with counterexample and bounds validation."""
     
-    def __init__(self):
+    def __init__(
+        self, 
+        device: str = 'cpu',
+        dtype: torch.dtype = torch.float64
+    ):
+        """
+        Initialize verification validator.
+        
+        Args:
+            device: Device for computation ('cpu' or 'cuda')
+            dtype: Data type for computation (float32 or float64)
+        """
         self.factory = ModelFactory()
+        self.device = device
+        self.dtype = dtype
         self.validation_results = []
         
         # Initialize debug file (GUARDED)
@@ -87,6 +177,7 @@ class VerifierValidator:
             debug_file = PerformanceOptions.debug_output_file
             with open(debug_file, 'w') as f:
                 f.write(f"ACT Verification Debug Log\n")
+                f.write(f"Device: {device}, Dtype: {dtype}\n")
                 f.write(f"{'='*80}\n\n")
             logger.info(f"Debug logging to: {debug_file}")
     
@@ -98,6 +189,10 @@ class VerifierValidator:
         """
         Try to find a concrete counterexample through inference testing.
         
+        Args:
+            name: Network name
+            model: PyTorch model for concrete execution
+            
         Returns:
             (counterexample_input, results_dict) if found, None otherwise
         """
@@ -105,6 +200,7 @@ class VerifierValidator:
         
         for test_case in test_cases:
             input_tensor = self.factory.generate_test_input(name, test_case)
+            input_tensor = input_tensor.to(device=self.device, dtype=self.dtype)
             results = model(input_tensor)
             
             # Check if this is a counterexample
@@ -117,13 +213,59 @@ class VerifierValidator:
         
         return None
     
-    def validate_network(
+    def validate_counterexamples(
         self, 
-        name: str, 
-        solver: str = 'gurobi'
+        networks: Optional[List[str]] = None,
+        solvers: List[str] = ['gurobi', 'torchlp']
     ) -> Dict[str, Any]:
         """
-        Validate verifier correctness for a single network.
+        Level 1: Validate verifier soundness using concrete counterexamples.
+        
+        Args:
+            networks: List of network names (None = all networks)
+            solvers: List of solver names to test
+            
+        Returns:
+            Summary dictionary with validation results
+        """
+        if networks is None:
+            networks = self.factory.list_networks()
+        
+        logger.info(f"\n{'='*80}")
+        logger.info(f"LEVEL 1: COUNTEREXAMPLE/SOUNDNESS VALIDATION")
+        logger.info(f"{'='*80}")
+        logger.info(f"Testing {len(networks)} networks with {len(solvers)} solvers")
+        logger.info(f"Device: {self.device}, Dtype: {self.dtype}")
+        logger.info(f"{'='*80}\n")
+        
+        for network in networks:
+            for solver in solvers:
+                try:
+                    self._validate_counterexample_single(network, solver)
+                except Exception as e:
+                    logger.error(f"Validation failed for {network}/{solver}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Add error result if not already added
+                    error_result = {
+                        'network': network,
+                        'solver': solver,
+                        'validation_type': 'counterexample',
+                        'status': 'ERROR',
+                        'error': f"Outer exception: {str(e)}",
+                        'concrete_counterexample': False
+                    }
+                    self.validation_results.append(error_result)
+        
+        return self._compute_summary(validation_type='counterexample')
+    
+    def _validate_counterexample_single(
+        self, 
+        name: str, 
+        solver: str
+    ) -> Dict[str, Any]:
+        """
+        Validate verifier correctness for a single network (Level 1).
         
         Args:
             name: Network name from examples_config.yaml
@@ -136,11 +278,12 @@ class VerifierValidator:
         logger.info(f"Validating: {name} (solver: {solver})")
         logger.info(f"{'='*80}")
         
-        # Step 1: Load pre-loaded ACT Net from factory (no file I/O)
+        # Step 1: Load ACT Net from factory
         act_net = self.factory.get_act_net(name)
         
         # Step 2: Create PyTorch model for concrete execution
         model = self.factory.create_model(name, load_weights=True)
+        model = model.to(device=self.device, dtype=self.dtype)
         counterexample = self.find_concrete_counterexample(name, model)
         
         # Step 3: Run formal verifier on ACT Net
@@ -161,7 +304,8 @@ class VerifierValidator:
             # If verifier found counterexample, validate it with model
             if verify_result.counterexample is not None:
                 logger.info(f"     Verifier counterexample shape: {verify_result.counterexample.shape}")
-                ce_results = model(verify_result.counterexample.unsqueeze(0))
+                ce_tensor = verify_result.counterexample.unsqueeze(0).to(device=self.device, dtype=self.dtype)
+                ce_results = model(ce_tensor)
                 if isinstance(ce_results, dict):
                     logger.info(f"     CE validation: input_sat={ce_results['input_satisfied']}, "
                               f"output_sat={ce_results['output_satisfied']}")
@@ -171,6 +315,7 @@ class VerifierValidator:
             error_result = {
                 'network': name,
                 'solver': solver,
+                'validation_type': 'counterexample',
                 'status': 'ERROR',
                 'error': str(e),
                 'concrete_counterexample': counterexample is not None
@@ -179,7 +324,7 @@ class VerifierValidator:
             return error_result
         
         # Step 4: Cross-validate results
-        validation = self._cross_validate(
+        validation = self._cross_validate_counterexample(
             network_name=name,
             solver_name=solver,
             concrete_counterexample=counterexample,
@@ -189,7 +334,7 @@ class VerifierValidator:
         self.validation_results.append(validation)
         return validation
     
-    def _cross_validate(
+    def _cross_validate_counterexample(
         self,
         network_name: str,
         solver_name: str,
@@ -197,7 +342,7 @@ class VerifierValidator:
         verifier_status: str
     ) -> Dict[str, Any]:
         """
-        Cross-validate concrete inference vs formal verification.
+        Cross-validate concrete inference vs formal verification (Level 1).
         
         Validation Rules:
         1. If concrete counterexample found → verifier MUST report FALSIFIED or UNKNOWN
@@ -206,6 +351,7 @@ class VerifierValidator:
         result = {
             'network': network_name,
             'solver': solver_name,
+            'validation_type': 'counterexample',
             'concrete_counterexample': concrete_counterexample is not None,
             'verifier_result': verifier_status,
             'validation_status': None,
@@ -262,94 +408,335 @@ class VerifierValidator:
         
         return result
     
-    def validate_all_networks(self, solvers: list = ['gurobi', 'torchlp']) -> Dict[str, Any]:
+    def validate_bounds(
+        self,
+        networks: Optional[List[str]] = None,
+        tf_modes: List[str] = ['interval'],
+        num_samples: int = 10
+    ) -> Dict[str, Any]:
         """
-        Validate verifier correctness across all networks and solvers.
+        Level 3: Validate abstract bounds overapproximate concrete values.
         
+        Args:
+            networks: List of network names (None = all networks)
+            tf_modes: Transfer function modes to test ('interval', 'hybridz')
+            num_samples: Number of concrete inputs to sample per network
+            
         Returns:
-            Summary statistics and detailed results
+            Summary dictionary with validation results
         """
-        networks = self.factory.list_networks()
+        if networks is None:
+            networks = self.factory.list_networks()
         
-        print("\n" + "="*80)
-        print("FORMAL VERIFIER VALIDATION TEST SUITE")
-        print("="*80)
-        print(f"Testing {len(networks)} networks with {len(solvers)} solvers ({len(networks) * len(solvers)} total tests)")
-        print("="*80)
+        logger.info(f"\n{'='*80}")
+        logger.info(f"LEVEL 3: BOUNDS/NUMERICAL VALIDATION")
+        logger.info(f"{'='*80}")
+        logger.info(f"Testing {len(networks)} networks with {len(tf_modes)} TF modes")
+        logger.info(f"Samples per network: {num_samples}")
+        logger.info(f"Device: {self.device}, Dtype: {self.dtype}")
+        logger.info(f"{'='*80}\n")
         
         for network in networks:
-            for solver in solvers:
+            for tf_mode in tf_modes:
                 try:
-                    self.validate_network(network, solver)
+                    self._validate_bounds_single(network, tf_mode, num_samples)
                 except Exception as e:
-                    logger.error(f"Validation failed for {network}/{solver}: {e}")
+                    logger.error(f"Bounds validation failed for {network}/{tf_mode}: {e}")
                     import traceback
                     traceback.print_exc()
+                    # Add error result if not already added
+                    error_result = {
+                        'network': network,
+                        'tf_mode': tf_mode,
+                        'validation_type': 'bounds',
+                        'status': 'ERROR',
+                        'error': f"Outer exception: {str(e)}",
+                        'samples_processed': 0
+                    }
+                    self.validation_results.append(error_result)
         
-        # Compute summary statistics
-        summary = self._compute_summary()
-        self._print_summary(summary)
-        
-        return summary
+        return self._compute_summary(validation_type='bounds')
     
-    def _compute_summary(self) -> Dict[str, Any]:
-        """Compute validation summary statistics."""
-        total = len(self.validation_results)
+    def _validate_bounds_single(
+        self,
+        name: str,
+        tf_mode: str,
+        num_samples: int
+    ) -> Dict[str, Any]:
+        """
+        Validate bounds for a single network (Level 3).
+        
+        Args:
+            name: Network name
+            tf_mode: Transfer function mode ('interval' or 'hybridz')
+            num_samples: Number of concrete inputs to sample
+            
+        Returns:
+            Validation result dictionary
+        """
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Validating bounds: {name} (tf_mode: {tf_mode})")
+        logger.info(f"{'='*80}")
+        
+        # Step 1: Load ACT Net and PyTorch model
+        act_net = self.factory.get_act_net(name)
+        model = self.factory.create_model(name, load_weights=True)
+        model = model.to(device=self.device, dtype=self.dtype)
+        
+        # Step 2: Set transfer function mode globally
+        from act.back_end.transfer_functions import set_transfer_function_mode
+        set_transfer_function_mode(tf_mode)
+        
+        # Step 3: Sample concrete inputs
+        violations = []
+        total_checks = 0
+        
+        for sample_idx in range(num_samples):
+            # Generate random input within spec
+            input_tensor = self.factory.generate_test_input(name, 'random')
+            input_tensor = input_tensor.to(device=self.device, dtype=self.dtype)
+            
+            # Step 4: Get concrete activations via forward hooks
+            concrete_activations = self._get_concrete_activations(model, input_tensor)
+            
+            # Step 5: Prepare entry fact from input tensor
+            from act.back_end.core import Fact, Bounds
+            entry_id = 0  # INPUT layer is typically layer 0
+            input_bounds = Bounds(lb=input_tensor.flatten(), ub=input_tensor.flatten())
+            entry_fact = Fact(bounds=input_bounds, cons=None)
+            
+            # Step 6: Run abstract analysis
+            try:
+                before, after, globalC = analyze(act_net, entry_id, entry_fact)
+                
+                # Step 7: Check bounds containment
+                for layer_id, concrete_vals in concrete_activations.items():
+                    if layer_id not in after:
+                        continue
+                    
+                    abstract_bounds = after[layer_id].bounds
+                    lb = abstract_bounds.lb
+                    ub = abstract_bounds.ub
+                    
+                    # Flatten concrete values to match ACT's 1D representation
+                    concrete_vals_flat = concrete_vals.flatten()
+                    
+                    # Ensure shapes match (ACT may have different neuron counts)
+                    if concrete_vals_flat.shape != lb.shape:
+                        logger.warning(f"  ⚠️ Shape mismatch at layer {layer_id}: "
+                                     f"concrete={concrete_vals_flat.shape}, abstract={lb.shape}. Skipping.")
+                        continue
+                    
+                    # Check if concrete values are within bounds
+                    violations_mask = (concrete_vals_flat < lb) | (concrete_vals_flat > ub)
+                    num_violations = violations_mask.sum().item()
+                    total_checks += concrete_vals_flat.numel()
+                    
+                    if num_violations > 0:
+                        violation_info = {
+                            'sample_idx': sample_idx,
+                            'layer_id': layer_id,
+                            'num_violations': num_violations,
+                            'total_neurons': concrete_vals_flat.numel(),
+                            'concrete_min': concrete_vals_flat.min().item(),
+                            'concrete_max': concrete_vals_flat.max().item(),
+                            'abstract_lb': lb.min().item(),
+                            'abstract_ub': ub.max().item()
+                        }
+                        violations.append(violation_info)
+                        logger.error(f"  ❌ Bounds violation at layer {layer_id}: "
+                                   f"{num_violations}/{concrete_vals_flat.numel()} neurons")
+            
+            except Exception as e:
+                logger.error(f"  ⚠️ Abstract analysis failed for sample {sample_idx}: {e}")
+                error_result = {
+                    'network': name,
+                    'tf_mode': tf_mode,
+                    'validation_type': 'bounds',
+                    'status': 'ERROR',
+                    'error': str(e),
+                    'samples_processed': sample_idx
+                }
+                self.validation_results.append(error_result)
+                return error_result
+        
+        # Step 6: Summarize results
+        if len(violations) > 0:
+            result = {
+                'network': name,
+                'tf_mode': tf_mode,
+                'validation_type': 'bounds',
+                'validation_status': 'FAILED',
+                'explanation': f"🚨 UNSOUND BOUNDS: {len(violations)} violations found across {num_samples} samples",
+                'total_checks': total_checks,
+                'violations': violations
+            }
+            logger.error(f"\n  {result['explanation']}")
+        else:
+            result = {
+                'network': name,
+                'tf_mode': tf_mode,
+                'validation_type': 'bounds',
+                'validation_status': 'PASSED',
+                'explanation': f"✅ SOUND BOUNDS: All {total_checks} checks passed across {num_samples} samples",
+                'total_checks': total_checks,
+                'violations': []
+            }
+            logger.info(f"\n  {result['explanation']}")
+        
+        self.validation_results.append(result)
+        return result
+    
+    def _get_concrete_activations(
+        self,
+        model: torch.nn.Module,
+        input_tensor: torch.Tensor
+    ) -> Dict[int, torch.Tensor]:
+        """
+        Get concrete activation values by running forward pass with hooks.
+        
+        Args:
+            model: PyTorch model
+            input_tensor: Input tensor
+            
+        Returns:
+            Dictionary mapping layer_id to activation tensor
+        """
+        activations = {}
+        hooks = []
+        
+        def make_hook(layer_id):
+            def hook(module, input, output):
+                activations[layer_id] = output.detach().clone()
+            return hook
+        
+        # Register hooks on all layers
+        layer_id = 0
+        for module in model.modules():
+            if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d, torch.nn.ReLU)):
+                hook = module.register_forward_hook(make_hook(layer_id))
+                hooks.append(hook)
+                layer_id += 1
+        
+        # Run forward pass
+        with torch.no_grad():
+            model(input_tensor)
+        
+        # Remove hooks
+        for hook in hooks:
+            hook.remove()
+        
+        return activations
+    
+    def validate_comprehensive(
+        self,
+        networks: Optional[List[str]] = None,
+        solvers: List[str] = ['gurobi', 'torchlp'],
+        tf_modes: List[str] = ['interval'],
+        num_samples: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Run both Level 1 and Level 3 validations.
+        
+        Args:
+            networks: List of network names (None = all networks)
+            solvers: List of solver names for Level 1
+            tf_modes: Transfer function modes for Level 3
+            num_samples: Number of samples for Level 3
+            
+        Returns:
+            Combined summary dictionary
+        """
+        logger.info(f"\n{'='*80}")
+        logger.info(f"COMPREHENSIVE VERIFICATION VALIDATION")
+        logger.info(f"{'='*80}")
+        logger.info(f"Running both Level 1 (Counterexample) and Level 3 (Bounds) validation")
+        logger.info(f"Device: {self.device}, Dtype: {self.dtype}")
+        logger.info(f"{'='*80}\n")
+        
+        # Run Level 1
+        summary_l1 = self.validate_counterexamples(networks=networks, solvers=solvers)
+        
+        # Run Level 3
+        summary_l3 = self.validate_bounds(networks=networks, tf_modes=tf_modes, num_samples=num_samples)
+        
+        # Combine summaries - FAILED if any failures OR errors
+        has_failures = (summary_l1.get('failed', 0) > 0 or summary_l3.get('failed', 0) > 0)
+        has_errors = (summary_l1.get('errors', 0) > 0 or summary_l3.get('errors', 0) > 0)
+        
+        if has_failures:
+            overall_status = 'FAILED'  # Critical: verifier is unsound
+        elif has_errors:
+            overall_status = 'ERROR'   # Backend bugs prevent validation
+        else:
+            overall_status = 'PASSED'  # All tests passed
+        
+        combined = {
+            'level1_counterexample': summary_l1,
+            'level3_bounds': summary_l3,
+            'overall_status': overall_status
+        }
+        
+        self._print_comprehensive_summary(combined)
+        return combined
+    
+    def _compute_summary(self, validation_type: str) -> Dict[str, Any]:
+        """
+        Compute validation summary statistics for specific validation type.
+        
+        Args:
+            validation_type: 'counterexample' or 'bounds'
+        """
+        results = [r for r in self.validation_results if r.get('validation_type') == validation_type]
+        total = len(results)
         
         if total == 0:
             return {
+                'validation_type': validation_type,
                 'total': 0,
                 'passed': 0,
                 'failed': 0,
                 'acceptable': 0,
                 'inconclusive': 0,
                 'errors': 0,
-                'counterexamples_found': 0,
-                'critical_bugs': 0,
                 'results': [],
                 'error_message': 'No validation results (all tests encountered errors)'
             }
         
-        passed = sum(1 for r in self.validation_results if r.get('validation_status') == 'PASSED')
-        failed = sum(1 for r in self.validation_results if r.get('validation_status') == 'FAILED')
-        acceptable = sum(1 for r in self.validation_results if r.get('validation_status') == 'ACCEPTABLE')
-        inconclusive = sum(1 for r in self.validation_results if r.get('validation_status') == 'INCONCLUSIVE')
-        errors = sum(1 for r in self.validation_results if r.get('status') == 'ERROR')
+        passed = sum(1 for r in results if r.get('validation_status') == 'PASSED')
+        failed = sum(1 for r in results if r.get('validation_status') == 'FAILED')
+        acceptable = sum(1 for r in results if r.get('validation_status') == 'ACCEPTABLE')
+        inconclusive = sum(1 for r in results if r.get('validation_status') == 'INCONCLUSIVE')
+        errors = sum(1 for r in results if r.get('status') == 'ERROR')
         
-        counterexamples_found = sum(1 for r in self.validation_results if r.get('concrete_counterexample', False))
-        
-        return {
+        summary = {
+            'validation_type': validation_type,
             'total': total,
             'passed': passed,
             'failed': failed,
             'acceptable': acceptable,
             'inconclusive': inconclusive,
             'errors': errors,
-            'counterexamples_found': counterexamples_found,
-            'critical_bugs': failed,  # FAILED status means soundness bug
-            'results': self.validation_results
+            'results': results
         }
+        
+        if validation_type == 'counterexample':
+            summary['counterexamples_found'] = sum(1 for r in results if r.get('concrete_counterexample', False))
+            summary['critical_bugs'] = failed
+        elif validation_type == 'bounds':
+            summary['total_checks'] = sum(r.get('total_checks', 0) for r in results)
+            summary['total_violations'] = sum(len(r.get('violations', [])) for r in results)
+        
+        self._print_summary(summary)
+        return summary
     
     def _print_summary(self, summary: Dict[str, Any]):
-        """Print validation summary."""
+        """Print validation summary for specific validation type."""
+        validation_type = summary.get('validation_type', 'unknown')
+        
         print("\n" + "="*80)
-        print("VALIDATION SUMMARY")
+        print(f"VALIDATION SUMMARY - {validation_type.upper()}")
         print("="*80)
-        
-        # Print detailed network and solver listing
-        networks = self.factory.list_networks()
-        solvers_used = set(r.get('solver') for r in summary.get('results', []) if 'solver' in r)
-        
-        print(f"\nNetworks tested: {len(networks)}")
-        for i, net in enumerate(networks, 1):
-            print(f"  {i:2d}. {net}")
-        
-        print(f"\nSolvers tested: {len(solvers_used)}")
-        for i, solver in enumerate(sorted(solvers_used), 1):
-            print(f"  {i}. {solver}")
-        
-        print(f"\nTotal validation tests: {summary['total']}")
-        print(f"Concrete counterexamples found: {summary['counterexamples_found']}")
         
         if summary['total'] == 0:
             print()
@@ -359,60 +746,118 @@ class VerifierValidator:
             print("="*80)
             return
         
+        print(f"\nTotal validation tests: {summary['total']}")
+        
+        if validation_type == 'counterexample':
+            print(f"Concrete counterexamples found: {summary.get('counterexamples_found', 0)}")
+        elif validation_type == 'bounds':
+            print(f"Total bound checks: {summary.get('total_checks', 0)}")
+            print(f"Total violations: {summary.get('total_violations', 0)}")
+        
         print()
-        print(f"✅ PASSED (verifier correct):     {summary['passed']}")
-        print(f"⚠️  ACCEPTABLE (incomplete):       {summary['acceptable']}")
-        print(f"⚪ INCONCLUSIVE (no test data):   {summary['inconclusive']}")
-        print(f"❌ ERRORS (transfer function):    {summary['errors']}")
-        print(f"🚨 FAILED (soundness bugs):       {summary['failed']}")
+        print(f"✅ PASSED:       {summary['passed']}")
+        if validation_type == 'counterexample':
+            print(f"⚠️  ACCEPTABLE:   {summary['acceptable']}")
+            print(f"⚪ INCONCLUSIVE: {summary['inconclusive']}")
+        print(f"❌ ERRORS:       {summary['errors']}")
+        print(f"🚨 FAILED:       {summary['failed']}")
         print("="*80)
         
         if summary['failed'] > 0:
-            print("\n🚨 CRITICAL: Soundness bugs detected in verifier!")
-            print("The following networks have false negatives:")
+            print(f"\n🚨 CRITICAL: {validation_type.upper()} validation failed!")
+            if validation_type == 'counterexample':
+                print("Soundness bugs detected in the following networks:")
+            else:
+                print("Unsound bounds detected in the following networks:")
             for result in summary['results']:
                 if result.get('validation_status') == 'FAILED':
-                    print(f"  - {result['network']} ({result['solver']})")
+                    if validation_type == 'counterexample':
+                        print(f"  - {result['network']} ({result['solver']})")
+                    else:
+                        print(f"  - {result['network']} ({result['tf_mode']})")
             print()
         elif summary['errors'] > 0:
-            print("\n⚠️  All validation tests encountered errors!")
-            print("This is due to pre-existing transfer function bugs:")
-            print("  - MLP: Batch dimension shape mismatch (e.g., '64x784 and 1x784')")
-            print("  - CNN: Missing 'input_shape' metadata in layer parameters")
+            print(f"\n⚠️  All {validation_type} validation tests encountered errors!")
+            print("This indicates pre-existing bugs in the verification backend.")
             print()
-            print("These are NOT related to the refactoring work (setup_and_solve, analyze with Fact).")
-            print("The validation framework itself is correct - it successfully:")
-            print("  ✅ Pre-loads 12 ACT Nets from factory")
-            print("  ✅ Creates PyTorch models for concrete execution")
-            print("  ✅ Finds concrete counterexamples in all test networks")
-            print()
-            print("Next step: Fix transfer function batch handling to complete validation.")
-        elif summary['counterexamples_found'] > 0:
-            print("\n✅ Verifier validation PASSED!")
-            print("All concrete counterexamples were correctly identified by verifier.")
         else:
-            print("\n⚪ No counterexamples found in concrete testing.")
-            print("Cannot fully validate verifier soundness (need more test cases).")
+            print(f"\n✅ {validation_type.upper()} validation PASSED!")
         
+        print("="*80)
+    
+    def _print_comprehensive_summary(self, combined: Dict[str, Any]):
+        """Print comprehensive summary for both validation levels."""
+        print("\n" + "="*80)
+        print("COMPREHENSIVE VALIDATION SUMMARY")
+        print("="*80)
+        
+        l1 = combined['level1_counterexample']
+        l3 = combined['level3_bounds']
+        
+        print(f"\nLevel 1 (Counterexample): {l1['passed']}/{l1['total']} passed, {l1['failed']} failed, {l1['errors']} errors")
+        print(f"Level 3 (Bounds):         {l3['passed']}/{l3['total']} passed, {l3['failed']} failed, {l3['errors']} errors")
+        print()
+        print(f"Overall Status: {combined['overall_status']}")
         print("="*80)
 
 
 def main():
-    """Run verifier validation test suite."""
-    validator = VerifierValidator()
+    """Run verification validation test suite."""
+    import argparse
     
-    # Validate with both solvers
-    summary = validator.validate_all_networks(solvers=['gurobi', 'torchlp'])
+    parser = argparse.ArgumentParser(description='ACT Verification Validator')
+    parser.add_argument('--mode', choices=['counterexample', 'bounds', 'comprehensive'],
+                       default='comprehensive', help='Validation mode')
+    parser.add_argument('--device', default='cpu', help='Device (cpu or cuda)')
+    parser.add_argument('--dtype', default='float64', choices=['float32', 'float64'],
+                       help='Data type')
+    parser.add_argument('--networks', nargs='+', help='Specific networks to test')
+    parser.add_argument('--solvers', nargs='+', default=['gurobi', 'torchlp'],
+                       help='Solvers for Level 1')
+    parser.add_argument('--tf-modes', nargs='+', default=['interval'],
+                       help='Transfer function modes for Level 3')
+    parser.add_argument('--samples', type=int, default=10,
+                       help='Number of samples for Level 3')
+    
+    args = parser.parse_args()
+    
+    # Convert dtype string to torch dtype
+    dtype = torch.float64 if args.dtype == 'float64' else torch.float32
+    
+    # Create validator
+    validator = VerificationValidator(device=args.device, dtype=dtype)
+    
+    # Run validation
+    if args.mode == 'counterexample':
+        summary = validator.validate_counterexamples(
+            networks=args.networks,
+            solvers=args.solvers
+        )
+        exit_code = 1 if summary['failed'] > 0 else 0
+    elif args.mode == 'bounds':
+        summary = validator.validate_bounds(
+            networks=args.networks,
+            tf_modes=args.tf_modes,
+            num_samples=args.samples
+        )
+        exit_code = 1 if summary['failed'] > 0 else 0
+    else:  # comprehensive
+        combined = validator.validate_comprehensive(
+            networks=args.networks,
+            solvers=args.solvers,
+            tf_modes=args.tf_modes,
+            num_samples=args.samples
+        )
+        exit_code = 1 if combined['overall_status'] == 'FAILED' else 0
     
     # Print debug file location (GUARDED)
     if PerformanceOptions.debug_tf:
         logger.info(f"\n📝 Debug log written to: {PerformanceOptions.debug_output_file}")
     
-    # Exit code: 0 if no critical bugs, 1 if soundness bugs detected
-    exit_code = 1 if summary['failed'] > 0 else 0
     return exit_code
 
 
 if __name__ == "__main__":
     import sys
     sys.exit(main())
+

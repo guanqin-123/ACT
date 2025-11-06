@@ -4,7 +4,7 @@ ACT Pipeline Verification Module
 This module contains verification utilities for the ACT framework:
 - torch2act.py: Automatic PyTorch→ACT Net conversion
 - act2torch.py: ACT Net→PyTorch conversion utilities
-- validate_verifier.py: Verifier correctness validation with concrete tests
+- validate_verifier.py: Unified verifier validation (counterexample and bounds checking)
 - model_factory.py: ACT Net factory for test networks
 - utils.py: Shared utilities and performance profiling
 - llm_probe.py: LLM-based verification probing and analysis
@@ -12,7 +12,7 @@ This module contains verification utilities for the ACT framework:
 
 from .torch2act import *
 from .act2torch import *
-from .validate_verifier import *
+from .validate_verifier import VerificationValidator
 from .model_factory import *
 from .utils import *
 from .llm_probe import *
@@ -25,6 +25,7 @@ __all__ = [
     'act2torch',
     
     # validate_verifier exports
+    'VerificationValidator',
     'validate_verifier',
     
     # model_factory exports

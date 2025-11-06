@@ -697,6 +697,149 @@ creator = TorchVisionSpecCreator(config_name="torchvision_classification")
 spec_results = creator.create_specs_for_data_model_pairs(num_samples=10)
 ```
 
+## Verification Validation
+
+The ACT Pipeline provides a comprehensive verification validation framework (`validate_verifier.py`) to ensure the soundness and correctness of the ACT verification backend. The validation framework implements two levels of validation:
+
+### Level 1: Counterexample/Soundness Validation
+
+Validates that the verifier doesn't claim CERTIFIED when concrete counterexamples exist. This is a critical soundness check.
+
+**Validation Strategy:**
+1. Generate strategic test cases (center, boundary, random) within input specification
+2. Run concrete execution to find property violations
+3. If counterexample found, run formal verification
+4. Cross-validate: verifier MUST report FALSIFIED or UNKNOWN (not CERTIFIED)
+
+**Validation Matrix:**
+```
+┌─────────────────────────┬────────────────────────────────────┬──────────────┐
+│ Concrete Counterexample │ Verifier Result                    │ Validation   │
+├─────────────────────────┼────────────────────────────────────┼──────────────┤
+│ FOUND                   │ CERTIFIED                          │ ❌ FAILED    │
+│                         │ (Soundness Bug - false negative)   │              │
+├─────────────────────────┼────────────────────────────────────┼──────────────┤
+│ FOUND                   │ FALSIFIED                          │ ✅ PASSED    │
+│                         │ (Correct - verifier found issue)   │              │
+├─────────────────────────┼────────────────────────────────────┼──────────────┤
+│ FOUND                   │ UNKNOWN                            │ ⚠️ ACCEPTABLE│
+│                         │ (Incomplete but sound)             │              │
+├─────────────────────────┼────────────────────────────────────┼──────────────┤
+│ NOT FOUND               │ Any Result                         │ ❓ INCONC.   │
+│                         │ (Cannot validate - no ground truth)│              │
+└─────────────────────────┴────────────────────────────────────┴──────────────┘
+```
+
+### Level 3: Bounds/Numerical Validation
+
+Validates that abstract interpretation correctly overapproximates concrete activation values. This ensures transfer function soundness.
+
+**Validation Strategy:**
+1. Sample concrete inputs from input specification
+2. Run concrete forward pass through PyTorch model → get concrete activations
+3. Run abstract analysis through ACT → get abstract bounds for each layer
+4. Check: `concrete_value ∈ [lb, ub]` for all layers and neurons
+
+**Validation Matrix:**
+```
+┌──────────────────────┬────────────────────────┬──────────────┐
+│ Concrete Values      │ Abstract Bounds        │ Validation   │
+├──────────────────────┼────────────────────────┼──────────────┤
+│ value ∈ [lb, ub]     │ All layers/neurons     │ ✅ PASSED    │
+│ (Sound bounds)       │                        │              │
+├──────────────────────┼────────────────────────┼──────────────┤
+│ value ∉ [lb, ub]     │ Any layer/neuron       │ ❌ FAILED    │
+│ (Unsound bounds)     │ (Transfer function bug)│              │
+└──────────────────────┴────────────────────────┴──────────────┘
+```
+
+### Usage
+
+**Via CLI (Recommended):**
+
+```bash
+# Run comprehensive validation (both levels, default)
+python -m act.pipeline --validate-verifier --device cpu --dtype float64
+
+# Run only counterexample validation (Level 1)
+python -m act.pipeline --validate-verifier --mode counterexample
+
+# Run only bounds validation (Level 3)
+python -m act.pipeline --validate-verifier --mode bounds --samples 20
+
+# Test specific networks
+python -m act.pipeline --validate-verifier --networks mnist_mlp_small,mnist_cnn_small
+
+# Test with specific solvers
+python -m act.pipeline --validate-verifier --mode counterexample --solvers gurobi torchlp
+
+# Test with different transfer function modes
+python -m act.pipeline --validate-verifier --mode bounds --tf-modes interval hybridz
+```
+
+**Direct Python API:**
+
+```python
+from act.pipeline.verification.validate_verifier import VerificationValidator
+import torch
+
+# Create validator with specific device/dtype
+validator = VerificationValidator(device='cpu', dtype=torch.float64)
+
+# Run Level 1: Counterexample validation
+summary_l1 = validator.validate_counterexamples(
+    networks=['mnist_mlp_small', 'mnist_cnn_small'],
+    solvers=['gurobi', 'torchlp']
+)
+
+# Run Level 3: Bounds validation
+summary_l3 = validator.validate_bounds(
+    networks=['mnist_mlp_small'],
+    tf_modes=['interval'],
+    num_samples=10
+)
+
+# Run comprehensive validation (both levels)
+combined = validator.validate_comprehensive(
+    networks=None,  # None = all networks
+    solvers=['gurobi'],
+    tf_modes=['interval'],
+    num_samples=10
+)
+
+# Check results
+if combined['overall_status'] == 'PASSED':
+    print("✅ All validation passed!")
+else:
+    print("❌ Validation failed - check detailed results")
+```
+
+**CI/CD Integration:**
+
+The validation framework is integrated into the GitHub Actions workflow for continuous testing:
+
+```yaml
+# Float64 test suite
+- name: Run Verifier Validation (float64)
+  run: python -m act.pipeline --validate-verifier --device cpu --dtype float64
+
+# Float32 test suite  
+- name: Run Verifier Validation (float32)
+  run: python -m act.pipeline --validate-verifier --device cpu --dtype float32
+```
+
+**Exit Codes:**
+- `0`: All validations passed (no soundness bugs)
+- `1`: Soundness bugs detected (Level 1) or unsound bounds (Level 3)
+
+**Test Networks:**
+
+The validator uses test networks from `act/back_end/examples/nets/`:
+- MLP networks: `mnist_mlp_small`, `mnist_mlp_medium`
+- CNN networks: `mnist_cnn_small`, `cifar_cnn_small`
+- RNN networks: (if available)
+- Transformer networks: (if available)
+
 ## Integration with ACT Framework
 
 The pipeline seamlessly integrates with ACT's core components:
