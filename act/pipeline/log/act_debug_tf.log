@@ -1,4 +1,5 @@
-ACT Torch2ACT Conversion Debug Log
+ACT Verification Debug Log
+Device: cpu, Dtype: torch.float64
 ================================================================================
 
 
@@ -123,23 +124,23 @@ Status: ✅ VALID
 ================================================================================
 Layer 0 (INPUT)
 ================================================================================
-Input bounds: shape=torch.Size([1, 784]), lb_range=[0.4900, 0.4900], ub_range=[0.5100, 0.5100]
-Output bounds: shape=torch.Size([1, 784]), lb_range=[0.4900, 0.4900], ub_range=[0.5100, 0.5100]
+Input bounds: shape=torch.Size([1, 784]), lb_range=[0.4500, 0.4500], ub_range=[0.5500, 0.5500]
+Output bounds: shape=torch.Size([1, 784]), lb_range=[0.4500, 0.4500], ub_range=[0.5500, 0.5500]
 Constraints generated: 0
 
 ================================================================================
 Layer 1 (INPUT_SPEC)
 ================================================================================
-Input bounds: shape=torch.Size([1, 784]), lb_range=[0.4900, 0.4900], ub_range=[0.5100, 0.5100]
-Output bounds: shape=torch.Size([1, 784]), lb_range=[0.4900, 0.4900], ub_range=[0.5100, 0.5100]
+Input bounds: shape=torch.Size([1, 784]), lb_range=[0.4500, 0.4500], ub_range=[0.5500, 0.5500]
+Output bounds: shape=torch.Size([1, 784]), lb_range=[0.4500, 0.4500], ub_range=[0.5500, 0.5500]
 Constraints generated: 0
 
 ================================================================================
 Layer 2 (DENSE)
 ================================================================================
-Input bounds: shape=torch.Size([1, 784]), lb_range=[0.4900, 0.4900], ub_range=[0.5100, 0.5100]
-Output bounds: shape=torch.Size([64]), lb_range=[-3.5982, 2.3694], ub_range=[-2.3887, 3.6075]
-Parameters: W.shape=torch.Size([64, 784]), b.shape=torch.Size([64])
+Input bounds: shape=torch.Size([1, 784]), lb_range=[0.4500, 0.4500], ub_range=[0.5500, 0.5500]
+Output bounds: shape=torch.Size([32]), lb_range=[-6.7740, -1.3210], ub_range=[-0.7016, 4.8828]
+Parameters: W.shape=torch.Size([32, 784]), b.shape=torch.Size([32])
 Constraints generated: 2
   Con 0: EQ, var_ids=(3, 2)
   Con 1: INEQ, var_ids=(3,)
@@ -147,8 +148,8 @@ Constraints generated: 2
 ================================================================================
 Layer 3 (RELU)
 ================================================================================
-Input bounds: shape=torch.Size([64]), lb_range=[-3.5982, 2.3694], ub_range=[-2.3887, 3.6075]
-Output bounds: shape=torch.Size([64]), lb_range=[0.0000, 2.3694], ub_range=[0.0000, 3.6075]
+Input bounds: shape=torch.Size([32]), lb_range=[-6.7740, -1.3210], ub_range=[-0.7016, 4.8828]
+Output bounds: shape=torch.Size([32]), lb_range=[0.0000, 0.0000], ub_range=[0.0000, 4.8828]
 Constraints generated: 2
   Con 0: INEQ, var_ids=(4, 3)
   Con 1: INEQ, var_ids=(4,)
@@ -156,9 +157,9 @@ Constraints generated: 2
 ================================================================================
 Layer 4 (DENSE)
 ================================================================================
-Input bounds: shape=torch.Size([64]), lb_range=[0.0000, 2.3694], ub_range=[0.0000, 3.6075]
-Output bounds: shape=torch.Size([10]), lb_range=[-2.6200, 0.0577], ub_range=[0.1983, 2.7195]
-Parameters: W.shape=torch.Size([10, 64]), b.shape=torch.Size([10])
+Input bounds: shape=torch.Size([32]), lb_range=[0.0000, 0.0000], ub_range=[0.0000, 4.8828]
+Output bounds: shape=torch.Size([10]), lb_range=[-5.0821, -2.7730], ub_range=[3.1053, 5.1857]
+Parameters: W.shape=torch.Size([10, 32]), b.shape=torch.Size([10])
 Constraints generated: 2
   Con 0: EQ, var_ids=(5, 4)
   Con 1: INEQ, var_ids=(5,)
@@ -166,8 +167,8 @@ Constraints generated: 2
 ================================================================================
 Layer 5 (ASSERT)
 ================================================================================
-Input bounds: shape=torch.Size([10]), lb_range=[-2.6200, 0.0577], ub_range=[0.1983, 2.7195]
-Output bounds: shape=torch.Size([10]), lb_range=[-2.6200, 0.0577], ub_range=[0.1983, 2.7195]
+Input bounds: shape=torch.Size([10]), lb_range=[-5.0821, -2.7730], ub_range=[3.1053, 5.1857]
+Output bounds: shape=torch.Size([10]), lb_range=[-5.0821, -2.7730], ub_range=[3.1053, 5.1857]
 Constraints generated: 0
 
 ================================================================================
@@ -178,3 +179,359 @@ Unique variables referenced: 4
 Variables with bounds found: 4
 Status: ✅ VALID
 
+
+================================================================================
+Layer 0 (INPUT)
+================================================================================
+Input bounds: shape=torch.Size([1, 784]), lb_range=[0.4500, 0.4500], ub_range=[0.5500, 0.5500]
+Output bounds: shape=torch.Size([1, 784]), lb_range=[0.4500, 0.4500], ub_range=[0.5500, 0.5500]
+Constraints generated: 0
+
+================================================================================
+Layer 1 (INPUT_SPEC)
+================================================================================
+Input bounds: shape=torch.Size([1, 784]), lb_range=[0.4500, 0.4500], ub_range=[0.5500, 0.5500]
+Output bounds: shape=torch.Size([1, 784]), lb_range=[0.4500, 0.4500], ub_range=[0.5500, 0.5500]
+Constraints generated: 0
+
+================================================================================
+Layer 2 (DENSE)
+================================================================================
+Input bounds: shape=torch.Size([1, 784]), lb_range=[0.4500, 0.4500], ub_range=[0.5500, 0.5500]
+Output bounds: shape=torch.Size([32]), lb_range=[-6.7740, -1.3210], ub_range=[-0.7016, 4.8828]
+Parameters: W.shape=torch.Size([32, 784]), b.shape=torch.Size([32])
+Constraints generated: 2
+  Con 0: EQ, var_ids=(3, 2)
+  Con 1: INEQ, var_ids=(3,)
+
+================================================================================
+Layer 3 (RELU)
+================================================================================
+Input bounds: shape=torch.Size([32]), lb_range=[-6.7740, -1.3210], ub_range=[-0.7016, 4.8828]
+Output bounds: shape=torch.Size([32]), lb_range=[0.0000, 0.0000], ub_range=[0.0000, 4.8828]
+Constraints generated: 2
+  Con 0: INEQ, var_ids=(4, 3)
+  Con 1: INEQ, var_ids=(4,)
+
+================================================================================
+Layer 4 (DENSE)
+================================================================================
+Input bounds: shape=torch.Size([32]), lb_range=[0.0000, 0.0000], ub_range=[0.0000, 4.8828]
+Output bounds: shape=torch.Size([10]), lb_range=[-5.0821, -2.7730], ub_range=[3.1053, 5.1857]
+Parameters: W.shape=torch.Size([10, 32]), b.shape=torch.Size([10])
+Constraints generated: 2
+  Con 0: EQ, var_ids=(5, 4)
+  Con 1: INEQ, var_ids=(5,)
+
+================================================================================
+Layer 5 (ASSERT)
+================================================================================
+Input bounds: shape=torch.Size([10]), lb_range=[-5.0821, -2.7730], ub_range=[3.1053, 5.1857]
+Output bounds: shape=torch.Size([10]), lb_range=[-5.0821, -2.7730], ub_range=[3.1053, 5.1857]
+Constraints generated: 0
+
+================================================================================
+CONSTRAINT VALIDATION (Targeted)
+================================================================================
+Total constraints: 6
+Unique variables referenced: 4
+Variables with bounds found: 4
+Status: ✅ VALID
+
+
+================================================================================
+Layer 0 (INPUT)
+================================================================================
+Input bounds: shape=torch.Size([1, 784]), lb_range=[0.3500, 0.3500], ub_range=[0.6500, 0.6500]
+Output bounds: shape=torch.Size([1, 784]), lb_range=[0.3500, 0.3500], ub_range=[0.6500, 0.6500]
+Constraints generated: 0
+
+================================================================================
+Layer 1 (INPUT_SPEC)
+================================================================================
+Input bounds: shape=torch.Size([1, 784]), lb_range=[0.3500, 0.3500], ub_range=[0.6500, 0.6500]
+Output bounds: shape=torch.Size([1, 784]), lb_range=[0.3500, 0.3500], ub_range=[0.6500, 0.6500]
+Constraints generated: 0
+
+================================================================================
+Layer 2 (DENSE)
+================================================================================
+Input bounds: shape=torch.Size([1, 784]), lb_range=[0.3500, 0.3500], ub_range=[0.6500, 0.6500]
+Output bounds: shape=torch.Size([16]), lb_range=[-11.9975, -6.8504], ub_range=[7.7039, 11.4527]
+Parameters: W.shape=torch.Size([16, 784]), b.shape=torch.Size([16])
+Constraints generated: 2
+  Con 0: EQ, var_ids=(3, 2)
+  Con 1: INEQ, var_ids=(3,)
+
+================================================================================
+Layer 3 (RELU)
+================================================================================
+Input bounds: shape=torch.Size([16]), lb_range=[-11.9975, -6.8504], ub_range=[7.7039, 11.4527]
+Output bounds: shape=torch.Size([16]), lb_range=[0.0000, 0.0000], ub_range=[7.7039, 11.4527]
+Constraints generated: 2
+  Con 0: INEQ, var_ids=(4, 3)
+  Con 1: INEQ, var_ids=(4,)
+
+================================================================================
+Layer 4 (DENSE)
+================================================================================
+Input bounds: shape=torch.Size([16]), lb_range=[0.0000, 0.0000], ub_range=[7.7039, 11.4527]
+Output bounds: shape=torch.Size([10]), lb_range=[-8.6280, -3.4021], ub_range=[2.7614, 10.1802]
+Parameters: W.shape=torch.Size([10, 16]), b.shape=torch.Size([10])
+Constraints generated: 2
+  Con 0: EQ, var_ids=(5, 4)
+  Con 1: INEQ, var_ids=(5,)
+
+================================================================================
+Layer 5 (ASSERT)
+================================================================================
+Input bounds: shape=torch.Size([10]), lb_range=[-8.6280, -3.4021], ub_range=[2.7614, 10.1802]
+Output bounds: shape=torch.Size([10]), lb_range=[-8.6280, -3.4021], ub_range=[2.7614, 10.1802]
+Constraints generated: 0
+
+================================================================================
+CONSTRAINT VALIDATION (Targeted)
+================================================================================
+Total constraints: 6
+Unique variables referenced: 4
+Variables with bounds found: 4
+Status: ✅ VALID
+
+
+================================================================================
+Layer 0 (INPUT)
+================================================================================
+Input bounds: shape=torch.Size([1, 784]), lb_range=[0.3500, 0.3500], ub_range=[0.6500, 0.6500]
+Output bounds: shape=torch.Size([1, 784]), lb_range=[0.3500, 0.3500], ub_range=[0.6500, 0.6500]
+Constraints generated: 0
+
+================================================================================
+Layer 1 (INPUT_SPEC)
+================================================================================
+Input bounds: shape=torch.Size([1, 784]), lb_range=[0.3500, 0.3500], ub_range=[0.6500, 0.6500]
+Output bounds: shape=torch.Size([1, 784]), lb_range=[0.3500, 0.3500], ub_range=[0.6500, 0.6500]
+Constraints generated: 0
+
+================================================================================
+Layer 2 (DENSE)
+================================================================================
+Input bounds: shape=torch.Size([1, 784]), lb_range=[0.3500, 0.3500], ub_range=[0.6500, 0.6500]
+Output bounds: shape=torch.Size([16]), lb_range=[-11.9975, -6.8504], ub_range=[7.7039, 11.4527]
+Parameters: W.shape=torch.Size([16, 784]), b.shape=torch.Size([16])
+Constraints generated: 2
+  Con 0: EQ, var_ids=(3, 2)
+  Con 1: INEQ, var_ids=(3,)
+
+================================================================================
+Layer 3 (RELU)
+================================================================================
+Input bounds: shape=torch.Size([16]), lb_range=[-11.9975, -6.8504], ub_range=[7.7039, 11.4527]
+Output bounds: shape=torch.Size([16]), lb_range=[0.0000, 0.0000], ub_range=[7.7039, 11.4527]
+Constraints generated: 2
+  Con 0: INEQ, var_ids=(4, 3)
+  Con 1: INEQ, var_ids=(4,)
+
+================================================================================
+Layer 4 (DENSE)
+================================================================================
+Input bounds: shape=torch.Size([16]), lb_range=[0.0000, 0.0000], ub_range=[7.7039, 11.4527]
+Output bounds: shape=torch.Size([10]), lb_range=[-8.6280, -3.4021], ub_range=[2.7614, 10.1802]
+Parameters: W.shape=torch.Size([10, 16]), b.shape=torch.Size([10])
+Constraints generated: 2
+  Con 0: EQ, var_ids=(5, 4)
+  Con 1: INEQ, var_ids=(5,)
+
+================================================================================
+Layer 5 (ASSERT)
+================================================================================
+Input bounds: shape=torch.Size([10]), lb_range=[-8.6280, -3.4021], ub_range=[2.7614, 10.1802]
+Output bounds: shape=torch.Size([10]), lb_range=[-8.6280, -3.4021], ub_range=[2.7614, 10.1802]
+Constraints generated: 0
+
+================================================================================
+CONSTRAINT VALIDATION (Targeted)
+================================================================================
+Total constraints: 6
+Unique variables referenced: 4
+Variables with bounds found: 4
+Status: ✅ VALID
+
+
+================================================================================
+Layer 0 (INPUT)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Constraints generated: 0
+
+================================================================================
+Layer 1 (INPUT_SPEC)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Constraints generated: 0
+
+================================================================================
+Layer 2 (CONV2D)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([16384]), lb_range=[-1.7255, -0.0542], ub_range=[0.0458, 1.7801]
+Parameters: weight.shape=torch.Size([16, 3, 3, 3])
+Constraints generated: 2
+  Con 0: EQ, var_ids=(3, 2)
+  Con 1: INEQ, var_ids=(3,)
+
+================================================================================
+Layer 3 (RELU)
+================================================================================
+Input bounds: shape=torch.Size([16384]), lb_range=[-1.7255, -0.0542], ub_range=[0.0458, 1.7801]
+Output bounds: shape=torch.Size([16384]), lb_range=[0.0000, 0.0000], ub_range=[0.0458, 1.7801]
+Constraints generated: 2
+  Con 0: INEQ, var_ids=(4, 3)
+  Con 1: INEQ, var_ids=(4,)
+
+================================================================================
+Layer 0 (INPUT)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Constraints generated: 0
+
+================================================================================
+Layer 1 (INPUT_SPEC)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Constraints generated: 0
+
+================================================================================
+Layer 2 (CONV2D)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([16384]), lb_range=[-1.7255, -0.0542], ub_range=[0.0458, 1.7801]
+Parameters: weight.shape=torch.Size([16, 3, 3, 3])
+Constraints generated: 2
+  Con 0: EQ, var_ids=(3, 2)
+  Con 1: INEQ, var_ids=(3,)
+
+================================================================================
+Layer 3 (RELU)
+================================================================================
+Input bounds: shape=torch.Size([16384]), lb_range=[-1.7255, -0.0542], ub_range=[0.0458, 1.7801]
+Output bounds: shape=torch.Size([16384]), lb_range=[0.0000, 0.0000], ub_range=[0.0458, 1.7801]
+Constraints generated: 2
+  Con 0: INEQ, var_ids=(4, 3)
+  Con 1: INEQ, var_ids=(4,)
+
+================================================================================
+Layer 0 (INPUT)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Constraints generated: 0
+
+================================================================================
+Layer 1 (INPUT_SPEC)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Constraints generated: 0
+
+================================================================================
+Layer 2 (CONV2D)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([8192]), lb_range=[-1.4590, 0.0000], ub_range=[0.1671, 1.5013]
+Parameters: weight.shape=torch.Size([8, 3, 3, 3])
+Constraints generated: 2
+  Con 0: EQ, var_ids=(3, 2)
+  Con 1: INEQ, var_ids=(3,)
+
+================================================================================
+Layer 3 (RELU)
+================================================================================
+Input bounds: shape=torch.Size([8192]), lb_range=[-1.4590, 0.0000], ub_range=[0.1671, 1.5013]
+Output bounds: shape=torch.Size([8192]), lb_range=[0.0000, 0.0000], ub_range=[0.1671, 1.5013]
+Constraints generated: 2
+  Con 0: INEQ, var_ids=(4, 3)
+  Con 1: INEQ, var_ids=(4,)
+
+================================================================================
+Layer 0 (INPUT)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Constraints generated: 0
+
+================================================================================
+Layer 1 (INPUT_SPEC)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Constraints generated: 0
+
+================================================================================
+Layer 2 (CONV2D)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([8192]), lb_range=[-1.4590, 0.0000], ub_range=[0.1671, 1.5013]
+Parameters: weight.shape=torch.Size([8, 3, 3, 3])
+Constraints generated: 2
+  Con 0: EQ, var_ids=(3, 2)
+  Con 1: INEQ, var_ids=(3,)
+
+================================================================================
+Layer 3 (RELU)
+================================================================================
+Input bounds: shape=torch.Size([8192]), lb_range=[-1.4590, 0.0000], ub_range=[0.1671, 1.5013]
+Output bounds: shape=torch.Size([8192]), lb_range=[0.0000, 0.0000], ub_range=[0.1671, 1.5013]
+Constraints generated: 2
+  Con 0: INEQ, var_ids=(4, 3)
+  Con 1: INEQ, var_ids=(4,)
+
+================================================================================
+Layer 0 (INPUT)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Constraints generated: 0
+
+================================================================================
+Layer 1 (INPUT_SPEC)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Constraints generated: 0
+
+================================================================================
+Layer 2 (CONV2D)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([4096]), lb_range=[-1.2119, -0.3088], ub_range=[0.1461, 1.5508]
+Parameters: weight.shape=torch.Size([4, 3, 3, 3])
+Constraints generated: 2
+  Con 0: EQ, var_ids=(3, 2)
+  Con 1: INEQ, var_ids=(3,)
+
+================================================================================
+Layer 3 (RELU)
+================================================================================
+Input bounds: shape=torch.Size([4096]), lb_range=[-1.2119, -0.3088], ub_range=[0.1461, 1.5508]
+Output bounds: shape=torch.Size([4096]), lb_range=[0.0000, 0.0000], ub_range=[0.1461, 1.5508]
+Constraints generated: 2
+  Con 0: INEQ, var_ids=(4, 3)
+  Con 1: INEQ, var_ids=(4,)
+
+================================================================================
+Layer 0 (INPUT)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Constraints generated: 0
+
+================================================================================
+Layer 1 (INPUT_SPEC)
+================================================================================
+Input bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Output bounds: shape=torch.Size([1, 3, 32, 32]), lb_range=[0.0000, 0.0000], ub_range=[1.0000, 1.0000]
+Constraints generated: 0

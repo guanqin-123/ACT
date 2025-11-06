@@ -555,14 +555,20 @@ def cmd_validate_verifier(args):
                 networks=networks,
                 solvers=args.solvers
             )
-            exit_code = 1 if summary['failed'] > 0 else 0
+            # Exit 1 if failures or errors, unless --ignore-errors is set
+            exit_code = 0 if args.ignore_errors else (
+                1 if (summary['failed'] > 0 or summary.get('errors', 0) > 0) else 0
+            )
         elif args.mode == 'bounds':
             summary = validator.validate_bounds(
                 networks=networks,
                 tf_modes=args.tf_modes,
                 num_samples=args.samples
             )
-            exit_code = 1 if summary['failed'] > 0 else 0
+            # Exit 1 if failures or errors, unless --ignore-errors is set
+            exit_code = 0 if args.ignore_errors else (
+                1 if (summary['failed'] > 0 or summary.get('errors', 0) > 0) else 0
+            )
         else:  # comprehensive
             combined = validator.validate_comprehensive(
                 networks=networks,
@@ -570,7 +576,10 @@ def cmd_validate_verifier(args):
                 tf_modes=args.tf_modes,
                 num_samples=args.samples
             )
-            exit_code = 1 if combined['overall_status'] == 'FAILED' else 0
+            # Exit 1 if any failures or errors, unless --ignore-errors is set
+            exit_code = 0 if args.ignore_errors else (
+                1 if combined['overall_status'] in ('FAILED', 'ERROR') else 0
+            )
         
         sys.exit(exit_code)
     
@@ -780,6 +789,11 @@ Examples:
         type=int,
         default=10,
         help="Number of samples for Level 3 validation (default: 10)"
+    )
+    validation_group.add_argument(
+        "--ignore-errors",
+        action="store_true",
+        help="Always exit 0 (ignore failures and errors for CI)"
     )
     
     # Add standard device/dtype arguments (shared across all ACT CLIs)

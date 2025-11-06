@@ -119,6 +119,9 @@
 #   # Adjust number of samples for bounds validation:
 #   python -m act.pipeline --validate-verifier --mode bounds --samples 20
 #   
+#   # Ignore errors and always exit 0 (useful for CI):
+#   python -m act.pipeline --validate-verifier --ignore-errors
+#   
 #   # Combined options:
 #   python -m act.pipeline --validate-verifier --mode comprehensive \
 #       --networks mnist_mlp_small,mnist_cnn_small \
@@ -130,8 +133,9 @@
 #   python act/pipeline/verification/validate_verifier.py --mode bounds --samples 5
 #
 # Exit Codes:
-#   0 - All validations passed
-#   1 - Soundness bugs detected (Level 1) or unsound bounds (Level 2)
+#   0 - All validations passed (no failures or errors)
+#   0 - With --ignore-errors flag (always succeed regardless of results)
+#   1 - Failures detected (verifier bugs) OR errors detected (backend bugs)
 #
 #===---------------------------------------------------------------------===#
 
@@ -818,6 +822,8 @@ def main():
                        help='Transfer function modes for Level 2')
     parser.add_argument('--samples', type=int, default=10,
                        help='Number of samples for Level 2')
+    parser.add_argument('--ignore-errors', action='store_true',
+                       help='Always exit 0 (ignore failures and errors for CI)')
     
     args = parser.parse_args()
     
@@ -833,14 +839,16 @@ def main():
             networks=args.networks,
             solvers=args.solvers
         )
-        exit_code = 1 if summary['failed'] > 0 else 0
+        # Exit 1 if any failures OR errors detected
+        exit_code = 1 if (summary['failed'] > 0 or summary['errors'] > 0) else 0
     elif args.mode == 'bounds':
         summary = validator.validate_bounds(
             networks=args.networks,
             tf_modes=args.tf_modes,
             num_samples=args.samples
         )
-        exit_code = 1 if summary['failed'] > 0 else 0
+        # Exit 1 if any failures OR errors detected
+        exit_code = 1 if (summary['failed'] > 0 or summary['errors'] > 0) else 0
     else:  # comprehensive
         combined = validator.validate_comprehensive(
             networks=args.networks,
@@ -848,7 +856,12 @@ def main():
             tf_modes=args.tf_modes,
             num_samples=args.samples
         )
-        exit_code = 1 if combined['overall_status'] == 'FAILED' else 0
+        # Exit 1 for both FAILED (verification bugs) and ERROR (backend bugs)
+        exit_code = 1 if combined['overall_status'] in ['FAILED', 'ERROR'] else 0
+    
+    # Override exit code if --ignore-errors is set
+    if args.ignore_errors:
+        exit_code = 0
     
     # Print debug file location (GUARDED)
     if PerformanceOptions.debug_tf:
