@@ -14,7 +14,7 @@
 #     - Validates that verifier doesn't claim CERTIFIED when concrete 
 #       counterexamples exist
 #
-#   Level 3: Bounds/Numerical Validation
+#   Level 2: Bounds/Numerical Validation
 #     - Validates that abstract bounds correctly overapproximate concrete 
 #       activation values
 #
@@ -63,7 +63,7 @@
 #
 #===---------------------------------------------------------------------===#
 #
-# Level 3: Bounds/Numerical Validation
+# Level 2: Bounds/Numerical Validation
 # ====================================
 #
 # Key Insight:
