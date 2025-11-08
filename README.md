@@ -1,6 +1,4 @@
-# Abstract Constraint Transformer (ACT)
-
-[![Continuous Integration (CI) Status](https://github.com/doctormeeee/Abstract-Constraint-Transformer/actions/workflows/ci.yml/badge.svg)](https://github.com/doctormeeee/Abstract-Constraint-Transformer/actions/workflows/ci.yml)
+# Abstract Constraint Transformation (ACT)
 
 An end-to-end neural network verification platform that supports refinement-based precision, diverse models, input formats, and specification types.
 
