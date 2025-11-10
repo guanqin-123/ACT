@@ -52,6 +52,51 @@ jupyter notebook ipynb/vnnlib_visualization.ipynb
 code ipynb/vnnlib_visualization.ipynb
 ```
 
+### `fuzzing_trace_analysis.ipynb` ⭐ NEW
+
+**Purpose**: Interactive visual analysis of ACTFuzzer execution traces with rich visualizations and widgets.
+
+**Contents**:
+1. **Load & Overview**: Quick summary statistics of fuzzing execution
+2. **Visual Overview**: 2×2 grid with coverage/strategy/effectiveness/violations plots
+3. **Interactive Explorer**: Widget-based trace browser with input visualizations
+4. **Custom Analysis**: Playground for filtering, comparison, and export
+
+**Key Features**:
+- 📊 **Automatic visualizations**: Coverage progression, strategy distribution, violations timeline
+- 🔍 **Interactive widgets**: Dropdown explorer for individual trace inspection
+- 🎨 **Input heatmaps**: Before/after/diff visualizations for mutated inputs
+- 📈 **Strategy analysis**: Box plots showing effectiveness of different mutation strategies
+- 💾 **Export capabilities**: CSV summaries, PyTorch trace files
+- 🎯 **4 cells only**: Compact design for quick analysis
+
+**Usage**:
+```bash
+# 1. Generate traces with ACTFuzzer
+python -m act.pipeline.fuzzing.actfuzzer \
+    --trace-level 1 \
+    --trace-output act/pipeline/log/my_traces.json
+
+# 2. Open notebook
+jupyter notebook ipynb/fuzzing_trace_analysis.ipynb
+
+# 3. Update trace_file path in Cell 1
+trace_file = Path("../act/pipeline/log/my_traces.json")
+
+# 4. Run all cells
+```
+
+**Requirements**:
+- `matplotlib`, `seaborn` (visualization)
+- `ipywidgets` (interactive explorer)
+- `pandas` (data analysis)
+
+**Trace Levels**:
+- Level 0: No tracing (disabled)
+- Level 1: Basic info + inputs (recommended for visualization)
+- Level 2: + Layer activations (memory intensive)
+- Level 3: + Gradients (most detailed, slowest)
+
 ## Running Notebooks
 
 ### Prerequisites

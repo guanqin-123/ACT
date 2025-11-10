@@ -24,6 +24,7 @@ from act.pipeline.fuzzing.mutations import MutationEngine
 from act.pipeline.fuzzing.coverage import CoverageTracker
 from act.pipeline.fuzzing.corpus import SeedCorpus, FuzzingSeed
 from act.pipeline.fuzzing.checker import PropertyChecker, Counterexample
+from act.util.path_config import get_pipeline_log_dir
 
 
 @dataclass
@@ -40,6 +41,10 @@ class FuzzingConfig:
         save_counterexamples: Whether to save counterexamples incrementally
         output_dir: Output directory for results
         report_interval: Print progress every N iterations
+        trace_level: Execution tracing level (0=disabled, 1=default, 2=full, 3=debug)
+        trace_sample_rate: Capture every Nth iteration (1=all iterations)
+        trace_storage: Storage backend ("hdf5" or "json")
+        trace_output: Trace output path (None=auto-generate)
     """
     max_iterations: int = 10000
     timeout_seconds: float = 3600.0
@@ -52,8 +57,14 @@ class FuzzingConfig:
     })
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     save_counterexamples: bool = True
-    output_dir: Path = field(default_factory=lambda: Path("fuzzing_results"))
+    output_dir: Path = field(default_factory=lambda: Path(get_pipeline_log_dir()) / "fuzzing_results")
     report_interval: int = 100
+    
+    # Tracing configuration
+    trace_level: int = 0  # 0=disabled, 1=default, 2=full, 3=debug
+    trace_sample_rate: int = 1  # Capture every Nth iteration
+    trace_storage: str = "json"  # "json" or "hdf5"
+    trace_output: Optional[Path] = None  # Auto-generated if None
 
 
 @dataclass
@@ -161,10 +172,36 @@ class ACTFuzzer:
             strategy=self.config.seed_selection_strategy
         )
         
+        # Initialize tracer (only if trace_level > 0)
+        if self.config.trace_level > 0:
+            from act.pipeline.fuzzing.tracer import ExecutionTracer
+            
+            # Auto-generate trace output path if not specified
+            trace_output = self.config.trace_output or (
+                self.config.output_dir / f"traces.{self._get_trace_ext()}"
+            )
+            
+            self.tracer = ExecutionTracer(
+                level=self.config.trace_level,
+                sample_rate=self.config.trace_sample_rate,
+                storage_backend=self.config.trace_storage,
+                output_path=trace_output
+            )
+            
+            print(f"📊 Tracing enabled: Level {self.config.trace_level}, "
+                  f"sampling every {self.config.trace_sample_rate} iteration(s)")
+            print(f"   Output: {trace_output}")
+        else:
+            self.tracer = None  # No overhead when disabled
+        
         # Statistics
         self.counterexamples: List[Counterexample] = []
         self.iterations = 0
         self.start_time = 0.0
+    
+    def _get_trace_ext(self) -> str:
+        """Get file extension for trace storage."""
+        return {"hdf5": "h5", "json": "json"}[self.config.trace_storage]
     
     def _extract_spec(self, layer_type) -> Optional[InputSpec | OutputSpec]:
         """Extract spec from wrapper layer."""
@@ -208,7 +245,7 @@ class ACTFuzzer:
         return self._generate_report()
     
     def _fuzz_iteration(self, iteration: int):
-        """Single fuzzing iteration."""
+        """Single fuzzing iteration with optional tracing."""
         # 1. Select seed
         seed = self.seed_corpus.select()
         
@@ -217,6 +254,7 @@ class ACTFuzzer:
         
         # 3. Mutate with feedback
         candidate = self.mutation_engine.mutate(seed_tensor)
+        mutation_strategy = self.mutation_engine.last_strategy
         
         # 4. Run inference
         with torch.no_grad():
@@ -228,7 +266,7 @@ class ACTFuzzer:
         else:
             output = output_dict
         
-        # 4. Check violation
+        # 5. Check violation
         violation = self.property_checker.check(
             input_tensor=candidate,
             output=output,
@@ -236,11 +274,49 @@ class ACTFuzzer:
             seed_tensor=seed.tensor
         )
         
-        # 5. Update coverage
+        # 6. Update coverage
         activations = self.mutation_engine.get_last_activations()
         coverage_delta = self.coverage_tracker.update(candidate, activations)
+        coverage = self.coverage_tracker.get_coverage()
         
-        # 6. Handle results
+        # 7. Compute energy
+        if violation or coverage_delta > 0:
+            energy = self._compute_energy(coverage_delta, violation is not None)
+        else:
+            energy = 0.0
+        
+        # 8. UNIFIED TRACING HOOK (all levels)
+        if self.tracer and self.tracer.should_trace(iteration):
+            # Collect gradients only if Level 3
+            gradients = None
+            loss_value = None
+            if self.config.trace_level >= 3:
+                gradients = self.mutation_engine.get_last_gradients()
+                loss_value = self.mutation_engine.get_last_loss()
+            
+            # Single tracing call - tracer handles level-specific storage
+            self.tracer.record_iteration(
+                iteration=iteration,
+                timestamp=time.time(),
+                mutation_strategy=mutation_strategy,
+                violation=violation,
+                coverage=coverage,
+                coverage_delta=coverage_delta,
+                energy=energy,
+                seed_id=seed.id,
+                # Level 1+ data
+                input_before=seed_tensor,
+                input_after=candidate,
+                parent_id=seed.parent_id,
+                depth=seed.depth,
+                # Level 2+ data
+                activations=activations,
+                # Level 3+ data
+                gradients=gradients,
+                loss_value=loss_value
+            )
+        
+        # 9. Handle results
         if violation:
             self.counterexamples.append(violation)
             print(f"🚨 Counterexample #{len(self.counterexamples)}: {violation.summary()}")
@@ -249,14 +325,14 @@ class ACTFuzzer:
                 self.config.output_dir.mkdir(parents=True, exist_ok=True)
                 violation.save(self.config.output_dir / f"ce_{len(self.counterexamples)}.pt")
         
-        # 7. Add to corpus if interesting
+        # 10. Add to corpus if interesting
         if violation or coverage_delta > 0:
-            energy = self._compute_energy(coverage_delta, violation is not None)
             new_seed = FuzzingSeed(
                 tensor=candidate.cpu(),
                 label=seed.label,
                 energy=energy,
-                depth=seed.depth + 1
+                depth=seed.depth + 1,
+                parent_id=seed.id
             )
             self.seed_corpus.add(new_seed)
         
@@ -305,5 +381,9 @@ class ACTFuzzer:
         
         if self.config.save_counterexamples and report.counterexamples:
             report.save(self.config.output_dir)
+        
+        # Close tracer if enabled
+        if self.tracer:
+            self.tracer.close()
         
         return report

@@ -208,6 +208,9 @@ class MutationEngine:
         # Statistics
         self.total_mutations = 0
         self.last_activations: Dict[str, torch.Tensor] = {}
+        self.last_strategy: Optional[str] = None  # NEW: track last mutation strategy
+        self.last_gradients: Optional[Dict[str, torch.Tensor]] = None  # NEW: for Level 3 tracing
+        self.last_loss: Optional[float] = None  # NEW: for Level 3 tracing
         
         # Setup hooks for activation capture
         self._setup_hooks()
@@ -243,6 +246,9 @@ class MutationEngine:
         strategy_probs = list(self.weights.values())
         strategy_name = np.random.choice(strategy_names, p=strategy_probs)
         strategy = self.strategies[strategy_name]
+        
+        # NEW: Store strategy for tracing
+        self.last_strategy = strategy_name
         
         # Apply mutation
         input_device = input_tensor.to(self.device)
@@ -318,6 +324,14 @@ class MutationEngine:
     def get_last_activations(self) -> Dict[str, torch.Tensor]:
         """Get activations from last inference."""
         return self.last_activations
+    
+    def get_last_gradients(self) -> Optional[Dict[str, torch.Tensor]]:
+        """Get gradients from last mutation (Level 3 tracing only)."""
+        return self.last_gradients
+    
+    def get_last_loss(self) -> Optional[float]:
+        """Get loss value from last mutation (Level 3 tracing only)."""
+        return self.last_loss
     
     def get_stats(self) -> Dict:
         """Get mutation statistics."""

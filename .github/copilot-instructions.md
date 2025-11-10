@@ -81,9 +81,22 @@ spec_type = "local_lp"
 ## Critical Conventions
 
 ### Path Handling
+- **ALWAYS use `act/util/path_config.py`**: For any file path operations, use the centralized path utilities:
+  - `get_project_root()` - Project root directory
+  - `get_pipeline_log_dir()` - Pipeline log directory
+  - `get_data_dir()` - Data directory
+  - `get_model_dir()` - Model directory
+  - Never hardcode paths - always use path_config.py functions
 - **Project root**: Always use project root as working directory
 - **Model paths**: Relative to project root (`act/wrapper_exts/models/vnnmodels/...`)
 - **Import structure**: Hierarchical imports following `act/front_end`, `act/back_end`, `act/pipeline`
+
+### Device and Dtype Management
+- **ALWAYS use `act/util/device_manager.py`**: For device and dtype operations:
+  - `DeviceManager.get_device()` - Get CUDA device if available, else CPU
+  - `DeviceManager.get_dtype()` - Get default dtype (float32)
+  - `DeviceManager.to_device(tensor)` - Move tensor to managed device
+  - Never hardcode `torch.device('cuda')` or `torch.float32` - use DeviceManager
 
 ### Memory Patterns
 - **Auto-cleanup**: Torch cache clearing in memory-intensive operations

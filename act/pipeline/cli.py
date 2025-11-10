@@ -292,7 +292,12 @@ def cmd_fuzz(args):
             "activation": 0.3,
             "boundary": 0.2,
             "random": 0.1
-        }
+        },
+        # Tracing configuration
+        trace_level=args.trace_level,
+        trace_sample_rate=args.trace_sample,
+        trace_storage=args.trace_storage,
+        trace_output=Path(args.trace_output) if args.trace_output else None
     )
     
     # Create spec creator and load data-model pairs
@@ -756,6 +761,37 @@ Examples:
         type=int,
         default=100,
         help="Report progress every N iterations (default: 100)"
+    )
+    
+    # Tracing options
+    trace_group = parser.add_argument_group('Execution Tracing Options')
+    trace_group.add_argument(
+        "--trace-level",
+        type=int,
+        choices=[0, 1, 2, 3],
+        default=0,
+        help="Tracing detail level: 0=disabled (default), 1=basic (iteration metrics + inputs), "
+             "2=full (+ layer activations), 3=debug (+ gradients and loss)"
+    )
+    trace_group.add_argument(
+        "--trace-sample",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Capture every Nth iteration (default: 1 = all iterations). "
+             "Use higher values to reduce overhead (e.g., 10 = every 10th iteration)"
+    )
+    trace_group.add_argument(
+        "--trace-storage",
+        type=str,
+        choices=['hdf5', 'json'],
+        default='json',
+        help="Storage backend: json=text/readable (default), hdf5=binary/compressed"
+    )
+    trace_group.add_argument(
+        "--trace-output",
+        type=str,
+        help="Custom trace output path (default: <output-dir>/traces.{hdf5|json})"
     )
     
     # Validation options
