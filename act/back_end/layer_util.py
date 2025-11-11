@@ -80,6 +80,33 @@ def validate_layer(layer: "Layer") -> None:
 
     # Type check for params
     for name, val in layer.params.items():
+        # Special validation for labeled_input (must be LabeledInputTensor with tensor + int/list)
+        if name == 'labeled_input':
+            from act.front_end.spec_creator_base import LabeledInputTensor
+            if not isinstance(val, LabeledInputTensor):
+                raise TypeError(
+                    f"{kind}.params['labeled_input'] must be LabeledInputTensor, got {type(val)}. "
+                    f"Use LabeledInputTensor(tensor=..., label=...) from spec_creator_base."
+                )
+            # Validate tensor component
+            try:
+                import torch  # noqa
+                if not isinstance(val.tensor, Tensor):  # type: ignore[arg-type]
+                    raise TypeError(
+                        f"{kind}.params['labeled_input'].tensor must be torch.Tensor, got {type(val.tensor)}."
+                    )
+            except ImportError:
+                pass
+            # Validate label component (must be int or list of ints)
+            if val.label is not None and not isinstance(val.label, (int, list)):
+                raise TypeError(
+                    f"{kind}.params['labeled_input'].label must be int or list[int], got {type(val.label)}."
+                )
+            if isinstance(val.label, list) and not all(isinstance(x, int) for x in val.label):
+                raise TypeError(
+                    f"{kind}.params['labeled_input'].label list contains non-int elements."
+                )
+            continue
         # If torch isn't available, skip the runtime type check.
         try:
             import torch  # noqa

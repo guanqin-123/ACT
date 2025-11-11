@@ -78,9 +78,9 @@ from typing import Dict, Any, Optional, List, Tuple, Union
 
 # Import ACT components
 from act.front_end.specs import InputSpec, OutputSpec, InKind, OutKind
+from act.front_end.spec_creator_base import LabeledInputTensor
 from act.back_end.layer_schema import LayerKind, REGISTRY
 from act.back_end.layer_util import create_layer
-from act.util.device_manager import get_default_device, get_default_dtype
 
 
 def prod(seq: Tuple[int, ...]) -> int:
@@ -155,17 +155,18 @@ class InputLayer(nn.Module):
     """
     Declares the symbolic input block with rich metadata. No-op at inference.
     
+    Stores complete labeled input sample (tensor + label) for self-contained models.
     Supports comprehensive metadata tracking for verification including data type,
-    layout, dataset information, and optional ground truth labels.
+    layout, dataset information.
     
     NOTE: dtype is REQUIRED for verification soundness (different dtypes have
     different precision/range affecting bound propagation).
     """
     def __init__(
         self,
+        labeled_input: "LabeledInputTensor",  # Complete input sample with label
         shape: Tuple[int, ...],
         dtype: torch.dtype,  # REQUIRED: Critical for verification soundness
-        center: Optional[torch.Tensor] = None,
         desc: str = "input",
         # Tier 1: Essential metadata (strongly recommended)
         layout: Optional[str] = None,
@@ -174,9 +175,8 @@ class InputLayer(nn.Module):
         num_classes: Optional[int] = None,
         value_range: Optional[Tuple[float, float]] = None,
         scale_hint: Optional[str] = None,
-        distribution: Optional[str] = None,  # NEW: "uniform", "normal", "normalized", "unknown", or custom
+        distribution: Optional[str] = None,  # "uniform", "normal", "normalized", "unknown", or custom
         # Tier 3: Optional metadata
-        label: Optional[Union[torch.Tensor, int]] = None,
         sample_id: Optional[Union[int, str]] = None,
         domain: Optional[str] = None,
         channels: Optional[int] = None,
@@ -198,39 +198,58 @@ class InputLayer(nn.Module):
         self.num_classes = num_classes
         self.value_range = tuple(value_range) if value_range else None
         self.scale_hint = scale_hint
-        self.distribution = distribution  # NEW
+        self.distribution = distribution
         
         # Tier 3: Optional metadata
         self.sample_id = sample_id
         self.domain = domain
         self.channels = channels
         
-        # GPU-first device management for tensor buffers
-        if center is not None:
-            center = center.to(device=get_default_device(), dtype=get_default_dtype())
-            self.register_buffer("center", center.reshape(-1))
-        else:
-            self.center = None
+        # Store labeled input as PyTorch buffers
+        # Assumes device/dtype already initialized by caller (e.g., via initialize_device)
+        self.register_buffer("_input_tensor", labeled_input.tensor)
         
-        # Label as tensor buffer (device-aware, auto-converts from int)
-        if label is not None:
-            if isinstance(label, int):
-                label = torch.tensor(label, dtype=torch.long)
-            label = label.to(device=get_default_device(), dtype=torch.long)
-            self.register_buffer("label", label.reshape(-1))  # Always 1-D
+        # Store label: convert to tensor if needed
+        # Note: Labels use int64 regardless of float dtype initialization
+        label_value = labeled_input.label
+        if isinstance(label_value, int):
+            label_tensor = torch.tensor([label_value])
+        elif isinstance(label_value, (list, tuple)):
+            label_tensor = torch.tensor(label_value)
+        elif isinstance(label_value, torch.Tensor):
+            label_tensor = label_value.reshape(-1)
         else:
-            self.label = None
+            raise TypeError(f"Unsupported label type: {type(label_value)}")
+        self.register_buffer("_label_tensor", label_tensor)
         
         self._validate_schema()
+    
+    @property
+    def labeled_input(self) -> "LabeledInputTensor":
+        """Get the complete labeled input (tensor + label pair)."""
+        from act.front_end.spec_creator_base import LabeledInputTensor
+        # Return original label format (int if single element, list otherwise)
+        label = self._label_tensor.item() if self._label_tensor.numel() == 1 else self._label_tensor.tolist()
+        return LabeledInputTensor(tensor=self._input_tensor, label=label)
+    
+    @property
+    def input_tensor(self) -> torch.Tensor:
+        """Get input tensor (convenience accessor)."""
+        return self._input_tensor
+    
+    @property
+    def label(self) -> Union[int, List[int]]:
+        """Get label (convenience accessor)."""
+        return self._label_tensor.item() if self._label_tensor.numel() == 1 else self._label_tensor.tolist()
 
     def _validate_schema(self):
         """Validate parameters against INPUT layer schema"""
         schema = REGISTRY[LayerKind.INPUT.value]
         
-        # Collect params (only tensors)
-        params = {}
-        if self.center is not None:
-            params["center"] = self.center
+        # Collect params (optional: labeled_input as unified object)
+        params = {
+            "labeled_input": self.labeled_input,
+        }
         
         # Collect meta (everything else - dtype now REQUIRED)
         meta = {
@@ -253,10 +272,8 @@ class InputLayer(nn.Module):
             meta["value_range"] = self.value_range
         if self.scale_hint is not None:
             meta["scale_hint"] = self.scale_hint
-        if self.distribution is not None:  # NEW
+        if self.distribution is not None:
             meta["distribution"] = self.distribution
-        if self.label is not None:
-            meta["label"] = self.label  # Tensor stored directly
         if self.sample_id is not None:
             meta["sample_id"] = self.sample_id
         if self.domain is not None:
@@ -283,10 +300,10 @@ class InputLayer(nn.Module):
         N = prod(self.shape[1:])
         out_vars = list(range(len(in_vars), len(in_vars) + N))
         
-        # Collect params (only center)
-        params = {}
-        if self.center is not None:
-            params["center"] = self.center
+        # Collect params (optional: labeled_input for ACT serialization)
+        params = {
+            "labeled_input": self.labeled_input,
+        }
         
         # Collect meta (dtype is REQUIRED, always present)
         meta = {
@@ -308,10 +325,8 @@ class InputLayer(nn.Module):
             meta["value_range"] = self.value_range
         if self.scale_hint is not None:
             meta["scale_hint"] = self.scale_hint
-        if self.distribution is not None:  # NEW
+        if self.distribution is not None:
             meta["distribution"] = self.distribution
-        if self.label is not None:
-            meta["label"] = self.label
         if self.sample_id is not None:
             meta["sample_id"] = self.sample_id
         if self.domain is not None:
@@ -340,12 +355,12 @@ class InputLayer(nn.Module):
             "num_classes": self.num_classes,
             "value_range": self.value_range,
             "scale_hint": self.scale_hint,
-            "distribution": self.distribution,  # NEW
-            "label": self.label.item() if self.label is not None else None,
+            "distribution": self.distribution,
+            "label": self.label,
             "sample_id": self.sample_id,
             "domain": self.domain,
             "channels": self.channels,
-            "has_center": self.center is not None,
+            "input_tensor_shape": tuple(self.input_tensor.shape),
         }
 
     def __repr__(self) -> str:
@@ -353,8 +368,7 @@ class InputLayer(nn.Module):
         meta_str = f"shape={self.shape}"
         if self.dataset_name:
             meta_str += f", dataset={self.dataset_name}"
-        if self.label is not None:
-            meta_str += f", label={self.label.item()}"
+        meta_str += f", label={self.label}"
         if self.layout:
             meta_str += f", layout={self.layout}"
         return f"InputLayer({meta_str})"
@@ -471,8 +485,8 @@ class InputSpecLayer(nn.Module):
             if self.center is None or self.eps is None:
                 return (x, True, "⚠️ INPUT L∞: Missing center/eps")
             
-            center = self.center.reshape(x.shape)
-            linf_dist = (x - center).abs().max().item()
+            # Center has batch dimension matching x (both are (1, C, H, W))
+            linf_dist = (x - self.center).abs().max().item()
             satisfied = linf_dist <= self.eps
             
             if satisfied:

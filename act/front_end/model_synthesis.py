@@ -81,9 +81,93 @@ class WrapReport:
     model_name: str
 
 
+def synthesize_single_model_from_spec(
+    data_source: str,
+    model_name: str,
+    pytorch_model: nn.Module,
+    labeled_tensor: LabeledInputTensor,
+    input_spec: InputSpec,
+    output_spec: OutputSpec
+) -> Tuple[VerifiableModel, WrapReport]:
+    """
+    Synthesize a single wrapped model from a spec pair.
+    
+    Args:
+        data_source: Dataset/category name (e.g., "MNIST", "mnist_fc")
+        model_name: Model name (e.g., "simple_cnn", "instance_0")
+        pytorch_model: torch.nn.Module
+        labeled_tensor: LabeledInputTensor with input tensor and label
+        input_spec: Input specification
+        output_spec: Output specification
+    
+    Returns:
+        wrapped_model: VerifiableModel instance
+        report: WrapReport metadata
+    """
+    # Extract tensor with batch dimension (1, C, H, W)
+    x = labeled_tensor.tensor
+    input_shape = tuple(x.shape)
+    
+    # Infer metadata from tensor
+    layout = infer_layout_from_tensor(x)
+    dtype = x.dtype
+    
+    # Infer domain and channels
+    if x.dim() == 4:
+        domain = "vision"
+        channels = x.shape[1]  # (B,C,H,W)
+    else:
+        domain = "tabular"
+        channels = None
+    
+    # Compute value range
+    value_range = (float(x.min().item()), float(x.max().item())) if x.numel() > 0 else None
+    
+    # Build layer stack
+    layers: List[nn.Module] = [
+        InputLayer(
+            labeled_input=labeled_tensor,
+            shape=input_shape,
+            dtype=dtype,
+            layout=layout,
+            dataset_name=data_source,
+            num_classes=None,
+            value_range=value_range,
+            scale_hint="normalized" if domain == "vision" else "unknown",
+            distribution="normalized" if domain == "vision" else "unknown",
+            sample_id=None,
+            domain=domain,
+            channels=channels,
+        ),
+        InputSpecLayer(spec=input_spec),
+    ]
+    
+    # Add flatten if needed
+    if needs_flatten_before_model(pytorch_model) and len(input_shape) > 2:
+        layers.append(nn.Flatten())
+    
+    # Add model and output spec
+    layers.append(pytorch_model)
+    layers.append(OutputSpecLayer(spec=output_spec))
+    
+    # Create VerifiableModel
+    wrapped = VerifiableModel(*layers)
+    
+    # Create report
+    report = WrapReport(
+        input_shape=input_shape,
+        in_spec_kind=input_spec.kind,
+        out_spec_kind=output_spec.kind,
+        data_source=data_source,
+        model_name=model_name,
+    )
+    
+    return wrapped, report
+
+
 def synthesize_models_from_specs(
     spec_results: List[Tuple[str, str, nn.Module, List[LabeledInputTensor], List[Tuple[InputSpec, OutputSpec]]]]
-) -> Tuple[Dict[str, nn.Sequential], Dict[str, WrapReport], Dict[str, Dict[str, torch.Tensor]]]:
+) -> Tuple[Dict[str, nn.Sequential], Dict[str, WrapReport]]:
     """
     Synthesize wrapped models directly from spec creator results.
     
@@ -103,13 +187,11 @@ def synthesize_models_from_specs(
     Returns:
         wrapped_models: Dict[combo_id, nn.Sequential] - Synthesized VerifiableModel instances
         reports: Dict[combo_id, WrapReport] - Metadata for each wrapped model
-        input_data: Dict[data_source, data_pack] - Input data for testing
         
     combo_id format: "m:<model_name>|x:<data_source>|s:<spec_index>|is:<input_kind>|os:<output_kind>_m<margin>"
     """
     wrapped_models: Dict[str, nn.Sequential] = {}
     reports: Dict[str, WrapReport] = {}
-    input_data: Dict[str, Dict[str, torch.Tensor]] = {}
     
     print(f"\n🧬 Synthesizing models from {len(spec_results)} spec result(s)...")
     
@@ -131,101 +213,35 @@ def synthesize_models_from_specs(
             sample_idx = spec_idx // specs_per_sample if specs_per_sample > 0 else 0
             sample_idx = min(sample_idx, len(labeled_tensors) - 1)  # Clamp to valid range
             labeled_tensor = labeled_tensors[sample_idx]
-            input_tensor = labeled_tensor.tensor  # Already has batch dimension (1, C, H, W)
             
-            # No need to add batch dimension - tensor already has it
-            x = input_tensor
-            input_shape = tuple(x.shape)
-            
-            # Infer metadata from tensor
-            layout = infer_layout_from_tensor(x)
-            center_opt = x.squeeze(0).reshape(-1)  # For LINF_BALL specs
-            dtype = x.dtype
-            
-            # Infer domain and channels
-            if x.dim() == 4:
-                domain = "vision"
-                channels = x.shape[1]  # (B,C,H,W)
-            else:
-                domain = "tabular"
-                channels = None
-            
-            # Compute value range
-            value_range = (float(x.min().item()), float(x.max().item())) if x.numel() > 0 else None
-            
-            # Store in input_data for testing (use first sample as representative)
-            if data_source not in input_data:
-                first_labeled_tensor = labeled_tensors[0]
-                first_tensor = first_labeled_tensor.tensor  # Already (1, C, H, W)
-                first_x = first_tensor  # No unsqueeze needed
-                input_data[data_source] = {
-                    "x": first_x,
-                    "layout": infer_layout_from_tensor(first_x),
-                    "center": first_tensor.reshape(-1),
-                    "labels": None,  # Specs contain label info if needed
-                    "scale_hint": "normalized" if domain == "vision" else "unknown",
-                }
+            # Synthesize single wrapped model
+            wrapped, report = synthesize_single_model_from_spec(
+                data_source=data_source,
+                model_name=model_name,
+                pytorch_model=pytorch_model,
+                labeled_tensor=labeled_tensor,
+                input_spec=input_spec,
+                output_spec=output_spec
+            )
             
             # Create unique combo_id with spec index to avoid overwrites
             margin_str = f"m{output_spec.margin:.1f}" if hasattr(output_spec, 'margin') and output_spec.margin is not None else "m0.0"
             combo_id = f"m:{model_name}|x:{data_source}|s:{spec_idx}|is:{input_spec.kind}|os:{output_spec.kind}_{margin_str}"
             
-            # Extract label from output spec if available
-            label_tensor = None
-            if hasattr(output_spec, 'y_true') and output_spec.y_true is not None:
-                label_tensor = torch.tensor([output_spec.y_true])
-            
-            # Build layer stack
-            layers: List[nn.Module] = [
-                InputLayer(
-                    shape=input_shape,
-                    dtype=dtype,
-                    center=center_opt,
-                    layout=layout,
-                    dataset_name=data_source,
-                    num_classes=None,
-                    value_range=value_range,
-                    scale_hint="normalized" if domain == "vision" else "unknown",
-                    distribution="normalized" if domain == "vision" else "unknown",
-                    label=label_tensor,
-                    sample_id=None,
-                    domain=domain,
-                    channels=channels,
-                ),
-                InputSpecLayer(spec=input_spec),
-            ]
-            
-            # Add flatten if needed
-            if needs_flatten_before_model(pytorch_model) and len(input_shape) > 2:
-                layers.append(nn.Flatten())
-            
-            # Add model and output spec
-            layers.append(pytorch_model)
-            layers.append(OutputSpecLayer(spec=output_spec))
-            
-            # Create VerifiableModel
-            wrapped = VerifiableModel(*layers)
+            # Store results
             wrapped_models[combo_id] = wrapped
-            
-            # Create report
-            reports[combo_id] = WrapReport(
-                input_shape=input_shape,
-                in_spec_kind=input_spec.kind,
-                out_spec_kind=output_spec.kind,
-                data_source=data_source,
-                model_name=model_name,
-            )
+            reports[combo_id] = report
         
         print(f"✓ {data_source} + {model_name}: Created {len(spec_pairs)} wrapped model(s)")
     
     print(f"\n🎉 Synthesized {len(wrapped_models)} wrapped models from specs!")
-    return wrapped_models, reports, input_data
+    return wrapped_models, reports
 
 
 # -----------------------------------------------------------------------------
 # 4) Model synthesis main function
 # -----------------------------------------------------------------------------
-def model_synthesis(creator: str = 'torchvision') -> Tuple[Dict[str, nn.Sequential], Dict[str, Dict[str, torch.Tensor]]]:
+def model_synthesis(creator: str = 'torchvision') -> Dict[str, nn.Sequential]:
     """
     Main model synthesis function using new spec creators.
     
@@ -237,7 +253,6 @@ def model_synthesis(creator: str = 'torchvision') -> Tuple[Dict[str, nn.Sequenti
     
     Returns:
         wrapped_models: Dict[combo_id, nn.Sequential] - All synthesized wrapped models
-        input_data: Dict[dataset_name, data_pack] - Input data for testing
         
     Raises:
         RuntimeError: If no spec creator can load data-model pairs or create specs
@@ -306,7 +321,7 @@ def model_synthesis(creator: str = 'torchvision') -> Tuple[Dict[str, nn.Sequenti
     specs_per_sample = total_spec_pairs // total_samples if total_samples else 0
     
     # Synthesize wrapped models from spec results
-    wrapped_models, reports, input_data = synthesize_models_from_specs(spec_results)
+    wrapped_models, reports = synthesize_models_from_specs(spec_results)
     
     # Memory optimization: Free dataset memory after synthesis
     # spec_results contains (data_source, model_name, pytorch_model, input_tensors, spec_pairs)
@@ -328,7 +343,6 @@ def model_synthesis(creator: str = 'torchvision') -> Tuple[Dict[str, nn.Sequenti
     print(f"SYNTHESIS COMPLETE")
     print(f"{'='*80}")
     print(f"  • Wrapped models: {len(wrapped_models)}")
-    print(f"  • Data sources: {len(input_data)}")
     print(f"  • Unique dataset-model pairs: {len(set((r.data_source, r.model_name) for r in reports.values()))}")
     
     # Print detailed breakdown (using pre-calculated stats)
@@ -341,17 +355,21 @@ def model_synthesis(creator: str = 'torchvision') -> Tuple[Dict[str, nn.Sequenti
         print(f"  • Total spec pairs: {total_spec_pairs}")
         print(f"  • Calculation: {total_samples} samples × {specs_per_sample} specs/sample = {total_spec_pairs} wrapped models")
     
-    return wrapped_models, input_data
+    return wrapped_models
 
 
 if __name__ == "__main__":
     from act.util.model_inference import model_inference
+    from act.util.device_manager import initialize_device
+    
+    # Initialize device/dtype before synthesis (models typically use float32)
+    initialize_device(device='cuda', dtype='float32')
     
     # Step 1: Synthesize all wrapped models using new spec creators
-    wrapped_models, input_data = model_synthesis()
+    wrapped_models = model_synthesis()
     
-    # Step 2: Test all models with inference
-    successful_models = model_inference(wrapped_models, input_data)
+    # Step 2: Test all models with inference (input data extracted from wrapped models)
+    successful_models = model_inference(wrapped_models)
     
     print(f"\n✅ Successfully inferred {len(successful_models)} out of {len(wrapped_models)} models")
     print(f"\n🎯 NEW SPEC CREATOR INTEGRATION: COMPLETE ✅")

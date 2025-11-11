@@ -302,11 +302,11 @@ class MutationEngine:
             center = self.input_spec.center.to(tensor.device)
             eps = self.input_spec.eps
             
-            # Verify shape consistency (should be guaranteed by spec creators)
+            # Verify shape consistency (center has batch dimension matching tensor)
             assert center.shape == tensor.shape, (
                 f"Shape mismatch in LINF_BALL projection: "
                 f"input_spec.center.shape={center.shape} != tensor.shape={tensor.shape}. "
-                f"This indicates a bug in the spec creator - center should be reshaped during spec creation."
+                f"This indicates a bug in the spec creator - center should have batch dimension."
             )
             
             delta = tensor - center

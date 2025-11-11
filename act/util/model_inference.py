@@ -50,13 +50,12 @@ def infer_single_model(combo_id: str, model: nn.Sequential, input_tensor: torch.
 
 # Main model inference function
 # -----------------------------------------------------------------------------
-def model_inference(models: Dict[str, nn.Sequential], input_data: Dict[str, Dict[str, torch.Tensor]]) -> Dict[str, nn.Sequential]:
+def model_inference(models: Dict[str, nn.Sequential]) -> Dict[str, nn.Sequential]:
     """
-    Test all wrapped models with their respective inputs and provide execution statistics.
+    Test all wrapped models with their stored inputs and provide execution statistics.
     
     Args:
         models: Dict[combo_id, nn.Sequential] - Synthesized wrapped models to test
-        input_data: Dict[dataset_name, data_pack] - Input data for testing models
         
     Returns:
         Dict[combo_id, nn.Sequential] - Successfully inferred models only
@@ -68,43 +67,48 @@ def model_inference(models: Dict[str, nn.Sequential], input_data: Dict[str, Dict
         print("⚠️  No models to test - check spec generation and synthesis configuration")
         return {}
     
-    # Group by dataset for organized testing
-    by_dataset = {}
-    for combo_id, model in models.items():
-        dataset = combo_id.split('|')[1].split(':')[1]  # Extract from x:dataset_name
-        if dataset not in by_dataset:
-            by_dataset[dataset] = []
-        by_dataset[dataset].append((combo_id, model))
-    
     success_count = 0
     failure_count = 0
+    correct_predictions = 0
     failure_summary = {}  # Track unique failure types
     successful_models = {}  # Track successfully inferred models
     
-    for dataset_name, models_list in by_dataset.items():
-        test_input = input_data[dataset_name]["x"]
-        dataset_successes = 0
+    for combo_id, model in models.items():
+        # Extract input and label from InputLayer (first layer)
+        input_layer = model[0]
+        if not hasattr(input_layer, 'input_tensor'):
+            print(f"⚠️  Model {combo_id} missing input_tensor in InputLayer")
+            failure_count += 1
+            continue
         
-        for combo_id, model in models_list:
-            model_name = combo_id.split('|')[0].split(':')[1]
-            success, output, error_msg = infer_single_model(combo_id, model, test_input)
+        test_input = input_layer.input_tensor
+        test_label = input_layer.label  # Extract ground truth label
+        dataset = combo_id.split('|')[1].split(':')[1]  # Extract from x:dataset_name
+        model_name = combo_id.split('|')[0].split(':')[1]
+        success, output, error_msg = infer_single_model(combo_id, model, test_input)
+        
+        if success:
+            # Validate prediction against ground truth label
+            pred_class = output.argmax().item() if output.dim() > 0 else output.item()
+            is_correct = (pred_class == test_label)
             
-            if success:
-                success_count += 1
-                dataset_successes += 1
-                successful_models[combo_id] = model  # Store successful model
-            else:
-                failure_count += 1
-                # Track unique failure patterns
-                pattern = f"{model_name.split('_')[0]} + {dataset_name}"  # e.g., "mnist + cifar10"
-                if pattern not in failure_summary:
-                    failure_summary[pattern] = {'count': 0, 'error': error_msg}
-                failure_summary[pattern]['count'] += 1
-        
-        print(f"   {dataset_name}: {dataset_successes}/{len(models_list)} successful")
+            success_count += 1
+            if is_correct:
+                correct_predictions += 1
+            successful_models[combo_id] = model  # Store successful model
+        else:
+            failure_count += 1
+            # Track unique failure patterns
+            pattern = f"{model_name.split('_')[0]} + {dataset}"  # e.g., "mnist + cifar10"
+            if pattern not in failure_summary:
+                failure_summary[pattern] = {'count': 0, 'error': error_msg}
+            failure_summary[pattern]['count'] += 1
     
     success_rate = (success_count / len(models)) * 100 if len(models) > 0 else 0
+    accuracy = (correct_predictions / success_count * 100) if success_count > 0 else 0
+    
     print(f"\n📊 Overall: {success_count}/{len(models)} successful ({success_rate:.1f}%)")
+    print(f"🎯 Accuracy: {correct_predictions}/{success_count} correct predictions ({accuracy:.1f}%)")
     
     # Show concise failure analysis
     if failure_summary:

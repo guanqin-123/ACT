@@ -145,9 +145,9 @@ class LayerKind(str, enum.Enum):
 REGISTRY: Dict[str, Dict[str, List[str]]] = {
     # Wrapper & specs
     LayerKind.INPUT.value:       {
-        "params_required": [], 
+        "params_required": [],
         "params_optional": [
-            "center",           # Optional tensor: center point for perturbation specs (flattened)
+            "labeled_input",    # Optional: LabeledInputTensor (tensor + label pair) for self-contained model inference
         ], 
         "meta_required": [
             "shape",            # Required tuple: input shape including batch=1 (e.g., (1, 784) or (1, 3, 32, 32))
@@ -164,7 +164,6 @@ REGISTRY: Dict[str, Dict[str, List[str]]] = {
             "scale_hint",       # Optional str: scale description - "0-1", "0-255", "normalized", "unknown"
             "distribution",     # Optional str: data distribution - "uniform", "normal", "normalized", "unknown", or custom (free-form)
             # Tier 3: Optional metadata for debugging and tracking
-            "label",            # Optional tensor: ground truth label (0-D or 1-D tensor, device-aware via register_buffer)
             "sample_id",        # Optional int/str: sample identifier for tracking individual inputs
             "domain",           # Optional str: problem domain - "vision", "tabular", "text", "audio"
             "channels",         # Optional int: number of channels (e.g., 1 for grayscale, 3 for RGB)
@@ -196,7 +195,7 @@ REGISTRY: Dict[str, Dict[str, List[str]]] = {
     LayerKind.SIGMOID.value:     {"params_required": [], "params_optional": [], "meta_required": [], "meta_optional": []},
     LayerKind.TANH.value:        {"params_required": [], "params_optional": [], "meta_required": [], "meta_optional": []},
     LayerKind.SOFTPLUS.value:    {"params_required": [], "params_optional": [], "meta_required": [], "meta_optional": []},
-    LayerKind.SILU.value:        {"params_required": [], "params_optional": [], "meta_required": [], "meta_optional": []},
+    LayerKind.SILU.value:        {"params_required": [], "params_optional": [], "meta_required": [], "meta_optional": ["input_shape","output_shape"]},
     LayerKind.GELU.value:        {"params_required": [], "params_optional": [], "meta_required": [], "meta_optional": ["approximate"]},
     LayerKind.RELU6.value:       {"params_required": [], "params_optional": [], "meta_required": [], "meta_optional": []},
     LayerKind.HARDTANH.value:    {"params_required": [], "params_optional": [], "meta_required": [], "meta_optional": ["min_val","max_val"]},

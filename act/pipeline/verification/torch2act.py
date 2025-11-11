@@ -58,6 +58,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
+from torchvision.ops import StochasticDepth
 
 from act.util.model_inference import model_inference
 from act.front_end.model_synthesis import model_synthesis
@@ -176,8 +177,9 @@ class TorchToACT:
         """Check if module is a primitive layer that can be directly converted."""
         return isinstance(mod, (
             nn.Linear, nn.ReLU, nn.Conv2d, nn.Flatten,
-            nn.MaxPool2d, nn.AvgPool2d, nn.Dropout,
-            nn.BatchNorm2d, nn.Tanh, nn.Sigmoid, nn.LeakyReLU
+            nn.MaxPool2d, nn.AvgPool2d, nn.AdaptiveAvgPool2d, nn.Dropout,
+            nn.BatchNorm2d, nn.Tanh, nn.Sigmoid, nn.LeakyReLU, nn.SiLU,
+            StochasticDepth
         ))
 
     def _convert_primitive_module(self, mod: nn.Module) -> None:
@@ -301,6 +303,11 @@ class TorchToACT:
         elif isinstance(mod, nn.Dropout):
             # Dropout is a no-op during inference/verification
             pass
+        
+        elif isinstance(mod, StochasticDepth):
+            # StochasticDepth (DropPath) is identity during inference/verification
+            # During training it randomly drops residual branches, but in eval mode: output = input
+            pass
             
         elif isinstance(mod, nn.BatchNorm2d):
             # BatchNorm2d during inference: y = gamma * (x - running_mean) / sqrt(running_var + eps) + beta
@@ -369,6 +376,81 @@ class TorchToACT:
                                "original_shape": self.shape},
                          in_vars=self.prev_out, out_vars=out_vars)
                 self.prev_out = out_vars
+        
+        elif isinstance(mod, nn.AdaptiveAvgPool2d):
+            # AdaptiveAvgPool2d: Adaptive average pooling to output_size
+            output_size = mod.output_size
+            if isinstance(output_size, int):
+                output_size = (output_size, output_size)
+            
+            # Infer input shape
+            if len(self.shape) == 2:
+                n_features = self.shape[1]
+                # Try to infer from common sizes
+                if n_features == 3072:  # CIFAR-10
+                    input_shape = (1, 3, 32, 32)
+                elif n_features == 784:  # MNIST
+                    input_shape = (1, 1, 28, 28)
+                else:
+                    # Try to infer square spatial dimensions
+                    spatial_size = int(n_features ** 0.5)
+                    channels = 1
+                    input_shape = (1, channels, spatial_size, spatial_size)
+            else:
+                input_shape = self.shape
+            
+            batch, in_c, in_h, in_w = input_shape
+            out_h, out_w = output_size
+            output_shape = (1, in_c, out_h, out_w)
+            out_features = in_c * out_h * out_w
+            
+            # Calculate equivalent kernel and stride for average pooling
+            kernel_h = in_h // out_h
+            kernel_w = in_w // out_w
+            stride_h = kernel_h
+            stride_w = kernel_w
+            
+            meta = {
+                "kernel_size": (kernel_h, kernel_w),
+                "stride": (stride_h, stride_w),
+                "padding": (0, 0),
+                "output_size": output_size
+            }
+            
+            out_vars = self._alloc_ids(out_features)
+            self._add(LayerKind.AVGPOOL2D.value, params={}, meta=meta,
+                      in_vars=self.prev_out, out_vars=out_vars)
+            self.shape = (1, out_features)
+            self.prev_out = out_vars
+        
+        elif isinstance(mod, nn.SiLU):
+            # SiLU (Swish) activation: x * sigmoid(x)
+            out_vars = self._same_size_forward()
+            self._add(LayerKind.SILU.value, params={}, 
+                      meta={"input_shape": self.shape, "output_shape": self.shape},
+                      in_vars=self.prev_out, out_vars=out_vars)
+            self.prev_out = out_vars
+        
+        elif isinstance(mod, nn.Sigmoid):
+            out_vars = self._same_size_forward()
+            self._add(LayerKind.SIGMOID.value, params={}, 
+                      meta={},
+                      in_vars=self.prev_out, out_vars=out_vars)
+            self.prev_out = out_vars
+        
+        elif isinstance(mod, nn.Tanh):
+            out_vars = self._same_size_forward()
+            self._add(LayerKind.TANH.value, params={}, 
+                      meta={},
+                      in_vars=self.prev_out, out_vars=out_vars)
+            self.prev_out = out_vars
+        
+        elif isinstance(mod, nn.LeakyReLU):
+            out_vars = self._same_size_forward()
+            self._add(LayerKind.LRELU.value, params={}, 
+                      meta={"negative_slope": mod.negative_slope},
+                      in_vars=self.prev_out, out_vars=out_vars)
+            self.prev_out = out_vars
             
         else:
             raise NotImplementedError(f"Primitive conversion not implemented: {type(mod).__name__}")
@@ -462,12 +544,12 @@ def main():
     
     # Step 1: Synthesize all wrapped models
     print("\n📦 Step 1: Synthesizing wrapped models...")
-    wrapped_models, input_data = model_synthesis()
+    wrapped_models = model_synthesis()
     print(f"  ✅ Generated {len(wrapped_models)} wrapped models")
     
-    # Step 2: Test all models with inference
+    # Step 2: Test all models with inference (input data now stored in models)
     print("\n🧪 Step 2: Testing model inference...")
-    successful_models = model_inference(wrapped_models, input_data)
+    successful_models = model_inference(wrapped_models)
     print(f"  ✅ {len(successful_models)} models passed inference tests")
     
     if not successful_models:
