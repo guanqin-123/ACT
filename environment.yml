@@ -16,6 +16,7 @@ dependencies:
   - tqdm
   - gurobi
   - ipykernel
+  - ipywidgets  # Interactive trace explorer in Jupyter notebooks
   - matplotlib
   - pyyaml  # Config loading (specs, models, abcrown)
   - psutil  # Memory monitoring in pipeline
