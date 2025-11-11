@@ -52,50 +52,45 @@ jupyter notebook ipynb/vnnlib_visualization.ipynb
 code ipynb/vnnlib_visualization.ipynb
 ```
 
-### `fuzzing_trace_analysis.ipynb` ⭐ NEW
+### `vnnlib_fuzzer.ipynb` ⭐ NEW
 
-**Purpose**: Interactive visual analysis of ACTFuzzer execution traces with rich visualizations and widgets.
+**Purpose**: End-to-end demonstration of ACTFuzzer on CIFAR-100 VNNLib benchmarks with integrated trace analysis.
 
 **Contents**:
-1. **Load & Overview**: Quick summary statistics of fuzzing execution
-2. **Visual Overview**: 2×2 grid with coverage/strategy/effectiveness/violations plots
-3. **Interactive Explorer**: Widget-based trace browser with input visualizations
-4. **Custom Analysis**: Playground for filtering, comparison, and export
+1. **VNNLib Benchmark Loading**: Load CIFAR-100 VNNLib instances with model and specification parsing
+2. **Multi-Instance Fuzzing**: Run fuzzing on multiple instances with configurable timeout and mutation strategies
+3. **Counterexample Visualization**: Side-by-side comparison of original/perturbation/perturbed images
+4. **Trace Analysis**: Integrated trace visualization with coverage, strategy effectiveness, and violations
+5. **Interactive Trace Explorer**: Widget-based trace browser for detailed inspection
 
 **Key Features**:
-- 📊 **Automatic visualizations**: Coverage progression, strategy distribution, violations timeline
-- 🔍 **Interactive widgets**: Dropdown explorer for individual trace inspection
+- 🎯 **Complete workflow**: Load → Fuzz → Analyze → Visualize in one notebook
+- 📊 **Automatic trace capture**: Fuzzing traces saved and analyzed with rich visualizations
+- 🔍 **Interactive widgets**: Dropdown explorer for browsing traces across multiple instances
 - 🎨 **Input heatmaps**: Before/after/diff visualizations for mutated inputs
-- 📈 **Strategy analysis**: Box plots showing effectiveness of different mutation strategies
-- 💾 **Export capabilities**: CSV summaries, PyTorch trace files
-- 🎯 **4 cells only**: Compact design for quick analysis
+- 📈 **Strategy analysis**: Box plots and pie charts showing mutation effectiveness
+- 💾 **Export capabilities**: Trace export to PyTorch files, CSV summaries
+- ⚡ **Performance tracking**: Iterations/sec, coverage metrics, counterexample detection
 
 **Usage**:
 ```bash
-# 1. Generate traces with ACTFuzzer
-python -m act.pipeline.fuzzing.actfuzzer \
-    --trace-level 1 \
-    --trace-output act/pipeline/log/my_traces.json
+# Open in Jupyter
+jupyter notebook ipynb/vnnlib_fuzzer.ipynb
 
-# 2. Open notebook
-jupyter notebook ipynb/fuzzing_trace_analysis.ipynb
-
-# 3. Update trace_file path in Cell 1
-trace_file = Path("../act/pipeline/log/my_traces.json")
-
-# 4. Run all cells
+# Or use VS Code's notebook interface
+code ipynb/vnnlib_fuzzer.ipynb
 ```
 
 **Requirements**:
-- `matplotlib`, `seaborn` (visualization)
-- `ipywidgets` (interactive explorer)
-- `pandas` (data analysis)
+- `matplotlib`, `pandas` (visualization and analysis)
+- `ipywidgets>=8.0.0` (interactive explorer)
+- `torch`, `torchvision` (model inference)
 
-**Trace Levels**:
-- Level 0: No tracing (disabled)
-- Level 1: Basic info + inputs (recommended for visualization)
-- Level 2: + Layer activations (memory intensive)
-- Level 3: + Gradients (most detailed, slowest)
+**Configuration**:
+- Modify `timeout_seconds` in Cell 4 to adjust fuzzing budget
+- Change `trace_level` (0=disabled, 1=basic, 2=full) for tracing detail
+- Adjust `trace_sample_rate` (1=every iteration, 10=every 10th) to control file size
+- Select `trace_storage` ("json" or "hdf5") based on performance needs
 
 ## Running Notebooks
 
