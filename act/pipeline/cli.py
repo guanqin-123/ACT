@@ -277,7 +277,10 @@ def cmd_fuzz(args):
     
     # Determine creator
     creator = args.creator
-    print(f"📦 Using spec creator: {creator.upper()}\n")
+    print(f"📦 Using spec creator: {creator.upper()}")
+    if args.strict_mode:
+        print(f"⚠️  Strict mode enabled: Errors will be raised on constraint violations")
+    print()
     
     # Load configuration
     config = FuzzingConfig(
@@ -393,6 +396,10 @@ def cmd_fuzz(args):
     print(f"{'='*80}")
     print(f"STEP 2: Model Synthesis")
     print(f"{'='*80}\n")
+    
+    # Set strict mode for all VerifiableModel instances
+    from act.front_end.verifiable_model import VerifiableModel
+    VerifiableModel.set_strict_mode(args.strict_mode)
     
     try:
         wrapped_models, reports, input_data = synthesize_models_from_specs(spec_results)
@@ -761,6 +768,11 @@ Examples:
         type=int,
         default=100,
         help="Report progress every N iterations (default: 100)"
+    )
+    fuzz_group.add_argument(
+        "--strict-mode",
+        action="store_true",
+        help="Enable strict mode: raise errors on input/output constraint violations (default: False)"
     )
     
     # Tracing options

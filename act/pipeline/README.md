@@ -924,6 +924,33 @@ factory = ModelFactory()
 model = factory.create_model("mnist_mlp_small", load_weights=True)
 ```
 
+## Strict Mode
+
+**Strict mode** causes `VerifiableModel` to raise `ValueError` immediately on constraint violations instead of returning status gracefully. Useful for debugging and fail-fast testing.
+
+**CLI Usage:**
+```bash
+python act/pipeline/cli.py --strict-mode [options...]
+```
+
+**Programmatic Usage:**
+```python
+from act.front_end.verifiable_model import VerifiableModel
+
+# Enable globally (affects all instances)
+VerifiableModel.set_strict_mode(True)
+model = VerifiableModel(*layers)
+
+try:
+    result = model(input)  # Raises ValueError on violation
+except ValueError as e:
+    print(f"Violation: {e}")
+```
+
+**Behavior:**
+- **Non-Strict** (default): Returns `{'input_satisfied': False, ...}`
+- **Strict**: Prints explanation, raises `ValueError`
+
 ## Future Enhancements
 
 - [ ] Add support for more layer types (attention, transformers)

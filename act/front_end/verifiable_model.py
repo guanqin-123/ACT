@@ -99,6 +99,14 @@ class VerifiableModel(nn.Sequential):
     and OutputSpecLayer, returning a dict with both model output and
     constraint satisfaction status.
     
+    Strict Mode:
+        Controlled via VerifiableModel.set_strict_mode(True/False).
+        When enabled, raises ValueError on input/output constraint violations.
+        Default: False (graceful violation reporting).
+    
+    Args:
+        *args: Layers to include in the sequential model
+    
     Returns:
         Dict with keys:
         - 'output': Model output tensor
@@ -106,7 +114,27 @@ class VerifiableModel(nn.Sequential):
         - 'input_explanation': Human-readable input constraint result
         - 'output_satisfied': True if output constraints satisfied
         - 'output_explanation': Human-readable output constraint result
+    
+    Raises:
+        ValueError: If strict mode enabled and input/output constraints are violated
     """
+    
+    # Class-level strict mode setting (shared across all instances)
+    _strict_mode: bool = False
+    
+    def __init__(self, *args):
+        super().__init__(*args)
+    
+    @classmethod
+    def set_strict_mode(cls, enabled: bool) -> None:
+        """
+        When enabled, forward() raises ValueError on input/output violations.
+        """
+        cls._strict_mode = enabled
+    
+    @classmethod
+    def get_strict_mode(cls) -> bool:
+        return cls._strict_mode
     
     def forward(self, x):
         """
@@ -140,6 +168,19 @@ class VerifiableModel(nn.Sequential):
             else:
                 # Regular layer, just pass through
                 x = result
+        
+        # Strict mode: raise on constraint violations
+        if self._strict_mode:
+            if not input_satisfied:
+                print(f"[STRICT MODE] {input_explanation}")
+                raise ValueError(
+                    f"Input constraint violated in strict mode: {input_explanation}"
+                )
+            if not output_satisfied:
+                print(f"[STRICT MODE] {output_explanation}")
+                raise ValueError(
+                    f"Output constraint violated in strict mode: {output_explanation}"
+                )
         
         # Return comprehensive verification result
         return {
