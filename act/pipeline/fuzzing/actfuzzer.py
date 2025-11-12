@@ -37,6 +37,8 @@ class FuzzingConfig:
         timeout_seconds: Total time budget
         seed_selection_strategy: "energy" or "random"
         mutation_weights: Dict of strategy weights
+        perturb_mode: Perturbation size computation mode ("adaptive_scalar", "adaptive_perdim", "fixed")
+        perturb_scale: Fraction of range per mutation perturbation (e.g., 0.1 = 10% = ~10 steps to traverse)
         device: Torch device ("cuda" or "cpu")
         save_counterexamples: Whether to save counterexamples incrementally
         output_dir: Output directory for results
@@ -45,6 +47,21 @@ class FuzzingConfig:
         trace_sample_rate: Capture every Nth iteration (1=all iterations)
         trace_storage: Storage backend ("hdf5" or "json")
         trace_output: Trace output path (None=auto-generate)
+    
+    Perturbation Size Configuration:
+        NOTE: We use "perturb_size" (not "epsilon") to avoid confusion with InputSpec.eps (L∞ radius).
+        - InputSpec.eps: Defines constraint boundaries (e.g., center ± eps for LINF_BALL)
+        - Mutation perturb_size: Controls mutation perturbation magnitude (exploration granularity)
+        
+        perturb_mode determines how mutation perturbation sizes are computed:
+        - "adaptive_scalar": Single perturb_size from mean(ub-lb) * perturb_scale (default, best for uniform ranges)
+        - "adaptive_perdim": Per-dimension perturb_size from (ub-lb) * perturb_scale (best for non-uniform ranges)
+        - "fixed": Legacy hardcoded values (0.01 for gradient/activation, 0.005 for boundary/random)
+        
+        perturb_scale interpretation:
+        - Fraction of feasible range each mutation perturbation covers
+        - steps_to_traverse = 1 / perturb_scale
+        - Example: perturb_scale=0.1 → 10% per perturbation → ~10 steps to traverse from lb to ub
     """
     max_iterations: int = 10000
     timeout_seconds: float = 3600.0
@@ -55,6 +72,8 @@ class FuzzingConfig:
         "boundary": 0.2,
         "random": 0.1
     })
+    perturb_mode: str = "adaptive_scalar"  # Perturbation size computation mode
+    perturb_scale: float = 0.1  # Fraction of range per perturbation (10% → ~10 steps)
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     save_counterexamples: bool = True
     output_dir: Path = field(default_factory=lambda: Path(get_pipeline_log_dir()) / "fuzzing_results")
@@ -163,7 +182,9 @@ class ACTFuzzer:
             model=self.model,
             input_spec=self.input_spec,
             weights=self.config.mutation_weights,
-            device=self.device
+            device=self.device,
+            perturb_mode=self.config.perturb_mode,
+            perturb_scale=self.config.perturb_scale
         )
         self.coverage_tracker = CoverageTracker(self.model)
         self.property_checker = PropertyChecker(self.output_spec)

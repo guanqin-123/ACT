@@ -12,6 +12,34 @@ fuzzing:
     boundary: 0.2      # Boundary exploration
     random: 0.1        # Random baseline
   
+  # Mutation perturbation size configuration
+  # =========================================
+  # NOTE: We use "perturb_size" (not "epsilon") to avoid confusion with InputSpec.eps
+  #   - InputSpec.eps: L∞ radius constraint (defines boundaries)
+  #   - perturb_size: Mutation perturbation magnitude (defines exploration granularity)
+  #
+  # perturb_mode: How to compute mutation perturbation sizes
+  #   - "adaptive_scalar": Single perturb_size from mean(ub-lb) * perturb_scale
+  #                        Best for uniform ranges (e.g., VNNLib BOX constraints)
+  #   - "adaptive_perdim": Per-dimension perturb_size from (ub-lb) * perturb_scale
+  #                        Best for non-uniform ranges (different feature scales)
+  #   - "fixed": Legacy hardcoded values (0.01 for gradient/activation, 0.005 for boundary/random)
+  #
+  # perturb_scale: Fraction of feasible range each mutation perturbation covers
+  #   - Interpretation: steps_to_traverse = 1 / perturb_scale
+  #   - Calculation: range / perturb_size = range / (range * scale) = 1 / scale
+  #   - Examples:
+  #       * 0.1  → 10% per perturbation → ~10 steps to traverse from lb to ub
+  #       * 0.2  → 20% per perturbation → ~5 steps to traverse from lb to ub
+  #       * 0.05 → 5% per perturbation  → ~20 steps to traverse from lb to ub
+  #
+  # Recommended values:
+  #   - perturb_scale=0.1 (default): Balanced exploration (10 steps)
+  #   - perturb_scale=0.05: Fine-grained exploration (20 steps)
+  #   - perturb_scale=0.2: Coarse exploration (5 steps)
+  perturb_mode: "adaptive_scalar"
+  perturb_scale: 0.1
+  
   # Seed selection
   seed_selection_strategy: "energy"  # or "random"
   

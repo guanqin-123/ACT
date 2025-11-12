@@ -119,6 +119,89 @@ Gaussian noise baseline:
 x' = x + N(0, ε²)
 ```
 
+## Adaptive Perturbation Sizing
+
+### Terminology Note
+
+**Important**: We use "**perturb_size**" (not "epsilon") to avoid confusion with InputSpec constraints:
+- **InputSpec.eps**: L∞ radius constraint (defines input space boundaries, e.g., `center ± eps`)
+- **Mutation perturb_size**: Mutation perturbation magnitude (defines exploration granularity per iteration)
+
+These are completely different concepts with different scales and purposes.
+
+### What is perturb_scale?
+
+In fuzzing, **perturb_size** controls the **magnitude of each mutation perturbation**, not the boundaries (boundaries are enforced by projection to InputSpec). To ensure consistent exploration across different problem scales, ACTFuzzer supports **adaptive perturbation sizing** that scales with InputSpec bounds.
+
+**perturb_scale** is the **fraction of the feasible range** that each mutation perturbation covers.
+
+#### Interpretation Formula
+```
+steps_to_traverse = 1 / perturb_scale
+```
+
+#### Calculation
+```
+range / perturb_size = range / (range * perturb_scale) = 1 / perturb_scale
+```
+
+#### Examples
+- **perturb_scale=0.1** → Each perturbation covers 10% of range → Takes ~**10 steps** to traverse from lb to ub
+- **perturb_scale=0.2** → Each perturbation covers 20% of range → Takes ~**5 steps** to traverse from lb to ub
+- **perturb_scale=0.05** → Each perturbation covers 5% of range → Takes ~**20 steps** to traverse from lb to ub
+
+### Perturbation Size Modes
+
+#### 1. adaptive_scalar (Default)
+- **Computation**: `perturb_size = mean(ub - lb) * perturb_scale`
+- **Best for**: Uniform ranges (e.g., VNNLib BOX constraints with consistent bounds)
+- **Example**: VNNLib with lb=0.0, ub=1.0 → range=1.0, perturb_size=0.1 (10 steps)
+
+#### 2. adaptive_perdim (Advanced)
+- **Computation**: `perturb_size[i] = (ub[i] - lb[i]) * perturb_scale`
+- **Best for**: Non-uniform ranges (different features with vastly different scales)
+- **Example**: lb=[0, -100], ub=[1, 100] → perturb_size=[0.1, 20.0] (10 steps per dimension)
+
+#### 3. fixed (Legacy)
+- **Computation**: Hardcoded values (0.01 for gradient/activation, 0.005 for boundary/random)
+- **Best for**: Backward compatibility or when InputSpec is not available
+- **Note**: May be too large for tight bounds or too small for wide bounds
+
+### Configuration
+
+Set in `config.yaml`:
+```yaml
+perturb_mode: "adaptive_scalar"  # Options: "adaptive_scalar", "adaptive_perdim", "fixed"
+perturb_scale: 0.1               # Fraction of range per perturbation (default: 0.1 = 10 steps)
+```
+
+### Recommended Values
+
+| Use Case | perturb_scale | Steps | Description |
+|----------|---------------|-------|-------------|
+| **Balanced** | 0.1 (default) | ~10 | Good for most cases |
+| **Fine-grained** | 0.05 | ~20 | Thorough exploration, slower |
+| **Coarse** | 0.2 | ~5 | Fast exploration, may miss violations |
+
+### Example: VNNLib with [0, 1] bounds
+
+```python
+# With perturb_scale=0.1:
+# - range = 1.0 - 0.0 = 1.0
+# - perturb_size = 1.0 * 0.1 = 0.1
+# - steps = 1.0 / 0.1 = 10 steps to traverse
+```
+
+**Diagnostic output** (printed during initialization):
+```
+[MutationEngine] Adaptive Scalar Perturbation Size:
+  - perturb_scale: 0.1 (fraction of range per perturbation)
+  - mean_range: 1.000000
+  - computed perturb_size: 0.100000
+  - steps_to_traverse: ~10.0 steps
+  - interpretation: Each mutation perturbation covers 10.0% of the range
+```
+
 ## Coverage Metrics
 
 ACTFuzzer tracks **neuron coverage**:
