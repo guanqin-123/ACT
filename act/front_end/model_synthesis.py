@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Tuple, Union
 
 # Import ACT components
-from act.front_end.specs import InputSpec, OutputSpec, InKind, OutKind
+from act.front_end.specs import InputSpec, OutputSpec, InKind, OutKind, BatchedInputSpec, BatchedOutputSpec
 from act.front_end.spec_creator_base import LabeledInputTensor
 from act.front_end.verifiable_model import (
     InputLayer,
@@ -356,6 +356,155 @@ def model_synthesis(creator: str = 'torchvision') -> Dict[str, nn.Module]:
         print(f"  • Calculation: {total_samples} samples × {specs_per_sample} specs/sample = {total_spec_pairs} wrapped models")
     
     return wrapped_models
+
+
+# =============================================================================
+# Batched Model Synthesis
+# =============================================================================
+
+@dataclass
+class BatchedWrapReport:
+    """Metadata for batched wrapped model."""
+    batch_size: int
+    input_shape: Tuple[int, ...]
+    in_spec_kind: str
+    out_spec_kind: str
+    data_source: str
+    model_name: str
+    unique_labels: int
+
+
+def synthesize_batched_model(
+    pytorch_model: nn.Module,
+    labeled_tensors: List[LabeledInputTensor],
+    input_specs: List[InputSpec],
+    output_specs: List[OutputSpec],
+    data_source: str = "unknown",
+    model_name: str = "unknown",
+) -> Tuple[VerifiableModel, BatchedWrapReport]:
+    """
+    Synthesize a VerifiableModel for batched inference from lists of specs.
+    Uses unified VerifiableModel which now supports batching natively.
+    """
+    B = len(labeled_tensors)
+    assert len(input_specs) == B and len(output_specs) == B and B > 0, "Spec count mismatch"
+    
+    images = torch.stack([t.tensor.squeeze(0) for t in labeled_tensors])
+    labels = torch.tensor([t.label for t in labeled_tensors], dtype=torch.long)
+    
+    batched_in = BatchedInputSpec.from_single_specs(input_specs)
+    batched_out = BatchedOutputSpec.from_single_specs(output_specs)
+    
+    wrapped = VerifiableModel(
+        InputSpecLayer(InputSpec(
+            kind=batched_in.kind,
+            lb=batched_in.lb, ub=batched_in.ub,
+            center=batched_in.center, eps=batched_in.eps if not isinstance(batched_in.eps, torch.Tensor) else batched_in.eps[0].item(),
+            A=batched_in.A, b=batched_in.b
+        )),
+        pytorch_model,
+        OutputSpecLayer(OutputSpec(
+            kind=batched_out.kind,
+            y_true=batched_out.y_true,
+            margin=batched_out.margin if not isinstance(batched_out.margin, torch.Tensor) else batched_out.margin[0].item(),
+            c=batched_out.c, d=batched_out.d,
+            lb=batched_out.lb, ub=batched_out.ub
+        )),
+    )
+    
+    return wrapped, BatchedWrapReport(
+        batch_size=B, input_shape=tuple(images.shape),
+        in_spec_kind=input_specs[0].kind, out_spec_kind=output_specs[0].kind,
+        data_source=data_source, model_name=model_name,
+        unique_labels=len(labels.unique())
+    )
+
+
+def synthesize_batched_model_from_loader(
+    pytorch_model: nn.Module,
+    images: torch.Tensor,
+    labels: torch.Tensor,
+    eps: Union[float, torch.Tensor] = 0.1,
+    input_kind: str = InKind.LINF_BALL,
+    output_kind: str = OutKind.TOP1_ROBUST,
+    data_source: str = "unknown",
+    model_name: str = "unknown",
+) -> Tuple[VerifiableModel, BatchedWrapReport]:
+    """Synthesize VerifiableModel for batched inference directly from tensors."""
+    if input_kind == InKind.LINF_BALL:
+        input_spec = InputSpec(kind=InKind.LINF_BALL, center=images, eps=eps if not isinstance(eps, torch.Tensor) else eps[0].item())
+    elif input_kind == InKind.BOX:
+        eps_val = eps if not isinstance(eps, torch.Tensor) else eps
+        if isinstance(eps_val, torch.Tensor):
+            eps_exp = eps_val.view(-1, *([1]*(images.dim()-1)))
+        else:
+            eps_exp = eps_val
+        input_spec = InputSpec(kind=InKind.BOX, lb=(images-eps_exp).clamp(0,1), ub=(images+eps_exp).clamp(0,1))
+    else:
+        raise ValueError(f"Unsupported input_kind: {input_kind}")
+    
+    output_spec = OutputSpec(kind=output_kind, y_true=labels)
+    
+    wrapped = VerifiableModel(
+        InputSpecLayer(input_spec),
+        pytorch_model,
+        OutputSpecLayer(output_spec),
+    )
+    
+    return wrapped, BatchedWrapReport(
+        batch_size=images.shape[0], input_shape=tuple(images.shape),
+        in_spec_kind=input_kind, out_spec_kind=output_kind,
+        data_source=data_source, model_name=model_name,
+        unique_labels=len(labels.unique())
+    )
+
+
+def synthesize_batched_models_from_specs(
+    spec_results: List[Tuple[str, str, nn.Module, List[LabeledInputTensor], List[Tuple[InputSpec, OutputSpec]]]],
+    batch_size: int = 32,
+) -> Tuple[Dict[str, VerifiableModel], Dict[str, BatchedWrapReport]]:
+    """
+    Synthesize batched models from spec creator results.
+    Groups specs by (input_kind, output_kind), then batches them.
+    Uses unified VerifiableModel which now supports batching natively.
+    """
+    from collections import defaultdict
+    
+    batched_models: Dict[str, VerifiableModel] = {}
+    reports: Dict[str, BatchedWrapReport] = {}
+    
+    print(f"\n🧬 Synthesizing BATCHED models from {len(spec_results)} spec result(s)...")
+    
+    for data_source, model_name, pytorch_model, labeled_tensors, spec_pairs in spec_results:
+        if not labeled_tensors or not spec_pairs:
+            continue
+        
+        # Group by (input_kind, output_kind)
+        grouped: Dict[Tuple[str, str], List[Tuple[int, InputSpec, OutputSpec]]] = defaultdict(list)
+        specs_per_sample = len(spec_pairs) // len(labeled_tensors) if labeled_tensors else 1
+        
+        for idx, (in_spec, out_spec) in enumerate(spec_pairs):
+            sample_idx = min(idx // specs_per_sample, len(labeled_tensors) - 1)
+            grouped[(in_spec.kind, out_spec.kind)].append((sample_idx, in_spec, out_spec))
+        
+        for (in_kind, out_kind), items in grouped.items():
+            for batch_start in range(0, len(items), batch_size):
+                batch = items[batch_start:batch_start + batch_size]
+                wrapped, report = synthesize_batched_model(
+                    pytorch_model,
+                    [labeled_tensors[i] for i, _, _ in batch],
+                    [s for _, s, _ in batch],
+                    [s for _, _, s in batch],
+                    data_source, model_name
+                )
+                batch_id = f"m:{model_name}|x:{data_source}|in:{in_kind}|out:{out_kind}|b:{batch_start//batch_size}"
+                batched_models[batch_id] = wrapped
+                reports[batch_id] = report
+        
+        print(f"✓ {data_source} + {model_name}: {len(spec_pairs)} specs batched")
+    
+    print(f"\n🎉 Synthesized {len(batched_models)} batched models!")
+    return batched_models, reports
 
 
 if __name__ == "__main__":

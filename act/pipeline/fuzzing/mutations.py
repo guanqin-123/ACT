@@ -63,15 +63,17 @@ License: AGPLv3+
 
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import Dict, Optional, Union, TYPE_CHECKING
+from typing import Dict, List, Optional, Union, TYPE_CHECKING
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
 from act.front_end.specs import InputSpec, InKind
-from act.front_end.spec_creator_base import LabeledInputTensor
 from act.util.device_manager import get_default_device
+
+if TYPE_CHECKING:
+    from act.pipeline.fuzzing.corpus import FuzzingSeed
 
 
 class MutationStrategy(ABC):
@@ -190,15 +192,19 @@ class PGDMutation(MutationStrategy):
         """Apply PGD mutation.
         
         Args:
-            input_tensor: Seed input tensor
+            input_tensor: Seed input tensor [B, C, H, W] or [1, C, H, W]
             model: Model for gradient computation
             activations: Activations from previous inference (unused by PGD)
-            label: Ground truth label for cross-entropy loss (if None, uses variance loss)
+            label: Ground truth label(s) for cross-entropy loss. Can be:
+                   - int: Single label (applied to all samples in batch)
+                   - List[int]: Per-sample labels for batched input
+                   - None: Uses variance loss (unsupervised)
         
         Returns:
-            Adversarially perturbed input tensor
+            Adversarially perturbed input tensor [B, C, H, W]
         """
         x0 = input_tensor.detach()
+        B = x0.shape[0]
 
         perturb_size = self.perturb_size.to(input_tensor.device) if isinstance(self.perturb_size, torch.Tensor) else self.perturb_size
         x_low = x0 - perturb_size
@@ -239,7 +245,11 @@ class PGDMutation(MutationStrategy):
                     f"Model output should have batch dimension, got shape {output.shape}. "
                     f"Ensure model outputs include batch dimension."
                 )
-                target = torch.full((output.shape[0],), label, dtype=torch.long, device=get_default_device())
+                # Handle both single label and list of labels
+                if isinstance(label, (list, tuple)):
+                    target = torch.tensor(label, dtype=torch.long, device=output.device)
+                else:
+                    target = torch.full((B,), label, dtype=torch.long, device=output.device)
                 loss = F.cross_entropy(output, target)
             else:
                 # If no label is provided, maximize output variance
@@ -543,89 +553,108 @@ class MutationEngine:
             if isinstance(module, (nn.ReLU, nn.Linear, nn.Conv2d)):
                 module.register_forward_hook(make_hook(name))
                 
-    def mutate(self, labeled_tensor: 'LabeledInputTensor') -> torch.Tensor:
+    def mutate(self, seed: 'FuzzingSeed') -> torch.Tensor:
         """
-        Apply random mutation strategy and project to InputSpec.
+        Apply random mutation strategy and project to InputSpec (single sample).
+        
+        Delegates to mutate_batch() for unified implementation.
         
         Args:
-            labeled_tensor: LabeledInputTensor containing input tensor and ground truth label.
-                           Label is used for targeted attacks (e.g., PGD with cross-entropy loss).
+            seed: FuzzingSeed from corpus with .tensor [1,C,H,W] and .label
         
         Returns:
-            Mutated input satisfying InputSpec constraints
+            Mutated input [1, C, H, W] satisfying InputSpec constraints
         """
-        # Extract tensor and label from labeled_tensor
-        input_tensor = labeled_tensor.tensor
-        label = labeled_tensor.label
+        # Delegate to batched implementation - result is already [1, C, H, W]
+        return self.mutate_batch([seed])
+    
+    def mutate_batch(self, seeds: 'List[FuzzingSeed]') -> torch.Tensor:
+        """
+        Apply mutation to a batch of seeds simultaneously.
         
-        # Select strategy
+        This is the core mutation implementation. All mutation strategies
+        work with batched tensors due to PyTorch's broadcasting semantics.
+        
+        Args:
+            seeds: List of FuzzingSeed from corpus, each with .tensor [1,C,H,W] and .label
+        
+        Returns:
+            Batched mutated tensor [B, C, H, W] satisfying InputSpec constraints
+        """
+        if not seeds:
+            raise ValueError("Empty seed list")
+        
+        B = len(seeds)
+        
+        # Stack input tensors: each seed.tensor is [1, C, H, W] -> batch is [B, C, H, W]
+        batch_input = torch.cat([s.tensor for s in seeds], dim=0).to(self.device)
+        labels = [s.label for s in seeds]
+        
+        # Select strategy (same for all samples in batch)
         strategy_names = list(self.weights.keys())
         strategy_probs = list(self.weights.values())
         strategy_name = np.random.choice(strategy_names, p=strategy_probs)
         strategy = self.strategies[strategy_name]
         
-        # NEW: Store strategy for tracing
+        # Store strategy for tracing
         self.last_strategy = strategy_name
         
-        # Apply mutation (pass label for strategies that support it, e.g., PGD)
-        input_device = input_tensor.to(self.device)
+        # Apply batched mutation
+        # All strategies work with batched tensors due to torch ops
         mutated = strategy.mutate(
-            input_device,
+            batch_input,
             self.model,
             self.activation_map,
-            label=label
+            label=labels if B > 1 else labels[0]  # Single label for B=1, list for B>1
         )
         
-        # Project to InputSpec constraints
-        mutated = self._project(mutated)
+        # Batched projection to InputSpec constraints
+        # Pass seeds so we can use per-seed centers for LINF_BALL
+        mutated = self._project(mutated, seeds)
         
-        self.total_mutations += 1
+        self.total_mutations += B
         return mutated
     
-    def _project(self, tensor: torch.Tensor) -> torch.Tensor:
+    def _project(self, tensor: torch.Tensor, seeds: 'Optional[List[FuzzingSeed]]' = None) -> torch.Tensor:
         """
         Project tensor to satisfy InputSpec constraints.
         
+        Handles both single [1, C, H, W] and batched [B, C, H, W] tensors.
+        
+        For LINF_BALL with multiple seeds: uses each seed's tensor as center
+        (per-seed projection) instead of the global InputSpec center.
+        
         Supports:
         - BOX: Clip to [lb, ub]
-        - LINF_BALL: Clamp to L∞ ball around center
+        - LINF_BALL: Clamp to L∞ ball around center (per-seed or global)
         - LIN_POLY: (TODO) Project to linear polytope
-        
-        Note: InputSpec bounds should always match tensor shape (enforced by spec creators).
         """
         if self.input_spec is None:
             return tensor
         
+        B = tensor.shape[0]
+        
         if self.input_spec.kind == InKind.BOX:
-            # Box constraints: clip to bounds
             lb = self.input_spec.lb.to(tensor.device)
             ub = self.input_spec.ub.to(tensor.device)
             
-            # Verify shape consistency (should be guaranteed by spec creators)
-            assert lb.shape == tensor.shape, (
-                f"Shape mismatch in BOX projection: "
-                f"input_spec.lb.shape={lb.shape} != tensor.shape={tensor.shape}. "
-                f"This indicates a bug in the spec creator - bounds should be reshaped during spec creation."
-            )
-            assert ub.shape == tensor.shape, (
-                f"Shape mismatch in BOX projection: "
-                f"input_spec.ub.shape={ub.shape} != tensor.shape={tensor.shape}. "
-                f"This indicates a bug in the spec creator - bounds should be reshaped during spec creation."
-            )
+            # Expand bounds if needed: [1, C, H, W] -> [B, C, H, W]
+            if lb.shape[0] == 1 and B > 1:
+                lb = lb.expand(B, *lb.shape[1:])
+                ub = ub.expand(B, *ub.shape[1:])
             
             return torch.clamp(tensor, lb, ub)
         
         elif self.input_spec.kind == InKind.LINF_BALL:
-            # L∞ ball: clamp perturbation to epsilon
-            center = self.input_spec.center.to(tensor.device)
             eps = self.input_spec.eps
             
-            # Verify shape consistency (center has batch dimension matching tensor)
-            assert center.shape == tensor.shape, (
-                f"Shape mismatch in LINF_BALL projection: "
-                f"input_spec.center.shape={center.shape} != tensor.shape={tensor.shape}. "
-                f"This indicates a bug in the spec creator - center should have batch dimension."
-            )
+            # Per-seed projection: use each seed's original tensor as center
+            # This ensures each sample stays within its own L∞ ball
+            assert seeds is not None and len(seeds) == B, \
+                f"LINF_BALL projection requires seeds (got {len(seeds) if seeds else 0}, expected {B})"
+            
+            # Stack seed tensors to get per-sample centers
+            center = torch.cat([s.tensor for s in seeds], dim=0).to(tensor.device)
             
             delta = tensor - center
             delta = torch.clamp(delta, -eps, eps)
@@ -634,7 +663,6 @@ class MutationEngine:
         elif self.input_spec.kind == InKind.LIN_POLY:
             # Linear polytope: Ax <= b
             # TODO: Implement quadratic programming projection
-            # For now, just return the tensor
             return tensor
         
         return tensor

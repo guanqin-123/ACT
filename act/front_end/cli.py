@@ -279,6 +279,46 @@ def print_list_downloads(creator: Optional[str] = None):
     print(f"\n{'='*100}\n")
 
 
+def run_batched_tests():
+    """Run batched integration tests."""
+    from act.front_end.batched_loader import BatchedSpecLoader
+    
+    print(f"\n{'='*100}")
+    print(f"BATCHED INTEGRATION TESTS")
+    print(f"{'='*100}")
+    
+    downloaded = tv_loader.list_downloaded_pairs()
+    if not downloaded:
+        print(f"\n⚠️  No datasets downloaded. Run: python -m act.front_end --download MNIST")
+        return
+    
+    datasets = {}
+    for p in downloaded:
+        datasets.setdefault(p['dataset'], []).append(p)
+    
+    print(f"\nFound {len(datasets)} dataset(s): {', '.join(datasets.keys())}")
+    
+    ok, fail = 0, 0
+    for ds, pairs in datasets.items():
+        model_name = pairs[0]['model']
+        try:
+            loader = BatchedSpecLoader.from_torchvision(ds, 10, eps=0.1, model_name=model_name)
+            in_spec, out_spec = loader.get_batched_specs()
+            assert in_spec.batch_size == out_spec.batch_size == 10
+            print(f"✅ {ds} + {model_name}: batch_size=10, shape={list(in_spec._get_tensor().shape)}")
+            ok += 1
+        except Exception as e:
+            print(f"❌ {ds} + {model_name}: {e}")
+            fail += 1
+    
+    print(f"\n{'='*100}")
+    print(f"RESULT: {ok}/{ok + fail} passed")
+    print(f"{'='*100}\n")
+    
+    if fail > 0:
+        raise SystemExit(1)
+
+
 def print_creators():
     """Print information about all available creators."""
     creators = list_creators()
@@ -503,6 +543,13 @@ Examples:
         help="Run inference on synthesized models to validate correctness (defaults to TorchVision, use --creator to specify)"
     )
     
+    parser.add_argument(
+        "--test-batched",
+        action="store_true",
+        dest="test_batched",
+        help="Run batched integration tests (requires downloaded datasets)"
+    )
+    
     # Add standard device/dtype arguments
     add_device_args(parser)
     
@@ -540,7 +587,7 @@ Examples:
             from act.front_end.model_synthesis import model_synthesis
             from act.util.model_inference import model_inference
             
-            wrapped_models, input_data = model_synthesis(creator=creator_name)
+            wrapped_models = model_synthesis(creator=creator_name)
             print(f"\n✓ Successfully synthesized {len(wrapped_models)} models")
             
             # Automatically run inference after synthesis
@@ -548,7 +595,7 @@ Examples:
             print(f"MODEL INFERENCE - {creator_name.upper()}")
             print(f"{'='*100}\n")
             
-            successful_models = model_inference(wrapped_models, input_data)
+            successful_models = model_inference(wrapped_models)
             print(f"\n✓ Successfully ran inference on {len(successful_models)}/{len(wrapped_models)} models")
             print(f"  Models are ready for verification")
         except Exception as e:
@@ -640,6 +687,9 @@ Examples:
             print(f"\n✗ Inference failed: {e}")
             print(f"\nTraceback:")
             traceback.print_exc()
+    
+    elif args.test_batched:
+        run_batched_tests()
     
     else:
         parser.print_help()

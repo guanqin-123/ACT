@@ -411,6 +411,7 @@ class _LayerGraphBuilder:
             nn.Flatten: self._convert_flatten,
             nn.Linear: self._convert_linear,
             nn.ReLU: lambda m: self._convert_activation(m, LayerKind.RELU),
+            nn.ReLU6: lambda m: self._convert_activation(m, LayerKind.RELU6),
             nn.Conv2d: self._convert_conv2d,
             nn.MaxPool2d: self._convert_pool2d,
             nn.AvgPool2d: self._convert_pool2d,

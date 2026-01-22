@@ -19,6 +19,28 @@ import torch
 import torch.nn as nn
 from typing import Dict, Any, Optional, List, Tuple, Union
 
+
+# ------------------- Utility Functions ---------------------------------------
+# Shared utilities for model inference and verification
+# -----------------------------------------------------------------------------
+def to_bool(val: Any) -> bool:
+    """
+    Convert satisfaction value to bool.
+    
+    Handles both legacy bool values and new Tensor[B] values from unified 
+    VerifiableModel that now supports batching natively.
+    
+    Args:
+        val: Either a bool or a Tensor[B] of bools
+        
+    Returns:
+        True if all elements are satisfied (for Tensor), or the bool value itself
+    """
+    if isinstance(val, torch.Tensor):
+        return bool(val.all().item())
+    return bool(val)
+
+
 # ------------------- Model Inference Function --------------------------------
 # Helper function for single model inference
 # -----------------------------------------------------------------------------
@@ -36,7 +58,18 @@ def infer_single_model(combo_id: str, model: nn.Module, input_tensor: torch.Tens
             - success: True if inference succeeded, False otherwise
             - output: Model output tensor if successful, None otherwise
             - error_msg: Error message if failed, None otherwise
+    
+    Raises:
+        AssertionError: If model and input_tensor are on different devices.
     """
+    # Verify model and input are on the same device
+    try:
+        model_device = next(model.parameters()).device
+    except StopIteration:
+        model_device = torch.device('cpu')  # Model has no parameters
+    assert input_tensor.device == model_device, \
+        f"Device mismatch: input on {input_tensor.device}, model on {model_device}"
+    
     try:
         with torch.no_grad():
             output = model(input_tensor)
