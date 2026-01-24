@@ -275,8 +275,8 @@ creator = TorchVisionSpecCreator()
 results = creator.create_specs_for_data_model_pairs(...)
 
 # 2. Synthesize wrapped models
-from act.front_end.model_synthesis import model_synthesis
-wrapped_models, input_data = model_synthesis(spec_results=results)
+from act.front_end.model_synthesis import synthesize_models_grouped
+wrapped_models, reports = synthesize_models_grouped(results)
 
 # 3. Convert to ACT Net
 from act.pipeline.verification.torch2act import torch_to_act_net

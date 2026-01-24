@@ -780,7 +780,7 @@ The VNNLIB creator integrates seamlessly with ACT's verification pipeline:
 
 ```python
 from act.front_end.vnnlib_loader import VNNLibSpecCreator
-from act.front_end.model_synthesis import model_synthesis
+from act.front_end.model_synthesis import synthesize_models_grouped
 from act.pipeline.verification.torch2act import torch_to_act_net
 from act.back_end.verifier import verify_once
 
@@ -792,7 +792,7 @@ results = creator.create_specs_for_data_model_pairs(
 )
 
 # 2. Synthesize wrapped models (InputSpecLayer + Model + OutputSpecLayer)
-wrapped_models, input_data = model_synthesis(spec_results=results)
+wrapped_models, reports = synthesize_models_grouped(results)
 
 # 3. Convert to ACT Net representation
 for model_id, wrapped_model in wrapped_models.items():
@@ -841,16 +841,16 @@ for category, instance_id, pytorch_model, input_tensors, spec_pairs in results:
 #### Step 2: Model Synthesis
 
 ```python
-from act.front_end.model_synthesis import model_synthesis
+from act.front_end.model_synthesis import synthesize_models_grouped
 
 # Wrap models with spec layers
-wrapped_models, input_data = model_synthesis(spec_results=results)
+wrapped_models, reports = synthesize_models_grouped(results)
 
 # Each wrapped model: InputSpecLayer → PyTorchModel → OutputSpecLayer
 for model_id, wrapped_model in wrapped_models.items():
     print(f"Model ID: {model_id}")
     print(f"Layers: {list(wrapped_model.children())}")
-    print(f"Input data: {input_data[model_id][0].shape}")
+    print(f"Report: {reports[model_id]}")
 ```
 
 #### Step 3: Torch → ACT Conversion
@@ -901,7 +901,7 @@ elif result.status == VerifyStatus.UNKNOWN:
 
 ```python
 from act.front_end.vnnlib_loader import VNNLibSpecCreator
-from act.front_end.model_synthesis import model_synthesis
+from act.front_end.model_synthesis import synthesize_models_grouped
 from act.pipeline.verification.torch2act import torch_to_act_net
 from act.back_end.verifier import verify_once
 from act.back_end import VerifyStatus
@@ -922,7 +922,7 @@ for category in categories:
     )
     
     # Synthesize and verify
-    wrapped_models, input_data = model_synthesis(spec_results=results)
+    wrapped_models, reports = synthesize_models_grouped(results)
     
     certified = 0
     falsified = 0
@@ -930,7 +930,7 @@ for category in categories:
     
     for model_id, wrapped_model in wrapped_models.items():
         try:
-            act_net = torch_to_act_net(wrapped_model, input_data[model_id][0])
+            act_net = torch_to_act_net(wrapped_model)
             result = verify_once(act_net, solver='gurobi', timeout=60)
             
             if result.status == VerifyStatus.CERTIFIED:

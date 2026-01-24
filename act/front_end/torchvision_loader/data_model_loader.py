@@ -10,7 +10,7 @@ Copyright (C) 2025 SVF-tools/ACT
 License: AGPLv3+
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import os
 import json
 import torch
@@ -503,7 +503,8 @@ def load_dataset_model_pair(
     split: str = "test",
     batch_size: int = 1,
     shuffle: bool = False,
-    auto_download: bool = True
+    auto_download: bool = True,
+    verbose: bool = True,
 ) -> dict:
     """
     Load a previously downloaded dataset-model pair.
@@ -512,11 +513,12 @@ def load_dataset_model_pair(
     Args:
         dataset_name: Name of the dataset (case-insensitive)
         model_name: Name of the model (case-insensitive)
-        root_dir: Root directory where datasets are stored (default: from path_config.get_torchvision_data_root())
+        root_dir: Root directory where datasets are stored
         split: Which split to load ('train' or 'test')
         batch_size: Batch size for DataLoader
         shuffle: Whether to shuffle the data
         auto_download: If True and pair not found, automatically download it
+        verbose: Print loading progress (default True)
         
     Returns:
         Dictionary containing:
@@ -525,39 +527,32 @@ def load_dataset_model_pair(
         - model: torch.nn.Module object
         - metadata: Dictionary with dataset/model information
         - preprocessing: Transform pipeline used
-        
-    Example:
-        >>> result = load_dataset_model_pair("MNIST", "simple_cnn")
-        >>> model = result['model']
-        >>> dataloader = result['dataloader']
-        >>> for images, labels in dataloader:
-        ...     outputs = model(images)
     """
     import importlib.util
     
-    # Use path from config if not specified
     if root_dir is None:
         root_dir = get_torchvision_data_root()
     
-    # Normalize names (case-insensitive)
     dataset_name = find_dataset_name(dataset_name)
-    model_name = find_model_name(model_name)
     
-    # Check if pair exists
+    if model_name is None:
+        info = get_dataset_info(dataset_name)
+        if info and info.get('models'):
+            model_name = info['models'][0]
+        else:
+            raise ValueError(f"No recommended models for dataset '{dataset_name}'")
+    else:
+        model_name = find_model_name(model_name)
+    
     dataset_dir = Path(root_dir) / dataset_name
     info_path = dataset_dir / "info.json"
     
-    # Auto-download if not found
     if not dataset_dir.exists() or not info_path.exists():
         if auto_download:
-            print(f"\n{'='*80}")
-            print(f"Dataset-model pair not found locally. Downloading...")
-            print(f"{'='*80}\n")
+            if verbose:
+                print(f"Downloading {dataset_name} + {model_name}...")
             
-            # Determine which split to download
             download_split = split if split in ['train', 'test'] else 'both'
-            
-            # Download the pair
             download_result = download_dataset_model_pair(
                 dataset_name=dataset_name,
                 model_name=model_name,
@@ -566,66 +561,40 @@ def load_dataset_model_pair(
             )
             
             if download_result['status'] != 'success':
-                raise RuntimeError(
-                    f"Failed to download dataset-model pair: {download_result['message']}"
-                )
-            
-            print(f"\n{'='*80}")
-            print(f"Download completed. Proceeding to load...")
-            print(f"{'='*80}\n")
+                raise RuntimeError(f"Failed to download: {download_result['message']}")
         else:
             raise FileNotFoundError(
                 f"Dataset directory not found: {dataset_dir}\n"
-                f"Use --download {dataset_name} {model_name} to download first, "
-                f"or set auto_download=True."
+                f"Use --download {dataset_name} {model_name} to download first."
             )
     
     if not info_path.exists():
-        raise FileNotFoundError(
-            f"Metadata file not found: {info_path}\n"
-            f"The dataset directory may be incomplete."
-        )
+        raise FileNotFoundError(f"Metadata file not found: {info_path}")
     
-    # Load metadata
     with open(info_path, 'r') as f:
         metadata = json.load(f)
     
-    print(f"\n{'='*80}")
-    print(f"LOADING: {dataset_name} + {model_name}")
-    print(f"{'='*80}")
-    
-    # Check if requested split was downloaded
     if split not in metadata['splits_downloaded']:
         available = ', '.join(metadata['splits_downloaded'])
-        raise ValueError(
-            f"Split '{split}' not available. Downloaded splits: {available}\n"
-            f"Use --download {dataset_name} {model_name} --split {split} to download."
-        )
+        raise ValueError(f"Split '{split}' not available. Downloaded: {available}")
     
-    # Load dataset with preprocessing
-    print(f"[1/3] Loading dataset ({split} split)...")
+    if verbose:
+        print(f"Loading {dataset_name} + {model_name} ({split})...", end=" ")
+    
     raw_dir = dataset_dir / "raw"
-    
-    # Create preprocessing pipeline (uniform for all models)
     preprocessing = create_preprocessing_pipeline(dataset_name)
     
-    # Load dataset
     import torchvision.datasets
     dataset_class = getattr(torchvision.datasets, dataset_name)
     is_train = (split == "train")
     
-    try:
-        dataset = dataset_class(
-            root=str(raw_dir),
-            train=is_train,
-            transform=preprocessing,
-            download=False  # Already downloaded
-        )
-        print(f"  ✓ Loaded {len(dataset)} samples")
-    except Exception as e:
-        raise RuntimeError(f"Failed to load dataset: {e}")
+    dataset = dataset_class(
+        root=str(raw_dir),
+        train=is_train,
+        transform=preprocessing,
+        download=False
+    )
     
-    # Create DataLoader
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
@@ -633,67 +602,40 @@ def load_dataset_model_pair(
         num_workers=0
     )
     
-    # Load model
-    print(f"[2/3] Loading model architecture...")
     model_path = dataset_dir / "models" / f"{model_name}.py"
-    
     if not model_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
     
-    # Import torchvision.models explicitly to avoid circular import issues
     import torchvision.models
     
-    # Load model based on type
     if hasattr(torchvision.models, model_name):
-        # Standard TorchVision model
         model_fn = getattr(torchvision.models, model_name)
         model = model_fn(weights="DEFAULT")
-        print(f"  ✓ Loaded {model_name} with pre-trained weights")
         
-        # Adjust final layer for number of classes if needed
         num_classes = metadata['num_classes']
         if hasattr(model, 'fc'):
             in_features = model.fc.in_features
             if model.fc.out_features != num_classes:
                 model.fc = torch.nn.Linear(in_features, num_classes)
-                print(f"  ✓ Adjusted final layer: {in_features} → {num_classes} classes")
         elif hasattr(model, 'classifier'):
-            # For models like VGG, MobileNet
             if isinstance(model.classifier, torch.nn.Sequential):
                 in_features = model.classifier[-1].in_features
                 if model.classifier[-1].out_features != num_classes:
                     model.classifier[-1] = torch.nn.Linear(in_features, num_classes)
-                    print(f"  ✓ Adjusted classifier: {in_features} → {num_classes} classes")
             else:
                 in_features = model.classifier.in_features
                 if model.classifier.out_features != num_classes:
                     model.classifier = torch.nn.Linear(in_features, num_classes)
-                    print(f"  ✓ Adjusted classifier: {in_features} → {num_classes} classes")
-        
-        print(f"  ✓ Loaded {model_name} from torchvision.models")
     else:
-        # Custom model - need to execute the .py file
         spec = importlib.util.spec_from_file_location("custom_model", model_path)
         custom_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(custom_module)
         model = custom_module.model
-        print(f"  ✓ Loaded custom model from {model_path.name}")
     
-    model.eval()  # Set to evaluation mode by default
+    model.eval()
     
-    # Print summary
-    print(f"[3/3] Summary...")
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
-    print(f"  Dataset: {len(dataset)} samples ({split} split)")
-    print(f"  Model: {total_params:,} parameters ({trainable_params:,} trainable)")
-    print(f"  Batch size: {batch_size}")
-    print(f"  Preprocessing: {'Yes' if metadata['preprocessing_required'] else 'No'}")
-    
-    print(f"\n{'='*80}")
-    print(f"✓ LOADED SUCCESSFULLY")
-    print(f"{'='*80}")
+    if verbose:
+        print(f"OK ({len(dataset)} samples, B={batch_size})")
     
     return {
         'dataset': dataset,

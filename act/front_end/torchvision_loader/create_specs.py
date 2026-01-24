@@ -19,7 +19,7 @@ import logging
 import torch
 import torch.nn as nn
 
-from act.front_end.spec_creator_base import BaseSpecCreator, LabeledInputTensor
+from act.front_end.spec_creator_base import BaseSpecCreator
 from act.front_end.specs import InputSpec, OutputSpec, InKind, OutKind
 from act.front_end.torchvision_loader.data_model_loader import (
     list_downloaded_pairs,
@@ -45,8 +45,8 @@ class TorchVisionSpecCreator(BaseSpecCreator):
         ...     num_samples=10
         ... )
         >>> 
-        >>> for data_source, model_name, pytorch_model, labeled_tensors, spec_pairs in results:
-        ...     print(f"{data_source} + {model_name}: {len(spec_pairs)} spec pairs")
+        >>> for data_source, model_name, pytorch_model, images, labels, spec_pairs in results:
+        ...     print(f"{data_source} + {model_name}: {len(spec_pairs)} spec pairs, B={images.shape[0]}")
     """
     
     def __init__(
@@ -71,11 +71,11 @@ class TorchVisionSpecCreator(BaseSpecCreator):
         start_index: int = 0,
         split: str = "test",
         validate_shapes: bool = True
-    ) -> List[Tuple[str, str, nn.Module, List[LabeledInputTensor], List[Tuple[InputSpec, OutputSpec]]]]:
+    ) -> List[Tuple[str, str, nn.Module, torch.Tensor, torch.Tensor, List[Tuple[InputSpec, OutputSpec]]]]:
         """
         Create specs for TorchVision dataset-model pairs.
         
-        Unified return format: List of (data_source, model_name, pytorch_model, labeled_tensors, spec_pairs)
+        BATCH-NATIVE: Returns batched tensors directly (no LabeledInputTensor wrapper).
         
         Args:
             dataset_names: List of dataset names (None = all downloaded)
@@ -90,7 +90,8 @@ class TorchVisionSpecCreator(BaseSpecCreator):
             - data_source: Dataset name (e.g., "MNIST")
             - model_name: Model name (e.g., "simple_cnn")
             - pytorch_model: torch.nn.Module
-            - labeled_tensors: List of LabeledInputTensor instances
+            - images: Batched image tensor [B, C, H, W]
+            - labels: Batched label tensor [B]
             - spec_pairs: List of (InputSpec, OutputSpec) tuples
             
         Example:
@@ -141,13 +142,13 @@ class TorchVisionSpecCreator(BaseSpecCreator):
             model_name = pair_info['model']
             
             try:
-                # Load pair
+                # Load pair with batch_size=num_samples for efficiency
                 logger.info(f"Loading pair: {dataset_name} + {model_name}")
                 pair_data = load_dataset_model_pair(
                     dataset_name=dataset_name,
                     model_name=model_name,
                     split=split,
-                    batch_size=1,
+                    batch_size=num_samples,  # Load all samples in one batch
                     shuffle=False,
                     auto_download=False  # Already filtered to downloaded pairs
                 )
@@ -192,64 +193,50 @@ class TorchVisionSpecCreator(BaseSpecCreator):
         num_samples: int,
         start_index: int,
         validate_shapes: bool
-    ) -> Optional[Tuple[str, str, nn.Module, List[LabeledInputTensor], List[Tuple[InputSpec, OutputSpec]]]]:
+    ) -> Optional[Tuple[str, str, nn.Module, torch.Tensor, torch.Tensor, List[Tuple[InputSpec, OutputSpec]]]]:
         """
         Create specs for a single dataset-model pair.
         
+        BATCH-NATIVE: Creates batched specs directly with B=num_samples.
+        Each spec pair has InputSpec[B] and OutputSpec[B] where B=num_samples.
+        
         Returns:
-            Tuple of (data_source, model_name, pytorch_model, labeled_tensors, spec_pairs)
+            Tuple of (data_source, model_name, pytorch_model, images[B,C,H,W], labels[B], spec_pairs)
             or None if failed
         """
         logger.info(f"Generating specs for {data_source} + {model_name}")
         
-        # Collect samples as LabeledInputTensors
-        labeled_tensors = []
+        # Use iterator to get one batch directly
+        data_iter = iter(dataloader)
         
-        for idx, (images, targets) in enumerate(dataloader):
-            if idx < start_index:
-                continue
-            if len(labeled_tensors) >= num_samples:
-                break
-            
-            # Create LabeledInputTensor pairing image with label (keep batch dimension)
-            tensor = images  # Keep batch dimension (1, C, H, W)
-            label = targets.item()
-            labeled_tensors.append(LabeledInputTensor(tensor=tensor, label=label))
+        # Skip to start_index if needed
+        for _ in range(start_index):
+            try:
+                next(data_iter)
+            except StopIteration:
+                logger.warning(f"start_index {start_index} exceeds dataset size for {data_source}")
+                return None
         
-        if not labeled_tensors:
-            logger.warning(f"No samples collected for {data_source}")
+        # Get one batch of num_samples
+        try:
+            batched_images, batched_targets = next(data_iter)
+        except StopIteration:
+            logger.warning(f"No samples available for {data_source}")
             return None
         
-        logger.info(f"Collected {len(labeled_tensors)} samples")
+        actual_samples = batched_images.shape[0]
+        logger.info(f"Loaded {actual_samples} samples in one batch")
         
-        # Generate spec pairs for EACH sample
-        all_spec_pairs = []
+        # BATCH-NATIVE: Create batched specs directly from tensors
+        spec_pairs = self._create_batched_specs_from_tensors(batched_images, batched_targets)
         
-        for labeled_tensor in labeled_tensors:
-            # Unpack tensor and label
-            tensor, label = labeled_tensor
-            
-            # Generate input specs for this sample
-            sample_input_specs = self._generate_input_specs_for_sample(tensor)
-            
-            # Generate output specs for this sample's label
-            sample_output_specs = self._generate_output_specs_for_label(label)
-            
-            # Create combinations for this sample
-            sample_spec_pairs = self._create_spec_combinations(sample_input_specs, sample_output_specs)
-            
-            all_spec_pairs.extend(sample_spec_pairs)
+        logger.info(f"Generated {len(spec_pairs)} batched spec combinations (B={actual_samples})")
         
-        spec_pairs = all_spec_pairs
-        
-        logger.info(f"Generated {len(spec_pairs)} spec combinations")
-        
-        # Validate if requested
-        if validate_shapes:
+        if validate_shapes and spec_pairs:
             validated_pairs = self._validate_and_filter_specs(
                 spec_pairs,
                 pytorch_model,
-                labeled_tensors[0].tensor  # Use first sample for shape
+                batched_images  # Full batch for shape validation (specs are batched)
             )
             
             if len(validated_pairs) < len(spec_pairs):
@@ -263,182 +250,71 @@ class TorchVisionSpecCreator(BaseSpecCreator):
             logger.warning(f"No valid specs generated for {data_source} + {model_name}")
             return None
         
-        return (data_source, model_name, pytorch_model, labeled_tensors, spec_pairs)
+        return (data_source, model_name, pytorch_model, batched_images, batched_targets, spec_pairs)
     
-    def _generate_input_specs_for_sample(self, sample_tensor: torch.Tensor) -> List[InputSpec]:
+    def _create_batched_specs_from_tensors(
+        self,
+        batched_images: torch.Tensor,
+        batched_labels: torch.Tensor,
+    ) -> List[Tuple[InputSpec, OutputSpec]]:
         """
-        Generate input specifications for a single sample tensor.
+        Create batched specs directly from batched tensors.
         
-        Creates BOX and/or LINF_BALL specs based on configuration.
+        BATCH-NATIVE: Creates K specs with B=batched_images.shape[0].
         
         Args:
-            sample_tensor: Single input sample tensor
+            batched_images: Batched image tensor [B, C, H, W]
+            batched_labels: Batched label tensor [B]
             
         Returns:
-            List of InputSpec objects for this sample
+            List of (InputSpec[B], OutputSpec[B])
         """
-        input_specs = []
-        
-        # Get epsilon values from config
+        # Get config
         epsilons = self.config.get('epsilons', [0.01, 0.03, 0.05])
-        
-        # Get input kinds to generate
         input_kinds = self.config.get('input_kinds', ['BOX', 'LINF_BALL'])
+        output_kinds = self.config.get('output_kinds', ['MARGIN_ROBUST'])
+        margins = self.config.get('margins', [0.0])
         
-        for kind in input_kinds:
-            if kind == 'BOX':
-                # BOX: lb and ub bounds
-                for eps in epsilons:
-                    lb = torch.clamp(sample_tensor - eps, 0.0, 1.0)
-                    ub = torch.clamp(sample_tensor + eps, 0.0, 1.0)
-                    
-                    input_specs.append(InputSpec(
+        spec_pairs = []
+        
+        for in_kind in input_kinds:
+            for eps in epsilons:
+                # Create batched InputSpec
+                if in_kind == 'BOX':
+                    input_spec = InputSpec(
                         kind=InKind.BOX,
-                        lb=lb,
-                        ub=ub
-                    ))
-            
-            elif kind == 'LINF_BALL':
-                # LINF_BALL: center and epsilon
-                for eps in epsilons:
-                    input_specs.append(InputSpec(
+                        lb=torch.clamp(batched_images - eps, 0.0, 1.0),
+                        ub=torch.clamp(batched_images + eps, 0.0, 1.0),
+                    )
+                elif in_kind == 'LINF_BALL':
+                    input_spec = InputSpec(
                         kind=InKind.LINF_BALL,
-                        center=sample_tensor.clone(),
-                        eps=eps
-                    ))
-        
-        return input_specs
-    
-    def _generate_output_specs_for_label(self, label: int) -> List[OutputSpec]:
-        """
-        Generate output specifications for a single label.
-        
-        Creates MARGIN_ROBUST and/or TOP1_ROBUST specs based on configuration.
-        
-        Args:
-            label: Ground truth label
-            
-        Returns:
-            List of OutputSpec objects for this label
-        """
-        output_specs = []
-        
-        # Get output kinds to generate
-        output_kinds = self.config.get('output_kinds', ['MARGIN_ROBUST'])
-        
-        # Get margin values
-        margins = self.config.get('margins', [0.0])
-        
-        for kind in output_kinds:
-            if kind == 'MARGIN_ROBUST':
-                # MARGIN_ROBUST: classification with margin
-                for margin in margins:
-                    output_specs.append(OutputSpec(
-                        kind=OutKind.MARGIN_ROBUST,
-                        y_true=label,
-                        margin=margin
-                    ))
-            
-            elif kind == 'TOP1_ROBUST':
-                # TOP1_ROBUST: top-1 classification
-                output_specs.append(OutputSpec(
-                    kind=OutKind.TOP1_ROBUST,
-                    y_true=label
-                ))
-        
-        return output_specs
-    
-    # Legacy methods (kept for backward compatibility but not used)
-    def _generate_input_specs(self, input_tensors: List[torch.Tensor]) -> List[InputSpec]:
-        """
-        Generate input specifications from sample tensors.
-        
-        Creates BOX and/or LINF_BALL specs based on configuration.
-        For each input tensor, generates all configured spec types.
-        
-        Args:
-            input_tensors: List of input sample tensors
-            
-        Returns:
-            List of InputSpec objects (one set per input tensor)
-        """
-        input_specs = []
-        
-        # Get epsilon values from config
-        epsilons = self.config.get('epsilons', [0.01, 0.03, 0.05])
-        
-        # Get input kinds to generate
-        input_kinds = self.config.get('input_kinds', ['BOX', 'LINF_BALL'])
-        
-        # Generate specs for EACH input tensor
-        for sample_idx, sample_tensor in enumerate(input_tensors):
-            for kind in input_kinds:
-                if kind == 'BOX':
-                    # BOX: lb and ub bounds
-                    for eps in epsilons:
-                        lb = torch.clamp(sample_tensor - eps, 0.0, 1.0)
-                        ub = torch.clamp(sample_tensor + eps, 0.0, 1.0)
-                        
-                        input_specs.append(InputSpec(
-                            kind=InKind.BOX,
-                            lb=lb,
-                            ub=ub
-                        ))
+                        center=batched_images.clone(),
+                        eps=eps,
+                    )
+                else:
+                    continue
                 
-                elif kind == 'LINF_BALL':
-                    # LINF_BALL: center and epsilon
-                    for eps in epsilons:
-                        input_specs.append(InputSpec(
-                            kind=InKind.LINF_BALL,
-                            center=sample_tensor.clone(),
-                            eps=eps
-                        ))
-        
-        logger.debug(f"Generated {len(input_specs)} input specs from {len(input_tensors)} samples")
-        return input_specs
-    
-    def _generate_output_specs(self, labels: List[int]) -> List[OutputSpec]:
-        """
-        Generate output specifications for classification.
-        
-        Creates MARGIN_ROBUST and/or TOP1_ROBUST specs based on configuration.
-        For each label, generates all configured output spec types.
-        
-        Args:
-            labels: List of ground truth labels
-            
-        Returns:
-            List of OutputSpec objects (one set per label)
-        """
-        output_specs = []
-        
-        # Get output kinds to generate
-        output_kinds = self.config.get('output_kinds', ['MARGIN_ROBUST'])
-        
-        # Get margin values
-        margins = self.config.get('margins', [0.0])
-        
-        # Generate specs for EACH label
-        for y_true in labels:
-            for kind in output_kinds:
-                if kind == 'MARGIN_ROBUST':
-                    # MARGIN_ROBUST: classification with margin
+                for out_kind in output_kinds:
                     for margin in margins:
-                        output_specs.append(OutputSpec(
-                            kind=OutKind.MARGIN_ROBUST,
-                            y_true=y_true,
-                            margin=margin
-                        ))
-                
-                elif kind == 'TOP1_ROBUST':
-                    # TOP1_ROBUST: top-1 classification
-                    output_specs.append(OutputSpec(
-                        kind=OutKind.TOP1_ROBUST,
-                        y_true=y_true
-                    ))
+                        # Create batched OutputSpec
+                        if out_kind == 'MARGIN_ROBUST':
+                            output_spec = OutputSpec(
+                                kind=OutKind.MARGIN_ROBUST,
+                                y_true=batched_labels.clone(),
+                                margin=margin,
+                            )
+                        elif out_kind == 'TOP1_ROBUST':
+                            output_spec = OutputSpec(
+                                kind=OutKind.TOP1_ROBUST,
+                                y_true=batched_labels.clone(),
+                            )
+                        else:
+                            continue
+                        
+                        spec_pairs.append((input_spec, output_spec))
         
-        logger.debug(f"Generated {len(output_specs)} output specs from {len(labels)} labels")
-        return output_specs
+        return spec_pairs
     
     def _validate_and_filter_specs(
         self,
@@ -480,33 +356,3 @@ class TorchVisionSpecCreator(BaseSpecCreator):
                 logger.debug(f"Spec validation error: {e}")
         
         return valid_pairs
-
-
-# Convenience function for quick usage
-def create_torchvision_specs(
-    dataset_names: Optional[List[str]] = None,
-    model_names: Optional[List[str]] = None,
-    num_samples: int = 10,
-    config_name: str = "torchvision_classification"
-) -> List[Tuple[str, str, nn.Module, List[LabeledInputTensor], List[Tuple[InputSpec, OutputSpec]]]]:
-    """
-    Convenience function to create TorchVision specs with default settings.
-    
-    Args:
-        dataset_names: List of dataset names (None = all)
-        model_names: List of model names (None = all)
-        num_samples: Number of samples per pair
-        config_name: Configuration preset name
-        
-    Returns:
-        List of (data_source, model_name, pytorch_model, labeled_tensors, spec_pairs)
-        
-    Example:
-        >>> results = create_torchvision_specs(["MNIST"], ["simple_cnn"], num_samples=5)
-    """
-    creator = TorchVisionSpecCreator(config_name=config_name)
-    return creator.create_specs_for_data_model_pairs(
-        dataset_names=dataset_names,
-        model_names=model_names,
-        num_samples=num_samples
-    )

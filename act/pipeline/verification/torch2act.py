@@ -39,8 +39,8 @@
 #   act_net = converter.run()
 #   
 #   # ACT Net ready for verification
-#   from act.back_end.verifier import verify_once
-#   result = verify_once(act_net)
+#   from act.back_end.verifier import verify
+#   result = verify(act_net)
 #
 #===---------------------------------------------------------------------===#
 
@@ -59,7 +59,7 @@ from act.pipeline.verification.utils import _prod, _normalize_tuple
 
 # Imports needed for main() test harness
 from act.util.model_inference import model_inference
-from act.front_end.model_synthesis import model_synthesis
+from act.front_end.model_synthesis import run_synthesis_pipeline
 from act.back_end.solver.solver_torch import TorchLPSolver
 from act.back_end.solver.solver_gurobi import GurobiSolver
 from act.util.options import PerformanceOptions
@@ -411,6 +411,7 @@ class _LayerGraphBuilder:
             nn.Flatten: self._convert_flatten,
             nn.Linear: self._convert_linear,
             nn.ReLU: lambda m: self._convert_activation(m, LayerKind.RELU),
+            nn.ReLU6: lambda m: self._convert_activation(m, LayerKind.RELU6),
             nn.Conv2d: self._convert_conv2d,
             nn.MaxPool2d: self._convert_pool2d,
             nn.AvgPool2d: self._convert_pool2d,
@@ -947,7 +948,7 @@ def main():
     
     # Step 1: Synthesize all wrapped models
     print("\n Step 1: Synthesizing wrapped models...")
-    wrapped_models = model_synthesis()
+    wrapped_models = run_synthesis_pipeline()
     print(f"  Generated {len(wrapped_models)} wrapped models")
     
     # Step 2: Test all models with inference (input data now stored in models)
@@ -963,8 +964,8 @@ def main():
     print(f"\n Step 3: Converting and verifying all {len(successful_models)} successful models...")
     print(f"  Processing one at a time to avoid memory issues...")
     
-    # Import verification functions
-    from act.back_end.verifier import verify_once
+    # Import verification functions (using new unified verify() API)
+    from act.back_end.verifier import verify
     
     import gc
     import torch as torch_module
@@ -1037,12 +1038,10 @@ def main():
             
             for solver_name, solver in solvers_to_test:
                 try:
-                    # TEMPORARILY COMMENTED OUT: Testing if verify_once causes memory issue
-                    # res = verify_once(net, solver=solver, timelimit=30.0)
-                    # status = res.status
-                    status = "SKIPPED"  # Placeholder to test memory usage
+                    res = verify(net, solver=solver, timelimit=30.0)
+                    status = res.status
                     model_verification[solver_name] = status
-                    print(f"    Verification ({solver_name}): {status} (verify_once commented out)")
+                    print(f"    Verification ({solver_name}): {status}")
                     
                     if status == "UNSAT" or status == "SAT":
                         verification_success_count += 1

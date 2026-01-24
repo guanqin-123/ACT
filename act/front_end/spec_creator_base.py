@@ -313,15 +313,19 @@ class BaseSpecCreator(ABC):
             (is_valid, error_message) tuple
         """
         if spec.kind in [OutKind.MARGIN_ROBUST, OutKind.TOP1_ROBUST]:
-            if not (0 <= spec.y_true < num_classes):
-                return False, f"Class label {spec.y_true} out of range [0, {num_classes})"
+            y_true = spec.y_true
+            if isinstance(y_true, torch.Tensor):
+                if not ((y_true >= 0) & (y_true < num_classes)).all():
+                    return False, f"Some class labels out of range [0, {num_classes})"
+            else:
+                if not (0 <= y_true < num_classes):
+                    return False, f"Class label {y_true} out of range [0, {num_classes})"
         
         elif spec.kind == OutKind.LINEAR_LE:
             if spec.c.numel() != num_classes:
                 return False, f"LINEAR_LE coeff size {spec.c.numel()} != num_classes {num_classes}"
         
         elif spec.kind == OutKind.RANGE:
-            # Range specs are always valid (can be per-output or global)
             pass
         
         return True, ""
@@ -402,24 +406,27 @@ class BaseSpecCreator(ABC):
     @abstractmethod
     def create_specs_for_data_model_pairs(
         self,
-        max_samples: Optional[int] = None,
-        filter_fn: Optional[Callable] = None,
-        validate_shapes: bool = True
-    ) -> List[Tuple[str, str, torch.nn.Module, List[torch.Tensor], List[Tuple[InputSpec, OutputSpec]]]]:
+        **kwargs
+    ) -> List[Tuple[str, str, torch.nn.Module, torch.Tensor, torch.Tensor, List[Tuple[InputSpec, OutputSpec]]]]:
         """
         Create specs for data-model pairs (must be implemented by subclasses).
         
-        Args:
-            max_samples: Maximum number of samples/instances to process
-            filter_fn: Optional filter function (source, model) -> bool
+        BATCH-NATIVE: Returns batched tensors directly (no wrappers).
+        
+        Subclass implementations may accept different parameters based on their
+        data source (e.g., dataset_names for TorchVision, categories for VNNLIB).
+        
+        Common kwargs across implementations:
+            num_samples: Number of samples to process
             validate_shapes: Whether to validate spec shapes with model
         
         Returns:
-            List of (data_source, model_name, pytorch_model, input_tensors, spec_pairs) tuples
-            - data_source: Dataset/category identifier
-            - model_name: Model identifier
+            List of tuples:
+            - data_source: Dataset/category identifier (str)
+            - model_name: Model identifier (str)
             - pytorch_model: PyTorch nn.Module
-            - input_tensors: List of input tensors
+            - images: Batched input tensor [B, C, H, W] or [B, F]
+            - labels: Batched label tensor [B]
             - spec_pairs: List of (InputSpec, OutputSpec) tuples
         """
         pass

@@ -683,3 +683,72 @@ def _get_directory_size(path: Path) -> int:
     except Exception as e:
         logger.warning(f"Failed to calculate directory size: {e}")
     return total
+
+
+# =============================================================================
+# Load VNNLib Specs
+# =============================================================================
+
+def load_vnnlib(
+    category: str,
+    num_samples: int,
+    onnx_model: Optional[str] = None,
+    eps: Optional[float] = None,
+) -> Tuple['InputSpec', 'OutputSpec', nn.Module]:
+    """
+    Load specs from VNNLib category.
+    
+    Returns: (InputSpec, OutputSpec, model)
+    """
+    from act.front_end.specs import InKind, OutKind, InputSpec, OutputSpec
+    
+    download_vnnlib_category(category)
+    pairs = [p for p in list_downloaded_pairs() if p['category'] == category]
+    if not pairs:
+        raise ValueError(f"No instances for category '{category}'")
+    
+    # Filter by model if multiple exist
+    unique_models = sorted(set(Path(p['onnx_model']).name for p in pairs))
+    if len(unique_models) > 1:
+        if onnx_model is None:
+            raise ValueError(f"Category '{category}' has {len(unique_models)} models. Specify onnx_model=")
+        pairs = [p for p in pairs if Path(p['onnx_model']).name == Path(onnx_model).name]
+    
+    pairs = pairs[:min(num_samples, len(pairs))]
+    
+    # Load model ONCE
+    onnx_path = Path(pairs[0]['paths']['onnx'])
+    model = convert_onnx_to_pytorch(onnx_path, simplify=True)
+    model.eval()
+    input_shape = get_onnx_input_shape(onnx_path)
+    
+    # Parse VNNLIB specs
+    images, labels = [], []
+    for p in pairs:
+        try:
+            vnn_path = Path(p['paths']['vnnlib'])
+            tensor, meta = parse_vnnlib_to_tensors(vnn_path, input_shape)
+            images.append(tensor.squeeze(0))
+            labels.append(extract_label_from_vnnlib(vnn_path) or 0)
+        except Exception as e:
+            logger.warning(f"Skipping {p['vnnlib_spec']}: {e}")
+    
+    if not images:
+        raise RuntimeError(f"Failed to load samples from '{category}'")
+    
+    images_t = torch.stack(images)
+    labels_t = torch.tensor(labels, dtype=torch.long)
+    
+    # Infer eps if not provided
+    if eps is None:
+        _, meta = parse_vnnlib_to_tensors(Path(pairs[0]['paths']['vnnlib']), input_shape)
+        if 'input_lb' in meta and 'input_ub' in meta:
+            eps = float(((meta['input_ub'] - meta['input_lb']) / 2).flatten().max())
+        else:
+            eps = 0.0
+    
+    return (
+        InputSpec(kind=InKind.LINF_BALL, center=images_t, eps=eps),
+        OutputSpec(kind=OutKind.TOP1_ROBUST, y_true=labels_t),
+        model
+    )

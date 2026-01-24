@@ -144,18 +144,19 @@ import copy
 import torch
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Union
 
 from act.pipeline.verification.model_factory import ModelFactory
 from act.pipeline.verification.torch2act import TorchToACT
 from act.pipeline.verification.per_neuron_bounds import PerNeuronCheckConfig, run_per_neuron_bounds_check
-from act.back_end.verifier import verify_once, gather_input_spec_layers, seed_from_input_specs, get_input_ids, get_assert_layer, find_entry_layer_id
+from act.back_end.verifier import verify, gather_input_spec_layers, seed_from_input_specs, get_input_ids, get_assert_layer, find_entry_layer_id
 from act.util.stats import VerifyStatus
 from act.back_end.solver.solver_gurobi import GurobiSolver
 from act.back_end.solver.solver_gurobi import is_gurobi_available
 from act.back_end.solver.solver_torch import TorchLPSolver
 from act.util.options import PerformanceOptions
 from act.front_end.specs import OutKind
+from act.util.model_inference import to_bool
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -240,7 +241,7 @@ class VerificationValidator:
             x = x.to(device=self.device, dtype=self.dtype)
             with torch.no_grad():
                 res = model(x)
-            if isinstance(res, dict) and res.get("input_satisfied", False) and (not res.get("output_satisfied", True)):
+            if isinstance(res, dict) and to_bool(res.get("input_satisfied", False)) and (not to_bool(res.get("output_satisfied", True))):
                 logger.info("  🔴 Counterexample found (spec_center)")
                 logger.info("     Input explanation:  %s", res.get("input_explanation"))
                 logger.info("     Output explanation: %s", res.get("output_explanation"))
@@ -257,7 +258,7 @@ class VerificationValidator:
                         x = x.to(device=self.device, dtype=self.dtype)
                         with torch.no_grad():
                             res = model(x)
-                        if isinstance(res, dict) and res.get("input_satisfied", False) and (not res.get("output_satisfied", True)):
+                        if isinstance(res, dict) and to_bool(res.get("input_satisfied", False)) and (not to_bool(res.get("output_satisfied", True))):
                             logger.info("  🔴 Counterexample found (spec_per_dim_%s_%d)", tag, i)
                             logger.info("     Input explanation:  %s", res.get("input_explanation"))
                             logger.info("     Output explanation: %s", res.get("output_explanation"))
@@ -271,7 +272,7 @@ class VerificationValidator:
                 x = x.to(device=self.device, dtype=self.dtype)
                 with torch.no_grad():
                     res = model(x)
-                if isinstance(res, dict) and res.get("input_satisfied", False) and (not res.get("output_satisfied", True)):
+                if isinstance(res, dict) and to_bool(res.get("input_satisfied", False)) and (not to_bool(res.get("output_satisfied", True))):
                     logger.info("  🔴 Counterexample found (spec_random_%d)", k)
                     logger.info("     Input explanation:  %s", res.get("input_explanation"))
                     logger.info("     Output explanation: %s", res.get("output_explanation"))
@@ -374,7 +375,7 @@ class VerificationValidator:
             else:
                 raise ValueError(f"Unknown solver: {solver}")
             
-            verify_result = verify_once(act_net, solver=solver_instance)
+            verify_result = verify(act_net, solver=solver_instance)
             verifier_status = verify_result.status
             logger.info(f"     Verifier result: {verifier_status}")
             
