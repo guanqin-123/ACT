@@ -86,7 +86,15 @@ def model_inference(models: Dict[Union[str, Tuple], nn.Module]) -> Dict[Union[st
         test_label = input_layer.label
         
         # Move input to same device as model
-        model_device = next(model.parameters()).device
+        # Detect model device: try parameters first, then buffers, then default device
+        try:
+            model_device = next(iter(model.parameters())).device
+        except StopIteration:
+            try:
+                model_device = next(iter(model.buffers())).device
+            except StopIteration:
+                from act.util.device_manager import get_default_device
+                model_device = get_default_device()
         test_input = test_input.to(model_device)
         
         # Parse combo_id: handle tuple keys (dataset, model, in_kind, out_kind)

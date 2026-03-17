@@ -69,6 +69,18 @@ def convert_onnx_to_pytorch(
             except Exception as e:
                 logger.warning(f"ONNX simplification failed: {e}, using original model")
         
+        # Upgrade old opsets to version 13 so onnx2torch can handle all ops.
+        # Older VNN-COMP models (e.g., ACAS Xu opset 8) use Flatten v1 which
+        # onnx2torch doesn't support; opset ≥11 uses Flatten v11 which it does.
+        current_opset = onnx_model.opset_import[0].version if onnx_model.opset_import else 0
+        if current_opset < 13:
+            try:
+                from onnx import version_converter
+                logger.info(f"Upgrading ONNX opset {current_opset} → 13 for onnx2torch compatibility")
+                onnx_model = version_converter.convert_version(onnx_model, 13)
+            except Exception as e:
+                logger.warning(f"Opset upgrade failed ({e}), attempting conversion with opset {current_opset}")
+        
         # Convert to PyTorch
         logger.info("Converting ONNX to PyTorch")
         pytorch_model = convert(onnx_model)

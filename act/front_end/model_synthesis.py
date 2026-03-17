@@ -114,7 +114,11 @@ def _merge_specs_to_batch(
     
     # Merge input tensors: (1,C,H,W) * N → (N,C,H,W)
     tensor = torch.cat([lt.tensor for lt in lts], dim=0)
-    labels = torch.cat([lt.label for lt in lts], dim=0)
+    # Labels may be None for VNNLIB RANGE specs (no classification label)
+    if all(lt.label is not None for lt in lts):
+        labels = torch.cat([lt.label for lt in lts], dim=0)
+    else:
+        labels = None
     
     # Merge input specs based on kind
     if in_kind == InKind.BOX:
@@ -143,18 +147,49 @@ def _merge_specs_to_batch(
     else:
         raise NotImplementedError(f"Batching for {in_kind} not implemented")
     
-    # Merge output specs: y_true and margin
-    y_true = torch.cat([s.y_true for s in out_specs], dim=0)
+    # Merge output specs: y_true and margin (may be None for RANGE specs)
+    if all(s.y_true is not None for s in out_specs):
+        y_true = torch.cat([s.y_true for s in out_specs], dim=0)
+    else:
+        y_true = None
     # Use default dtype - device is automatically handled by device_manager
-    margins = torch.cat([
-        s.margin if s.margin is not None else torch.tensor([0.0], dtype=torch.get_default_dtype())
-        for s in out_specs
-    ], dim=0)
+    if all(s.margin is not None for s in out_specs):
+        margins = torch.cat([s.margin for s in out_specs], dim=0)
+    elif any(s.margin is not None for s in out_specs):
+        margins = torch.cat([
+            s.margin if s.margin is not None else torch.tensor([0.0], dtype=torch.get_default_dtype())
+            for s in out_specs
+        ], dim=0)
+    else:
+        margins = None
+    
+    # Merge output-spec-specific fields for LINEAR_LE / RANGE.
+    # Individual specs may have 1D tensors (n_outputs,) without a batch dim.
+    # Use stack for 1D → (N, n_outputs), cat for 2D+ → (N, ...).
+    def _batch_merge(tensors):
+        """Stack 1D tensors into (N,...), cat 2D+ tensors along dim=0."""
+        if tensors[0].dim() == 1:
+            return torch.stack(tensors, dim=0)       # (n,) * N → (N, n)
+        else:
+            return torch.cat(tensors, dim=0)          # (1,...) * N → (N,...)
+    
+    c_vec = None
+    d_vec = None
+    out_lb = None
+    out_ub = None
+    if all(hasattr(s, 'c') and s.c is not None for s in out_specs):
+        c_vec = _batch_merge([s.c for s in out_specs])
+    if all(hasattr(s, 'd') and s.d is not None for s in out_specs):
+        d_vec = _batch_merge([s.d for s in out_specs])
+    if all(hasattr(s, 'lb') and s.lb is not None for s in out_specs):
+        out_lb = _batch_merge([s.lb for s in out_specs])
+    if all(hasattr(s, 'ub') and s.ub is not None for s in out_specs):
+        out_ub = _batch_merge([s.ub for s in out_specs])
     
     # Create batched spec objects
     batched_lt = LabeledInputTensor(tensor=tensor, label=labels)
     batched_in = InputSpec(kind=in_kind, lb=lb, ub=ub, center=center, eps=eps)
-    batched_out = OutputSpec(kind=out_kind, y_true=y_true, margin=margins)
+    batched_out = OutputSpec(kind=out_kind, y_true=y_true, margin=margins, c=c_vec, d=d_vec, lb=out_lb, ub=out_ub)
     
     return batched_lt, batched_in, batched_out
 
@@ -201,7 +236,15 @@ def _build_batched_model(
     
     # Create VerifiableModel and move to correct device
     vm = VerifiableModel(*layers)
-    model_device = next(pytorch_model.parameters()).device
+    # Detect model device: try parameters first, then buffers, then default device
+    try:
+        model_device = next(iter(pytorch_model.parameters())).device
+    except StopIteration:
+        try:
+            model_device = next(iter(pytorch_model.buffers())).device
+        except StopIteration:
+            from act.util.device_manager import get_default_device
+            model_device = get_default_device()
     vm = vm.to(model_device)
     
     return vm

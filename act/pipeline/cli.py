@@ -370,6 +370,11 @@ def cmd_fuzz(args):
         trace_storage=args.trace_storage,
         trace_output=Path(args.trace_output) if args.trace_output else None,
     )
+    # Add optional overrides (only if explicitly specified via CLI)
+    if args.perturb_mode is not None:
+        overrides['perturb_mode'] = args.perturb_mode
+    if args.coverage_strategy is not None:
+        overrides['coverage_strategy'] = args.coverage_strategy
     config = FuzzingConfig.from_yaml(**overrides)
     
     # Create spec creator and load data-model pairs
@@ -856,6 +861,20 @@ Examples:
         "--strict-mode",
         action="store_true",
         help="Enable strict mode: raise errors on input/output constraint violations (default: False)"
+    )
+    fuzz_group.add_argument(
+        "--perturb-mode",
+        type=str,
+        choices=['adaptive_scalar', 'adaptive_perdim', 'fixed'],
+        default=None,
+        help="Perturbation sizing mode: adaptive_scalar (isotropic), adaptive_perdim (anisotropic), fixed (legacy). Default: from config.yaml"
+    )
+    fuzz_group.add_argument(
+        "--coverage-strategy",
+        type=str,
+        choices=['GlobalCov', 'BestInputCov'],
+        default=None,
+        help="Coverage tracking strategy: GlobalCov (persistent bitmap union), BestInputCov (per-input best). Default: from config.yaml"
     )
     
     # Tracing options
