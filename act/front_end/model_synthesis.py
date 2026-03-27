@@ -1,18 +1,3 @@
-#===- act/front_end/model_synthesis.py - Model Synthesis Framework -----====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   Model Synthesis and Generation Framework. Advanced neural network synthesis,
-#   optimization, and domain-specific model generation. Single-file implementation
-#   for ACT-compatible model synthesis pipeline.
-#
-#===---------------------------------------------------------------------===#
-
 # Detect if running as script (not as module) and exit with helpful message
 if __name__ == "__main__" and __package__ is None:
     import sys

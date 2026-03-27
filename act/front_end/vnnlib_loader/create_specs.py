@@ -1,17 +1,3 @@
-# ===- act/front_end/vnnlib/create_specs.py - VNNLIB Spec Creator ------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-# ===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   Create InputSpec and OutputSpec from VNNLIB benchmark instances.
-#   Parses VNNLIB constraints and converts ONNX models to PyTorch.
-#
-# ===---------------------------------------------------------------------===#
-
 from __future__ import annotations
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional

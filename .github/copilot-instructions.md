@@ -1,4 +1,4 @@
-# Copilot Instructions for Abstract Constraint Transformer (ACT)
+# Copilot Instructions for Neural Network Verification Framework
 
 ## Project Overview
 ACT is a unified neural network verification framework with a modern three-tier architecture: **Front-End** (data/model/spec processing), **Back-End** (verification core), and **Pipeline** (testing/integration). The framework supports PyTorch-native verification with automatic Torch→ACT conversion and spec-free verification.

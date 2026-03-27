@@ -1,81 +1,45 @@
-"""
-Results Aggregator for RQ1 Experiment Data.
-
-Scans experiment result JSON files, computes mean ± std across runs,
-and generates CSV, LaTeX (matching paper Table 1), and text table output.
-
-Usage:
-    python act/pipeline/script/results_aggregator.py <results_dir>
-    python act/pipeline/script/results_aggregator.py experiments/rq1 --output reports/
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 import argparse
-import csv
 import json
 import math
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from act.util.path_config import get_project_root
+
 # ---------------------------------------------------------------------------
 # Constants — ordering and display names matching paper Table 1
 # ---------------------------------------------------------------------------
 BENCHMARK_ORDER: List[str] = [
-    "acasxu",
+    "trafficsigns",
     "cifar100",
     "tinyimagenet",
-    "mnist",
-    "trafficsigns",
 ]
 
 BENCHMARK_DISPLAY: Dict[str, str] = {
-    "acasxu": r"\textsc{AcasXu}",
     "cifar100": r"\textsc{Cifar100}",
     "tinyimagenet": r"\textsc{TinyImageNet}",
-    "mnist": r"\textsc{Mnist}",
     "trafficsigns": r"\textsc{TrafficSigns}",
 }
 
 METHOD_ORDER: List[str] = [
-    "batch_aniso",
+    "seq_fix",
     "batch_iso",
-    "seq_aniso",
-    "seq_rand",
+    "batch_aniso",
 ]
 
 # paper_name values from rq1_config.py METHODS dict
 METHOD_PAPER_NAME: Dict[str, str] = {
     "batch_aniso": r"\textbf{\sysname}",
     "batch_iso": r"\textsc{Batch\text{-}Iso}",
-    "seq_aniso": r"\textsc{Seq\text{-}Aniso}",
-    "seq_rand": r"\textsc{Seq\text{-}Rand}",
+    "seq_fix": r"\textsc{Seq\text{-}Fixed}",
 }
 
 METHOD_TEXT_NAME: Dict[str, str] = {
-    "batch_aniso": "ACT (ours)",
+    "batch_aniso": "Batch-Ani",
     "batch_iso": "Batch-Iso",
-    "seq_aniso": "Seq-Aniso",
-    "seq_rand": "Seq-Rand",
+    "seq_fix": "Seq-Fixed",
 }
-
-# CSV columns
-CSV_COLUMNS: List[str] = [
-    "benchmark",
-    "method",
-    "violations_mean",
-    "violations_std",
-    "coverage_mean",
-    "coverage_std",
-    "ttfv_mean",
-    "ttfv_std",
-    "throughput_mean",
-    "throughput_std",
-    "num_runs",
-    "speedup",
-]
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +139,9 @@ class ResultsAggregator:
                 runs = bm_data.get(method, [])
                 if not runs:
                     continue
-                tp_vals = [r["throughput"] for r in runs if r.get("throughput") is not None]
+                tp_vals = [
+                    r["throughput"] for r in runs if r.get("throughput") is not None
+                ]
                 if tp_vals:
                     throughput_lookup[benchmark][method] = _mean(tp_vals)
 
@@ -206,16 +172,22 @@ class ResultsAggregator:
                     )
                     continue
 
-                violations = [r["violations"] for r in runs if r.get("violations") is not None]
-                coverages = [r["coverage"] for r in runs if r.get("coverage") is not None]
+                violations = [
+                    r["violations"] for r in runs if r.get("violations") is not None
+                ]
+                coverages = [
+                    r["coverage"] for r in runs if r.get("coverage") is not None
+                ]
                 ttfvs = [r["ttfv"] for r in runs if r.get("ttfv") is not None]
-                throughputs = [r["throughput"] for r in runs if r.get("throughput") is not None]
+                throughputs = [
+                    r["throughput"] for r in runs if r.get("throughput") is not None
+                ]
 
-                # Speedup: batch_aniso throughput / seq_rand throughput
+                # Speedup: batch_aniso throughput / seq_fix throughput
                 speedup: Optional[float] = None
                 if method == "batch_aniso":
                     ba_tp = throughput_lookup.get(benchmark, {}).get("batch_aniso")
-                    sr_tp = throughput_lookup.get(benchmark, {}).get("seq_rand")
+                    sr_tp = throughput_lookup.get(benchmark, {}).get("seq_fix")
                     if ba_tp is not None and sr_tp is not None and sr_tp > 0:
                         speedup = ba_tp / sr_tp
 
@@ -240,38 +212,12 @@ class ResultsAggregator:
         return stats
 
     # ------------------------------------------------------------------
-    # to_csv
-    # ------------------------------------------------------------------
-    def to_csv(self, output_path: Path) -> None:
-        """Write ``results_summary.csv`` to *output_path* directory."""
-        if not self._stats:
-            self.compute_stats()
-
-        csv_file = Path(output_path) / "results_summary.csv"
-        csv_file.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(csv_file, "w", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(fh, fieldnames=CSV_COLUMNS)
-            writer.writeheader()
-            for row in self._stats:
-                csv_row: Dict[str, Any] = {}
-                for col in CSV_COLUMNS:
-                    val = row.get(col)
-                    if val is None:
-                        csv_row[col] = ""
-                    elif isinstance(val, float):
-                        csv_row[col] = f"{val:.6f}"
-                    else:
-                        csv_row[col] = val
-                writer.writerow(csv_row)
-
-        print(f"CSV written to {csv_file}")
-
-    # ------------------------------------------------------------------
     # LaTeX formatting helpers
     # ------------------------------------------------------------------
     @staticmethod
-    def _fmt_violations(mean: Optional[float], std: Optional[float], num_runs: int) -> str:
+    def _fmt_violations(
+        mean: Optional[float], std: Optional[float], num_runs: int
+    ) -> str:
         if mean is None:
             return "---"
         m = int(round(mean))
@@ -281,7 +227,9 @@ class ResultsAggregator:
         return f"${m} \\pm {s}$"
 
     @staticmethod
-    def _fmt_coverage(mean: Optional[float], std: Optional[float], num_runs: int) -> str:
+    def _fmt_coverage(
+        mean: Optional[float], std: Optional[float], num_runs: int
+    ) -> str:
         if mean is None:
             return "---"
         pct = mean * 100.0
@@ -295,11 +243,13 @@ class ResultsAggregator:
         if mean is None:
             return "---"
         if num_runs <= 1 or std is None or std == 0.0:
-            return f"{mean:.1f}"
-        return f"${mean:.1f} \\pm {std:.1f}$"
+            return f"{mean:.2f}"
+        return f"${mean:.2f} \\pm {std:.2f}$"
 
     @staticmethod
-    def _fmt_throughput(mean: Optional[float], std: Optional[float], num_runs: int) -> str:
+    def _fmt_throughput(
+        mean: Optional[float], std: Optional[float], num_runs: int
+    ) -> str:
         if mean is None:
             return "---"
         if num_runs <= 1 or std is None or std == 0.0:
@@ -318,12 +268,11 @@ class ResultsAggregator:
         tex_file.parent.mkdir(parents=True, exist_ok=True)
 
         lines: List[str] = []
-        lines.append(r"\begin{tabular}{l l r r r r}")
+        lines.append(r"\begin{tabular}{l l r r r}")
         lines.append(r"\toprule")
         lines.append(
             r"\textbf{Benchmark} & \textbf{Method} "
-            r"& \textbf{Violations} & \textbf{Cov.\,(\%)} "
-            r"& \textbf{TTFV\,(s)} & \textbf{Thpt.\,(it/s)} \\"
+            r"& \textbf{Violations} & \textbf{TTFV\,(s)} & \textbf{Thpt.\,(it/s)} \\"
         )
         lines.append(r"\midrule")
 
@@ -340,22 +289,20 @@ class ResultsAggregator:
                 row = lookup.get((benchmark, method))
                 if row is None or row["num_runs"] == 0:
                     paper_name = METHOD_PAPER_NAME.get(method, method)
-                    lines.append(
-                        f"  & {paper_name}"
-                        f"  & --- & --- & --- & --- \\\\"
-                    )
+                    lines.append(f"  & {paper_name}  & --- & --- & --- \\\\")
                     continue
 
                 nr = row["num_runs"]
-                viol = self._fmt_violations(row["violations_mean"], row["violations_std"], nr)
-                cov = self._fmt_coverage(row["coverage_mean"], row["coverage_std"], nr)
+                viol = self._fmt_violations(
+                    row["violations_mean"], row["violations_std"], nr
+                )
                 ttfv = self._fmt_ttfv(row["ttfv_mean"], row["ttfv_std"], nr)
-                thpt = self._fmt_throughput(row["throughput_mean"], row["throughput_std"], nr)
+                thpt = self._fmt_throughput(
+                    row["throughput_mean"], row["throughput_std"], nr
+                )
                 paper_name = METHOD_PAPER_NAME.get(method, method)
 
-                lines.append(
-                    f"  & {paper_name:<35s} & {viol} & {cov} & {ttfv} & {thpt} \\\\"
-                )
+                lines.append(f"  & {paper_name:<35s} & {viol} & {ttfv} & {thpt} \\\\")
 
             # \midrule between benchmarks, \bottomrule after the last
             if bm_idx < len(BENCHMARK_ORDER) - 1:
@@ -384,10 +331,8 @@ class ResultsAggregator:
         w_cov = 16
         w_ttfv = 14
         w_thpt = 16
-        w_runs = 5
-        w_spd = 8
 
-        sep = "-" * (w_bm + w_method + w_viol + w_cov + w_ttfv + w_thpt + w_runs + w_spd + 7)
+        sep = "-" * (w_bm + w_method + w_viol + w_cov + w_ttfv + w_thpt + 5)
 
         header = (
             f"{'Benchmark':<{w_bm}} "
@@ -395,9 +340,16 @@ class ResultsAggregator:
             f"{'Violations':>{w_viol}} "
             f"{'Coverage(%)':>{w_cov}} "
             f"{'TTFV(s)':>{w_ttfv}} "
-            f"{'Thpt(it/s)':>{w_thpt}} "
-            f"{'Runs':>{w_runs}} "
-            f"{'Speedup':>{w_spd}}"
+            f"{'Thpt(it/s)':>{w_thpt}}"
+        )
+
+        header = (
+            f"{'Benchmark':<{w_bm}} "
+            f"{'Method':<{w_method}} "
+            f"{'Violations':>{w_viol}} "
+            f"{'Coverage(%)':>{w_cov}} "
+            f"{'TTFV(s)':>{w_ttfv}} "
+            f"{'Thpt(it/s)':>{w_thpt}}"
         )
 
         print(sep)
@@ -421,9 +373,7 @@ class ResultsAggregator:
                         f"{'---':>{w_viol}} "
                         f"{'---':>{w_cov}} "
                         f"{'---':>{w_ttfv}} "
-                        f"{'---':>{w_thpt}} "
-                        f"{'0':>{w_runs}} "
-                        f"{'---':>{w_spd}}"
+                        f"{'---':>{w_thpt}}"
                     )
                     continue
 
@@ -445,9 +395,9 @@ class ResultsAggregator:
                     cm = row["coverage_mean"] * 100.0
                     if nr > 1 and row["coverage_std"] and row["coverage_std"] > 0:
                         cs = row["coverage_std"] * 100.0
-                        cov_str = f"{cm:.1f}±{cs:.1f}"
+                        cov_str = f"{cm:.2f}±{cs:.2f}"
                     else:
-                        cov_str = f"{cm:.1f}"
+                        cov_str = f"{cm:.2f}"
                 else:
                     cov_str = "---"
 
@@ -463,7 +413,9 @@ class ResultsAggregator:
                 # Throughput
                 if row["throughput_mean"] is not None:
                     if nr > 1 and row["throughput_std"] and row["throughput_std"] > 0:
-                        thpt_str = f"{row['throughput_mean']:.1f}±{row['throughput_std']:.1f}"
+                        thpt_str = (
+                            f"{row['throughput_mean']:.1f}±{row['throughput_std']:.1f}"
+                        )
                     else:
                         thpt_str = f"{row['throughput_mean']:.1f}"
                 else:
@@ -481,9 +433,7 @@ class ResultsAggregator:
                     f"{viol_str:>{w_viol}} "
                     f"{cov_str:>{w_cov}} "
                     f"{ttfv_str:>{w_ttfv}} "
-                    f"{thpt_str:>{w_thpt}} "
-                    f"{str(nr):>{w_runs}} "
-                    f"{spd_str:>{w_spd}}"
+                    f"{thpt_str:>{w_thpt}}"
                 )
 
             if bm_idx < len(BENCHMARK_ORDER) - 1:
@@ -515,23 +465,23 @@ def main() -> None:
 
     results_dir = Path(args.results_dir)
     if not results_dir.exists():
-        print(f"ERROR: results directory does not exist: {results_dir}", file=sys.stderr)
+        print(
+            f"ERROR: results directory does not exist: {results_dir}", file=sys.stderr
+        )
         sys.exit(1)
     if not results_dir.is_dir():
         print(f"ERROR: not a directory: {results_dir}", file=sys.stderr)
         sys.exit(1)
 
-    output_dir = Path(args.output) if args.output else results_dir
+    output_dir = (
+        Path(args.output) if args.output else Path(get_project_root()) / "figures"
+    )
 
     aggregator = ResultsAggregator(results_dir)
     raw = aggregator.scan_results()
 
     # Check if any results were found
-    total_runs = sum(
-        len(runs)
-        for bm_data in raw.values()
-        for runs in bm_data.values()
-    )
+    total_runs = sum(len(runs) for bm_data in raw.values() for runs in bm_data.values())
     if total_runs == 0:
         print(
             f"ERROR: no run_*.json files found under {results_dir}/{{benchmark}}/{{method}}/",
@@ -544,7 +494,6 @@ def main() -> None:
     aggregator.compute_stats()
     aggregator.to_text()
     print()
-    aggregator.to_csv(output_dir)
     aggregator.to_latex(output_dir)
 
 

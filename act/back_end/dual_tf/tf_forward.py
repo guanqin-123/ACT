@@ -1,21 +1,3 @@
-#===- act/back_end/dual_tf/tf_forward.py - Forward Bounds ----------------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   Forward bound propagation for DualTF using linear coefficient tracking.
-#   Tracks linear coefficients: output = A @ input + bias
-#   Bounds: lb = A @ x0 + bias - |A| @ eps, ub = A @ x0 + bias + |A| @ eps
-#   
-#   Much tighter than interval propagation for deeper networks.
-#   For activation layers, returns PRE-activation bounds (needed by dual backward).
-#
-#===---------------------------------------------------------------------===#
-
 import torch
 import torch.nn.functional as F
 from typing import Dict, Tuple

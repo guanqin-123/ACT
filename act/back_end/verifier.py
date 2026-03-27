@@ -1,25 +1,3 @@
-#===- act/back_end/verifier.py - Spec-free Verification Engine ----------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   Spec-free, input-free verification (single-shot).
-#   Assumes ACT Net already encodes input and output specifications via
-#   INPUT_SPEC and ASSERT layers produced by torch2act.TorchToACT.
-#
-# Architecture:
-#   1. Extract seed bounds and constraints from INPUT_SPEC layers
-#   2. Create entry_fact (Fact with bounds + all constraints)
-#   3. Pass entry_fact to analyze() for abstract interpretation
-#   4. Export all constraints via export_to_solver() (includes LIN_POLY)
-#   5. Add negated ASSERT property and solve
-#
-#===---------------------------------------------------------------------===#
-
 # Public API:
 #   - verify_once(net, solver, timelimit=None) -> VerifyResult
 #

@@ -1,18 +1,3 @@
-#===- act/back_end/hybridz_tf/tf_transformer.py - HybridZ Transformer TF -====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   HybridZ Transformer Transfer Functions. Implements HybridZ-based transfer
-#   functions for Transformer layers including layer normalization, attention
-#   mechanisms, and position encoding.
-#
-#===---------------------------------------------------------------------===#
-
 import torch
 import math
 from typing import Optional

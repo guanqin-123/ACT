@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""
-Creator Registry for ACT Specification Creators.
-
-Provides factory pattern for managing multiple spec creators (TorchVision, VNNLIB)
-with automatic detection and routing.
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 from typing import Dict, Tuple, Optional, List
 from act.front_end.spec_creator_base import BaseSpecCreator
 

@@ -2,47 +2,45 @@
 # ===========================================================================
 # RQ3 Scale Sensitivity Experiment Runner
 #
-# Runs 12 configurations (2 benchmarks × 6 scale factors) × 5 runs = 60 total.
-# Estimated time: ~5 hours on GPU (60 × 300s + overhead).
-#
 # Usage:
 #   bash act/pipeline/script/run_rq3.sh [OPTIONS]
 #
 # Options:
-#   --device DEVICE     cpu or cuda (default: cuda)
-#   --timeout SECONDS   Per-run timeout (default: 300)
-#   --runs N            Runs per config (default: 5)
-#   --output-dir DIR    Results directory (default: experiments/rq3)
-#   --dry-run           Print what would be run without executing
-#   --benchmark NAME    Run only this benchmark (default: all)
-#   --scale VALUE       Run only this scale factor (default: all)
+#   --device DEVICE          cpu or cuda (default: cuda)
+#   --timeout SECONDS        Per-run timeout (default: 60)
+#   --runs N                 Runs per config (default: 5)
+#   --output-dir DIR         Results directory (default: experiments/rq3)
+#   --dry-run                Print what would be run without executing
+#   --benchmark NAME         Run only this benchmark (default: all)
+#   --scale VALUE            Run only this scale factor (default: all)
+#   --max-instances N        Limit instances per run (default: all)
 #
-# Copyright (C) 2025 SVF-tools/ACT
-# License: AGPLv3+
 # ===========================================================================
 
 set -euo pipefail
 
 # Defaults
 DEVICE="cuda"
-TIMEOUT=300
+TIMEOUT=60
 RUNS=5
 OUTPUT_DIR="experiments/rq3"
 DRY_RUN=false
 FILTER_BENCHMARK=""
 FILTER_SCALE=""
+MAX_INSTANCES=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --device)       DEVICE="$2"; shift 2 ;;
-        --timeout)      TIMEOUT="$2"; shift 2 ;;
-        --runs)         RUNS="$2"; shift 2 ;;
-        --output-dir)   OUTPUT_DIR="$2"; shift 2 ;;
-        --dry-run)      DRY_RUN=true; shift ;;
-        --benchmark)    FILTER_BENCHMARK="$2"; shift 2 ;;
-        --scale)        FILTER_SCALE="$2"; shift 2 ;;
-        *)              echo "Unknown option: $1"; exit 1 ;;
+        --device)           DEVICE="$2"; shift 2 ;;
+        --timeout)          TIMEOUT="$2"; shift 2 ;;
+        --runs)             RUNS="$2"; shift 2 ;;
+        --output-dir)       OUTPUT_DIR="$2"; shift 2 ;;
+        --dry-run)          DRY_RUN=true; shift ;;
+        --benchmark)        FILTER_BENCHMARK="$2"; shift 2 ;;
+        --scale)            FILTER_SCALE="$2"; shift 2 ;;
+        --max-instances)    MAX_INSTANCES="$2"; shift 2 ;;
+        *)                  echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
@@ -118,6 +116,8 @@ for benchmark in "${BENCHMARKS[@]}"; do
                 echo "RUN   $benchmark  $method  scale=$scale  run_$run_id  ($(date '+%H:%M:%S'))"
                 echo "--------------------------------------------------------------"
 
+                MAX_INST_ARG=""
+                [[ -n "$MAX_INSTANCES" ]] && MAX_INST_ARG="--max-instances $MAX_INSTANCES"
                 if python "$RUNNER" \
                     --benchmark "$benchmark" \
                     --method "$method" \
@@ -127,6 +127,7 @@ for benchmark in "${BENCHMARKS[@]}"; do
                     --timeout "$TIMEOUT" \
                     --device "$DEVICE" \
                     --output-dir "$PROJECT_ROOT/$OUTPUT_DIR" \
+                    $MAX_INST_ARG \
                     2>&1 | tee -a "$LOG_FILE"; then
                     EXECUTED=$((EXECUTED + 1))
                     echo "  ✓ Done"

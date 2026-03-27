@@ -3,28 +3,17 @@
 # -*- coding: utf-8 -*-
 
 ###############################################################################
-##   Abstract Constraint Transformer (ACT) - αβ-CROWN Integration            ##
-##                                                                           ##
-##   doctormeeee (https://github.com/doctormeeee) and contributors           ##
-##   Copyright (C) 2024-2025                                                 ##
+##   αβ-CROWN Integration                                                    ##
 ##                                                                           ##
 ##   This file contains code adapted from the open-source αβ-CROWN           ##
-##   project with modifications and enhancements for integration             ##
-##   within the ACT verification framework.                                  ##
+##   project with modifications for integration within the verification      ##
+##   framework.                                                              ##
 ##                                                                           ##
 ##   Original αβ-CROWN source:                                               ##
 ##   - Repository: https://github.com/Verified-Intelligence/alpha-beta-CROWN ##
 ##     Copyright (C) 2021-2025 The α,β-CROWN Team                            ##
 ##     Licensed under BSD 3-Clause License                                   ##
 ##     Primary authors: Huan Zhang, Zhouxing Shi, Xiangru Zhong              ##
-##                                                                           ##
-##   ACT modifications include:                                              ##
-##   - Integration with ACT unified interface and parameter system           ##
-##   - Compatibility improvements for ACT verification workflows             ##
-##                                                                           ##
-##   This integration enables seamless αβ-CROWN verification within          ##
-##   the ACT framework while maintaining full compatibility with             ##
-##   original αβ-CROWN capabilities and performance characteristics.         ##
 ##                                                                           ##
 ###############################################################################
 

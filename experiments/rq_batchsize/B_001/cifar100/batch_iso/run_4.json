@@ -1,0 +1,28 @@
+{
+  "benchmark": "cifar100",
+  "method": "batch_iso",
+  "run_id": 4,
+  "violations": 0,
+  "coverage": 0.5774760383386581,
+  "ttfv": null,
+  "throughput": 25.727072449135772,
+  "total_time": 60.01460146903992,
+  "num_model_groups": 1,
+  "batch_mode": "all",
+  "instances_processed": 1,
+  "per_group_results": [
+    {
+      "model_key": "cifar100_2024::CIFAR100_resnet_medium_CIFAR100_resnet_medium_prop_idx_3965_sidx_688_eps_0.0039::BOX::TOP1_ROBUST",
+      "batch_size": 1,
+      "violations": 0,
+      "coverage": 0.5774760383386581,
+      "ttfv": null,
+      "throughput": 25.72943657340384,
+      "time": 60.013290882110596,
+      "total_iterations": 1544,
+      "violated_seed_indices": []
+    }
+  ],
+  "violation_timestamps": [],
+  "all_violated_indices": []
+}

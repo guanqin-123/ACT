@@ -1,28 +1,16 @@
-"""
-RQ3 Results Aggregator: Scale Factor Sensitivity.
-
-Scans RQ3 experiment results for both batch_aniso and batch_iso,
-produces tables showing how each method responds to varying scale factor s.
-
-Usage:
-    python act/pipeline/script/rq3_aggregator.py experiments/rq3
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from act.util.path_config import get_project_root
+
 SCALE_FACTORS = [0.01, 0.05, 0.1, 0.2, 0.3, 0.5]
-METHODS = ["batch_aniso", "batch_iso"]
+METHODS = ["batch_iso", "batch_aniso"]
 BENCHMARK_ORDER = ["cifar100", "tinyimagenet"]
 
 BENCHMARK_DISPLAY = {
@@ -229,7 +217,9 @@ def main() -> None:
         print(f"ERROR: {results_dir} does not exist", file=sys.stderr)
         sys.exit(1)
 
-    output_dir = Path(args.output) if args.output else results_dir
+    output_dir = (
+        Path(args.output) if args.output else Path(get_project_root()) / "figures"
+    )
 
     aggregator = ResultsAggregator(results_dir)
     aggregator.scan_and_compute()
@@ -247,7 +237,6 @@ def main() -> None:
 
     aggregator.to_text()
     print()
-    aggregator.to_csv(output_dir)
     aggregator.to_latex(output_dir)
 
 

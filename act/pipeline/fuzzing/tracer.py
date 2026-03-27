@@ -1,16 +1,3 @@
-"""
-Execution tracer for ACTFuzzer with configurable detail levels.
-
-Unified tracing architecture supporting 4 detail levels:
-- Level 0: Lightweight metrics (iteration, mutation, coverage)
-- Level 1: + Input tensors and seed genealogy
-- Level 2: + Full layer activations
-- Level 3: + Gradients and loss values
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Optional, Any

@@ -1,19 +1,3 @@
-#===- act/back_end/hybridz_tf/tf_cnn.py - HybridZ CNN Transfer Functions ====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   HybridZ CNN Transfer Functions. Implements HybridZ-based transfer functions
-#   for CNN layers including convolution, pooling, and tensor reshaping
-#   operations.
-#
-#===---------------------------------------------------------------------===#
-
-
 import torch
 import torch.nn.functional as F
 from typing import List, Tuple

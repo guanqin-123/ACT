@@ -1,0 +1,12 @@
+{
+  "category": "traffic_signs_recognition_2023",
+  "num_instances": 44,
+  "num_onnx_models": 3,
+  "num_vnnlib_specs": 44,
+  "source": "https://raw.githubusercontent.com/VNN-COMP/vnncomp2024_benchmarks/main/benchmarks",
+  "paths": {
+    "onnx": "/srv/scratch/PAG/Guanqin/posdoc/ASE/ACT/data/vnnlib/traffic_signs_recognition_2023/onnx",
+    "vnnlib": "/srv/scratch/PAG/Guanqin/posdoc/ASE/ACT/data/vnnlib/traffic_signs_recognition_2023/vnnlib",
+    "instances": "/srv/scratch/PAG/Guanqin/posdoc/ASE/ACT/data/vnnlib/traffic_signs_recognition_2023/instances.csv"
+  }
+}

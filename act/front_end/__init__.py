@@ -1,18 +1,3 @@
-#===- act/front_end/__init__.py - ACT Frontend Preprocessing Module ----====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   ACT Front-End module providing unified specification system and utilities
-#   for DNN verification. Integrates with spec creators for data/model/spec
-#   loading and synthesis.
-#
-#===---------------------------------------------------------------------===#
-
 """
 ACT Front-End Module
 

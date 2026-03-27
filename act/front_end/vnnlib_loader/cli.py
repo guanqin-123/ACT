@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""
-Command-Line Interface for VNNLIB Category Management.
-
-Provides CLI tools for exploring VNN-COMP categories, downloading benchmarks,
-parsing VNNLIB files, and managing ONNX models.
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 import argparse
 from typing import Optional
 

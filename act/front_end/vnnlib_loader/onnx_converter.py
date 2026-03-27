@@ -1,17 +1,3 @@
-#===- act/front_end/vnnlib/onnx_converter.py - ONNX to PyTorch -------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   Convert ONNX models to PyTorch nn.Module for unified verification interface.
-#   Supports model validation and shape inference.
-#
-#===---------------------------------------------------------------------===#
-
 from __future__ import annotations
 from pathlib import Path
 from typing import Tuple, Optional

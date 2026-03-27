@@ -1,15 +1,3 @@
-#!/usr/bin/env python3
-"""
-Dataset-Model Mapping for TorchVision Datasets.
-
-This module provides comprehensive mappings between torchvision datasets
-and appropriate PyTorch models, including recommended architectures,
-input sizes, number of classes, and usage notes.
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 from typing import Dict, Any, List, Optional
 
 

@@ -2,7 +2,7 @@
 
 
 
-PyTorch model generation, ACT conversion, and testing utilities for the Abstract Constraint Transformer (ACT) framework.A comprehensive testing framework for validating the Abstract Constraint Transformer (ACT) abstraction verifier with configurable mock testing, property-based validation, and regression testing capabilities.
+PyTorch model generation, conversion, and testing utilities for the verification framework. A comprehensive testing framework for validating the abstraction verifier with configurable mock testing, property-based validation, and regression testing capabilities.
 
 
 
@@ -966,8 +966,5 @@ except ValueError as e:
 
 ## License
 
-ACT: Abstract Constraint Transformer  
-Copyright (C) 2025– ACT Team
-
-Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).  
+Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
 Distributed without any warranty; see <http://www.gnu.org/licenses/>.

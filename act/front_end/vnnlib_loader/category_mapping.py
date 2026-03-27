@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""
-VNNLIB Category Mapping for ACT Verification Framework.
-
-Provides mapping between VNNLIB benchmark categories and their properties.
-Similar to TorchVision's data_model_mapping but for VNNLIB benchmarks.
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 from typing import Dict, List, Optional
 
 # VNNLIB Category Mapping

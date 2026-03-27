@@ -1,12 +1,3 @@
-"""
-Trace storage backends for ACTFuzzer execution traces.
-
-Supports HDF5 (recommended), JSON, and async wrappers for performance.
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from pathlib import Path

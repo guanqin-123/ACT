@@ -1,15 +1,3 @@
-#!/usr/bin/env python3
-"""
-Dataset-Model Loader for TorchVision.
-
-Provides functionality to download, load, and manage dataset-model pairs
-from TorchVision, including automatic downloading, preprocessing, and
-model instantiation.
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 from typing import Dict, Any, List, Optional
 import os
 import json

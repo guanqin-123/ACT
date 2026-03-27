@@ -1,17 +1,3 @@
-#===- act/back_end/net_factory.py - YAML-Driven Network Factory ----------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   YAML-driven network factory for generating ACT example networks with
-#   automatic parameter generation for INPUT_SPEC and ASSERT layers.
-#
-#===---------------------------------------------------------------------===#
-#
 # ASSERT Layer Specification Guide
 # =================================
 #

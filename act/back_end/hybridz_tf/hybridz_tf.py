@@ -1,18 +1,3 @@
-#===- act/back_end/hybridz_tf/hybridz_tf.py - HybridZ Transfer Function -====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   HybridZ Transfer Function Implementation. Implements the HybridzTF class
-#   that provides zonotope-based transfer functions with enhanced precision
-#   over interval methods.
-#
-#===---------------------------------------------------------------------===#
-
 """
 """
 

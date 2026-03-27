@@ -1,0 +1,28 @@
+{
+  "benchmark": "tinyimagenet",
+  "method": "batch_iso",
+  "run_id": 3,
+  "violations": 0,
+  "coverage": 0.6074950690335306,
+  "ttfv": null,
+  "throughput": 16.992064462692852,
+  "total_time": 60.02802085876465,
+  "num_model_groups": 1,
+  "batch_mode": "all",
+  "instances_processed": 1,
+  "per_group_results": [
+    {
+      "model_key": "tinyimagenet_2024::TinyImageNet_resnet_medium_TinyImageNet_resnet_medium_prop_idx_3866_sidx_8102_eps_0.0039::BOX::TOP1_ROBUST",
+      "batch_size": 1,
+      "violations": 0,
+      "coverage": 0.6074950690335306,
+      "ttfv": null,
+      "throughput": 16.993615296205395,
+      "time": 60.02668118476868,
+      "total_iterations": 1020,
+      "violated_seed_indices": []
+    }
+  ],
+  "violation_timestamps": [],
+  "all_violated_indices": []
+}

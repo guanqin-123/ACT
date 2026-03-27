@@ -1,18 +1,3 @@
-#===- act/pipeline/utils.py - Pipeline Testing Utilities ---------------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   Shared utilities for ACT pipeline testing framework. Provides common
-#   utilities for parallel execution, performance profiling, logging,
-#   and other shared functionality across the pipeline testing system.
-#
-#===---------------------------------------------------------------------===#
-
 import time
 import psutil
 import logging

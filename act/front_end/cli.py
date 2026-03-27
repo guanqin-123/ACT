@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""
-Unified Command-Line Interface for ACT Front-End.
-
-Provides a unified CLI that supports both TorchVision datasets/models and VNNLIB
-verification benchmarks with automatic creator detection.
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 import argparse
 from pathlib import Path
 from typing import Optional

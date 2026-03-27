@@ -1,18 +1,3 @@
-#===- act/back_end/serialization.py - ACT Net JSON Serialization -------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   JSON serialization and deserialization for ACT Net and Layer structures.
-#   Provides robust tensor handling, schema validation, and round-trip
-#   conversion capabilities for neural network verification models.
-#
-#===---------------------------------------------------------------------===#
-
 from __future__ import annotations
 import json
 import base64

@@ -1,18 +1,3 @@
-#===- act/pipeline/__init__.py - ACT Pipeline Module -------------------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   ACT Pipeline module for PyTorch model generation and testing utilities.
-#   Provides tools for converting between PyTorch models and ACT Nets,
-#   verifier validation, and utility functions.
-#
-#===---------------------------------------------------------------------===#
-
 """ACT Pipeline Module - Model Generation and Testing Utilities.
 
 This module provides utilities for PyTorch model generation, ACT conversion,

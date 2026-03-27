@@ -1,12 +1,3 @@
-"""
-Property violation detection for ACTFuzzer.
-
-Checks if model outputs violate OutputSpec properties and records counterexamples.
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, List, Tuple

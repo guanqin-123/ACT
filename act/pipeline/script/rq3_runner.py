@@ -1,17 +1,3 @@
-"""
-RQ3 Experiment Runner: Scale Factor Sensitivity.
-
-Varies the perturbation scale factor s for batch_aniso across benchmarks.
-Reuses run_single_experiment() from rq1_runner.py — no duplication of fuzzing logic.
-
-Usage:
-    python act/pipeline/script/rq3_runner.py --benchmark acasxu --scale 0.1 --runs 1 --timeout 30 --device cpu --max-instances 2
-    python act/pipeline/script/rq3_runner.py --benchmark cifar100 --scale 0.05 --runs 5 --timeout 300 --device cuda
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 from __future__ import annotations
 
 import argparse

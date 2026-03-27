@@ -1,19 +1,3 @@
-#===- act/front_end/model_inference.py - Model Inference Framework -----====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   Model inference and testing framework. Functions for testing
-#   synthesized models, analyzing failures, and providing user-friendly
-#   explanations for architecture mismatches in the ACT verification pipeline.
-#
-#===---------------------------------------------------------------------===#
-
-
 from __future__ import annotations
 import torch
 import torch.nn as nn

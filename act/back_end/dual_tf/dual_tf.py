@@ -1,18 +1,3 @@
-#===- act/back_end/dual_tf/dual_tf.py - Dual Transfer Function Class ----====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   DualTF class implementing Wong & Kolter backward pass for dual bounds.
-#   Algorithm: v=-c, backward through layers, accumulate contributions.
-#
-#===---------------------------------------------------------------------===#
-
-
 import torch
 from typing import Dict, Optional, Tuple
 from act.back_end.core import Bounds, Fact, Layer, Net, ConSet

@@ -790,11 +790,10 @@ rm -rf data/torchvision/MNIST
 
 ## License
 
-Copyright (C) 2025 SVF-tools/ACT
 License: AGPLv3+
 
 ## References
 
 - TorchVision Documentation: https://pytorch.org/vision/stable/
-- ACT Framework: https://github.com/SVF-tools/ACT
+- Verification Framework: <ANONYMOUS_URL>
 - PyTorch Models: https://pytorch.org/vision/stable/models.html

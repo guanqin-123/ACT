@@ -1,6 +1,6 @@
 # Setup Directory
 
-This directory contains all environment setup scripts and dependency requirements for the Abstract Constraint Transformer (ACT) framework.
+This directory contains all environment setup scripts and dependency requirements for the verification framework.
 
 ## Files Overview
 

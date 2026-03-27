@@ -1,20 +1,3 @@
-#===- act/back_end/dual_tf/tf_mlp.py - MLP Dual Transfer Functions ------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   MLP dual transfer functions for Lagrangian dual bound computation.
-#   ReLU (Linear-adaptive): slope depends on sign of dual variable
-#     - v >= 0: use lower bound (slope=0, contrib=0)
-#     - v < 0: use upper bound (slope=u/(u-l), contrib=-v*d*l)
-#   Dense: v_{i-1}=W^T@v, contrib=-b^T@v
-#
-#===---------------------------------------------------------------------===#
-
 import torch
 from typing import Tuple, Optional
 from act.back_end.core import Bounds

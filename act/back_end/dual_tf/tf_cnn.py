@@ -1,17 +1,3 @@
-#===- act/back_end/dual_tf/tf_cnn.py - CNN Dual Transfer Functions ------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   CNN dual backward functions. Conv2D: v_out=ConvT(v,W), contrib=-b^T@v.
-#   Forward bounds handled by IntervalTF (see tf_forward.py).
-#
-#===---------------------------------------------------------------------===#
-
 import torch
 import torch.nn.functional as F
 from typing import Tuple, Optional

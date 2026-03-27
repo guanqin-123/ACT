@@ -1,13 +1,3 @@
-"""
-ACTFuzzer: Inference-based whitebox fuzzing for neural network verification.
-
-Main fuzzer engine that orchestrates mutation, coverage tracking, and
-property checking to find counterexamples.
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Any
@@ -340,7 +330,7 @@ class ACTFuzzer:
             FuzzingReport with counterexamples and statistics
         """
         print(f"{'='*80}")
-        print(f"ACT: Abstract Constraint Transformer")
+        print(f"Neural Network Verification Framework")
         print(f"Inference-based whitebox fuzzing for neural network verification")
         print(f"{'='*80}\n")
         

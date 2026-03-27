@@ -1,15 +1,3 @@
-#!/usr/bin/env python3
-"""
-ACT Pipeline Command-Line Interface.
-
-Provides fuzzing capabilities for neural network verification with support for:
-- VNNLib verification benchmarks (default)
-- TorchVision datasets (alternative)
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 import argparse
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -105,7 +93,7 @@ class PerNeuronConfigAction(argparse.Action):
 def print_header():
     """Print simple header."""
     print(f"\n{'='*80}")
-    print(f"ACT: Abstract Constraint Transformer")
+    print(f"Neural Network Verification Framework")
     print(f"Inference-based whitebox fuzzing for neural network verification")
     print(f"{'='*80}\n")
 

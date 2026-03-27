@@ -1,17 +1,3 @@
-#===- act/front_end/vnnlib/data_model_loader.py - VNNLIB Loader -------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   Download, list, and load VNNLIB benchmarks from VNN-COMP repository.
-#   Mirrors torchvision/data_model_loader.py structure for unified interface.
-#
-#===---------------------------------------------------------------------===#
-
 from __future__ import annotations
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple

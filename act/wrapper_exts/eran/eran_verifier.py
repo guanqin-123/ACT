@@ -2,11 +2,7 @@
 # -*- coding: utf-8 -*-
 
 #########################################################################
-##   Abstract Constraint Transformer (ACT) - ERAN Verifier             ##
-##                                                                     ##
-##   doctormeeee (https://github.com/doctormeeee) and contributors     ##
-##   Copyright (C) 2024-2025                                           ##
-##                                                                     ##
+##   ERAN Verifier Integration                                         ##
 #########################################################################
 
 import os

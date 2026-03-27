@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""
-Command-Line Interface for TorchVision Dataset-Model Mapping.
-
-Provides CLI tools for exploring datasets, downloading dataset-model pairs,
-validating compatibility, and running comprehensive tests.
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 import argparse
 from typing import Optional
 

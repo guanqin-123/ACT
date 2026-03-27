@@ -1,18 +1,3 @@
-#===- act/back_end/dual_tf/tf_transformer.py - Transformer Dual TFs -----====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   Transformer dual backward functions (Attention, LayerNorm, GELU).
-#   Softmax/LayerNorm are challenging due to non-element-wise ops.
-#   Forward bounds handled by IntervalTF (see tf_forward.py).
-#
-#===---------------------------------------------------------------------===#
-
 import torch
 from typing import Tuple, Optional, Dict
 from act.back_end.core import Bounds

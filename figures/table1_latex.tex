@@ -1,0 +1,20 @@
+\begin{tabular}{l l r r r}
+\toprule
+\textbf{Benchmark} & \textbf{Method} & \textbf{Violations} & \textbf{TTFV\,(s)} & \textbf{Thpt.\,(it/s)} \\
+\midrule
+\textsc{TrafficSigns}
+  & \textsc{Seq\text{-}Fixed}           & 40622 & 62.59 & 75.0 \\
+  & \textsc{Batch\text{-}Iso}           & 73316 & 0.06 & 407.3 \\
+  & \textbf{\sysname}                   & 75208 & 0.06 & 417.9 \\
+\midrule
+\textsc{Cifar100}
+  & \textsc{Seq\text{-}Fixed}           & 14562 & 60.14 & 15.2 \\
+  & \textsc{Batch\text{-}Iso}           & 60242 & 0.60 & 516.4 \\
+  & \textbf{\sysname}                   & 61527 & 0.60 & 524.0 \\
+\midrule
+\textsc{TinyImageNet}
+  & \textsc{Seq\text{-}Fixed}           & 16890 & 60.18 & 10.9 \\
+  & \textsc{Batch\text{-}Iso}           & 23125 & 1.20 & 395.1 \\
+  & \textbf{\sysname}                   & 25274 & 1.09 & 430.7 \\
+\bottomrule
+\end{tabular}

@@ -1,25 +1,3 @@
-#!/usr/bin/env python3
-#===- act/pipeline/validate_verifier.py - Verifier Correctness Validation ====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   Unified verification validation framework with two validation levels:
-#
-#   Level 1: Counterexample/Soundness Validation
-#     - Validates that verifier doesn't claim CERTIFIED when concrete 
-#       counterexamples exist
-#
-#   Level 2: Bounds/Numerical Validation
-#     - Validates that abstract bounds correctly overapproximate concrete 
-#       activation values
-#
-#===---------------------------------------------------------------------===#
-#
 # Level 1: Counterexample/Soundness Validation
 # ============================================
 #

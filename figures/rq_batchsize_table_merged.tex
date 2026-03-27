@@ -1,0 +1,27 @@
+\begin{table*}[t]
+\centering
+\caption{Pairwise comparison of batch-size configurations (violations/spec).
+  \ding{61}: no significant difference; \ding{51}/\ding{51}\ding{51}/\ding{51}\ding{51}\ding{51}: row significantly better (small/medium/large effect);
+  \ding{55}/\ding{55}\ding{55}/\ding{55}\ding{55}\ding{55}: row significantly worse. Wilcoxon rank-sum test with Benjamini-Hochberg FDR correction ($\alpha=0.05$);
+  effect size: Cohen's $d$ (small $|d|\geq6$, medium $|d|\geq9$, large $|d|\geq13$).}
+\label{tab:batchsize-merged}
+\small
+\begin{tabular}{l cccccccc c l cccccccccc}
+\toprule
+  & \multicolumn{8}{c}{CIFAR-100} & & & \multicolumn{10}{c}{TinyImageNet} \\
+\cmidrule(lr){2-9} \cmidrule(lr){12-21}
+  & Iso-1 & Iso-10 & Iso-50 & Iso-99 & Ani-1 & Ani-10 & Ani-50 & Ani-99 & &  & Iso-1 & Iso-10 & Iso-50 & Iso-100 & Iso-199 & Ani-1 & Ani-10 & Ani-50 & Ani-100 & Ani-199 \\
+\midrule
+Iso-1 & --- & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & $\equiv$ & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & & Iso-1 & --- & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55} & $\equiv$ & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} \\
+Iso-10 & \ding{51}\ding{51}\ding{51} & --- & \ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} & $\equiv$ & \ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} & & Iso-10 & \ding{51}\ding{51}\ding{51} & --- & \ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} & $\equiv$ & \ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} \\
+Iso-50 & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55} & --- & \ding{51} & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55} & $\equiv$ & \ding{51} & & Iso-50 & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55} & --- & \ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55} & $\equiv$ & \ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} \\
+Iso-99 & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55}\ding{55} & \ding{55} & --- & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55}\ding{55} & \ding{55} & $\equiv$ & & Iso-100 & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55} & --- & \ding{51} & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55} & \ding{55}\ding{55} & $\equiv$ & \ding{51} \\
+Ani-1 & $\equiv$ & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & --- & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & & Iso-199 & \ding{51}\ding{51} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & \ding{55} & --- & \ding{51}\ding{51} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & \ding{55} & $\equiv$ \\
+Ani-10 & \ding{51}\ding{51}\ding{51} & $\equiv$ & \ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} & --- & \ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} & & Ani-1 & $\equiv$ & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55} & --- & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} \\
+Ani-50 & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55} & $\equiv$ & \ding{51} & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55} & --- & \ding{51} & & Ani-10 & \ding{51}\ding{51}\ding{51} & $\equiv$ & \ding{51}\ding{51} & \ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} & --- & \ding{51}\ding{51} & \ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} \\
+Ani-99 & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55}\ding{55} & \ding{55} & $\equiv$ & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55}\ding{55} & \ding{55} & --- & & Ani-50 & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55} & $\equiv$ & \ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55} & --- & \ding{51}\ding{51} & \ding{51}\ding{51}\ding{51} \\
+  & & & & & & & & & & Ani-100 & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55} & $\equiv$ & \ding{51} & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55} & \ding{55}\ding{55} & --- & \ding{51} \\
+  & & & & & & & & & & Ani-199 & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & \ding{55} & $\equiv$ & \ding{51}\ding{51}\ding{51} & \ding{55}\ding{55}\ding{55} & \ding{55}\ding{55}\ding{55} & \ding{55} & --- \\
+\bottomrule
+\end{tabular}
+\end{table*}

@@ -1,28 +1,3 @@
-#!/usr/bin/env python3
-#===- act/pipeline/act2torch.py - ACT to Torch Converter ----------------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# ACT → PyTorch Converter (Schema-Driven)
-# =======================================
-# Single source of truth: layer_schema.py REGISTRY
-#
-# Design:
-#   - Zero mapping tables: torch_module, params all from REGISTRY
-#   - Param names match PyTorch: weight, bias, stride, padding, etc.
-#
-# Layer Routing:
-#   INPUT      → (skipped)
-#   INPUT_SPEC → InputSpecLayer
-#   <MODEL>    → REGISTRY[kind]['torch_module'] (if defined)
-#   ASSERT     → OutputSpecLayer
-#
-#===---------------------------------------------------------------------===#
-
 from typing import Optional, Dict, Any, Tuple
 import importlib
 import torch

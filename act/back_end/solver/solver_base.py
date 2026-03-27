@@ -1,12 +1,4 @@
 
-#===- act/back_end/solver/solver_base.py - Base Solver Interface -------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
 # Purpose:
 #   Base Solver Interface. Defines abstract base class and common interfaces
 #   for constraint satisfaction problem solvers.

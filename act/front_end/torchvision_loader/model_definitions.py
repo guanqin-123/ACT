@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""
-Custom Model Architectures for TorchVision Datasets.
-
-Provides custom neural network architectures (SimpleCNN, LeNet5) optimized
-for smaller datasets like MNIST, along with code generation utilities.
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 import torch.nn as nn
 
 

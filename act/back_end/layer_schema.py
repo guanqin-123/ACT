@@ -1,17 +1,3 @@
-#===- act/back_end/layer_schema.py - ACT Layer Schema and Registry -----====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   ACT layer schema definitions, strict registry, wrapper checks,
-#   and validation for layer types and parameters.
-#
-#===---------------------------------------------------------------------===#
-
 """
 SCHEMA STRUCTURE:
 - The REGISTRY uses two keys per entry:

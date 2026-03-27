@@ -1,31 +1,5 @@
-"""
-RQ1 Experiment Configuration.
 
-Defines all 20 configurations (5 benchmarks × 4 methods) for the
-"Batched Fuzzing Speedup" research question.
-
-Usage:
-    from act.pipeline.script.rq1_config import BENCHMARKS, METHODS, RQ1_CONFIGS
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
-# ---------------------------------------------------------------------------
-# Benchmarks: short key → VNNLib category + metadata
-#
-# NAMING CONVENTION:
-#   - CLI uses SHORT KEYS (e.g., "acasxu") for --benchmark argument
-#   - VNNLib category strings (e.g., "acasxu_2023") are only used
-#     when calling VNNLibSpecCreator internally
-#   - Output paths use short keys: experiments/rq1/acasxu/batch_aniso/run_0.json
-# ---------------------------------------------------------------------------
 BENCHMARKS = {
-    "acasxu": {
-        "category": "acasxu_2023",
-        "expected_instances": 185,
-        "description": "ACAS Xu collision avoidance (45 FC networks, 5D input)",
-    },
     "cifar100": {
         "category": "cifar100_2024",
         "expected_instances": 199,
@@ -94,20 +68,12 @@ METHODS = {
         "paper_name": r"\textsc{Batch\text{-}Iso}",
         "description": "Batch fuzzing with isotropic perturbation",
     },
-    "seq_aniso": {
-        "perturb_mode": "adaptive_perdim",
-        "mutation_weights": _PAPER_WEIGHTS,
-        "coverage_strategy": "GlobalCov",
-        "batch_mode": "sequential",
-        "paper_name": r"\textsc{Seq\text{-}Aniso}",
-        "description": "Sequential (B=1) with anisotropic perturbation",
-    },
-    "seq_rand": {
+    "seq_fix": {
         "perturb_mode": "fixed",
         "mutation_weights": _PAPER_WEIGHTS,
         "coverage_strategy": "GlobalCov",
         "batch_mode": "sequential",
-        "paper_name": r"\textsc{Seq\text{-}Rand}",
+        "paper_name": r"\textsc{Seq\text{-}Fixed}",
         "description": "Sequential (B=1) with fixed perturbation (baseline)",
     },
 }
@@ -135,9 +101,9 @@ RQ1_CONFIGS = [
 ]
 
 # Sanity checks
-assert len(BENCHMARKS) == 5, f"Expected 5 benchmarks, got {len(BENCHMARKS)}"
-assert len(METHODS) == 4, f"Expected 4 methods, got {len(METHODS)}"
-assert len(RQ1_CONFIGS) == 20, f"Expected 20 configs, got {len(RQ1_CONFIGS)}"
+assert len(BENCHMARKS) == 4, f"Expected 4 benchmarks, got {len(BENCHMARKS)}"
+assert len(METHODS) == 3, f"Expected 3 methods, got {len(METHODS)}"
+assert len(RQ1_CONFIGS) == 12, f"Expected 12 configs, got {len(RQ1_CONFIGS)}"
 assert abs(sum(_PAPER_WEIGHTS.values()) - 1.0) < 1e-6, (
     "Mutation weights must sum to 1.0"
 )

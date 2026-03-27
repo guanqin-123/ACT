@@ -1,17 +1,3 @@
-# ===- act/front_end/vnnlib/vnnlib_parser.py - VNNLIB Parser ----------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-# ===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   Parse VNNLIB SMT-LIB format files to extract input tensors and constraints.
-#   Converts VNNLIB specifications to InputSpec and OutputSpec objects.
-#
-# ===---------------------------------------------------------------------===#
-
 from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, TYPE_CHECKING

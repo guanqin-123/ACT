@@ -1,10 +1,3 @@
-"""
-Base class for specification creators with shape validation.
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass

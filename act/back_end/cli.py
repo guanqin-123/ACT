@@ -1,17 +1,3 @@
-#!/usr/bin/env python3
-"""
-ACT Back-End Command-Line Interface.
-
-Provides CLI tools for core verification operations:
-- Network verification (single-shot and branch-and-bound)
-- Network factory (generate example networks from YAML)
-- Network serialization (save/load ACT Net structures)
-- Analysis and constraint inspection
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 import argparse
 import sys
 from pathlib import Path

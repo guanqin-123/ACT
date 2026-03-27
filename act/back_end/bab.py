@@ -1,17 +1,3 @@
-#===- act/back_end/bab.py - Branch-and-Bound Verification --------------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   Branch-and-bound verification with iterative refinement.
-#   Implements refinement strategies for constraint satisfaction problems.
-#
-#===---------------------------------------------------------------------===#
-
 from __future__ import annotations
 import time
 import heapq

@@ -279,17 +279,17 @@ Typical performance on NVIDIA RTX 3090:
 ## Citation
 
 ```bibtex
-@software{actfuzzer2025,
-  title = {ACTFuzzer: Inference-based Whitebox Fuzzing},
-  author = {SVF-tools},
+@software{fuzzer2025,
+  title = {Inference-based Whitebox Fuzzing for Neural Network Verification},
+  author = {Anonymous},
   year = {2025},
-  url = {https://github.com/SVF-tools/ACT}
+  url = {<ANONYMOUS_URL>}
 }
 ```
 
 ## License
 
-AGPLv3+ - Copyright (C) 2025 SVF-tools/ACT
+AGPLv3+
 
 ---
 

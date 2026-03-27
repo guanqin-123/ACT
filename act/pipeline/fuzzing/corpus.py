@@ -1,16 +1,3 @@
-"""
-Batched seed corpus for GPU-accelerated fuzzing.
-
-FuzzingSeed — every field carries a leading batch dim B (no scalar path).
-SeedCorpus  — parallel-tensor pool.
-  Selection: energy-weighted sampling with replacement → FuzzingSeed(B).
-  Insertion: boolean-mask filtered add() with byte-hash dedup.
-  Storage:   N parallel 1-D/N-D tensors grown via torch.cat on insert.
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 from __future__ import annotations
 from typing import List, Optional, Union
 import numpy as np

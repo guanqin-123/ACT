@@ -1,0 +1,16 @@
+\begin{table}[t]
+\centering
+\caption{Additional violations found by the batch approach over the sequential baseline at equal wall-clock budgets. Each cell reports $\Delta_{\mathrm{Iso}}$ / $\Delta_{\mathrm{Ani}}$, where $\Delta = \text{Batch} - \text{Seq}$. Sequential baseline: \texttt{seq\_fix} for all benchmarks.}
+\label{tab:batch-advantage}
+\small
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Time} & \textsc{TrafficSigns} & \textsc{Cifar100} & \textsc{TinyImageNet} \\
+\midrule
+1 min & +32,274/+33,366 & +43,109/+42,382 & +22,926/+25,075 \\
+5 min & +61,664/+63,556 & +58,759/+60,044 & +21,335/+23,484 \\
+30 min & +32,846/+34,738 & +53,364/+54,649 & +17,250/+19,399 \\
+60 min & +32,694/+34,586 & +50,129/+51,414 & +13,708/+15,857 \\
+\bottomrule
+\end{tabular}
+\end{table}

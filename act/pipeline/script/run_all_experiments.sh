@@ -2,24 +2,19 @@
 # ===========================================================================
 # Run ALL Experiments (RQ1 + RQ2 + RQ3) Overnight
 #
-# RQ1: 5 benchmarks × 4 methods × 3 runs = 60 configs (~5.5h)
-# RQ2: Uses RQ1 data (figures + unique violation analysis)
-# RQ3: 2 benchmarks × 2 methods × 6 scales × 3 runs = 72 configs (~6.6h)
-# Total: ~12h
 #
 # Usage:
 #   bash act/pipeline/script/run_all_experiments.sh
 #   nohup bash act/pipeline/script/run_all_experiments.sh > experiments/overnight.log 2>&1 &
 #
-# Copyright (C) 2025 SVF-tools/ACT
 # ===========================================================================
 
 set -uo pipefail
 
-PYTHON=/home/guanqinzhang/guanqin/miniconda3/envs/act-py312/bin/python
+PYTHON=python3
 TIMEOUT=60
-RUNS=3
-DEVICE=cuda
+RUNS=1
+DEVICE=cpu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -50,8 +45,8 @@ echo "### PHASE 1/3: RQ1 ($(date +%H:%M:%S)) ###"
 
 RQ1_OK=0; RQ1_SKIP=0; RQ1_FAIL=0
 
-for bm in acasxu cifar100 tinyimagenet mnist trafficsigns; do
-  for method in batch_aniso batch_iso seq_aniso seq_rand; do
+for bm in trafficsigns cifar100 tinyimagenet; do
+  for method in batch_aniso batch_iso seq_fix; do
     for ((run_id=0; run_id<RUNS; run_id++)); do
       RESULT="$RQ1_DIR/$bm/$method/run_${run_id}.json"
       if [[ -f "$RESULT" ]]; then

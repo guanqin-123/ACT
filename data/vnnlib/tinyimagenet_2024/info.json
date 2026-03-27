@@ -1,0 +1,12 @@
+{
+  "category": "tinyimagenet_2024",
+  "num_instances": 199,
+  "num_onnx_models": 1,
+  "num_vnnlib_specs": 199,
+  "source": "https://raw.githubusercontent.com/VNN-COMP/vnncomp2024_benchmarks/main/benchmarks",
+  "paths": {
+    "onnx": "/srv/scratch/PAG/Guanqin/posdoc/ASE/ACT/data/vnnlib/tinyimagenet_2024/onnx",
+    "vnnlib": "/srv/scratch/PAG/Guanqin/posdoc/ASE/ACT/data/vnnlib/tinyimagenet_2024/vnnlib",
+    "instances": "/srv/scratch/PAG/Guanqin/posdoc/ASE/ACT/data/vnnlib/tinyimagenet_2024/instances.csv"
+  }
+}

@@ -1,19 +1,3 @@
-#===- act/back_end/dual_tf/tf_smooth.py - Smooth Activation Dual TF -----====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   Smooth activation dual backward (Sigmoid, Tanh). Tangent-line relaxation.
-#   Unified dual_smooth_backward() works for any S-shaped function given f, f'.
-#     - v >= 0: use lower bound (tangent/chord), contrib = v * b_lower
-#     - v < 0: use upper bound (chord/tangent), contrib = v * b_upper
-#
-#===---------------------------------------------------------------------===#
-
 import torch
 from typing import Tuple, Callable
 from act.back_end.core import Bounds

@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-"""
-TorchVision Dataset-Model Integration for ACT.
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 # Lazy imports to avoid circular dependency issues
 # Users can import specific modules directly if needed
 

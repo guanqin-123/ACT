@@ -1,19 +1,3 @@
-#!/usr/bin/env python3
-"""
-Shared CLI utilities for ACT.
-
-Provides common argument parsing and device initialization logic to ensure
-consistency across all ACT CLIs:
-- act.front_end (unified front-end CLI)
-- act.front_end.torchvision_loader (TorchVision-specific)
-- act.front_end.vnnlib_loader (VNNLIB-specific)
-- act.pipeline (fuzzing and testing)
-- act.back_end (verification core)
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 import argparse
 import torch
 

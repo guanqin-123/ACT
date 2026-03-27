@@ -1,18 +1,3 @@
-#===- act/util/torchvision_urls.py - Torchvision URL Configuration ====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===------------------------------------------------------------------------===#
-#
-# Purpose:
-#   Centralised torchvision compatibility patches.
-#   Import and call patch_mnist_mirrors() before any code that downloads MNIST,
-#   regardless of whether it runs in-process or via subprocess.
-#
-#===------------------------------------------------------------------------===#
-
 import torchvision.datasets as _tvd
 
 # Reliable MNIST mirrors that replace the defunct yann.lecun.com host.

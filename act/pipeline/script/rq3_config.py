@@ -1,16 +1,3 @@
-"""
-RQ3 Experiment Configuration: Scale Factor Sensitivity.
-
-Defines 12 configurations (2 benchmarks × 6 scale factors) for the
-"Sensitivity to perturbation scale factor s" research question.
-
-Usage:
-    from act.pipeline.script.rq3_config import SCALE_FACTORS, RQ3_BENCHMARKS, RQ3_CONFIGS
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 from act.pipeline.script.rq1_config import BENCHMARKS, METHODS, EXPERIMENT_DEFAULTS
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # Modules Directory
 
-This directory contains external verifier submodules integrated into the Abstract Constraint Transformer (ACT) framework. These are established neural network verification tools that ACT provides unified interfaces for.
+This directory contains external verifier submodules integrated into the verification framework. These are established neural network verification tools that the framework provides unified interfaces for.
 
 ## Submodules Overview
 
@@ -41,7 +41,7 @@ This directory contains external verifier submodules integrated into the Abstrac
 ### Initialisation
 Submodules are automatically initialised during setup:
 ```bash
-git clone --recursive https://github.com/doctormeeee/Abstract-Constraint-Transformer.git
+git clone --recursive <ANONYMOUS_URL>
 ```
 
 ### Manual Submodule Updates

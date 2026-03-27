@@ -1,76 +1,3 @@
-"""
-Mutation strategies for ACTFuzzer.
-
-Implements gradient-guided, activation-guided, boundary, and random mutations.
-All mutations automatically respect InputSpec constraints via projection.
-
-Gradient-guided now accommodates two mutated input generation methods: FGSM (Fast Gradient Sign Method) and PGD (Projected Gradient Descent).
-    1) FGSM: single-step gradient-based perturbation.
-    2) PGD: iterative gradient-based perturbation.
-
-## Batch Tensor-Based Mutation
-
-All mutation strategies operate on batched inputs [B, C, H, W] for GPU parallelism.
-The MutationEngine selects a single strategy per batch and applies it to all seeds
-simultaneously, enabling efficient gradient computation (FGSM/PGD) across the batch.
-The batch size is aligned with model synthesis (N VNNLib instances), so InputSpec bounds
-are already [N, ...] and match the batch dimension directly. After mutation, projection
-ensures each sample respects its InputSpec bounds (BOX per-sample bounds via original_index,
-or LINF_BALL eps-ball around each seed's original_tensor).
-
-## Adaptive Perturbation Sizing
-
-NOTE: We use "perturb_size" (not "epsilon") to avoid confusion with InputSpec.eps (L∞ radius).
-- InputSpec.eps: Defines constraint boundaries (e.g., center ± eps for LINF_BALL)
-- Mutation perturb_size: Controls mutation perturbation magnitude (exploration granularity)
-
-This module supports adaptive perturbation sizing that scales with InputSpec bounds to ensure
-consistent exploration across different problem scales.
-
-### What is perturb_scale?
-
-`perturb_scale` is the **fraction of the feasible range** that each mutation perturbation covers.
-
-**Interpretation Formula:**
-    steps_to_traverse = 1 / perturb_scale
-
-**Calculation:**
-    range / perturb_size = range / (range * perturb_scale) = 1 / perturb_scale
-
-**Examples:**
-    - perturb_scale=0.1  → Each perturbation covers 10% of range → Takes ~10 steps to traverse from lb to ub
-    - perturb_scale=0.2  → Each perturbation covers 20% of range → Takes ~5 steps to traverse from lb to ub
-    - perturb_scale=0.05 → Each perturbation covers 5% of range  → Takes ~20 steps to traverse from lb to ub
-
-### Perturbation Modes
-
-1. **adaptive_scalar** (default):
-   - Computes single perturb_size from mean range: perturb_size = mean(ub - lb) * perturb_scale
-   - Best for: Uniform ranges (e.g., VNNLib BOX constraints with consistent bounds)
-   - Example: VNNLib with lb=0.0, ub=1.0 → range=1.0, perturb_size=0.1 (10 steps)
-
-2. **adaptive_perdim** (advanced):
-   - Computes per-dimension perturb_size tensor: perturb_size[i] = (ub[i] - lb[i]) * perturb_scale
-   - Best for: Non-uniform ranges (e.g., different features with vastly different scales)
-   - Example: lb=[0, -100], ub=[1, 100] → perturb_size=[0.1, 20.0] (10 steps per dimension)
-
-3. **fixed** (legacy):
-   - Uses hardcoded perturb_size values (0.01 for gradient/activation, 0.005 for boundary/random)
-   - Best for: Backward compatibility or when InputSpec is not available
-   - Note: May be too large for tight bounds or too small for wide bounds
-
-### Configuration
-
-Set in `act/pipeline/fuzzing/config.yaml`:
-```yaml
-perturb_mode: "adaptive_scalar"  # Options: "adaptive_scalar", "adaptive_perdim", "fixed"
-perturb_scale: 0.1               # Fraction of range per step (default: 0.1 = 10 steps)
-```
-
-Copyright (C) 2025 SVF-tools/ACT
-License: AGPLv3+
-"""
-
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Union, TYPE_CHECKING
@@ -480,44 +407,6 @@ class MutationEngine:
         self._setup_hooks()
 
     def _compute_adaptive_perturb_size(self) -> Union[float, torch.Tensor]:
-        """
-        Compute perturb_size based on InputSpec bounds and perturb_mode.
-
-        Note: We use "perturb_size" to avoid confusion with InputSpec.eps (L∞ radius constraint).
-
-        Returns:
-            - float: Scalar perturb_size (for "adaptive_scalar" or "fixed" modes)
-            - torch.Tensor: Per-dimension perturb_size (for "adaptive_perdim" mode)
-
-        Algorithm:
-            1. adaptive_scalar: perturb_size = mean(ub - lb) * perturb_scale
-               - Single perturb_size value computed from mean range
-               - Best for uniform ranges (e.g., VNNLib BOX constraints)
-
-            2. adaptive_perdim: perturb_size = (ub - lb) * perturb_scale
-               - Tensor of perturb_size values, one per dimension
-               - Best for non-uniform ranges (different feature scales)
-
-            3. fixed: Uses hardcoded defaults (backward compatibility)
-               - gradient/activation: 0.01
-               - boundary/random: 0.005
-
-        Interpretation:
-            perturb_scale represents the fraction of range each perturbation covers.
-            steps_to_traverse = 1 / perturb_scale
-
-            Examples:
-                - perturb_scale=0.1  → 10% per perturbation → ~10 steps to traverse
-                - perturb_scale=0.2  → 20% per perturbation → ~5 steps to traverse
-                - perturb_scale=0.05 → 5% per perturbation  → ~20 steps to traverse
-        """
-        # Legacy fixed perturbation sizes (backward compatibility)
-        if self.perturb_mode == "fixed":
-            print(f"[MutationEngine] Using fixed perturb_size mode (legacy)")
-            print(f"  - Gradient/Activation perturb_size: 0.01")
-            print(f"  - Boundary/Random perturb_size: 0.005")
-            return 0.01
-
         if self.input_spec is None:
             print(
                 f"[MutationEngine] No InputSpec provided, falling back to fixed perturb_size=0.01"
@@ -542,10 +431,11 @@ class MutationEngine:
             )
             return 0.01
 
-        # Compute range for perturbation scaling
+        if self.perturb_mode == "fixed":
+            return (ub - lb).mean().item()
+
         range_tensor = ub - lb
 
-        # Compute single perturb_size from mean range
         if self.perturb_mode == "adaptive_scalar":
             mean_range = range_tensor.mean().item()
             perturb_size = mean_range * self.perturb_scale
@@ -563,7 +453,6 @@ class MutationEngine:
 
             return perturb_size
 
-        # Compute per-dimension perturb_size tensor
         elif self.perturb_mode == "adaptive_perdim":
             perturb_size_tensor = range_tensor * self.perturb_scale
 

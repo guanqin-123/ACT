@@ -2,11 +2,7 @@
 # -*- coding: utf-8 -*-
 
 #########################################################################
-##   Abstract Constraint Transformer (ACT) - αβ-CROWN Verifier         ##
-##                                                                     ##
-##   doctormeeee (https://github.com/doctormeeee) and contributors     ##
-##   Copyright (C) 2024-2025                                           ##
-##                                                                     ##
+##   αβ-CROWN Verifier Integration                                     ##
 #########################################################################
 
 import os

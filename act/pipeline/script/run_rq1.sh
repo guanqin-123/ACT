@@ -2,53 +2,51 @@
 # ===========================================================================
 # RQ1 Full Experiment Runner
 #
-# Runs all 20 configurations (5 benchmarks × 4 methods) × 5 runs = 100 total.
-# Estimated time: ~8.3 hours on GPU (100 × 300s + overhead).
-#
 # Usage:
 #   bash act/pipeline/script/run_rq1.sh [OPTIONS]
 #
 # Options:
-#   --device DEVICE     cpu or cuda (default: cuda)
-#   --timeout SECONDS   Per-run timeout (default: 300)
-#   --runs N            Runs per config (default: 5)
-#   --output-dir DIR    Results directory (default: experiments/rq1)
-#   --dry-run           Print what would be run without executing
-#   --benchmark NAME    Run only this benchmark (default: all)
-#   --method NAME       Run only this method (default: all)
+#   --device DEVICE          cpu or cuda (default: cuda)
+#   --timeout SECONDS        Per-run timeout (default: 60)
+#   --runs N                 Runs per config (default: 5)
+#   --output-dir DIR         Results directory (default: experiments/rq1)
+#   --dry-run                Print what would be run without executing
+#   --benchmark NAME         Run only this benchmark (default: all)
+#   --method NAME            Run only this method (default: all)
+#   --max-instances N        Limit instances per run (default: all)
 #
-# Copyright (C) 2025 SVF-tools/ACT
-# License: AGPLv3+
 # ===========================================================================
 
 set -euo pipefail
 
 # Defaults
 DEVICE="cuda"
-TIMEOUT=300
+TIMEOUT=60
 RUNS=5
 OUTPUT_DIR="experiments/rq1"
 DRY_RUN=false
 FILTER_BENCHMARK=""
 FILTER_METHOD=""
+MAX_INSTANCES=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --device)       DEVICE="$2"; shift 2 ;;
-        --timeout)      TIMEOUT="$2"; shift 2 ;;
-        --runs)         RUNS="$2"; shift 2 ;;
-        --output-dir)   OUTPUT_DIR="$2"; shift 2 ;;
-        --dry-run)      DRY_RUN=true; shift ;;
-        --benchmark)    FILTER_BENCHMARK="$2"; shift 2 ;;
-        --method)       FILTER_METHOD="$2"; shift 2 ;;
-        *)              echo "Unknown option: $1"; exit 1 ;;
+        --device)           DEVICE="$2"; shift 2 ;;
+        --timeout)          TIMEOUT="$2"; shift 2 ;;
+        --runs)             RUNS="$2"; shift 2 ;;
+        --output-dir)       OUTPUT_DIR="$2"; shift 2 ;;
+        --dry-run)          DRY_RUN=true; shift ;;
+        --benchmark)        FILTER_BENCHMARK="$2"; shift 2 ;;
+        --method)           FILTER_METHOD="$2"; shift 2 ;;
+        --max-instances)    MAX_INSTANCES="$2"; shift 2 ;;
+        *)                  echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
 # Benchmarks and methods (must match rq1_config.py)
-BENCHMARKS=("acasxu" "cifar100" "tinyimagenet" "mnist" "trafficsigns")
-METHODS=("batch_aniso" "batch_iso" "seq_aniso" "seq_rand")
+BENCHMARKS=("trafficsigns" "cifar100" "tinyimagenet")
+METHODS=("batch_aniso" "batch_iso" "seq_fix")
 
 # Script path (relative to project root)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -113,6 +111,8 @@ for benchmark in "${BENCHMARKS[@]}"; do
             echo "--------------------------------------------------------------"
 
             # Execute runner
+            MAX_INST_ARG=""
+            [[ -n "$MAX_INSTANCES" ]] && MAX_INST_ARG="--max-instances $MAX_INSTANCES"
             if python "$RUNNER" \
                 --benchmark "$benchmark" \
                 --method "$method" \
@@ -121,6 +121,7 @@ for benchmark in "${BENCHMARKS[@]}"; do
                 --timeout "$TIMEOUT" \
                 --device "$DEVICE" \
                 --output-dir "$PROJECT_ROOT/$OUTPUT_DIR" \
+                $MAX_INST_ARG \
                 2>&1 | tee -a "$LOG_FILE"; then
                 EXECUTED=$((EXECUTED + 1))
                 echo "  ✓ Done"

@@ -1,17 +1,3 @@
-#===- act/front_end/vnnlib/__init__.py - VNNLIB Module Exports --------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-#===---------------------------------------------------------------------===#
-#
-# Purpose:
-#   Module initialization for VNNLIB benchmark support.
-#   Exports key functions and classes for VNNLIB-based verification.
-#
-#===---------------------------------------------------------------------===#
-
 """
 VNNLIB Benchmark Support for ACT.
 
@@ -105,4 +91,4 @@ __all__ = [
 
 # Version info
 __version__ = '0.1.0'
-__author__ = 'ACT Team'
+__author__ = 'Anonymous'
