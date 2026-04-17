@@ -89,6 +89,15 @@ def check_violation_at_point(net: Net, x: torch.Tensor, assert_layer) -> bool:
                 return True
         return False
 
+    if k == OutKind.UNSAFE_LINEAR:
+        C = torch.as_tensor(assert_layer.params["c"], dtype=y.dtype)
+        if C.dim() == 1:
+            C = C.unsqueeze(0)
+        d_vec = torch.as_tensor(assert_layer.params["d"], dtype=y.dtype).reshape(-1)
+        Cy = C @ y.reshape(-1)
+        in_unsafe_region = (Cy <= d_vec + 1e-8).all()
+        return bool(in_unsafe_region.item())
+
     raise NotImplementedError(f"ASSERT kind not supported: {k}")
 
 
@@ -167,7 +176,12 @@ def verify_bab(
 
         for bounds in batch.to_bounds_list():
             processed += 1
-            status, ce_input, _ = setup_and_solve(net, bounds, solver, timelimit=None)
+            # Fresh solver per subproblem: setup_and_solve mutates solver state
+            # (adds constraints/vars), and that state must not leak across BaB
+            # iterations. Reconstruct from the original type to preserve class
+            # configuration while resetting accumulated state.
+            iter_solver = type(solver)()
+            status, ce_input, _ = setup_and_solve(net, bounds, iter_solver, timelimit=None)
 
             if status == SolveStatus.UNSAT:
                 continue
