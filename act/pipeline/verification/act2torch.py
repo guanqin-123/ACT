@@ -20,8 +20,9 @@
 #
 # ===---------------------------------------------------------------------===#
 
-from typing import Optional, Dict, Any, cast, Set, List
+from typing import Optional, Dict, Any, Tuple, cast
 from collections import deque
+from typing import Set, List
 import importlib
 import torch  # pyright: ignore[reportMissingImports]
 import torch.nn as nn  # pyright: ignore[reportMissingImports]
@@ -78,9 +79,8 @@ class ActGraphModule(nn.Module):
     Holds the body sub-graph between INPUT_SPEC and ASSERT. Performs forward by
     topological-order traversal, caching activations per layer id. Handles:
       - Module-backed layers (DENSE, CONV2D, RELU, ...): single-input nn.Module call.
-      - Functional layers (ADD, CONCAT, MUL, SCALE, BIAS, MEAN): inline tensor ops;
-        tensor constants (SCALE["a"], BIAS["c"]) registered as buffers for .to()
-        propagation.
+      - Functional layers (ADD, CONCAT, MUL, SCALE, BIAS): inline tensor ops; tensor
+        constants (SCALE["a"], BIAS["c"]) registered as buffers for .to() propagation.
       - BN-fused pairs (SCALE + BIAS with is_batchnorm_decomposition): SCALE owns the
         reconstructed BatchNorm module; BIAS's activation aliases SCALE's so successors
         reading the BIAS id get the fused BN output.
@@ -204,17 +204,9 @@ class ActGraphModule(nn.Module):
             return inputs[0] * getattr(self, f"_scale_a_{layer.id}")
         if kind == LayerKind.BIAS.value:
             return inputs[0] + getattr(self, f"_bias_c_{layer.id}")
-        if kind == LayerKind.MEAN.value:
-            dim = layer.params.get("dim")
-            keepdim = layer.params.get("keepdim", False)
-            if dim is None:
-                result = inputs[0].mean()
-                out_shape = layer.params.get("output_shape", (1, 1))
-                return result.reshape(out_shape)
-            return inputs[0].mean(dim=dim, keepdim=keepdim)
         raise NotImplementedError(
             f"ActGraphModule: functional layer kind '{kind}' (id={layer.id}) not supported. "
-            f"torch2act only emits ADD, CONCAT, MUL, SCALE, BIAS, MEAN functionally."
+            f"torch2act only emits ADD, CONCAT, MUL, SCALE, BIAS functionally."
         )
 
 
