@@ -193,6 +193,46 @@ class _LayerGraphBuilder:
         self.prev_out = self.node_outputs[node_name]
         self.shape = self.node_shapes[node_name]
         return True
+
+    def _resolve_get_attr_tensor(self, node: fx.Node) -> torch.Tensor:
+        """Resolve a get_attr node target against the original traced model."""
+        if node.op != 'get_attr':
+            raise TypeError(f"Expected get_attr node, got op={node.op!r}")
+
+        current: Any = self.model
+        for attr in str(node.target).split('.'):
+            if not hasattr(current, attr):
+                raise AttributeError(f"Unable to resolve attribute path '{node.target}' on model {type(self.model).__name__}")
+            current = getattr(current, attr)
+
+        if not isinstance(current, torch.Tensor):
+            raise TypeError(f"Resolved attribute '{node.target}' is not a tensor: {type(current).__name__}")
+        return current.detach()
+
+    def _align_constant_tensor(self, const_tensor: torch.Tensor,
+                               target_shape: Tuple[int, ...],
+                               target_size: int) -> torch.Tensor:
+        """Broadcast/expand a constant tensor to match a flattened ACT input."""
+        const = const_tensor.detach().to(dtype=self.dtype)
+
+        if const.numel() == target_size:
+            return const.reshape(-1)
+        if const.numel() == 1:
+            return const.reshape(1).repeat(target_size)
+
+        try:
+            return torch.broadcast_to(const, target_shape).reshape(-1)
+        except RuntimeError:
+            pass
+
+        if target_size % const.numel() == 0:
+            repeat_factor = target_size // const.numel()
+            return const.reshape(-1).repeat_interleave(repeat_factor)
+
+        raise ValueError(
+            f"Cannot align constant tensor of shape {tuple(const.shape)} to input shape {target_shape} "
+            f"(flattened size {target_size})."
+        )
     
     # -------------------------------------------------------------------------
     # Model Tracing (torch.fx only)
@@ -260,6 +300,7 @@ class _LayerGraphBuilder:
             'concat': self._process_concat_operation,
             'flatten': self._process_flatten_function,
             'mul': self._process_mul_operation,
+            'sub': self._process_sub_operation,
             'mean': self._process_mean_operation,
             'getitem': self._process_getitem_operation,
             'stochastic_depth': self._process_passthrough_function,
@@ -684,6 +725,41 @@ class _LayerGraphBuilder:
         self.prev_out = out_vars
         self.shape = x_shape
         self._register_node(node.name, layer_id)
+
+    def _process_sub_operation(self, node: fx.Node) -> None:
+        """Process SUB operation, primarily for x - const input normalization."""
+        inputs = [a for a in node.args if isinstance(a, fx.Node)]
+        if len(inputs) < 2:
+            return
+
+        x_node, y_node = inputs[0], inputs[1]
+        x_name = x_node.name
+        if x_name not in self.node_outputs:
+            return
+
+        x_vars = self.node_outputs[x_name]
+        x_shape = self.node_shapes[x_name]
+
+        if y_node.op == 'get_attr':
+            const_tensor = self._resolve_get_attr_tensor(y_node)
+            bias_tensor = -self._align_constant_tensor(const_tensor, x_shape, len(x_vars))
+            out_vars = self._alloc_ids(len(x_vars))
+            layer_id = self._add_layer(
+                "BIAS",
+                {"c": bias_tensor, "input_shape": x_shape, "output_shape": x_shape},
+                x_vars,
+                out_vars,
+            )
+            self.prev_out = out_vars
+            self.shape = x_shape
+            self._register_node(node.name, layer_id)
+            return
+
+        raise NotImplementedError(
+            f"Unsupported sub pattern for node '{node.name}': second operand op={y_node.op!r}. "
+            "Supported: sub(x, const_get_attr) for input normalization. "
+            "Tensor-tensor subtraction would require an internal SCALE(-1) + ADD graph."
+        )
     
     def _process_concat_operation(self, node: fx.Node) -> None:
         """Process CONCAT operation."""

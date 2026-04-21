@@ -652,13 +652,24 @@ _DEFAULT_COVERAGE_LAYERS = sorted(
 
 @functools.lru_cache(maxsize=1)
 def _get_tf_capabilities() -> Dict[str, FrozenSet[str]]:
-    result = {}
-    _tf_specs = [
+    """Return supported layer kinds per transfer-function implementation.
+
+    For ``interval_tf`` / ``hybridz_tf``: all keys in ``_LAYER_REGISTRY`` are
+    reported as supported (no stub distinction).
+
+    For ``dual_tf``: reports only kinds that have REAL (non-stub) handlers in
+    BOTH the forward AND backward registries. The stub sets ``_FORWARD_STUBS``
+    and ``_BACKWARD_STUBS`` (module-level in ``act.back_end.dual_tf.dual_tf``)
+    are filtered out by identity comparison per plan §6.9.
+    """
+    result: Dict[str, FrozenSet[str]] = {}
+
+    # Single-registry TFs (no stub filtering).
+    single_registry_specs = [
         ("interval", "act.back_end.interval_tf", "IntervalTF", "_LAYER_REGISTRY"),
-        ("hybridz", "act.back_end.hybridz_tf", "HybridzTF", "_LAYER_REGISTRY"),
-        ("dual", "act.back_end.dual_tf", "DualTF", "_BACKWARD_REGISTRY"),
+        ("hybridz",  "act.back_end.hybridz_tf",  "HybridzTF",  "_LAYER_REGISTRY"),
     ]
-    for tf_name, module_path, class_name, registry_attr in _tf_specs:
+    for tf_name, module_path, class_name, registry_attr in single_registry_specs:
         try:
             mod = importlib.import_module(module_path)
             cls = getattr(mod, class_name)
@@ -667,6 +678,29 @@ def _get_tf_capabilities() -> Dict[str, FrozenSet[str]]:
             result[tf_name] = frozenset(layers)
         except (ImportError, AttributeError) as e:
             raise RuntimeError(f"Cannot load {class_name}.{registry_attr}: {e}") from e
+
+    # DualTF: intersect real forward and real backward handlers (identity-based
+    # stub filter against _FORWARD_STUBS / _BACKWARD_STUBS frozensets).
+    try:
+        from act.back_end.dual_tf.dual_tf import (
+            DualTF,
+            _FORWARD_STUBS,
+            _BACKWARD_STUBS,
+        )
+    except (ImportError, AttributeError) as e:
+        raise RuntimeError(f"Cannot load DualTF dual-registry symbols: {e}") from e
+
+    def _real_keys(registry_dict, stub_set):
+        return {
+            k.upper()
+            for k, fn in registry_dict.items()
+            if fn not in stub_set
+        }
+
+    real_forward  = _real_keys(DualTF._FORWARD_REGISTRY,  _FORWARD_STUBS)
+    real_backward = _real_keys(DualTF._BACKWARD_REGISTRY, _BACKWARD_STUBS)
+    result["dual"] = frozenset(real_forward & real_backward)
+
     return result
 
 
