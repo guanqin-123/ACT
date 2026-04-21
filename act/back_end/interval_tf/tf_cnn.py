@@ -67,18 +67,22 @@ def tf_conv2d(L: Layer, Bin: Bounds) -> Fact:
     out_w = (in_w + 2 * padding[1] - dilation[1] * (kernel_w - 1) - 1) // stride[1] + 1
     output_shape = (1, out_channels, out_h, out_w)
     
-    # Compute bounds via torch
     lb_4d = Bin.lb.view(1, in_channels, in_h, in_w)
     ub_4d = Bin.ub.view(1, in_channels, in_h, in_w)
-    
+    if lb_4d.dtype != weight.dtype or lb_4d.device != weight.device:
+        lb_4d = lb_4d.to(dtype=weight.dtype, device=weight.device)
+        ub_4d = ub_4d.to(dtype=weight.dtype, device=weight.device)
+
     W_pos = weight.clamp(min=0)
     W_neg = weight.clamp(max=0)
     conv_kw = dict(stride=stride, padding=padding, dilation=dilation, groups=groups)
-    
+
     lb_out = F.conv2d(lb_4d, W_pos, None, **conv_kw) + F.conv2d(ub_4d, W_neg, None, **conv_kw)
     ub_out = F.conv2d(ub_4d, W_pos, None, **conv_kw) + F.conv2d(lb_4d, W_neg, None, **conv_kw)
-    
+
     if bias is not None:
+        if bias.dtype != lb_out.dtype or bias.device != lb_out.device:
+            bias = bias.to(dtype=lb_out.dtype, device=lb_out.device)
         lb_out = lb_out + bias.view(1, -1, 1, 1)
         ub_out = ub_out + bias.view(1, -1, 1, 1)
     

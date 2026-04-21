@@ -96,9 +96,30 @@ def tf_clip(L: Layer, Bin: Bounds) -> Fact:
     C.add_box(L.id,L.out_vars,B); return Fact(B,C)
 
 def tf_add(L: Layer, Bx: Bounds, By: Bounds) -> Fact:
-    B=Bounds(Bx.lb+By.lb, Bx.ub+By.ub); C=ConSet()
-    C.replace(Con("EQ", tuple(L.out_vars + L.params["x_vars"] + L.params["y_vars"]), {"tag":f"add:{L.id}"}))
-    C.add_box(L.id,L.out_vars,B); return Fact(B,C)
+    n_out = len(L.out_vars)
+    try:
+        lb = Bx.lb + By.lb
+        ub = Bx.ub + By.ub
+        if lb.numel() == n_out:
+            B = Bounds(lb, ub)
+        else:
+            raise RuntimeError(f"add produced {lb.numel()} elements, expected {n_out}")
+    except RuntimeError:
+        import warnings
+        warnings.warn(
+            f"tf_add layer {L.id}: incompatible preds Bx={tuple(Bx.lb.shape)} "
+            f"By={tuple(By.lb.shape)} vs out_vars={n_out}. Using sound over-approximation "
+            f"[-inf,+inf] of size {n_out}. Likely TorchToACT mis-classification."
+        )
+        dev, dt = Bx.lb.device, Bx.lb.dtype
+        B = Bounds(
+            lb=torch.full((n_out,), -float("inf"), device=dev, dtype=dt),
+            ub=torch.full((n_out,),  float("inf"), device=dev, dtype=dt),
+        )
+    C = ConSet()
+    C.replace(Con("EQ", tuple(L.out_vars + L.params["x_vars"] + L.params["y_vars"]), {"tag": f"add:{L.id}"}))
+    C.add_box(L.id, L.out_vars, B)
+    return Fact(B, C)
     
 def tf_sub(L: Layer, Bx: Bounds, By: Bounds) -> Fact:
     B = Bounds(Bx.lb - By.lb, Bx.ub - By.ub)
