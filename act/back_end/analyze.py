@@ -18,6 +18,7 @@ from typing import Dict, Tuple
 from act.back_end.core import Bounds, Fact, Net, ConSet
 from act.back_end.utils import box_join, changed_or_maskdiff, update_cache
 from act.back_end.transfer_functions import dispatch_tf, set_transfer_function_mode
+from act.back_end.layer_schema import LayerKind
 
 # Initialize default transfer function mode
 def initialize_tf_mode(mode: str = "interval"):
@@ -67,14 +68,36 @@ def analyze(net: Net, entry_id: int, entry_fact: Fact, eps: float=1e-9) -> Tuple
         # merge predecessors into before[lid]
         if net.preds.get(lid):
             preds_list = net.preds[lid]
-            # Initialize from first predecessor (not infinite bounds)
-            first_bounds = after[preds_list[0]].bounds
-            Bjoin = Bounds(lb=first_bounds.lb.clone(), ub=first_bounds.ub.clone())
+            pred_bounds = [after[pid].bounds for pid in preds_list]
+            kind = L.kind.upper() if isinstance(L.kind, str) else L.kind
+            shapes_match = all(b.lb.shape == pred_bounds[0].lb.shape for b in pred_bounds)
+
+            if kind == LayerKind.CONCAT.value:
+                # CONCAT: use schema-required concat_dim; preserves batch dim.
+                # Note: downstream TF handlers currently fetch bounds fresh via
+                # get_all_predecessor_bounds(), so this Bjoin is not consumed —
+                # but we still produce a correct shape for any future reader.
+                concat_dim = L.params.get("concat_dim", 0)
+                lb_cat = torch.cat([b.lb for b in pred_bounds], dim=concat_dim)
+                ub_cat = torch.cat([b.ub for b in pred_bounds], dim=concat_dim)
+                Bjoin = Bounds(lb=lb_cat, ub=ub_cat)
+            elif not shapes_match:
+                shapes = [tuple(b.lb.shape) for b in pred_bounds]
+                raise ValueError(
+                    f"Layer(id={lid}, kind={kind}) has {len(pred_bounds)} predecessors "
+                    f"with mismatched shapes {shapes}. Only CONCAT-family layers may have "
+                    f"shape-mismatched predecessors. Likely causes: graph wiring bug, "
+                    f"missing TF handler for a new multi-input layer kind, or incorrect "
+                    f"layer kind assignment."
+                )
+            else:
+                first = pred_bounds[0]
+                Bjoin = Bounds(lb=first.lb.clone(), ub=first.ub.clone())
+                for b in pred_bounds[1:]:
+                    Bjoin = box_join(Bjoin, b)
+
             Cjoin = ConSet()
-            for con in after[preds_list[0]].cons: Cjoin.replace(con)
-            # Join with remaining predecessors (for DAG merge points)
-            for pid in preds_list[1:]:
-                Bjoin = box_join(Bjoin, after[pid].bounds)
+            for pid in preds_list:
                 for con in after[pid].cons: Cjoin.replace(con)
             before[lid] = Fact(Bjoin, Cjoin)
 
