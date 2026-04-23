@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import time
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -42,6 +43,7 @@ from act.front_end.specs import OutKind, OutputSpec
 from act.pipeline.verification.act2torch import ACTToTorch
 from act.util.device_manager import get_default_device, get_default_dtype
 from act.util.stats import VerifyResult, VerifyStatus
+from act.back_end.counterexample_io import save_counterexample
 
 log = logging.getLogger(__name__)
 
@@ -363,6 +365,7 @@ def _verify_bab_legacy(
     config: BaBConfig,
     *,
     budget: float,
+    network_path: Optional[Path] = None,
 ) -> VerifyResult:
     brancher = _build_branching_strategy(config.branching_method)
     pool = _build_bounding(config.bounding_method)
@@ -384,10 +387,24 @@ def _verify_bab_legacy(
             if status == SolveStatus.SAT and ce_input is not None:
                 ce_tensor = torch.from_numpy(ce_input).to(device=root_bounds.lb.device)
                 if check_violation_at_point(net, ce_tensor, assert_layer):
+                    # CE already validated by check_violation_at_point — just save
+                    ce_batch = ce_tensor.unsqueeze(0)
+                    model_output = _run_model(net, ce_batch)
+                    saved_path: Optional[Path] = None
+                    if model_output is not None:
+                        saved_path = save_counterexample(
+                            net, ce_tensor, model_output[0], network_path,
+                            {
+                                "verifier_mode": "verify_bab_legacy",
+                                "property_kind": str(assert_layer.params.get("kind")),
+                                "solver": type(solver).__name__,
+                                "nodes": processed,
+                            },
+                        )
                     return VerifyResult(
                         VerifyStatus.FALSIFIED,
                         counterexample=ce_tensor,
-                        metadata={"nodes": processed},
+                        metadata={"nodes": processed, "saved_to": str(saved_path) if saved_path is not None else None},
                     )
             node_batch = SubproblemBatch(
                 lb=bounds.lb.unsqueeze(0),
@@ -413,6 +430,7 @@ def _verify_bab_batched(
     budget: float,
     dual_solver: Optional[DualSolver] = None,
     trace: Optional[BoundTrace] = None,
+    network_path: Optional[Path] = None,
 ) -> VerifyResult:
     dual_solver = dual_solver or DualSolver(DualTF())
     dual_solver.eta_iters = config.eta_iters
@@ -510,10 +528,25 @@ def _verify_bab_batched(
                 true_violations = check_violation_at_point_batched(net, ce_candidates, assert_layer)
                 if true_violations.any():
                     first = int(true_violations.nonzero(as_tuple=True)[0][0].item())
+                    ce_tensor = ce_candidates[first].detach().clone()
+                    # CE already validated by check_violation_at_point_batched — just save
+                    ce_batch = ce_tensor.unsqueeze(0)
+                    model_output = _run_model(net, ce_batch)
+                    saved_path: Optional[Path] = None
+                    if model_output is not None:
+                        saved_path = save_counterexample(
+                            net, ce_tensor, model_output[0], network_path,
+                            {
+                                "verifier_mode": "verify_bab_batched",
+                                "property_kind": str(assert_layer.params.get("kind")),
+                                "solver": "DualSolver",
+                                "nodes": processed,
+                            },
+                        )
                     return _finalize(VerifyResult(
                         VerifyStatus.FALSIFIED,
-                        counterexample=ce_candidates[first].detach().clone(),
-                        metadata={"nodes": processed},
+                        counterexample=ce_tensor,
+                        metadata={"nodes": processed, "saved_to": str(saved_path) if saved_path is not None else None},
                     ))
 
         open_idx = open_mask.nonzero(as_tuple=True)[0]
@@ -624,7 +657,20 @@ def verify_bab(
     verbose: bool = False,
     dual_solver: Optional[DualSolver] = None,
     trace: Optional[BoundTrace] = None,
+    network_path: Optional[Path] = None,
 ) -> VerifyResult:
+    """Branch-and-bound verification with optional CE persistence.
+
+    Returns CERTIFIED / FALSIFIED / UNKNOWN. On FALSIFIED, the validated
+    counterexample is also persisted to disk via
+    ``act.back_end.counterexample_io.save_counterexample`` and the saved
+    directory path is stored in ``result.metadata["saved_to"]``.
+
+    Args:
+        network_path: Optional path of the source network JSON. Used as the
+            ``<stem>`` in the saved CE directory name. When ``None``, the
+            stem defaults to ``"unnamed_net"``.
+    """
     if config is None:
         config = BaBConfig(
             max_depth=max_depth if max_depth is not None else 20,
@@ -652,8 +698,9 @@ def verify_bab(
             budget=budget,
             dual_solver=dual_solver,
             trace=trace,
+            network_path=network_path,
         )
-    return _verify_bab_legacy(net, solver, config, budget=budget)
+    return _verify_bab_legacy(net, solver, config, budget=budget, network_path=network_path)
 
 
 # ---------------------------------------------------------------------------

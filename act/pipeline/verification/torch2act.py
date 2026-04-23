@@ -50,7 +50,20 @@ import torch
 import torch.nn as nn
 import torch.fx as fx
 from torch.nn.modules.batchnorm import _BatchNorm
-from torchvision.ops import StochasticDepth
+try:
+    from torchvision.ops import StochasticDepth
+except Exception:  # torchvision may be unavailable or incompatible in some CI environments
+    # Provide a lightweight fallback to avoid import-time runtime errors when
+    # torchvision is not installable or its C++ ops are not registered for the
+    # current torch build. Tests that rely on actual StochasticDepth behavior
+    # do not run in this environment; providing a dummy class keeps import
+    # paths stable and allows the rest of the pipeline to be exercised.
+    class StochasticDepth(torch.nn.Module):
+        """Minimal stand-in for torchvision.ops.StochasticDepth used only for
+        isinstance checks during module conversion when torchvision is missing.
+        """
+        def __init__(self, *args, **kwargs):
+            super().__init__()
 
 from act.back_end.core import Net, Layer
 from act.back_end.layer_schema import LayerKind

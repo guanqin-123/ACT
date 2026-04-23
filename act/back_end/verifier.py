@@ -38,6 +38,8 @@ from typing import Optional, List, Callable, Dict, Any
 import numpy as np
 from scipy import stats
 import torch
+import logging
+from pathlib import Path
 
 # ACT backend imports
 from act.back_end.core import Bounds, Con, ConSet, Fact
@@ -50,6 +52,8 @@ from act.front_end.specs import InKind, OutKind
 
 # Verification types (canonical location: act/util/stats.py)
 from act.util.stats import VerifyStatus, VerifyResult
+
+logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
 # ACT Net extraction helpers
@@ -301,10 +305,23 @@ def setup_and_solve(
 # -----------------------------------------------------------------------------
 
 @torch.no_grad()
-def verify_once(net, solver: Solver, timelimit: Optional[float] = None) -> VerifyResult:
+def verify_once(
+    net,
+    solver: Solver,
+    timelimit: Optional[float] = None,
+    network_path: Optional[Path] = None,
+) -> VerifyResult:
     """
     Single-shot verification without refinement.
     Returns CERTIFIED/FALSIFIED/UNKNOWN with optional counterexample input.
+
+    Args:
+        net: ACT Net with embedded INPUT_SPEC and ASSERT layers.
+        solver: Constraint solver backend (Gurobi or TorchLP).
+        timelimit: Optional timelimit in seconds.
+        network_path: Optional Path to the source network file; used as the
+            <stem> in the saved counterexample directory name.
+            When None, "unnamed_net" is used.
     """
     spec_layers = gather_input_spec_layers(net)
     seed_bounds = seed_from_input_specs(spec_layers)
@@ -314,11 +331,42 @@ def verify_once(net, solver: Solver, timelimit: Optional[float] = None) -> Verif
     
     # Interpret result
     if status == SolveStatus.SAT and ce_input is not None:
+        # Local import to avoid circular dependency with bab.bab and counterexample_io
+        from act.back_end.counterexample_io import validate_and_save
+
         ce_x = torch.from_numpy(ce_input)
-        return VerifyResult(VerifyStatus.FALSIFIED, counterexample=ce_x, metadata=stats)
+        assert_layer = get_assert_layer(net)
+        # Filter out solver-level ``status`` so it cannot collide with the
+        # canonical CE metadata ``status`` key. Pass-through other stats fields
+        # under the ``solver_*`` namespace where appropriate to avoid clashes.
+        passthrough_stats = {
+            ("solver_status" if k == "status" else k): v
+            for k, v in stats.items()
+        }
+        status_metadata = {
+            "verifier_mode": "verify_once",
+            "property_kind": str(assert_layer.params.get("kind")),
+            "solver": type(solver).__name__,
+            "timelimit": timelimit,
+            **passthrough_stats,
+        }
+        is_true, saved_path = validate_and_save(
+            net, ce_x, assert_layer, network_path, status_metadata,
+        )
+        if is_true:
+            meta = {**stats, "saved_to": str(saved_path) if saved_path is not None else None}
+            return VerifyResult(VerifyStatus.FALSIFIED, counterexample=ce_x, metadata=meta)
+        # Spurious LP-relaxation CE — downgrade
+        logger.warning(
+            "verify_once: solver returned SAT but concrete inference shows no violation; "
+            "downgrading to UNKNOWN. ce_x=%s",
+            ce_x,
+        )
+        return VerifyResult(
+            VerifyStatus.UNKNOWN, metadata={**stats, "spurious_ce": True}
+        )
     
     if status == SolveStatus.UNSAT:
         return VerifyResult(VerifyStatus.CERTIFIED, metadata=stats)
     
     return VerifyResult(VerifyStatus.UNKNOWN, metadata=stats)
-

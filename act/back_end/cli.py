@@ -72,12 +72,13 @@ def run_verification(args, backend_cfg):
             solver=solver,
             config=bab,
             time_budget_s=backend_cfg.timeout,
+            network_path=Path(args.network),
         )
     else:
         print(f"\nRunning single-shot verification...")
         print(f"  Timeout: {backend_cfg.timeout}s\n")
 
-        result = verify_once(net=net, solver=solver, timelimit=backend_cfg.timeout)
+        result = verify_once(net=net, solver=solver, timelimit=backend_cfg.timeout, network_path=Path(args.network))
 
     print(f"\n{'=' * 80}")
     print(f"VERIFICATION RESULT: {result.status}")
@@ -91,6 +92,9 @@ def run_verification(args, backend_cfg):
         print(f"  Shape: {result.counterexample.shape}")
         if backend_cfg.verbose:
             print(f"  Values: {result.counterexample}")
+        saved_to = result.metadata.get("saved_to")
+        if saved_to is not None:
+            print(f"  Saved to: {saved_to}")
 
     if backend_cfg.verbose and result.metadata:
         print(f"\nVerification metadata:")
