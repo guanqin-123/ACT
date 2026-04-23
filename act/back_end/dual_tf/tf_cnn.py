@@ -6,6 +6,12 @@
 # Batch-aware Conv2D backward. nu: [B, *out_shape] -> v_out: [B, *in_flat], contrib: [B].
 #===---------------------------------------------------------------------===#
 
+# Note: Gradient enablement for dual backward helpers is governed by the
+# caller's torch.set_grad_enabled() context (see DualSolver.evaluate_spec).
+# @torch.no_grad() decorators on these helpers were removed to allow
+# gradient flow during robust training; verify_once / verify_bab paths
+# remain under no_grad via their own outer guards.
+
 import torch
 import torch.nn.functional as F
 from typing import Tuple, Optional, Dict, Any, List
@@ -82,40 +88,53 @@ def backward_conv2d(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
     return [nu_out], contrib
 
 
-@torch.no_grad()
 def dual_conv2d_backward(
     nu: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None,
     stride: int = 1, padding: int = 0,
     input_shape: Optional[tuple] = None, output_shape: Optional[tuple] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Conv2D backward via F.conv_transpose2d (naturally batched)."""
+    """Conv2D backward via F.conv_transpose2d (naturally batched).
+
+    output_shape is REQUIRED (no silent sqrt-inference fallback). The
+    .view(B, oC, oH, oW) into 4D is a legitimate shape restoration required
+    by F.conv_transpose2d, not a silent reshape to paper over a mismatch.
+    """
     assert weight.dim() == 4, f"weight must be 4D [oC,iC,kH,kW], got {weight.shape}"
     assert nu.dim() >= 2, f"nu must be batched (>=2D), got {nu.shape}"
     B = nu.shape[0]
     oC, iC, kH, kW = weight.shape
 
-    v_flat = nu.flatten(start_dim=1)                              # [B, n_out]
+    v_flat = nu.flatten(start_dim=1)
     n = v_flat.shape[-1]
 
-    if output_shape is not None:
-        if len(output_shape) == 4:   _, oC2, oH, oW = output_shape
-        elif len(output_shape) == 3: oC2, oH, oW = output_shape
-        else:                        oC2, oH, oW = oC, 1, 1
-        assert oC2 == oC, f"output_shape channels {oC2} != weight oC {oC}"
+    if output_shape is None:
+        raise ValueError(
+            "dual_conv2d_backward: output_shape is required. The previous silent "
+            "sqrt-based spatial inference was unsound for non-square feature maps."
+        )
+    if len(output_shape) == 4:
+        _, oC2, oH, oW = output_shape
+    elif len(output_shape) == 3:
+        oC2, oH, oW = output_shape
     else:
-        spatial = n // oC if oC > 0 else n
-        side = int(spatial ** 0.5) if spatial > 0 else 1
-        oH = oW = side
+        raise ValueError(
+            f"dual_conv2d_backward: output_shape must have len 3 or 4 (got "
+            f"{len(output_shape)}: {output_shape})"
+        )
+    if oC2 != oC:
+        raise ValueError(
+            f"dual_conv2d_backward: output_shape channels {oC2} do not match "
+            f"weight oC {oC}"
+        )
 
     expected = oC * oH * oW
-    if n == expected:
-        v_4d = v_flat.view(B, oC, oH, oW)
-    elif n > expected:
-        v_4d = v_flat[:, :expected].contiguous().view(B, oC, oH, oW)
-    else:
-        v_pad = torch.zeros(B, expected, dtype=v_flat.dtype, device=v_flat.device)
-        v_pad[:, :n] = v_flat
-        v_4d = v_pad.view(B, oC, oH, oW)
+    if n != expected:
+        raise ValueError(
+            f"dual_conv2d_backward: flat nu width {n} does not match expected "
+            f"output size {expected} (oC={oC}, oH={oH}, oW={oW}). Callers must "
+            f"pass nu shaped to match the conv output."
+        )
+    v_4d = v_flat.view(B, oC, oH, oW)
 
     if isinstance(stride, (list, tuple)): stride = stride[0]
     if isinstance(padding, (list, tuple)): padding = padding[0]
@@ -187,7 +206,6 @@ def backward_maxpool2d(L, nu, bounds_dict, preds):
     raise NotImplementedError("backward for MAXPOOL2D not implemented in dual_tf")
 
 
-@torch.no_grad()
 def dual_maxpool2d_backward(*args, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
     raise NotImplementedError("dual_maxpool2d_backward: not yet implemented")
 
@@ -227,6 +245,5 @@ def backward_avgpool2d(L, nu, bounds_dict, preds):
     raise NotImplementedError("backward for AVGPOOL2D not implemented in dual_tf")
 
 
-@torch.no_grad()
 def dual_avgpool2d_backward(*args, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
     raise NotImplementedError("dual_avgpool2d_backward: not yet implemented")

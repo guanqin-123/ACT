@@ -18,3 +18,4 @@ act/pipeline/log/*
 act/back_end/examples/nets/*
 act/ipynb/fuzzing_results_vnnlib/*
 fuzzing_results_vnnlib/*
+act/back_end/solver/test_spec_batching.py

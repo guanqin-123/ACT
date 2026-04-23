@@ -1,3 +1,4 @@
+# pyright: reportMissingImports=false, reportImportCycles=false
 #===- act/back_end/dual_tf/dual_tf.py - Dual Transfer Function Class ----====#
 # ACT: Abstract Constraint Transformer
 # Copyright (C) 2025- ACT Team
@@ -9,8 +10,10 @@
 #===---------------------------------------------------------------------===#
 
 
+import importlib
+
 import torch
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 from act.back_end.core import Bounds, Fact, Layer, Net, ConSet
 from act.back_end.layer_schema import LayerKind
 from act.back_end.transfer_functions import TransferFunction
@@ -35,123 +38,10 @@ from .tf_transformer import (
     forward_gelu, backward_gelu,
 )
 from .tf_forward import (
-    compute_forward_bounds, LinearBound, Frame,
-    _sum_linear_bounds, _sum_interval_bounds, _concretize,
-    _reset_forward_box, _align, _int_param,
+    compute_forward_bounds,
+    forward_add, backward_add,
+    forward_concat, backward_concat,
 )
-
-
-# ---- ADD ----
-def forward_add(
-    L: Layer, parent_boxes: List[Bounds], parent_lins: List[LinearBound],
-    parent_frames: List[Frame], preds: List[int], post_activation: bool,
-    device: torch.device, dtype: torch.dtype,
-) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
-    """ADD multi-pred forward handler.
-
-    Source: tf_forward.py lines 287-322 (ADD branch of compute_forward_bounds).
-    Semantics preserved verbatim — when all predecessor frames share the same
-    object identity and A_lb shapes match, sum the dual-track linear bounds and
-    concretize over the common frame; otherwise fall back to summing interval
-    boxes and reset the dual-track state. Bias (if present) is added on both
-    paths via _align. Returns (stored, out, lin, frame) where stored == out.
-    """
-    assert len(parent_boxes) >= 2, "forward_add: requires >=2 predecessors"
-    can_dual = all(
-        parent_frames[i] is parent_frames[0] for i in range(1, len(parent_frames))
-    ) and all(
-        parent_lins[i].A_lb.shape == parent_lins[0].A_lb.shape
-        for i in range(1, len(parent_lins))
-    )
-    if can_dual:
-        lin = _sum_linear_bounds(parent_lins)
-        bias_param = L.params.get("bias")
-        if bias_param is not None:
-            bias_vec = _align(bias_param.flatten(), lin.b_lb.shape[1])
-            lin = LinearBound(
-                A_lb=lin.A_lb,
-                b_lb=lin.b_lb + bias_vec,
-                A_ub=lin.A_ub,
-                b_ub=lin.b_ub + bias_vec,
-            )
-        frame = parent_frames[0]
-        lb, ub = _concretize(lin, *frame)
-    else:
-        summed = _sum_interval_bounds(parent_boxes)
-        lb, ub = summed.lb, summed.ub
-        bias_param = L.params.get("bias")
-        if bias_param is not None:
-            bias_vec = _align(bias_param.flatten(), lb.shape[1])
-            lb = lb + bias_vec
-            ub = ub + bias_vec
-        lin, frame = _reset_forward_box(lb, ub, device, dtype)
-    out = Bounds(lb, ub)
-    return out, out, lin, frame
-
-
-def backward_add(L: Layer, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
-                 preds: List[int]) -> Tuple[List[torch.Tensor], torch.Tensor]:
-    """ADD backward: identity skip — same ν routed to every predecessor.
-
-    Bias contrib uses negative sign to match dual_bias_backward / dual_bn_backward
-    / dual_dense_backward conventions (y = x + bias ⇒ contrib = -(ν · bias)).
-    """
-    B = nu.shape[0]
-    contrib = torch.zeros(B, dtype=nu.dtype, device=nu.device)
-    if "bias" in L.params and L.params["bias"] is not None:
-        b = L.params["bias"].flatten()
-        v = nu.flatten(start_dim=1)
-        n = min(v.shape[-1], b.numel())
-        contrib = -(v[..., :n] * b[:n]).sum(dim=-1)
-    return [nu for _ in preds], contrib
-
-
-# ---- CONCAT ----
-def forward_concat(
-    L: Layer, parent_boxes: List[Bounds], parent_lins: List[LinearBound],
-    parent_frames: List[Frame], preds: List[int], post_activation: bool,
-    device: torch.device, dtype: torch.dtype,
-) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
-    """CONCAT multi-pred forward handler.
-
-    Source: tf_forward.py lines 324-346 (CONCAT branch of compute_forward_bounds).
-    Semantics preserved verbatim — when all predecessor frames share the same
-    object identity and A_lb batch/input axes match, concatenate dual-track
-    linear bounds along dim=1 and concretize; otherwise fall back to torch.cat
-    on interval boxes along concat_dim (default 1) and reset dual-track state.
-    Returns (stored, out, lin, frame) where stored == out.
-    """
-    assert len(parent_boxes) >= 2, "forward_concat: requires >=2 predecessors"
-    concat_dim = _int_param(L.params.get("concat_dim", 1), 1)
-    can_dual = all(
-        parent_frames[i] is parent_frames[0] for i in range(1, len(parent_frames))
-    ) and all(
-        parent_lins[i].A_lb.shape[0] == parent_lins[0].A_lb.shape[0]
-        and parent_lins[i].A_lb.shape[2] == parent_lins[0].A_lb.shape[2]
-        for i in range(1, len(parent_lins))
-    )
-    if can_dual:
-        lin = LinearBound(
-            A_lb=torch.cat([lin.A_lb for lin in parent_lins], dim=1),
-            b_lb=torch.cat([lin.b_lb for lin in parent_lins], dim=1),
-            A_ub=torch.cat([lin.A_ub for lin in parent_lins], dim=1),
-            b_ub=torch.cat([lin.b_ub for lin in parent_lins], dim=1),
-        )
-        frame = parent_frames[0]
-        lb, ub = _concretize(lin, *frame)
-    else:
-        lb = torch.cat([box.lb for box in parent_boxes], dim=concat_dim)
-        ub = torch.cat([box.ub for box in parent_boxes], dim=concat_dim)
-        lin, frame = _reset_forward_box(lb, ub, device, dtype)
-    out = Bounds(lb, ub)
-    return out, out, lin, frame
-
-
-def backward_concat(L, nu, bounds_dict, preds):
-    """CONCAT backward. (Pending)
-    Will require: concat_dim parameter to split nu into per-predecessor slices.
-    """
-    raise NotImplementedError("backward for CONCAT not implemented in dual_tf")
 
 
 class DualTF(TransferFunction):
@@ -241,6 +131,8 @@ class DualTF(TransferFunction):
     def __init__(self):
         self._forward_bounds_cache: Dict[int, Bounds] = {}
         self._cache_net_id: Optional[int] = None
+        self._bounds_dict: Optional[Dict[int, Bounds]] = None
+        self._alphas: Optional[Dict[int, torch.Tensor]] = None
 
     @property
     def name(self) -> str: return "DualTF"
@@ -249,10 +141,12 @@ class DualTF(TransferFunction):
         return layer_kind.upper() in self._BACKWARD_REGISTRY
 
     def apply(self, L: Layer, input_bounds: Bounds, net: Net,
-              before: Dict[int, Fact], after: Dict[int, Fact]) -> Fact:
+              before: Dict[int, Fact], after: Dict[int, Fact],
+              alphas: Optional[Dict[int, torch.Tensor]] = None) -> Fact:
         """Return unbatched Bounds Fact for analyze()/BaB integration."""
         net_id = id(net)
-        if self._cache_net_id != net_id or not self._forward_bounds_cache:
+        use_cache = alphas is None
+        if (not use_cache or self._cache_net_id != net_id or not self._forward_bounds_cache):
             input_lb, input_ub = None, None
             for layer in net.layers:
                 if layer.kind.upper() in (LayerKind.INPUT.value, LayerKind.INPUT_SPEC.value):
@@ -266,9 +160,17 @@ class DualTF(TransferFunction):
                         break
             if input_lb is None or input_ub is None:
                 input_lb, input_ub = input_bounds.lb, input_bounds.ub
-            self._forward_bounds_cache = compute_forward_bounds(
-                net, input_lb, input_ub, post_activation=True)
-            self._cache_net_id = net_id
+            computed = compute_forward_bounds(
+                net, input_lb, input_ub, post_activation=True, alphas=alphas)
+            if use_cache:
+                self._forward_bounds_cache = computed
+                self._cache_net_id = net_id
+            else:
+                self._forward_bounds_cache = {}
+                self._cache_net_id = None
+                if L.id in computed:
+                    return Fact(bounds=computed[L.id], cons=ConSet())
+                return Fact(bounds=input_bounds, cons=ConSet())
 
         if L.id in self._forward_bounds_cache:
             return Fact(bounds=self._forward_bounds_cache[L.id], cons=ConSet())
@@ -277,6 +179,26 @@ class DualTF(TransferFunction):
     def clear_cache(self):
         self._forward_bounds_cache.clear()
         self._cache_net_id = None
+
+    def _backward_objective(
+        self,
+        net: "Net",
+        v: torch.Tensor,
+        return_sce: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Convenience wrapper for gradient-flow tests."""
+        if self._bounds_dict is None:
+            raise ValueError("DualTF._backward_objective: _bounds_dict must be set before use")
+        solver_module = importlib.import_module("act.back_end.solver.solver_dual")
+        DualSolver = getattr(solver_module, "DualSolver")
+        solver = DualSolver(self)
+        return solver._backward_pass(
+            net,
+            self._bounds_dict,
+            v,
+            alphas=self._alphas,
+            return_sce=return_sce,
+        )
 
 
 # Explicit stub registry: any handler whose semantics are "raise NotImplementedError"
@@ -288,7 +210,7 @@ _FORWARD_STUBS = frozenset({
     forward_layernorm, forward_gelu,
 })
 _BACKWARD_STUBS = frozenset({
-    backward_maxpool2d, backward_avgpool2d, backward_concat,
+    backward_maxpool2d, backward_avgpool2d,
     backward_lstm, backward_gru, backward_attention,
     backward_layernorm, backward_gelu,
 })

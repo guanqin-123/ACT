@@ -97,27 +97,38 @@ def tf_clip(L: Layer, Bin: Bounds) -> Fact:
 
 def tf_add(L: Layer, Bx: Bounds, By: Bounds) -> Fact:
     n_out = len(L.out_vars)
-    try:
-        lb = Bx.lb + By.lb
-        ub = Bx.ub + By.ub
-        if lb.numel() == n_out:
-            B = Bounds(lb, ub)
-        else:
-            raise RuntimeError(f"add produced {lb.numel()} elements, expected {n_out}")
-    except RuntimeError:
-        import warnings
-        warnings.warn(
-            f"tf_add layer {L.id}: incompatible preds Bx={tuple(Bx.lb.shape)} "
-            f"By={tuple(By.lb.shape)} vs out_vars={n_out}. Using sound over-approximation "
-            f"[-inf,+inf] of size {n_out}. Likely TorchToACT mis-classification."
+    x_vars = L.params.get("x_vars")
+    y_vars = L.params.get("y_vars")
+    if x_vars is None or y_vars is None:
+        raise ValueError(
+            f"tf_add: layer {L.id} missing required 'x_vars' or 'y_vars' params"
         )
-        dev, dt = Bx.lb.device, Bx.lb.dtype
-        B = Bounds(
-            lb=torch.full((n_out,), -float("inf"), device=dev, dtype=dt),
-            ub=torch.full((n_out,),  float("inf"), device=dev, dtype=dt),
+    if len(x_vars) != Bx.lb.numel():
+        raise ValueError(
+            f"tf_add: layer {L.id} x_vars length {len(x_vars)} does not match "
+            f"Bx numel {Bx.lb.numel()}"
         )
+    if len(y_vars) != By.lb.numel():
+        raise ValueError(
+            f"tf_add: layer {L.id} y_vars length {len(y_vars)} does not match "
+            f"By numel {By.lb.numel()}"
+        )
+    if Bx.lb.shape != By.lb.shape:
+        raise ValueError(
+            f"tf_add: layer {L.id} predecessor shape mismatch Bx={tuple(Bx.lb.shape)} "
+            f"By={tuple(By.lb.shape)}. TorchToACT must produce matching ADD inputs."
+        )
+    lb = Bx.lb + By.lb
+    ub = Bx.ub + By.ub
+    if lb.numel() != n_out:
+        raise ValueError(
+            f"tf_add: layer {L.id} produced {lb.numel()} elements, expected "
+            f"{n_out} (len(out_vars))"
+        )
+    B = Bounds(lb, ub)
     C = ConSet()
-    C.replace(Con("EQ", tuple(L.out_vars + L.params["x_vars"] + L.params["y_vars"]), {"tag": f"add:{L.id}"}))
+    C.replace(Con("EQ", tuple(L.out_vars + list(x_vars) + list(y_vars)),
+                  {"tag": f"add:{L.id}"}))
     C.add_box(L.id, L.out_vars, B)
     return Fact(B, C)
     
@@ -213,8 +224,18 @@ def tf_matmul(L: Layer, Bx: Bounds, By: Bounds) -> Fact:
     return Fact(B, C)
 
 def tf_concat(L: Layer, Bs: List[Bounds]) -> Fact:
-    B=Bounds(torch.cat([b.lb for b in Bs],0), torch.cat([b.ub for b in Bs],0))
-    C=ConSet(); C.add_box(L.id,L.out_vars,B); return Fact(B,C)
+    if "concat_dim" not in L.params:
+        raise ValueError(
+            f"tf_concat: CONCAT layer {L.id} missing required 'concat_dim' param"
+        )
+    concat_dim = int(L.params["concat_dim"])
+    B = Bounds(
+        torch.cat([b.lb for b in Bs], dim=concat_dim),
+        torch.cat([b.ub for b in Bs], dim=concat_dim),
+    )
+    C = ConSet()
+    C.add_box(L.id, L.out_vars, B)
+    return Fact(B, C)
 
 def tf_bn(L: Layer, Bin: Bounds) -> Fact:
     A,c=L.params["A"],L.params["c"]

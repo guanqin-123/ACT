@@ -9,8 +9,11 @@
 # Purpose:
 #   Subproblem pool management for Branch-and-Bound.
 #
-#   Contains the abstract base class ``BoundingStrategy`` and the
-#   ``RandomBounding`` baseline implementation.
+#   Contains the abstract base class ``BoundingStrategy`` and two
+#   implementations:
+#
+#     * ``RandomBounding`` — uniform-random pop (baseline / ablation).
+#     * ``BFSBounding``    — FIFO deque; level-order traversal.
 #
 #   A bounding strategy maintains a *pool* of pending subproblems and
 #   decides which ones to process next.  All data flows through
@@ -25,12 +28,13 @@
 
 from __future__ import annotations
 
+import collections
 from abc import ABC, abstractmethod
 from typing import Optional
 
 import torch
 
-from act.back_end.bab.node import SubproblemBatch
+from act.back_end.bab.node import SubproblemBatch, _concat_subproblem_batches
 
 
 # ---------------------------------------------------------------------------
@@ -153,3 +157,70 @@ class RandomBounding(BoundingStrategy):
 
     def __len__(self) -> int:
         return 0 if self._lb is None else self._lb.shape[0]
+
+
+# ---------------------------------------------------------------------------
+# BFS (FIFO) pool — queue of SubproblemBatch, preserves insertion order
+# ---------------------------------------------------------------------------
+
+
+class BFSBounding(BoundingStrategy):
+    """First-in-first-out pool using a ``collections.deque`` of batches.
+
+    Push appends the incoming batch to the back; pop drains from the front.
+    Order is preserved across batch boundaries:
+
+    * If the front-most queue entry has ``N`` rows and ``N <= batch_size``,
+      the whole front is taken and the loop continues with the next entry
+      until ``batch_size`` is reached or the queue is empty.
+    * If the front-most entry has ``N > batch_size``, it is split via
+      :meth:`SubproblemBatch.select` — the first ``batch_size`` rows are
+      returned and the remaining ``N - batch_size`` rows are pushed **back
+      to the front** (``deque.appendleft``) so subsequent pops see them
+      next, preserving FIFO semantics at row granularity.
+
+    Unlike :class:`RandomBounding`, this class does not re-stack tensors
+    internally — it keeps the original batch shape intact (cheaper when
+    ``push`` rate ≈ ``pop`` rate).
+    """
+
+    def __init__(self) -> None:
+        self._queue: collections.deque[SubproblemBatch] = collections.deque()
+
+    # -- BoundingStrategy interface -----------------------------------------
+
+    def push(self, batch: SubproblemBatch) -> None:
+        if batch.batch_size == 0:
+            return
+        self._queue.append(batch)
+
+    def pop(self, batch_size: int = 1) -> SubproblemBatch:
+        if self.empty:
+            raise IndexError("pop from empty pool")
+        if batch_size <= 0:
+            raise ValueError(f"pop: batch_size must be positive, got {batch_size}")
+
+        pieces: list[SubproblemBatch] = []
+        remaining = batch_size
+
+        while remaining > 0 and len(self._queue) > 0:
+            front = self._queue.popleft()
+            n = front.batch_size
+
+            if n <= remaining:
+                pieces.append(front)
+                remaining -= n
+            else:
+                device = front.lb.device
+                head_idx = torch.arange(remaining, dtype=torch.long, device=device)
+                tail_idx = torch.arange(remaining, n, dtype=torch.long, device=device)
+                pieces.append(front.select(head_idx))
+                # Push the unclaimed tail back to the FRONT so the next
+                # pop() still sees the same row-order as the caller pushed.
+                self._queue.appendleft(front.select(tail_idx))
+                remaining = 0
+
+        return _concat_subproblem_batches(*pieces)
+
+    def __len__(self) -> int:
+        return sum(b.batch_size for b in self._queue)

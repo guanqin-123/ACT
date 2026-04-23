@@ -48,7 +48,7 @@ def run_verification(args, backend_cfg):
 
     from act.back_end.serialization.serialization import load_net_from_file
     from act.back_end.verifier import verify_once
-    from act.back_end.bab import verify_bab
+    from act.back_end.bab.bab import verify_bab
     from act.util.stats import VerifyStatus
 
     print(f"Loading network from: {args.network}")

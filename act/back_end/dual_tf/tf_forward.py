@@ -18,16 +18,20 @@ with activation bounds stored PRE-activation unless ``post_activation=True``.
 
 # pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownArgumentType=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false, reportMissingParameterType=false, reportUntypedFunctionDecorator=false, reportDeprecated=false
 
+import contextlib
 from collections import deque
 from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
 
 from act.back_end.core import Bounds, Layer, Net
 from act.back_end.layer_schema import LayerKind
 from act.util.device_manager import get_default_device, get_default_dtype
+
+if TYPE_CHECKING:
+    from act.back_end.bab.eta import EtaState
 
 
 @dataclass
@@ -206,12 +210,14 @@ def _topological_sort(net: Net) -> List[int]:
 
 
 def _sum_interval_bounds(boxes: List[Bounds]) -> Bounds:
-    """Sum predecessor boxes element-wise, trimming to the smallest width."""
     lbs = [box.lb.flatten(start_dim=1) for box in boxes]
     ubs = [box.ub.flatten(start_dim=1) for box in boxes]
-    n = min(lb.shape[1] for lb in lbs)
-    lbs = [lb[:, :n] for lb in lbs]
-    ubs = [ub[:, :n] for ub in ubs]
+    widths = [lb.shape[1] for lb in lbs]
+    if len(set(widths)) > 1:
+        raise ValueError(
+            f"_sum_interval_bounds: predecessor widths must match, got {widths}. "
+            f"Upstream graph produced shape-mismatched ADD inputs."
+        )
     return Bounds(sum(lbs[1:], lbs[0]), sum(ubs[1:], ubs[0]))
 
 
@@ -225,101 +231,173 @@ def _sum_linear_bounds(lins: List[LinearBound]) -> LinearBound:
     )
 
 
-@torch.no_grad()
+def _apply_eta_clamp(layer_id: int, out: Bounds,
+                     eta_state: "Optional[EtaState]") -> Bounds:
+    """Clamp pre-activation concrete bounds per eta split constraints.
+
+    Sign convention (canonical beta-CROWN):
+        sign > 0  (INACTIVE, z <= point)  -> ub ← min(ub, point)
+        sign < 0  (ACTIVE,   z >= point)  -> lb ← max(lb, point)
+        sign == 0                         -> no change
+
+    Fast path (returns ``out`` unchanged): ``eta_state`` is None,
+    ``fast_path_skip()`` is True, or this layer has no eta entry.
+    """
+    if eta_state is None or eta_state.fast_path_skip():
+        return out
+    if layer_id not in eta_state.sign:
+        return out
+
+    sgn = eta_state.sign[layer_id]
+    pt = eta_state.point[layer_id]
+
+    orig_shape = out.lb.shape
+    B = orig_shape[0]
+    lb_flat = out.lb.reshape(B, -1)
+    ub_flat = out.ub.reshape(B, -1)
+
+    if lb_flat.shape[-1] != sgn.shape[-1]:
+        raise ValueError(
+            f"_apply_eta_clamp: layer {layer_id} bounds width {lb_flat.shape[-1]} "
+            f"does not match eta sgn width {sgn.shape[-1]}. EtaState must be sized "
+            f"to match the layer's flattened pre-activation width."
+        )
+    if lb_flat.shape[-1] == 0:
+        return out
+
+    sgn_n = sgn.to(device=lb_flat.device, dtype=lb_flat.dtype)
+    pt_n = pt.to(device=lb_flat.device, dtype=lb_flat.dtype)
+    inactive = sgn_n > 0
+    active = sgn_n < 0
+
+    new_ub = torch.where(inactive, torch.minimum(ub_flat, pt_n), ub_flat)
+    new_lb = torch.where(active, torch.maximum(lb_flat, pt_n), lb_flat)
+
+    return Bounds(lb=new_lb.reshape(orig_shape), ub=new_ub.reshape(orig_shape))
+
+
 def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Tensor,
-                           post_activation: bool = False) -> Dict[int, Bounds]:
-    """Forward bounds, natively batched with singleton auto-promotion."""
-    # Lazy import to break circular dep (dual_tf imports compute_forward_bounds)
-    from .dual_tf import DualTF
+                           post_activation: bool = False,
+                           eta_state: "Optional[EtaState]" = None,
+                           alphas: Optional[Dict[int, torch.Tensor]] = None) -> Dict[int, Bounds]:
+    """Forward bounds, natively batched with singleton auto-promotion.
 
-    device, dtype = get_default_device(), get_default_dtype()
-    if (
-        input_lb.dtype != dtype or input_lb.device != device
-        or input_ub.dtype != dtype or input_ub.device != device
-    ):
-        input_lb = input_lb.to(device=device, dtype=dtype)
-        input_ub = input_ub.to(device=device, dtype=dtype)
+    When ``eta_state`` is supplied, pre-activation bounds of each layer id
+    present in ``eta_state.sign`` are clamped in place at the per-layer
+    dispatch site. ``eta_state=None`` (or empty via ``fast_path_skip()``)
+    preserves bit-identical behavior to the un-clamped path.
+    """
+    with torch.no_grad() if alphas is None else contextlib.nullcontext():
+        # Lazy import to break circular dep (dual_tf imports compute_forward_bounds)
+        from .dual_tf import DualTF
 
-    if input_lb.dim() < 2:
-        input_lb = input_lb.unsqueeze(0)
-        input_ub = input_ub.unsqueeze(0)
+        device, dtype = get_default_device(), get_default_dtype()
+        if (
+            input_lb.dtype != dtype or input_lb.device != device
+            or input_ub.dtype != dtype or input_ub.device != device
+        ):
+            input_lb = input_lb.to(device=device, dtype=dtype)
+            input_ub = input_ub.to(device=device, dtype=dtype)
 
-    B = input_lb.shape[0]
-    lb_in = input_lb.reshape(B, -1)
-    ub_in = input_ub.reshape(B, -1)
-    input_dim = lb_in.shape[1]
+        if input_lb.dim() < 2:
+            input_lb = input_lb.unsqueeze(0)
+            input_ub = input_ub.unsqueeze(0)
 
-    bounds_dict: Dict[int, Bounds] = {}
-    box_state: Dict[int, Bounds] = {}
-    lin_state: Dict[int, LinearBound] = {}
-    frame_dict: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
-    topo_order = _topological_sort(net)
-    entry_box = Bounds(lb_in, ub_in)
-    entry_lin = _identity_lin(B, input_dim, device, dtype)
-    entry_frame = (lb_in, ub_in)
+        B = input_lb.shape[0]
+        lb_in = input_lb.reshape(B, -1)
+        ub_in = input_ub.reshape(B, -1)
+        input_dim = lb_in.shape[1]
 
-    for lid in topo_order:
-        layer = net.by_id[lid]
-        lid = layer.id
-        kind = layer.kind.upper()
-        preds = list(net.preds.get(lid, []) or [])
+        bounds_dict: Dict[int, Bounds] = {}
+        box_state: Dict[int, Bounds] = {}
+        lin_state: Dict[int, LinearBound] = {}
+        frame_dict: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+        topo_order = _topological_sort(net)
+        entry_box = Bounds(lb_in, ub_in)
+        entry_lin = _identity_lin(B, input_dim, device, dtype)
+        entry_frame = (lb_in, ub_in)
 
-        if not preds:
-            if kind not in (LayerKind.INPUT.value, LayerKind.INPUT_SPEC.value):
-                raise ValueError(f"compute_forward_bounds: layer {lid} kind '{kind}' has no predecessors and is not INPUT / INPUT_SPEC")
-            _store_forward_state(
-                bounds_dict,
-                box_state,
-                lin_state,
-                frame_dict,
-                lid,
-                entry_box,
-                entry_box,
-                entry_lin,
-                entry_frame,
-            )
-            continue
+        for lid in topo_order:
+            layer = net.by_id[lid]
+            lid = layer.id
+            kind = layer.kind.upper()
+            preds = list(net.preds.get(lid, []) or [])
 
-        missing = [pid for pid in preds if pid not in box_state or pid not in lin_state or pid not in frame_dict]
-        if missing:
-            raise ValueError(f"compute_forward_bounds: layer {lid} missing predecessor state for {missing}")
+            if not preds:
+                if kind not in (LayerKind.INPUT.value, LayerKind.INPUT_SPEC.value):
+                    raise ValueError(f"compute_forward_bounds: layer {lid} kind '{kind}' has no predecessors and is not INPUT / INPUT_SPEC")
+                _store_forward_state(
+                    bounds_dict,
+                    box_state,
+                    lin_state,
+                    frame_dict,
+                    lid,
+                    entry_box,
+                    entry_box,
+                    entry_lin,
+                    entry_frame,
+                )
+                continue
 
-        if len(preds) >= 2 or kind in (LayerKind.ADD.value, LayerKind.CONCAT.value):
+            missing = [pid for pid in preds if pid not in box_state or pid not in lin_state or pid not in frame_dict]
+            if missing:
+                raise ValueError(f"compute_forward_bounds: layer {lid} missing predecessor state for {missing}")
+
+            if len(preds) >= 2 or kind in (LayerKind.ADD.value, LayerKind.CONCAT.value):
+                handler = DualTF._FORWARD_REGISTRY.get(kind)
+                if handler is None:
+                    raise ValueError(
+                        f"compute_forward_bounds: unknown multi-pred layer kind '{kind}' "
+                        f"at layer {lid}. Registered kinds: "
+                        f"{sorted(DualTF._FORWARD_REGISTRY.keys())}"
+                    )
+                pred_boxes  = [box_state[pid]   for pid in preds]
+                pred_lins   = [lin_state[pid]   for pid in preds]
+                pred_frames = [frame_dict[pid]  for pid in preds]
+                stored, out, lin, frame = handler(
+                    layer, pred_boxes, pred_lins, pred_frames, preds,
+                    post_activation, device, dtype,
+                )
+                out = _apply_eta_clamp(lid, out, eta_state)
+                stored = _apply_eta_clamp(lid, stored, eta_state)
+                _store_forward_state(bounds_dict, box_state, lin_state, frame_dict,
+                                     lid, stored, out, lin, frame)
+                continue
+
             handler = DualTF._FORWARD_REGISTRY.get(kind)
             if handler is None:
                 raise ValueError(
-                    f"compute_forward_bounds: unknown multi-pred layer kind '{kind}' "
-                    f"at layer {lid}. Registered kinds: "
-                    f"{sorted(DualTF._FORWARD_REGISTRY.keys())}"
+                    f"compute_forward_bounds: unknown layer kind '{kind}' at layer {lid}. "
+                    f"Registered kinds: {sorted(DualTF._FORWARD_REGISTRY.keys())}"
                 )
-            pred_boxes  = [box_state[pid]   for pid in preds]
-            pred_lins   = [lin_state[pid]   for pid in preds]
-            pred_frames = [frame_dict[pid]  for pid in preds]
-            stored, out, lin, frame = handler(
-                layer, pred_boxes, pred_lins, pred_frames, preds,
-                post_activation, device, dtype,
-            )
+            pred_boxes  = [box_state[preds[0]]]
+            pred_lins   = [lin_state[preds[0]]]
+            pred_frames = [frame_dict[preds[0]]]
+            # Keep registry handler signatures stable; Phase 2 per-layer learned
+            # alphas are consumed only by RELU here. LRELU keeps its fixed param.
+            if kind == LayerKind.RELU.value and alphas is not None and lid in alphas:
+                pre_lb, pre_ub = pred_boxes[0].lb, pred_boxes[0].ub
+                x_L, x_U = pred_frames[0]
+                lin = _fwd_relu(pred_lins[0], pre_lb, pre_ub, alpha=alphas[lid], layer_id=lid)
+                crown_lb, crown_ub = _concretize(lin, x_L, x_U)
+                int_lb, int_ub = _box_relu(pre_lb, pre_ub)
+                lb, ub = _intersect_boxes(crown_lb, crown_ub, int_lb, int_ub)
+                out = Bounds(lb, ub)
+                stored = out if post_activation else Bounds(pre_lb, pre_ub)
+                frame = pred_frames[0]
+                if post_activation:
+                    lin, frame = _reset_forward_box(lb, ub, device, dtype)
+            else:
+                stored, out, lin, frame = handler(
+                    layer, pred_boxes, pred_lins, pred_frames, preds,
+                    post_activation, device, dtype,
+                )
+            out = _apply_eta_clamp(lid, out, eta_state)
+            stored = _apply_eta_clamp(lid, stored, eta_state)
             _store_forward_state(bounds_dict, box_state, lin_state, frame_dict,
                                  lid, stored, out, lin, frame)
-            continue
 
-        handler = DualTF._FORWARD_REGISTRY.get(kind)
-        if handler is None:
-            raise ValueError(
-                f"compute_forward_bounds: unknown layer kind '{kind}' at layer {lid}. "
-                f"Registered kinds: {sorted(DualTF._FORWARD_REGISTRY.keys())}"
-            )
-        pred_boxes  = [box_state[preds[0]]]
-        pred_lins   = [lin_state[preds[0]]]
-        pred_frames = [frame_dict[preds[0]]]
-        stored, out, lin, frame = handler(
-            layer, pred_boxes, pred_lins, pred_frames, preds,
-            post_activation, device, dtype,
-        )
-        _store_forward_state(bounds_dict, box_state, lin_state, frame_dict,
-                             lid, stored, out, lin, frame)
-
-    return bounds_dict
+        return bounds_dict
 
 
 def _fwd_dense(layer: Layer, lin: LinearBound) -> LinearBound:
@@ -340,7 +418,9 @@ def _fwd_dense(layer: Layer, lin: LinearBound) -> LinearBound:
     )
 
 
-def _fwd_relu(lin: LinearBound, lb: torch.Tensor, ub: torch.Tensor) -> LinearBound:
+def _fwd_relu(lin: LinearBound, lb: torch.Tensor, ub: torch.Tensor,
+              alpha: Optional[torch.Tensor] = None,
+              layer_id: Optional[int] = None) -> LinearBound:
     """Apply forward ReLU linear relaxation with per-batch alpha choice."""
     on = lb >= 0
     off = ub <= 0
@@ -352,14 +432,37 @@ def _fwd_relu(lin: LinearBound, lb: torch.Tensor, ub: torch.Tensor) -> LinearBou
         torch.where(on, torch.ones_like(lb), torch.zeros_like(lb)),
     )
     up_inter = torch.where(amb, -up_slope * lb, torch.zeros_like(lb))
-    alpha = torch.where(
+    alpha_heur = torch.where(
         amb,
         (up_slope > 0.5).to(lb.dtype),
         torch.where(on, torch.ones_like(lb), torch.zeros_like(lb)),
     )
+    if alpha is None:
+        alpha_used = alpha_heur
+    else:
+        alpha = alpha.to(device=lb.device, dtype=lb.dtype)
+        try:
+            broadcast_shape = torch.broadcast_shapes(tuple(alpha.shape), tuple(lb.shape))
+        except RuntimeError as exc:
+            layer_txt = "" if layer_id is None else f" for layer {layer_id}"
+            raise ValueError(
+                f"compute_forward_bounds: alpha{layer_txt} shape {tuple(alpha.shape)} "
+                f"is not broadcastable to ReLU bounds shape {tuple(lb.shape)}"
+            ) from exc
+        if broadcast_shape != tuple(lb.shape):
+            layer_txt = "" if layer_id is None else f" for layer {layer_id}"
+            raise ValueError(
+                f"compute_forward_bounds: alpha{layer_txt} shape {tuple(alpha.shape)} "
+                f"must broadcast exactly to ReLU bounds shape {tuple(lb.shape)}"
+            )
+        alpha_b = torch.broadcast_to(alpha, lb.shape)
+        if __debug__:
+            assert bool((alpha_b >= 0).all().item()), "ReLU alpha must be >= 0"
+            assert bool((alpha_b <= 1).all().item()), "ReLU alpha must be <= 1"
+        alpha_used = torch.where(amb, alpha_b, alpha_heur)
     return LinearBound(
-        A_lb=alpha.unsqueeze(-1) * lin.A_lb,
-        b_lb=alpha * lin.b_lb,
+        A_lb=alpha_used.unsqueeze(-1) * lin.A_lb,
+        b_lb=alpha_used * lin.b_lb,
         A_ub=up_slope.unsqueeze(-1) * lin.A_ub,
         b_ub=up_slope * lin.b_ub + up_inter,
     )
@@ -603,5 +706,222 @@ def _align(a: torch.Tensor, n: int) -> torch.Tensor:
     if a.numel() == n:
         return a
     if a.numel() > n:
-        return a[:n]
+        raise ValueError(
+            f"_align: parameter length {a.numel()} does not match expected {n}."
+            f" Callers must pass parameters sized to the layer output."
+        )
     return a.repeat((n + a.numel() - 1) // a.numel())[:n]
+
+
+def _assert_broadcast_to_nu(
+    src_shape: Tuple[int, ...],
+    nu_shape: Tuple[int, ...],
+    fn_name: str,
+    src_name: str = "src",
+) -> None:
+    """Require ``src_shape`` to broadcast exactly to ``nu_shape`` (no shape change on nu)."""
+    try:
+        broadcast_shape = torch.broadcast_shapes(tuple(src_shape), tuple(nu_shape))
+    except RuntimeError as exc:
+        raise ValueError(
+            f"{fn_name}: {src_name} shape {tuple(src_shape)} not broadcastable "
+            f"to nu shape {tuple(nu_shape)}"
+        ) from exc
+    if broadcast_shape != tuple(nu_shape):
+        raise ValueError(
+            f"{fn_name}: {src_name} shape {tuple(src_shape)} must broadcast "
+            f"exactly to nu shape {tuple(nu_shape)}, got {broadcast_shape}"
+        )
+
+
+def _scale_mul(nu: torch.Tensor, scale: torch.Tensor, fn_name: str) -> torch.Tensor:
+    """v_out = scale * nu (elementwise, shape-preserving). ``scale`` is 1D of
+    size equal to nu's flat-per-batch size; strict numel match required.
+    """
+    B = nu.shape[0]
+    scale_flat = scale.flatten()
+    flat_size = nu.numel() // B
+    if scale_flat.numel() != flat_size:
+        raise ValueError(
+            f"{fn_name}: scale numel {scale_flat.numel()} does not match "
+            f"nu per-batch size {flat_size}"
+        )
+    v_flat = nu.reshape(B, flat_size)
+    return (scale_flat * v_flat).view_as(nu)
+
+
+def _bias_contrib(
+    nu: torch.Tensor, bias: Optional[torch.Tensor], fn_name: str
+) -> torch.Tensor:
+    """contrib[b] = -(flat(nu[b]) · bias) for affine y = ... + bias.
+    Returns zeros(B) if bias is None. Bias is 1D of size = nu's flat-per-batch.
+    """
+    B = nu.shape[0]
+    if bias is None:
+        return torch.zeros(B, dtype=nu.dtype, device=nu.device)
+    bias_flat = bias.flatten()
+    flat_size = nu.numel() // B
+    if bias_flat.numel() != flat_size:
+        raise ValueError(
+            f"{fn_name}: bias numel {bias_flat.numel()} does not match "
+            f"nu per-batch size {flat_size}"
+        )
+    v_flat = nu.reshape(B, flat_size)
+    return -(v_flat * bias_flat).sum(dim=-1)
+
+
+# ---- ADD ----
+def forward_add(
+    L: Layer, parent_boxes: List[Bounds], parent_lins: List[LinearBound],
+    parent_frames: List[Frame], preds: List[int], post_activation: bool,
+    device: torch.device, dtype: torch.dtype,
+) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
+    """ADD multi-pred forward handler.
+
+    Semantics: when all predecessor frames share the same object identity and
+    A_lb shapes match, sum the dual-track linear bounds and concretize over
+    the common frame; otherwise fall back to summing interval boxes and
+    reset the dual-track state. Bias (if present) is added on both paths via
+    _align. Returns (stored, out, lin, frame) where stored == out.
+    """
+    assert len(parent_boxes) >= 2, "forward_add: requires >=2 predecessors"
+    can_dual = all(
+        parent_frames[i] is parent_frames[0] for i in range(1, len(parent_frames))
+    ) and all(
+        parent_lins[i].A_lb.shape == parent_lins[0].A_lb.shape
+        for i in range(1, len(parent_lins))
+    )
+    if can_dual:
+        lin = _sum_linear_bounds(parent_lins)
+        bias_param = L.params.get("bias")
+        if bias_param is not None:
+            bias_vec = _align(cast(torch.Tensor, bias_param).flatten(), lin.b_lb.shape[1])
+            lin = LinearBound(
+                A_lb=lin.A_lb,
+                b_lb=lin.b_lb + bias_vec,
+                A_ub=lin.A_ub,
+                b_ub=lin.b_ub + bias_vec,
+            )
+        frame = parent_frames[0]
+        lb, ub = _concretize(lin, *frame)
+    else:
+        summed = _sum_interval_bounds(parent_boxes)
+        lb, ub = summed.lb, summed.ub
+        bias_param = L.params.get("bias")
+        if bias_param is not None:
+            bias_vec = _align(cast(torch.Tensor, bias_param).flatten(), lb.shape[1])
+            lb = lb + bias_vec
+            ub = ub + bias_vec
+        lin, frame = _reset_forward_box(lb, ub, device, dtype)
+    out = Bounds(lb, ub)
+    return out, out, lin, frame
+
+
+def backward_add(L: Layer, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
+                 preds: List[int]) -> Tuple[List[torch.Tensor], torch.Tensor]:
+    """ADD backward: identity skip - same ν routed unchanged to every predecessor.
+
+    ν is NOT reshaped: each pred_nu is the input ν as-is.
+    Bias contrib (if present) uses y = x + bias convention: contrib = -(ν · bias).
+    """
+    bias = cast(Optional[torch.Tensor], L.params.get("bias"))
+    contrib = _bias_contrib(nu, bias, f"backward_add[layer {L.id}]")
+    return [nu for _ in preds], contrib
+
+
+# ---- CONCAT ----
+def forward_concat(
+    L: Layer, parent_boxes: List[Bounds], parent_lins: List[LinearBound],
+    parent_frames: List[Frame], preds: List[int], post_activation: bool,
+    device: torch.device, dtype: torch.dtype,
+) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
+    """CONCAT multi-pred forward handler.
+
+    Semantics: when all predecessor frames share the same object identity and
+    A_lb batch/input axes match, concatenate dual-track linear bounds along
+    dim=1 and concretize; otherwise fall back to torch.cat on interval boxes
+    along concat_dim (default 1) and reset dual-track state. Returns
+    (stored, out, lin, frame) where stored == out.
+    """
+    assert len(parent_boxes) >= 2, "forward_concat: requires >=2 predecessors"
+    concat_dim = _int_param(L.params.get("concat_dim", 1), 1)
+    can_dual = all(
+        parent_frames[i] is parent_frames[0] for i in range(1, len(parent_frames))
+    ) and all(
+        parent_lins[i].A_lb.shape[0] == parent_lins[0].A_lb.shape[0]
+        and parent_lins[i].A_lb.shape[2] == parent_lins[0].A_lb.shape[2]
+        for i in range(1, len(parent_lins))
+    )
+    if can_dual:
+        lin = LinearBound(
+            A_lb=torch.cat([lin.A_lb for lin in parent_lins], dim=1),
+            b_lb=torch.cat([lin.b_lb for lin in parent_lins], dim=1),
+            A_ub=torch.cat([lin.A_ub for lin in parent_lins], dim=1),
+            b_ub=torch.cat([lin.b_ub for lin in parent_lins], dim=1),
+        )
+        frame = parent_frames[0]
+        lb, ub = _concretize(lin, *frame)
+    else:
+        lb = torch.cat([box.lb for box in parent_boxes], dim=concat_dim)
+        ub = torch.cat([box.ub for box in parent_boxes], dim=concat_dim)
+        lin, frame = _reset_forward_box(lb, ub, device, dtype)
+    out = Bounds(lb, ub)
+    return out, out, lin, frame
+
+
+def backward_concat(L: Layer, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
+                    preds: List[int]) -> Tuple[List[torch.Tensor], torch.Tensor]:
+    """CONCAT backward: split ν along concat_dim into per-predecessor slices.
+
+    Forward (see forward_concat): out = torch.cat([pred_i.out for i], dim=concat_dim).
+    Backward inverts this: nu_pred_i is the slice of nu matching pred_i's
+    width along concat_dim. ν is split (not reshaped), so per-pred ν inherits
+    nu's full rank.
+
+    Per-pred sizes are derived from bounds_dict[pid].lb.shape[concat_dim].
+    Any mismatch between sum(pred_sizes) and nu.shape[concat_dim] raises
+    ValueError rather than silently truncating or padding.
+
+    No bias on CONCAT, so contrib = 0.
+    """
+    # Stubs in the registry should raise NotImplementedError when executed
+    # so tests that exercise stub handlers receive the expected exception.
+    if getattr(L, "kind", None) == "STUB":
+        raise NotImplementedError("backward_concat: stub handler not implemented")
+
+    if len(preds) < 2:
+        raise ValueError(
+            f"backward_concat: CONCAT layer {L.id} requires >=2 predecessors, "
+            f"got {len(preds)}"
+        )
+    if "concat_dim" not in L.params:
+        raise ValueError(
+            f"backward_concat: CONCAT layer {L.id} missing required "
+            f"'concat_dim' param"
+        )
+    concat_dim = int(L.params["concat_dim"])
+
+    pred_sizes: List[int] = []
+    for pid in preds:
+        pbounds = bounds_dict.get(pid)
+        if pbounds is None:
+            raise ValueError(
+                f"backward_concat: missing bounds for predecessor {pid}"
+            )
+        if concat_dim >= pbounds.lb.dim():
+            raise ValueError(
+                f"backward_concat: concat_dim={concat_dim} out of range for "
+                f"predecessor {pid} with shape {tuple(pbounds.lb.shape)}"
+            )
+        pred_sizes.append(pbounds.lb.shape[concat_dim])
+
+    total = sum(pred_sizes)
+    if nu.shape[concat_dim] != total:
+        raise ValueError(
+            f"backward_concat: nu.shape[{concat_dim}]={nu.shape[concat_dim]} "
+            f"!= sum(pred_sizes)={total} (preds={preds}, sizes={pred_sizes})"
+        )
+
+    pred_nus = list(torch.split(nu, pred_sizes, dim=concat_dim))
+    contrib = torch.zeros(nu.shape[0], dtype=nu.dtype, device=nu.device)
+    return pred_nus, contrib

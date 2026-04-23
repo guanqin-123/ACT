@@ -198,23 +198,13 @@ def tf_mul(L, bounds, tf):
 
 
 def tf_concat(L, bounds, tf):
-    hz_in = tf._hz_cache.get(L.id)
-    if hz_in is not None:
-        preds = tf._net.preds.get(L.id, [])
-        parts = [tf._hz_cache.get(pid) for pid in preds]
-        if all(p is not None for p in parts):
-            result = parts[0]
-            for p in parts[1:]:
-                result = hz_minkowski_sum(result, p)
-            tf._hz_cache[L.id] = result
-        else:
-            hz_in = None
-    fact = interval.tf_concat(
-        L, tf._net.get_all_predecessor_bounds(L.id, tf._after, tf._before)
+    raise NotImplementedError(
+        "hybridz_tf.tf_concat: the Minkowski-sum approximation previously used here "
+        "is semantically wrong for CONCAT (concat is structural composition along a "
+        "given axis, not addition of two zonotopes). A dedicated hz_concat zonotope "
+        "operator is required. Use IntervalTF for CONCAT-containing nets, or "
+        "DualTF if dual bounds suffice, until hz_concat is implemented."
     )
-    if hz_in is not None:
-        return Fact(bounds=hz_compute_bounds(tf._hz_cache[L.id]), cons=fact.cons)
-    return fact
 
 
 # --- HZ activation encodings (zonotope domain) ---

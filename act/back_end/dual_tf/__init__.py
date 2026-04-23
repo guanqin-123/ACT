@@ -19,6 +19,82 @@
 # pyright: reportImportCycles=false
 """Dual Transfer Function package.
 
+## Primary Entry Point: `DualSolver.evaluate_spec`
+
+Unified dispatcher over all supported OutputSpec kinds (LINEAR_LE, UNSAFE_LINEAR,
+TOP1_ROBUST, MARGIN_ROBUST, RANGE). Encodes any spec as a batched `SpecBatch`
+(B*M linear forms) and runs a single backward pass via `compute_bound`.
+
+```python
+from act.back_end.solver import DualSolver
+from act.back_end.solver.spec_batching import SpecBatchResult
+from act.front_end.specs import OutputSpec, OutKind
+
+solver = DualSolver(tf=DualTF())
+result: SpecBatchResult = solver.evaluate_spec(
+    net, bounds_dict,
+    OutputSpec(kind=OutKind.TOP1_ROBUST, y_true=y_true),
+    num_classes=10,
+)
+# result.margins: [B, K]  — per-class lower bounds on y_true - y_j
+# result.certified: [B] bool
+# result.min_slack: [B]  — legacy-compatible worst-case margin
+```
+
+## Result Layers (SpecBatchResult vs VerifyResult)
+
+Two result types operate at different abstraction levels:
+
+- **`SpecBatchResult`** (low-level, batched): direct numerical output from
+  dual evaluation. Carries `[B, M]` margin tensor, per-cell slack, active-cell
+  mask, and `[B]` certification bool. Used for robust training losses and
+  intermediate computations.
+
+- **`VerifyResult`** (`act.util.stats`, per-sample): high-level verification
+  verdict with `status: VerifyStatus` enum (CERTIFIED / UNKNOWN / FALSIFIED /
+  TIMEOUT / ...), optional counterexample, and metadata.
+
+Convert via `SpecBatchResult.to_verify_results() -> List[VerifyResult]`. The
+bridge maps `certified=True -> CERTIFIED`, `certified=False -> UNKNOWN`
+(never FALSIFIED: dual bounds are sound but not complete; a negative slack
+may reflect relaxation gap rather than a true violation).
+
+## Gradient Flow (Robust Training)
+
+All dual backward handlers and `compute_bound` / `evaluate_spec` /
+`compute_robust_bound` honor the caller's gradient context via the
+`enable_grad: bool = False` parameter (default off for verification).
+
+```python
+# Robust training loop
+result = solver.evaluate_spec(net, bounds_dict, spec, enable_grad=True)
+loss = -result.margins.mean()
+loss.backward()  # gradients propagate through dense/conv weights
+```
+
+When `enable_grad=False` (default), execution is wrapped in
+`torch.set_grad_enabled(False)`, preserving inference-path performance.
+
+## Legacy: `compute_robust_bound`
+
+First-class shortcut for classification robustness, retained for both
+verification callers and robust training:
+
+```python
+min_slack, certified = solver.compute_robust_bound(
+    net, bounds_dict, y_true, num_classes
+)  # legacy tuple signature
+
+# Or, for training:
+result = solver.compute_robust_bound(
+    net, bounds_dict, y_true, num_classes,
+    margin=0.5, return_full=True, enable_grad=True,
+)  # returns SpecBatchResult
+```
+
+Internally delegates to `evaluate_spec` with `TOP1_ROBUST` or
+`MARGIN_ROBUST` spec kind.
+
 ## Batch Convention
 
 All tensors at module boundaries follow the `[B, *layer_shape]` convention:

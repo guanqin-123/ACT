@@ -7,11 +7,17 @@
 # nu: [B, *shape] -> v_out: [B, *shape], contrib: [B].
 #===---------------------------------------------------------------------===#
 
+# Note: Gradient enablement for dual backward helpers is governed by the
+# caller's torch.set_grad_enabled() context (see DualSolver.evaluate_spec).
+# @torch.no_grad() decorators on these helpers were removed to allow
+# gradient flow during robust training; verify_once / verify_bab paths
+# remain under no_grad via their own outer guards.
+
 import torch
 from typing import Tuple, Callable, Dict, Any, List
 from act.back_end.core import Bounds
-from .tf_mlp import _batch_flatten_bounds
-from .tf_forward import LinearBound, Frame, _reset_forward_box
+
+from .tf_forward import LinearBound, Frame, _reset_forward_box, _assert_broadcast_to_nu
 
 
 # ---- Shared primitives ----
@@ -29,7 +35,6 @@ def dtanh(x: torch.Tensor) -> torch.Tensor:
     return 1 - torch.tanh(x) ** 2
 
 
-@torch.no_grad()
 def compute_smooth_relaxation(
     l: torch.Tensor, u: torch.Tensor,
     func: Callable[[torch.Tensor], torch.Tensor],
@@ -62,27 +67,27 @@ def compute_smooth_relaxation(
     return k_lower, b_lower, k_upper, b_upper
 
 
-@torch.no_grad()
 def dual_smooth_backward(
     nu: torch.Tensor, bounds: Bounds,
     func: Callable[[torch.Tensor], torch.Tensor],
     dfunc: Callable[[torch.Tensor], torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Batched smooth activation backward with sign-adaptive bound selection."""
-    B = nu.shape[0]
-    l, u = _batch_flatten_bounds(bounds, B)
-    v = nu.flatten(start_dim=1)
-    n = min(v.shape[-1], l.shape[-1])
-    if v.shape[-1] != l.shape[-1]:
-        l, u, v = l[..., :n], u[..., :n], v[..., :n]
+    """Batched smooth activation backward with sign-adaptive bound selection.
 
+    Shape-preserving: operates at nu's native rank; bounds must broadcast to
+    nu's shape (commonly [1, n] bounds + [B, n] nu for multi-objective).
+    """
+    _assert_broadcast_to_nu(bounds.lb.shape, nu.shape, "dual_smooth_backward", "bounds")
+    l, u = bounds.lb, bounds.ub
+    v = nu
     k_lower, b_lower, k_upper, b_upper = compute_smooth_relaxation(l, u, func, dfunc)
     v_pos = v >= 0
     k = torch.where(v_pos, k_lower, k_upper)
     b = torch.where(v_pos, b_lower, b_upper)
 
-    v_out = v * k                                                 # [B, n]
-    contrib = (v * b).sum(dim=-1)                                 # [B]
+    v_out = v * k
+    reduce_dims = tuple(range(1, v.dim()))
+    contrib = (v * b).sum(dim=reduce_dims) if reduce_dims else (v * b)
     return v_out, contrib
 
 
@@ -117,7 +122,6 @@ def backward_sigmoid(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
     return [nu_out], contrib
 
 
-@torch.no_grad()
 def dual_sigmoid_backward(nu: torch.Tensor, bounds: Bounds):
     return dual_smooth_backward(nu, bounds, sigmoid, dsigmoid)
 
@@ -153,6 +157,5 @@ def backward_tanh(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
     return [nu_out], contrib
 
 
-@torch.no_grad()
 def dual_tanh_backward(nu: torch.Tensor, bounds: Bounds):
     return dual_smooth_backward(nu, bounds, tanh, dtanh)

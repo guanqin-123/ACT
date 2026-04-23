@@ -17,10 +17,12 @@ from .solver_interval import TorchLPSolver
 from .solver_gurobi import GurobiSolver
 from .solver_hz import HZSolver, HZono, hz_compute_bounds
 from .solver_dual import DualSolver
+from .spec_batching import SpecBatch, SpecBatchResult, build_spec_batch, expand_bounds_dict
 
 __all__ = [
     'Solver', 'SolverCaps', 'SolveStatus',
     'TorchLPSolver', 'GurobiSolver',
     'HZSolver', 'HZono', 'hz_compute_bounds',
     'DualSolver',
+    'SpecBatch', 'SpecBatchResult', 'build_spec_batch', 'expand_bounds_dict',
 ]
