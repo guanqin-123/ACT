@@ -172,6 +172,147 @@ def _get_pre_act_bias(
     return out
 
 
+def _normalize_feature_shape(
+    shape: tuple[int, ...] | list[int],
+    batch_size: int,
+) -> tuple[int, int, int, int]:
+    if len(shape) == 4:
+        _batch, channels, height, width = (int(dim) for dim in shape)
+        return (batch_size, channels, height, width)
+    if len(shape) == 3:
+        channels, height, width = (int(dim) for dim in shape)
+        return (batch_size, channels, height, width)
+    raise ValueError(f"Expected feature shape with 3 or 4 dims, got {shape!r}")
+
+
+def _normalize_pair(value: int | tuple[int, int] | list[int]) -> tuple[int, int]:
+    if isinstance(value, int):
+        return (value, value)
+    if len(value) != 2:
+        raise ValueError(f"Expected pair-like value, got {value!r}")
+    return (int(value[0]), int(value[1]))
+
+
+def _normalize_padding4(
+    padding: int | tuple[int, int] | tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    if isinstance(padding, int):
+        return (padding, padding, padding, padding)
+    if len(padding) == 2:
+        pad_h, pad_w = (int(item) for item in padding)
+        return (pad_w, pad_w, pad_h, pad_h)
+    return (
+        int(padding[0]),
+        int(padding[1]),
+        int(padding[2]),
+        int(padding[3]),
+    )
+
+
+def _canonicalize_patches_layout(
+    pieces: torch.Tensor,
+    batch_size: int,
+) -> torch.Tensor:
+    if pieces.ndim != 7:
+        raise ValueError(
+            f"BaBSR patches scoring expects 7-D patches, got {tuple(pieces.shape)}"
+        )
+    if int(pieces.shape[1]) == batch_size:
+        return pieces
+    if int(pieces.shape[0]) == batch_size:
+        return pieces.permute(1, 0, 2, 3, 4, 5, 6).contiguous()
+    raise ValueError(
+        f"Cannot infer batch axis for patches shape {tuple(pieces.shape)} with batch={batch_size}"
+    )
+
+
+def _resolve_score_input_shape(
+    layer_id: int,
+    value: Patches,
+    bounds: Bounds,
+    pre_layer: Layer,
+    batch_size: int,
+) -> tuple[int, int, int, int]:
+    if value.input_shape is not None:
+        return _normalize_feature_shape(cast(tuple[int, ...] | list[int], value.input_shape), batch_size)
+    output_shape = pre_layer.params.get("output_shape")
+    if isinstance(output_shape, (tuple, list)):
+        return _normalize_feature_shape(cast(tuple[int, ...] | list[int], output_shape), batch_size)
+    if bounds.lb.dim() == 4:
+        return _normalize_feature_shape(tuple(int(dim) for dim in bounds.lb.shape), batch_size)
+    raise ValueError(
+        f"BaBSR select_neurons: layer {layer_id} needs output_shape metadata to score Patches lA"
+    )
+
+
+def _patches_to_score_tensor(
+    layer_id: int,
+    value: Patches,
+    bounds: Bounds,
+    pre_layer: Layer,
+    batch_size: int,
+) -> torch.Tensor:
+    input_shape = _resolve_score_input_shape(layer_id, value, bounds, pre_layer, batch_size)
+    _, input_channels, input_height, input_width = input_shape
+    feature_dim = input_channels * input_height * input_width
+    reference = bounds.lb.reshape(batch_size, -1)
+    if value.is_identity:
+        return reference.new_ones((batch_size, feature_dim))
+    if value.patches is None:
+        raise ValueError(
+            f"BaBSR select_neurons: layer {layer_id} Patches input is missing tensor payload"
+        )
+
+    pieces = _canonicalize_patches_layout(value.patches, batch_size)
+    reduced = pieces.sum(dim=0)
+    _batch, out_h, out_w, patch_in_channels, k_h, k_w = (
+        int(reduced.shape[0]),
+        int(reduced.shape[1]),
+        int(reduced.shape[2]),
+        int(reduced.shape[3]),
+        int(reduced.shape[4]),
+        int(reduced.shape[5]),
+    )
+    if patch_in_channels != input_channels:
+        raise ValueError(
+            f"BaBSR select_neurons: layer {layer_id} Patches channels {patch_in_channels} do not match input shape {input_shape}"
+        )
+
+    stride_h, stride_w = _normalize_pair(cast(int | tuple[int, int] | list[int], value.stride))
+    pad_left, _pad_right, pad_top, _pad_bottom = _normalize_padding4(
+        cast(int | tuple[int, int] | tuple[int, int, int, int], value.padding)
+    )
+
+    oh = torch.arange(out_h, device=reduced.device, dtype=torch.long).view(out_h, 1, 1, 1, 1)
+    ow = torch.arange(out_w, device=reduced.device, dtype=torch.long).view(1, out_w, 1, 1, 1)
+    ic = torch.arange(input_channels, device=reduced.device, dtype=torch.long).view(1, 1, input_channels, 1, 1)
+    kh = torch.arange(k_h, device=reduced.device, dtype=torch.long).view(1, 1, 1, k_h, 1)
+    kw = torch.arange(k_w, device=reduced.device, dtype=torch.long).view(1, 1, 1, 1, k_w)
+    in_y = oh * stride_h - pad_top + kh
+    in_x = ow * stride_w - pad_left + kw
+    valid = (
+        (in_y >= 0)
+        & (in_y < input_height)
+        & (in_x >= 0)
+        & (in_x < input_width)
+    ).expand(out_h, out_w, input_channels, k_h, k_w)
+    flat_cols = (
+        ic * (input_height * input_width)
+        + in_y.clamp(min=0, max=input_height - 1) * input_width
+        + in_x.clamp(min=0, max=input_width - 1)
+    )
+    flat_cols = flat_cols.reshape(-1)
+    valid_flat = valid.reshape(-1)
+    values_flat = reduced.reshape(batch_size, -1)
+    score = values_flat.new_zeros((batch_size, feature_dim))
+    score.scatter_add_(
+        1,
+        flat_cols[valid_flat].unsqueeze(0).expand(batch_size, -1),
+        values_flat[:, valid_flat],
+    )
+    return score
+
+
 # ---------------------------------------------------------------------------
 # Per-layer lA collector
 # ---------------------------------------------------------------------------
@@ -376,26 +517,7 @@ def _lA_to_score_tensor(
 ) -> torch.Tensor:
     if isinstance(value, torch.Tensor):
         return value.reshape(batch_size, -1)
-
-    output_shape = pre_layer.params.get("output_shape")
-    if not isinstance(output_shape, (tuple, list)):
-        if bounds.lb.dim() == 4:
-            input_shape = tuple(int(dim) for dim in bounds.lb.shape)
-        else:
-            raise ValueError(
-                f"BaBSR select_neurons: layer {layer_id} needs output_shape metadata to materialize Patches lA"
-            )
-    else:
-        input_shape = tuple(int(dim) for dim in output_shape)
-    dense = value.to_matrix(input_shape)
-    _record_lA_materialization(layer_id)
-    if dense.ndim != 3:
-        raise ValueError(
-            f"BaBSR select_neurons: expected dense lA [B, rows, D], got {tuple(dense.shape)}"
-        )
-    if dense.shape[1] == 1:
-        return dense[:, 0, :]
-    return dense.reshape(batch_size, -1)
+    return _patches_to_score_tensor(layer_id, value, bounds, pre_layer, batch_size)
 
 
 # ---------------------------------------------------------------------------

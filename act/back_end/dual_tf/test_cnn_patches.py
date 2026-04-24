@@ -642,7 +642,7 @@ def test_babsr_instrumentation_no_silent_densify(caplog: pytest.LogCaptureFixtur
     _bounds, _, lb_4d, ub_4d = _make_input_box(2, 1, 4, 4, seed=56)
     with caplog.at_level("WARNING"):
         _score_picks(net, lb_4d, ub_4d, mode="patches")
-    assert any("materializing patches lA" in record.message for record in caplog.records)
+    assert not any("materializing patches lA" in record.message for record in caplog.records)
     caplog.clear()
     with caplog.at_level("WARNING"):
         _score_picks(net, lb_4d, ub_4d, mode="matrix")
