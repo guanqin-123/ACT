@@ -19,6 +19,7 @@ with activation bounds stored PRE-activation unless ``post_activation=True``.
 # pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownArgumentType=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false, reportMissingParameterType=false, reportUntypedFunctionDecorator=false, reportDeprecated=false
 
 import contextlib
+import logging
 from collections import deque
 from dataclasses import dataclass
 
@@ -32,6 +33,9 @@ from act.util.device_manager import get_default_device, get_default_dtype
 
 if TYPE_CHECKING:
     from act.back_end.bab.eta import EtaState
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -51,6 +55,24 @@ def _concretize(lin: LinearBound, x_L: torch.Tensor, x_U: torch.Tensor
     A_lb_n = lin.A_lb.clamp(max=0)
     A_ub_p = lin.A_ub.clamp(min=0)
     A_ub_n = lin.A_ub.clamp(max=0)
+    if lin.A_lb.dim() == 4:
+        if x_L.dim() == 3:
+            x_L_use = x_L[:, 0, :] if x_L.stride(1) == 0 else x_L.reshape(x_L.shape[0] * x_L.shape[1], x_L.shape[2])
+            x_U_use = x_U[:, 0, :] if x_U.stride(1) == 0 else x_U.reshape(x_U.shape[0] * x_U.shape[1], x_U.shape[2])
+        else:
+            x_L_use = x_L
+            x_U_use = x_U
+        lb = (
+            torch.einsum("bsoi,bi->bso", A_lb_p, x_L_use)
+            + torch.einsum("bsoi,bi->bso", A_lb_n, x_U_use)
+            + lin.b_lb
+        )
+        ub = (
+            torch.einsum("bsoi,bi->bso", A_ub_p, x_U_use)
+            + torch.einsum("bsoi,bi->bso", A_ub_n, x_L_use)
+            + lin.b_ub
+        )
+        return lb, ub
     lb = (
         torch.einsum("boi,bi->bo", A_lb_p, x_L)
         + torch.einsum("boi,bi->bo", A_lb_n, x_U)
@@ -231,6 +253,144 @@ def _sum_linear_bounds(lins: List[LinearBound]) -> LinearBound:
     )
 
 
+def _lin_has_rank3(lin: LinearBound) -> bool:
+    return lin.A_lb.dim() >= 4 and lin.A_lb.stride(1) == 0
+
+
+def _bounds_have_rank3(bounds: Bounds) -> bool:
+    return bounds.lb.dim() >= 3 and bounds.lb.stride(1) == 0
+
+
+def _flatten_batch_rows(tensor: torch.Tensor, *, writable: bool = False) -> torch.Tensor:
+    if tensor.dim() >= 3 and tensor.shape[0] > 0 and tensor.stride(1) == 0:
+        if writable:
+            tensor = tensor.contiguous()
+        return tensor.reshape(tensor.shape[0] * tensor.shape[1], *tensor.shape[2:])
+    return tensor
+
+
+def _flatten_lin_for_read(
+    lin: LinearBound,
+    *,
+    fn_name: str,
+    warn: bool = False,
+) -> tuple[LinearBound, tuple[int, int] | None]:
+    if not _lin_has_rank3(lin):
+        return lin, None
+    if warn:
+        log.warning("%s: materializing rank-3 LinearBound read path (TODO W3)", fn_name)
+    mat = _materialize_linear_if_needed(lin)
+    B, M = mat.A_lb.shape[:2]
+    return (
+        LinearBound(
+            A_lb=mat.A_lb.reshape(B * M, *mat.A_lb.shape[2:]),
+            b_lb=mat.b_lb.reshape(B * M, *mat.b_lb.shape[2:]),
+            A_ub=mat.A_ub.reshape(B * M, *mat.A_ub.shape[2:]),
+            b_ub=mat.b_ub.reshape(B * M, *mat.b_ub.shape[2:]),
+        ),
+        (B, M),
+    )
+
+
+def _restore_lin_rank3(lin: LinearBound, spec_shape: tuple[int, int] | None) -> LinearBound:
+    if spec_shape is None:
+        return lin
+    B, M = spec_shape
+    return LinearBound(
+        A_lb=lin.A_lb.reshape(B, M, *lin.A_lb.shape[1:]),
+        b_lb=lin.b_lb.reshape(B, M, *lin.b_lb.shape[1:]),
+        A_ub=lin.A_ub.reshape(B, M, *lin.A_ub.shape[1:]),
+        b_ub=lin.b_ub.reshape(B, M, *lin.b_ub.shape[1:]),
+    )
+
+
+def _materialize_linear_if_needed(lin: LinearBound) -> LinearBound:
+    tensors = (lin.A_lb, lin.b_lb, lin.A_ub, lin.b_ub)
+    needs_materialization = any(
+        tensor.dim() >= 3 and any(stride == 0 for stride in tensor.stride())
+        for tensor in tensors
+    )
+    if not needs_materialization:
+        return lin
+    return LinearBound(
+        A_lb=lin.A_lb.contiguous(),
+        b_lb=lin.b_lb.contiguous(),
+        A_ub=lin.A_ub.contiguous(),
+        b_ub=lin.b_ub.contiguous(),
+    )
+
+
+def _explicit_materialize_add_input(bounds: Bounds, lin: LinearBound, *, fn_name: str) -> tuple[Bounds, LinearBound]:
+    log.warning("%s: explicit materialize for mixed rank-2/rank-3 inputs", fn_name)
+    mat_lin = _materialize_linear_if_needed(lin)
+    if _bounds_have_rank3(bounds):
+        return (
+            Bounds(
+                lb=bounds.lb.contiguous().reshape(bounds.lb.shape[0] * bounds.lb.shape[1], *bounds.lb.shape[2:]),
+                ub=bounds.ub.contiguous().reshape(bounds.ub.shape[0] * bounds.ub.shape[1], *bounds.ub.shape[2:]),
+            ),
+            LinearBound(
+                A_lb=mat_lin.A_lb.reshape(mat_lin.A_lb.shape[0] * mat_lin.A_lb.shape[1], *mat_lin.A_lb.shape[2:]),
+                b_lb=mat_lin.b_lb.reshape(mat_lin.b_lb.shape[0] * mat_lin.b_lb.shape[1], *mat_lin.b_lb.shape[2:]),
+                A_ub=mat_lin.A_ub.reshape(mat_lin.A_ub.shape[0] * mat_lin.A_ub.shape[1], *mat_lin.A_ub.shape[2:]),
+                b_ub=mat_lin.b_ub.reshape(mat_lin.b_ub.shape[0] * mat_lin.b_ub.shape[1], *mat_lin.b_ub.shape[2:]),
+            ),
+        )
+    return bounds, mat_lin
+
+
+def _linear_feature_dim(lin: LinearBound) -> int:
+    return int(lin.b_lb.shape[-1])
+
+
+def _flatten_rank3_bounds(bounds: Bounds) -> Bounds:
+    if not _bounds_have_rank3(bounds):
+        return bounds
+    return Bounds(
+        lb=bounds.lb.contiguous().reshape(bounds.lb.shape[0] * bounds.lb.shape[1], *bounds.lb.shape[2:]),
+        ub=bounds.ub.contiguous().reshape(bounds.ub.shape[0] * bounds.ub.shape[1], *bounds.ub.shape[2:]),
+    )
+
+
+def _repeat_rank2_bounds(bounds: Bounds, factor: int) -> Bounds:
+    return Bounds(
+        lb=bounds.lb.repeat_interleave(factor, dim=0),
+        ub=bounds.ub.repeat_interleave(factor, dim=0),
+    )
+
+
+def _repeat_rank2_lin(lin: LinearBound, factor: int) -> LinearBound:
+    return LinearBound(
+        A_lb=lin.A_lb.repeat_interleave(factor, dim=0),
+        b_lb=lin.b_lb.repeat_interleave(factor, dim=0),
+        A_ub=lin.A_ub.repeat_interleave(factor, dim=0),
+        b_ub=lin.b_ub.repeat_interleave(factor, dim=0),
+    )
+
+
+def _normalize_mixed_rank_inputs(
+    parent_boxes: List[Bounds],
+    parent_lins: List[LinearBound],
+    *,
+    fn_name: str,
+) -> tuple[List[Bounds], List[LinearBound]]:
+    rank3_rows = [box.lb.shape[1] for box in parent_boxes if _bounds_have_rank3(box)]
+    if not rank3_rows:
+        return parent_boxes, parent_lins
+    factor = rank3_rows[0]
+    boxes_out: List[Bounds] = []
+    lins_out: List[LinearBound] = []
+    for box, lin in zip(parent_boxes, parent_lins):
+        if _bounds_have_rank3(box):
+            dense_box, dense_lin = _explicit_materialize_add_input(box, lin, fn_name=fn_name)
+            boxes_out.append(dense_box)
+            lins_out.append(dense_lin)
+        else:
+            boxes_out.append(_repeat_rank2_bounds(box, factor))
+            lins_out.append(_repeat_rank2_lin(lin, factor))
+    return boxes_out, lins_out
+
+
 def _apply_eta_clamp(layer_id: int, out: Bounds,
                      eta_state: "Optional[EtaState]") -> Bounds:
     """Clamp pre-activation concrete bounds per eta split constraints.
@@ -344,20 +504,31 @@ def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Ten
                 raise ValueError(f"compute_forward_bounds: layer {lid} missing predecessor state for {missing}")
 
             if len(preds) >= 2 or kind in (LayerKind.ADD.value, LayerKind.CONCAT.value):
-                handler = DualTF._FORWARD_REGISTRY.get(kind)
-                if handler is None:
-                    raise ValueError(
-                        f"compute_forward_bounds: unknown multi-pred layer kind '{kind}' "
-                        f"at layer {lid}. Registered kinds: "
-                        f"{sorted(DualTF._FORWARD_REGISTRY.keys())}"
-                    )
                 pred_boxes  = [box_state[pid]   for pid in preds]
                 pred_lins   = [lin_state[pid]   for pid in preds]
                 pred_frames = [frame_dict[pid]  for pid in preds]
-                stored, out, lin, frame = handler(
-                    layer, pred_boxes, pred_lins, pred_frames, preds,
-                    post_activation, device, dtype,
-                )
+                if kind == LayerKind.ADD.value:
+                    stored, out, lin, frame = forward_add(
+                        layer, pred_boxes, pred_lins, pred_frames, preds,
+                        post_activation, device, dtype,
+                    )
+                elif kind == LayerKind.CONCAT.value:
+                    stored, out, lin, frame = forward_concat(
+                        layer, pred_boxes, pred_lins, pred_frames, preds,
+                        post_activation, device, dtype,
+                    )
+                else:
+                    handler = DualTF._FORWARD_REGISTRY.get(kind)
+                    if handler is None:
+                        raise ValueError(
+                            f"compute_forward_bounds: unknown multi-pred layer kind '{kind}' "
+                            f"at layer {lid}. Registered kinds: "
+                            f"{sorted(DualTF._FORWARD_REGISTRY.keys())}"
+                        )
+                    stored, out, lin, frame = handler(
+                        layer, pred_boxes, pred_lins, pred_frames, preds,
+                        post_activation, device, dtype,
+                    )
                 out = _apply_eta_clamp(lid, out, eta_state)
                 stored = _apply_eta_clamp(lid, stored, eta_state)
                 _store_forward_state(bounds_dict, box_state, lin_state, frame_dict,
@@ -534,6 +705,7 @@ def _fwd_lrelu(lin: LinearBound, lb: torch.Tensor, ub: torch.Tensor, alpha: floa
 
 def _fwd_conv2d(layer: Layer, lin: LinearBound) -> Optional[LinearBound]:
     """Propagate dual-track affine bounds through Conv2D via batched F.conv2d."""
+    lin, spec_shape = _flatten_lin_for_read(lin, fn_name="_fwd_conv2d", warn=True)
     weight = layer.params["weight"]
     bias = layer.params.get("bias")
     stride = layer.params.get("stride", 1)
@@ -594,7 +766,10 @@ def _fwd_conv2d(layer: Layer, lin: LinearBound) -> Optional[LinearBound]:
         b_lb_new = b_lb_new + bias_bc
         b_ub_new = b_ub_new + bias_bc
 
-    return LinearBound(A_lb=A_lb_new, b_lb=b_lb_new, A_ub=A_ub_new, b_ub=b_ub_new)
+    return _restore_lin_rank3(
+        LinearBound(A_lb=A_lb_new, b_lb=b_lb_new, A_ub=A_ub_new, b_ub=b_ub_new),
+        spec_shape,
+    )
 
 
 def _fwd_conv2d_interval(layer: Layer, lb: torch.Tensor, ub: torch.Tensor
@@ -785,17 +960,22 @@ def forward_add(
     _align. Returns (stored, out, lin, frame) where stored == out.
     """
     assert len(parent_boxes) >= 2, "forward_add: requires >=2 predecessors"
+    rank3_flags = [_lin_has_rank3(lin) for lin in parent_lins]
+    forced_interval = False
+    if any(rank3_flags) and not all(rank3_flags):
+        parent_boxes, parent_lins = _normalize_mixed_rank_inputs(parent_boxes, parent_lins, fn_name="forward_add")
+        forced_interval = True
     can_dual = all(
         parent_frames[i] is parent_frames[0] for i in range(1, len(parent_frames))
     ) and all(
         parent_lins[i].A_lb.shape == parent_lins[0].A_lb.shape
         for i in range(1, len(parent_lins))
     )
-    if can_dual:
+    if can_dual and not forced_interval:
         lin = _sum_linear_bounds(parent_lins)
         bias_param = L.params.get("bias")
         if bias_param is not None:
-            bias_vec = _align(cast(torch.Tensor, bias_param).flatten(), lin.b_lb.shape[1])
+            bias_vec = _align(cast(torch.Tensor, bias_param).flatten(), _linear_feature_dim(lin))
             lin = LinearBound(
                 A_lb=lin.A_lb,
                 b_lb=lin.b_lb + bias_vec,
@@ -809,7 +989,7 @@ def forward_add(
         lb, ub = summed.lb, summed.ub
         bias_param = L.params.get("bias")
         if bias_param is not None:
-            bias_vec = _align(cast(torch.Tensor, bias_param).flatten(), lb.shape[1])
+            bias_vec = _align(cast(torch.Tensor, bias_param).flatten(), lb.shape[-1])
             lb = lb + bias_vec
             ub = ub + bias_vec
         lin, frame = _reset_forward_box(lb, ub, device, dtype)
@@ -845,25 +1025,31 @@ def forward_concat(
     """
     assert len(parent_boxes) >= 2, "forward_concat: requires >=2 predecessors"
     concat_dim = _int_param(L.params.get("concat_dim", 1), 1)
+    rank3_flags = [_lin_has_rank3(lin) for lin in parent_lins]
+    rank3_mode = all(rank3_flags)
+    if any(rank3_flags) and not all(rank3_flags):
+        parent_boxes, parent_lins = _normalize_mixed_rank_inputs(parent_boxes, parent_lins, fn_name="forward_concat")
     can_dual = all(
         parent_frames[i] is parent_frames[0] for i in range(1, len(parent_frames))
     ) and all(
         parent_lins[i].A_lb.shape[0] == parent_lins[0].A_lb.shape[0]
-        and parent_lins[i].A_lb.shape[2] == parent_lins[0].A_lb.shape[2]
+        and parent_lins[i].A_lb.shape[-1] == parent_lins[0].A_lb.shape[-1]
         for i in range(1, len(parent_lins))
     )
     if can_dual:
+        lin_cat_dim = 2 if rank3_mode else 1
         lin = LinearBound(
-            A_lb=torch.cat([lin.A_lb for lin in parent_lins], dim=1),
-            b_lb=torch.cat([lin.b_lb for lin in parent_lins], dim=1),
-            A_ub=torch.cat([lin.A_ub for lin in parent_lins], dim=1),
-            b_ub=torch.cat([lin.b_ub for lin in parent_lins], dim=1),
+            A_lb=torch.cat([lin.A_lb for lin in parent_lins], dim=lin_cat_dim),
+            b_lb=torch.cat([lin.b_lb for lin in parent_lins], dim=lin_cat_dim),
+            A_ub=torch.cat([lin.A_ub for lin in parent_lins], dim=lin_cat_dim),
+            b_ub=torch.cat([lin.b_ub for lin in parent_lins], dim=lin_cat_dim),
         )
         frame = parent_frames[0]
         lb, ub = _concretize(lin, *frame)
     else:
-        lb = torch.cat([box.lb for box in parent_boxes], dim=concat_dim)
-        ub = torch.cat([box.ub for box in parent_boxes], dim=concat_dim)
+        box_cat_dim = concat_dim + 1 if any(_bounds_have_rank3(box) for box in parent_boxes) else concat_dim
+        lb = torch.cat([box.lb for box in parent_boxes], dim=box_cat_dim)
+        ub = torch.cat([box.ub for box in parent_boxes], dim=box_cat_dim)
         lin, frame = _reset_forward_box(lb, ub, device, dtype)
     out = Bounds(lb, ub)
     return out, out, lin, frame

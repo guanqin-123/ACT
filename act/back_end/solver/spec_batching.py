@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import torch
 from dataclasses import dataclass
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING, cast
 
 from act.back_end.bab.eta import EtaState
+from act.back_end.bounds_dispatch import expand_rank3, materialize_if_needed
 from act.back_end.core import Bounds
+from act.back_end.dual_tf.tf_forward import LinearBound
 from act.front_end.specs import OutputSpec, OutKind
 
 if TYPE_CHECKING:
@@ -168,7 +170,21 @@ class SpecBatchResult:
         return results
 
 
-def expand_bounds_dict(bounds_dict: Dict[int, Bounds], M: int) -> Dict[int, Bounds]:
+def _materialize_expanded_bounds(bounds: Bounds) -> Bounds:
+    lin = LinearBound(A_lb=bounds.lb, b_lb=bounds.lb, A_ub=bounds.ub, b_ub=bounds.ub)
+    mat = materialize_if_needed(lin)
+    return Bounds(
+        lb=mat.A_lb.reshape(mat.A_lb.shape[0] * mat.A_lb.shape[1], *mat.A_lb.shape[2:]).contiguous(),
+        ub=mat.A_ub.reshape(mat.A_ub.shape[0] * mat.A_ub.shape[1], *mat.A_ub.shape[2:]).contiguous(),
+    )
+
+
+def expand_bounds_dict(
+    bounds_dict: Dict[int, Bounds],
+    M: int,
+    *,
+    materialize: bool = False,
+) -> Dict[int, Bounds]:
     """Expand each batched Bounds entry from [B, *shape] to [B*M, *shape].
 
     Uses repeat_interleave(M, dim=0) so row b*M+j of the expanded tensor
@@ -193,18 +209,16 @@ def expand_bounds_dict(bounds_dict: Dict[int, Bounds], M: int) -> Dict[int, Boun
         raise ValueError(f"expand_bounds_dict: M must be positive, got {M}")
     if M == 1:
         return dict(bounds_dict)
-    out: Dict[int, Bounds] = {}
     for lid, bounds in bounds_dict.items():
         if bounds.lb.dim() < 2:
             raise ValueError(
                 f"expand_bounds_dict: layer {lid} bounds must be batched "
                 f"[B, *shape], got dim={bounds.lb.dim()} shape={tuple(bounds.lb.shape)}"
             )
-        out[lid] = Bounds(
-            lb=bounds.lb.repeat_interleave(M, dim=0),
-            ub=bounds.ub.repeat_interleave(M, dim=0),
-        )
-    return out
+    expanded = cast(dict[int, Bounds], expand_rank3(bounds_dict, M))
+    if not materialize:
+        return expanded
+    return {lid: _materialize_expanded_bounds(bounds) for lid, bounds in expanded.items()}
 
 
 def _build_linear_le(
@@ -404,8 +418,9 @@ def build_spec_batch(
         from act.util.device_manager import get_default_dtype
         dtype = get_default_dtype()
 
-    if getattr(out_spec, "y_true", None) is not None:
-        y_true = out_spec.y_true.reshape(-1)
+    y_true_tensor = getattr(out_spec, "y_true", None)
+    if y_true_tensor is not None:
+        y_true = y_true_tensor.reshape(-1)
         margin = out_spec.margin
         if y_true.numel() == 1 and B > 1:
             y_true = y_true.repeat(B)

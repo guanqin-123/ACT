@@ -7,30 +7,29 @@ checks or tensor-manipulation bypassing dispatch is a bug. Wave 2a fans out thes
 to every consumer. Wave 3-4 fills the Patches branches.
 """
 
+import importlib
 from collections.abc import Mapping, Sequence
-from typing import cast
+from typing import Protocol, TypeVar, cast, overload
 
 import torch
 
 from act.back_end.bab.eta import EtaState
 from act.back_end.core import Bounds, Layer
-from act.back_end.dual_tf.tf_cnn import (
-    forward_avgpool2d,
-    forward_conv2d,
-    forward_maxpool2d,
-)
-from act.back_end.dual_tf.tf_forward import Frame, LinearBound, forward_add
-from act.back_end.dual_tf.tf_mlp import backward_relu, forward_bn
 from act.back_end.layer_schema import LayerKind
 from act.back_end.patches import Patches
 
 
-BoundsRep = LinearBound | Patches
-ForwardDispatchResult = tuple[Bounds, Bounds, LinearBound, Frame]
-ForwardParentFrames = list[Frame]
-ForwardParentBoxes = list[Bounds]
-ForwardParentLins = list[LinearBound]
-DispatchParentLins = Sequence[BoundsRep]
+class LinearBoundLike(Protocol):
+    A_lb: torch.Tensor
+    b_lb: torch.Tensor
+    A_ub: torch.Tensor
+    b_ub: torch.Tensor
+
+
+FrameLike = tuple[torch.Tensor, torch.Tensor]
+
+
+LinearBoundT = TypeVar("LinearBoundT", bound=LinearBoundLike)
 
 
 def is_rank3_view(x: object) -> bool:
@@ -51,11 +50,27 @@ def _has_zero_stride_axis(tensor: torch.Tensor) -> bool:
     return any(stride == 0 for stride in tensor.stride())
 
 
+def _expand_tensor_rank3(tensor: torch.Tensor, M: int) -> torch.Tensor:
+    return tensor.unsqueeze(1).expand(-1, M, *([-1] * (tensor.dim() - 1)))
+
+
+@overload
+def expand_rank3(bounds_dict: Mapping[int, Bounds], M: int) -> dict[int, Bounds]: ...
+
+
+@overload
+def expand_rank3(bounds_dict: Mapping[int, LinearBoundT], M: int) -> Mapping[int, LinearBoundT]: ...
+
+
+@overload
+def expand_rank3(bounds_dict: EtaState, M: int) -> Mapping[int, LinearBoundLike]: ...
+
+
 def expand_rank3(
-    bounds_dict: dict[int, LinearBound] | EtaState,
+    bounds_dict: Mapping[int, Bounds] | Mapping[int, LinearBoundLike] | EtaState,
     M: int,
-) -> dict[int, LinearBound]:
-    """Expand LinearBound tensors with a stride-0 spec axis.
+) -> Mapping[int, Bounds] | Mapping[int, LinearBoundLike]:
+    """Expand Bounds / LinearBound tensors with a stride-0 spec axis.
 
     Zero-copy expand via stride-0 view. Writes to the returned tensor will corrupt
     all M copies. Treat as read-only.
@@ -67,33 +82,54 @@ def expand_rank3(
     if M <= 0:
         raise ValueError(f"expand_rank3: M must be positive, got {M}")
     if M == 1:
-        return dict(bounds_dict)
+        if not bounds_dict:
+            return {}
+        first_value = next(iter(bounds_dict.values()))
+        if isinstance(first_value, Bounds):
+            return {lid: cast(Bounds, value) for lid, value in bounds_dict.items()}
+        return {lid: cast(LinearBoundLike, value) for lid, value in bounds_dict.items()}
 
-    expanded: dict[int, LinearBound] = {}
+    from act.back_end.dual_tf.tf_forward import LinearBound
+
+    expanded_bounds: dict[int, Bounds] = {}
+    expanded_linear: dict[int, LinearBound] = {}
+    is_linear = False
     for lid, bounds in bounds_dict.items():
-        A_lb = bounds.A_lb.unsqueeze(1).expand(-1, M, *([-1] * (bounds.A_lb.dim() - 1)))
-        A_ub = bounds.A_ub.unsqueeze(1).expand(-1, M, *([-1] * (bounds.A_ub.dim() - 1)))
-        b_lb = bounds.b_lb.unsqueeze(1).expand(-1, M, *([-1] * (bounds.b_lb.dim() - 1)))
-        b_ub = bounds.b_ub.unsqueeze(1).expand(-1, M, *([-1] * (bounds.b_ub.dim() - 1)))
+        if isinstance(bounds, Bounds):
+            lb = _expand_tensor_rank3(bounds.lb, M)
+            ub = _expand_tensor_rank3(bounds.ub, M)
+            assert lb.stride(1) == 0, "expand_rank3: lb spec axis must be stride-0"
+            assert ub.stride(1) == 0, "expand_rank3: ub spec axis must be stride-0"
+            expanded_bounds[lid] = Bounds(lb=lb, ub=ub)
+            continue
+
+        is_linear = True
+        linear = cast(LinearBoundLike, bounds)
+        A_lb = _expand_tensor_rank3(linear.A_lb, M)
+        A_ub = _expand_tensor_rank3(linear.A_ub, M)
+        b_lb = _expand_tensor_rank3(linear.b_lb, M)
+        b_ub = _expand_tensor_rank3(linear.b_ub, M)
 
         assert A_lb.stride(-3) == 0, "expand_rank3: A_lb spec axis must be stride-0"
         assert A_ub.stride(-3) == 0, "expand_rank3: A_ub spec axis must be stride-0"
         assert b_lb.stride(1) == 0, "expand_rank3: b_lb spec axis must be stride-0"
         assert b_ub.stride(1) == 0, "expand_rank3: b_ub spec axis must be stride-0"
 
-        expanded[lid] = LinearBound(A_lb=A_lb, b_lb=b_lb, A_ub=A_ub, b_ub=b_ub)
-    return expanded
+        expanded_linear[lid] = LinearBound(A_lb=A_lb, b_lb=b_lb, A_ub=A_ub, b_ub=b_ub)
+    return expanded_linear if is_linear else expanded_bounds
 
 
-def materialize_if_needed(bounds: LinearBound) -> LinearBound:
+def materialize_if_needed(bounds: LinearBoundLike) -> LinearBoundLike:
     """Materialize expanded stride-0 views for writable consumers."""
+    tf_forward = importlib.import_module("act.back_end.dual_tf.tf_forward")
+
     tensors = (bounds.A_lb, bounds.b_lb, bounds.A_ub, bounds.b_ub)
     needs_materialization = any(
         is_rank3_view(tensor) or _has_zero_stride_axis(tensor) for tensor in tensors
     )
     if not needs_materialization:
         return bounds
-    return LinearBound(
+    return tf_forward.LinearBound(
         A_lb=bounds.A_lb.contiguous(),
         b_lb=bounds.b_lb.contiguous(),
         A_ub=bounds.A_ub.contiguous(),
@@ -103,20 +139,22 @@ def materialize_if_needed(bounds: LinearBound) -> LinearBound:
 
 def dispatch_conv_forward(
     layer: Layer,
-    parent_boxes: ForwardParentBoxes,
-    parent_lins: DispatchParentLins,
-    parent_frames: ForwardParentFrames,
+    parent_boxes: list[Bounds],
+    parent_lins: Sequence[LinearBoundLike | Patches],
+    parent_frames: Sequence[FrameLike],
     preds: list[int],
     post_activation: bool,
     device: torch.device,
     dtype: torch.dtype,
-) -> ForwardDispatchResult:
+) -> tuple[Bounds, Bounds, LinearBoundLike, FrameLike]:
     if _contains_patches(parent_lins):
         raise NotImplementedError("Filled in W3 — conv patches forward")
-    return forward_conv2d(
+    tf_cnn = importlib.import_module("act.back_end.dual_tf.tf_cnn")
+
+    return tf_cnn.forward_conv2d(
         layer,
         parent_boxes,
-        cast(ForwardParentLins, parent_lins),
+        cast(list[object], list(parent_lins)),
         parent_frames,
         preds,
         post_activation,
@@ -133,25 +171,28 @@ def dispatch_relu_backward(
 ) -> tuple[list[torch.Tensor], torch.Tensor]:
     if isinstance(nu, Patches) or _contains_patches(bounds_dict):
         raise NotImplementedError("Filled in W3/W4")
-    return backward_relu(layer, nu, cast(dict[int, Bounds], bounds_dict), preds)
+    tf_mlp = importlib.import_module("act.back_end.dual_tf.tf_mlp")
+    return tf_mlp.backward_relu(layer, nu, cast(dict[int, Bounds], bounds_dict), preds)
 
 
 def dispatch_bn_forward(
     layer: object,
-    parent_boxes: ForwardParentBoxes,
-    parent_lins: DispatchParentLins,
-    parent_frames: ForwardParentFrames,
+    parent_boxes: list[Bounds],
+    parent_lins: Sequence[LinearBoundLike | Patches],
+    parent_frames: Sequence[FrameLike],
     preds: list[int],
     post_activation: bool,
     device: torch.device,
     dtype: torch.dtype,
-) -> ForwardDispatchResult:
+) -> tuple[Bounds, Bounds, LinearBoundLike, FrameLike]:
     if _contains_patches(parent_lins):
         raise NotImplementedError("Filled in W3/W4")
-    return forward_bn(
+    tf_mlp = importlib.import_module("act.back_end.dual_tf.tf_mlp")
+
+    return tf_mlp.forward_bn(
         layer,
         parent_boxes,
-        cast(ForwardParentLins, parent_lins),
+        cast(list[object], list(parent_lins)),
         parent_frames,
         preds,
         post_activation,
@@ -162,20 +203,48 @@ def dispatch_bn_forward(
 
 def dispatch_add_forward(
     layer: Layer,
-    parent_boxes: ForwardParentBoxes,
-    parent_lins: DispatchParentLins,
-    parent_frames: ForwardParentFrames,
+    parent_boxes: list[Bounds],
+    parent_lins: Sequence[LinearBoundLike | Patches],
+    parent_frames: Sequence[FrameLike],
     preds: list[int],
     post_activation: bool,
     device: torch.device,
     dtype: torch.dtype,
-) -> ForwardDispatchResult:
+) -> tuple[Bounds, Bounds, LinearBoundLike, FrameLike]:
     if _contains_patches(parent_lins):
         raise NotImplementedError("Filled in W3/W4")
-    return forward_add(
+    tf_forward = importlib.import_module("act.back_end.dual_tf.tf_forward")
+
+    return tf_forward.forward_add(
         layer,
         parent_boxes,
-        cast(ForwardParentLins, parent_lins),
+        cast(list[object], list(parent_lins)),
+        parent_frames,
+        preds,
+        post_activation,
+        device,
+        dtype,
+    )
+
+
+def dispatch_concat_forward(
+    layer: Layer,
+    parent_boxes: list[Bounds],
+    parent_lins: Sequence[LinearBoundLike | Patches],
+    parent_frames: Sequence[FrameLike],
+    preds: list[int],
+    post_activation: bool,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[Bounds, Bounds, LinearBoundLike, FrameLike]:
+    if _contains_patches(parent_lins):
+        raise NotImplementedError("Filled in W3/W4")
+    tf_forward = importlib.import_module("act.back_end.dual_tf.tf_forward")
+
+    return tf_forward.forward_concat(
+        layer,
+        parent_boxes,
+        cast(list[object], list(parent_lins)),
         parent_frames,
         preds,
         post_activation,
@@ -186,21 +255,23 @@ def dispatch_add_forward(
 
 def dispatch_pool_forward(
     layer: Layer,
-    parent_boxes: ForwardParentBoxes,
-    parent_lins: DispatchParentLins,
-    parent_frames: ForwardParentFrames,
+    parent_boxes: list[Bounds],
+    parent_lins: Sequence[LinearBoundLike | Patches],
+    parent_frames: Sequence[FrameLike],
     preds: list[int],
     post_activation: bool,
     device: torch.device,
     dtype: torch.dtype,
-) -> ForwardDispatchResult:
+) -> tuple[Bounds, Bounds, LinearBoundLike, FrameLike]:
     if _contains_patches(parent_lins):
         raise NotImplementedError("Filled in W3/W4")
+    tf_cnn = importlib.import_module("act.back_end.dual_tf.tf_cnn")
+
     if layer.kind == LayerKind.MAXPOOL2D.value:
-        return forward_maxpool2d(
+        return tf_cnn.forward_maxpool2d(
             layer,
             parent_boxes,
-            cast(ForwardParentLins, list(parent_lins)),
+            cast(list[object], list(parent_lins)),
             parent_frames,
             preds,
             post_activation,
@@ -208,10 +279,10 @@ def dispatch_pool_forward(
             dtype,
         )
     if layer.kind == LayerKind.AVGPOOL2D.value:
-        return forward_avgpool2d(
+        return tf_cnn.forward_avgpool2d(
             layer,
             parent_boxes,
-            cast(ForwardParentLins, list(parent_lins)),
+            cast(list[object], list(parent_lins)),
             parent_frames,
             preds,
             post_activation,
@@ -222,9 +293,9 @@ def dispatch_pool_forward(
 
 
 __all__ = [
-    "BoundsRep",
     "dispatch_add_forward",
     "dispatch_bn_forward",
+    "dispatch_concat_forward",
     "dispatch_conv_forward",
     "dispatch_pool_forward",
     "dispatch_relu_backward",

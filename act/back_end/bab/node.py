@@ -222,7 +222,7 @@ class SubproblemBatch:
             else None
         )
         histories = (
-            [self.histories[int(i)] for i in idx.tolist()]
+            [self.histories[row_idx] for row_idx in idx.detach().cpu().tolist()]
             if self.histories is not None
             else None
         )
@@ -346,10 +346,12 @@ class SubproblemBatch:
             if kind == "relu":
                 split_points.append(0.0)
             else:
+                assert per_row_split_points is not None
                 split_points.append(float(per_row_split_points[i].item()))
 
         def _build_child_eta(sign_for_new: float) -> EtaState:
             """Clone parent eta and write the per-row new-split entries."""
+            assert self.eta is not None
             new_val = {lid: t.clone() for lid, t in self.eta.val.items()}
             new_sign = {lid: t.clone() for lid, t in self.eta.sign.items()}
             new_point = {lid: t.clone() for lid, t in self.eta.point.items()}
@@ -470,23 +472,25 @@ def _concat_subproblem_batches(*batches: SubproblemBatch) -> SubproblemBatch:
 
     # eta — all-or-nothing to keep layer structure consistent.
     if all(b.eta is not None for b in batches):
-        layer_ids = batches[0].eta.layer_ids
+        eta_batches = [b.eta for b in batches if b.eta is not None]
+        layer_ids = eta_batches[0].layer_ids
         for b in batches[1:]:
+            assert b.eta is not None
             if b.eta.layer_ids != layer_ids:
                 raise ValueError(
                     f"_concat_subproblem_batches: eta layer id mismatch "
                     f"{b.eta.layer_ids} vs {layer_ids}"
                 )
         new_val = {
-            lid: torch.cat([b.eta.val[lid] for b in batches], dim=0)
+            lid: torch.cat([eta.val[lid] for eta in eta_batches], dim=0)
             for lid in layer_ids
         }
         new_sign = {
-            lid: torch.cat([b.eta.sign[lid] for b in batches], dim=0)
+            lid: torch.cat([eta.sign[lid] for eta in eta_batches], dim=0)
             for lid in layer_ids
         }
         new_point = {
-            lid: torch.cat([b.eta.point[lid] for b in batches], dim=0)
+            lid: torch.cat([eta.point[lid] for eta in eta_batches], dim=0)
             for lid in layer_ids
         }
         eta = EtaState(val=new_val, sign=new_sign, point=new_point)
@@ -506,12 +510,14 @@ def _concat_subproblem_batches(*batches: SubproblemBatch) -> SubproblemBatch:
 
     # parent_margins — all-or-nothing, same reasoning as eta.
     if all(b.parent_margins is not None for b in batches):
-        parent_margins = torch.cat([b.parent_margins for b in batches], dim=0)
+        margin_batches = [b.parent_margins for b in batches if b.parent_margins is not None]
+        parent_margins = torch.cat(margin_batches, dim=0)
     else:
         parent_margins = None
 
     if all(b.subproblem_ids is not None for b in batches):
-        subproblem_ids = torch.cat([b.subproblem_ids for b in batches], dim=0)
+        subproblem_id_batches = [b.subproblem_ids for b in batches if b.subproblem_ids is not None]
+        subproblem_ids = torch.cat(subproblem_id_batches, dim=0)
     else:
         subproblem_ids = None
 

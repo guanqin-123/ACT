@@ -28,7 +28,7 @@ from .tf_forward import (
     _fwd_dense, _fwd_relu, _fwd_bias, _fwd_scale, _fwd_bn, _fwd_lrelu,
     _concretize, _box_dense, _box_bias, _box_scale, _box_bn, _box_relu,
     _box_lrelu, _intersect_boxes, _reset_forward_box,
-    _assert_broadcast_to_nu, _scale_mul, _bias_contrib,
+    _assert_broadcast_to_nu, _scale_mul, _bias_contrib, _flatten_batch_rows,
 )
 
 
@@ -154,11 +154,13 @@ def backward_dense(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
 
 
 def dual_dense_backward(nu: torch.Tensor, W: torch.Tensor,
-                        b: Optional[torch.Tensor] = None
-                        ) -> Tuple[torch.Tensor, torch.Tensor]:
+                         b: Optional[torch.Tensor] = None
+                         ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Batched dense backward: v_out = nu @ W, contrib = -(v · bias)."""
     assert W.dim() == 2, f"W must be 2D, got {W.shape}"
     assert nu.dim() >= 2, f"nu must be batched (>=2D), got {nu.shape}"
+    if nu.dim() >= 3 and nu.shape[0] > 0 and nu.stride(1) == 0:
+        nu = _flatten_batch_rows(nu, writable=True)
     nu_flat = nu.flatten(start_dim=1)
     assert nu_flat.shape[-1] == W.shape[0], \
         f"nu last dim {nu_flat.shape[-1]} != W.shape[0] {W.shape[0]}"

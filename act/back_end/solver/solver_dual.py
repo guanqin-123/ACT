@@ -14,6 +14,8 @@ import logging
 import torch
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, cast
 from act.back_end.bab.eta import EtaState, expand_eta_state
+from act.back_end.bounds_dispatch import materialize_if_needed
+from act.back_end.dual_tf.tf_forward import LinearBound
 from act.back_end.core import Bounds, Net
 from act.back_end.layer_schema import LayerKind
 from act.back_end.solver.solver_base import Solver, SolverCaps
@@ -55,6 +57,54 @@ def _reverse_topological_sort(net: Net) -> List[int]:
             f"({len(order)}/{len(net.layers)} sorted)"
         )
     return order
+
+
+def _is_spec_rank3(tensor: torch.Tensor) -> bool:
+    return tensor.dim() >= 3 and tensor.shape[0] > 0 and tensor.stride(1) == 0
+
+
+def _batch_rows(tensor: torch.Tensor) -> int:
+    if _is_spec_rank3(tensor):
+        return int(tensor.shape[0] * tensor.shape[1])
+    if tensor.dim() >= 1:
+        return int(tensor.shape[0])
+    return 1
+
+
+def _flatten_batch_rows(tensor: torch.Tensor, *, writable: bool = False) -> torch.Tensor:
+    if _is_spec_rank3(tensor):
+        lead = tensor.shape[0] * tensor.shape[1]
+        if writable:
+            return tensor.contiguous().reshape(lead, *tensor.shape[2:])
+        return tensor.reshape(lead, *tensor.shape[2:])
+    return tensor
+
+
+def _flatten_bounds_rows(bounds: Bounds, *, writable: bool = False) -> Bounds:
+    if _is_spec_rank3(bounds.lb):
+        if writable:
+            mat = materialize_if_needed(
+                LinearBound(
+                    A_lb=bounds.lb,
+                    b_lb=bounds.lb,
+                    A_ub=bounds.ub,
+                    b_ub=bounds.ub,
+                )
+            )
+            return Bounds(lb=mat.A_lb.reshape(-1, *mat.A_lb.shape[2:]), ub=mat.A_ub.reshape(-1, *mat.A_ub.shape[2:]))
+        return Bounds(
+            lb=_flatten_batch_rows(bounds.lb, writable=writable),
+            ub=_flatten_batch_rows(bounds.ub, writable=writable),
+        )
+    return bounds
+
+
+def _reshape_margins(margins_flat: torch.Tensor, B: int, M: int) -> torch.Tensor:
+    return margins_flat.reshape(B, M)
+
+
+def _collapse_spec_axis(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor[:, 0, ...] if _is_spec_rank3(tensor) else tensor
 
 
 class DualSolver(Solver):
@@ -499,6 +549,9 @@ class DualSolver(Solver):
         if c.dtype != dtype or c.device != device:
             c = c.to(device=device, dtype=dtype)
         B = c.shape[0]
+        bounds_runtime = {
+            lid: _flatten_bounds_rows(bounds) for lid, bounds in bounds_dict.items()
+        }
 
         output_lid = self._get_assert_output_layer_id(net)
         nu_accum: Dict[int, torch.Tensor] = {output_lid: c.clone()}
@@ -534,7 +587,7 @@ class DualSolver(Solver):
                 handler,
                 layer,
                 nu_here,
-                bounds_dict,
+                bounds_runtime,
                 preds,
                 alphas,
             )
@@ -579,7 +632,7 @@ class DualSolver(Solver):
             net,
             input_lid,
             nu_final,
-            bounds_dict,
+            bounds_runtime,
             return_sce=return_sce,
             enable_grad=torch.is_grad_enabled(),
         )
@@ -601,17 +654,20 @@ class DualSolver(Solver):
                     f"DualSolver.compute_bound: bounds_dict missing ReLU layer {layer.id} for alpha discovery"
                 )
             bound = bounds_dict[layer.id]
+            lb_src = _collapse_spec_axis(bound.lb)
             flat_lb = (
-                bound.lb.flatten(start_dim=1)
-                if bound.lb.dim() >= 2
-                else bound.lb.flatten().unsqueeze(0)
+                lb_src.flatten(start_dim=1)
+                if lb_src.dim() >= 2
+                else lb_src.flatten().unsqueeze(0)
             )
             alpha_shapes[layer.id] = int(flat_lb.shape[-1])
         return alpha_shapes
 
     def _heuristic_alpha(self, bounds: Bounds) -> torch.Tensor:
-        lb = bounds.lb.flatten(start_dim=1) if bounds.lb.dim() >= 2 else bounds.lb.flatten().unsqueeze(0)
-        ub = bounds.ub.flatten(start_dim=1) if bounds.ub.dim() >= 2 else bounds.ub.flatten().unsqueeze(0)
+        lb_src = _collapse_spec_axis(bounds.lb)
+        ub_src = _collapse_spec_axis(bounds.ub)
+        lb = lb_src.flatten(start_dim=1) if lb_src.dim() >= 2 else lb_src.flatten().unsqueeze(0)
+        ub = ub_src.flatten(start_dim=1) if ub_src.dim() >= 2 else ub_src.flatten().unsqueeze(0)
         on = lb >= 0
         off = ub <= 0
         amb = ~(on | off)
@@ -644,15 +700,17 @@ class DualSolver(Solver):
         masks: Dict[int, torch.Tensor] = {}
         for lid in alpha_shapes:
             bound = bounds_dict[lid]
+            lb_src = _collapse_spec_axis(bound.lb)
+            ub_src = _collapse_spec_axis(bound.ub)
             lb = (
-                bound.lb.flatten(start_dim=1)
-                if bound.lb.dim() >= 2
-                else bound.lb.flatten().unsqueeze(0)
+                lb_src.flatten(start_dim=1)
+                if lb_src.dim() >= 2
+                else lb_src.flatten().unsqueeze(0)
             )
             ub = (
-                bound.ub.flatten(start_dim=1)
-                if bound.ub.dim() >= 2
-                else bound.ub.flatten().unsqueeze(0)
+                ub_src.flatten(start_dim=1)
+                if ub_src.dim() >= 2
+                else ub_src.flatten().unsqueeze(0)
             )
             masks[lid] = (lb < 0) & (ub > 0)
         return masks
@@ -845,11 +903,8 @@ class DualSolver(Solver):
     def _expand_alpha_dict(
         self, alphas: Dict[int, torch.Tensor], factor: int
     ) -> Dict[int, torch.Tensor]:
-        if factor <= 1 or not alphas:
-            return {lid: t for lid, t in alphas.items()}
-        return {
-            lid: t.repeat_interleave(factor, dim=0) for lid, t in alphas.items()
-        }
+        del factor
+        return {lid: t for lid, t in alphas.items()}
 
     def _collapse_alpha_dict(
         self, alphas: Dict[int, torch.Tensor], target_batch: int
@@ -1082,6 +1137,7 @@ class DualSolver(Solver):
         num_classes: Optional[int] = None,
         chunk_size: Optional[int] = None,
         enable_grad: bool = False,
+        materialize: bool = False,
     ) -> SpecBatchResult:
         """Unified dual bound evaluation for any OutputSpec.
 
@@ -1155,7 +1211,7 @@ class DualSolver(Solver):
         optimized_alpha_expanded: Optional[Dict[int, torch.Tensor]] = None
         with torch.set_grad_enabled(enable_grad):
             if chunk_size is None or spec.M <= chunk_size:
-                bounds_k = expand_bounds_dict(bounds_dict, spec.M)
+                bounds_k = expand_bounds_dict(bounds_dict, spec.M, materialize=materialize)
                 saved_eta = self._eta_state
                 saved_alpha = self._alpha_state
                 saved_sid_map = self._bound_trace_sid_map
@@ -1205,7 +1261,7 @@ class DualSolver(Solver):
             if isinstance(margins_flat, tuple):
                 margins_flat = margins_flat[0]
 
-            margins = margins_flat.view(B, spec.M)
+            margins = _reshape_margins(margins_flat, B, spec.M)
             slack = margins - spec.thresholds
             violations = (slack < 0) & spec.active_mask
             certified = ~violations.any(dim=-1)
@@ -1288,7 +1344,7 @@ class DualSolver(Solver):
                 self._bound_trace_sid_map = saved_sid_map
             if isinstance(margins_chunk, tuple):
                 margins_chunk = margins_chunk[0]
-            chunks.append(margins_chunk.view(B, m_chunk))
+            chunks.append(_reshape_margins(margins_chunk, B, m_chunk))
         return torch.cat(chunks, dim=1).reshape(B * M)
 
     def compute_robust_bound(
@@ -1468,7 +1524,7 @@ class DualSolver(Solver):
                         if eta_params is not None:
                             for param in eta_params.values():
                                 param.clamp_(min=0.0)
-                        current_margins = obj_flat.detach().view(batch_size, spec.M)
+                        current_margins = _reshape_margins(obj_flat.detach(), batch_size, spec.M)
                         current_slack = current_margins - spec.thresholds
                         current_min_slack = torch.where(
                             spec.active_mask,
@@ -1743,6 +1799,10 @@ class DualSolver(Solver):
                 ub = bounds.ub
 
             orig_shape = lb.shape
+            rank3_input = _is_spec_rank3(lb)
+            if rank3_input:
+                lb = _flatten_batch_rows(lb)
+                ub = _flatten_batch_rows(ub)
             if lb.dim() < 2:
                 lb_b = lb.flatten().unsqueeze(0).expand(B, -1)
                 ub_b = ub.flatten().unsqueeze(0).expand(B, -1)
@@ -1761,7 +1821,9 @@ class DualSolver(Solver):
             sce = None
             if return_sce:
                 sce_flat = torch.where(v > 0, lb_b, ub_b)
-                if lb.dim() < 2 and sce_flat.shape[-1] == lb.flatten().numel():
+                if rank3_input:
+                    sce = sce_flat.view(orig_shape[0], orig_shape[1], *orig_shape[2:])
+                elif lb.dim() < 2 and sce_flat.shape[-1] == lb.flatten().numel():
                     sce = sce_flat.view(B, *orig_shape)
                 elif lb.dim() >= 2:
                     total = int(torch.tensor(orig_shape[1:]).prod().item())

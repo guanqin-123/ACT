@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -29,6 +30,8 @@ from act.back_end.bab.node import SubproblemBatch
 from act.back_end.core import Bounds, Net
 from act.back_end.dual_tf.dual_tf import DualTF
 from act.back_end.layer_schema import LayerKind
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Configuration / activation classification
@@ -177,6 +180,16 @@ def compute_lA_per_layer(
             f"compute_lA_per_layer: c must be 2-D [B, num_classes], got shape "
             f"{tuple(c.shape)}"
         )
+    sample_bound = next(iter(bounds_dict.values()))
+    if sample_bound.lb.dim() >= 3 and sample_bound.lb.stride(1) == 0:
+        log.warning("compute_lA_per_layer: materializing rank-3 bounds at BaBSR boundary")
+        bounds_dict = {
+            lid: Bounds(
+                lb=bounds.lb.contiguous().reshape(bounds.lb.shape[0] * bounds.lb.shape[1], *bounds.lb.shape[2:]),
+                ub=bounds.ub.contiguous().reshape(bounds.ub.shape[0] * bounds.ub.shape[1], *bounds.ub.shape[2:]),
+            )
+            for lid, bounds in bounds_dict.items()
+        }
 
     # Locate ASSERT layer → its unique predecessor is the output layer.
     output_lid: Optional[int] = None
