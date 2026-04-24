@@ -1,20 +1,35 @@
 from __future__ import annotations
 
+# pyright: reportExplicitAny=false
+
 # pyright: reportUnusedCallResult=false, reportAny=false
 
 import argparse
+import copy
+from collections import defaultdict
 from collections.abc import Sequence
+from contextlib import contextmanager
 import json
 import logging
-import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
+import sys
+import time
+from typing import Any, cast
 
 import torch
 
 from act.back_end.bab.bab import verify_bab
+from act.back_end.bounds_dispatch import (
+    get_conv_materialization_count,
+    get_conv_mode,
+    get_strict_patches,
+    reset_conv_materialization_count,
+    set_conv_mode,
+    set_strict_patches,
+)
 from act.back_end.config import BaBConfig
+from act.back_end.core import Net
 from act.back_end.dual_tf import DualTF
 from act.back_end.solver.solver_dual import DualSolver
 from act.back_end.solver.solver_interval import TorchLPSolver
@@ -29,6 +44,15 @@ from scripts.bab_clamp_diagnostic import (
 
 LOGGER = logging.getLogger(__name__)
 LOGS_DIR = Path(get_project_root()) / "scripts" / "logs"
+KNOWN_3995_VNNLIB = "CIFAR100_resnet_medium_prop_idx_3995_sidx_7978_eps_0.0039.vnnlib"
+ABCROWN_BASELINES: dict[str, dict[str, object]] = {
+    KNOWN_3995_VNNLIB: {
+        "display_name": "α-β-CROWN baseline",
+        "status": "CERTIFIED",
+        "wall_time_s": 43.533897399902344,
+        "nodes": 516,
+    }
+}
 
 
 def _coerce_optional_float(value: object) -> float | None:
@@ -37,6 +61,18 @@ def _coerce_optional_float(value: object) -> float | None:
     if isinstance(value, (float, int)):
         return float(value)
     raise TypeError(f"Expected float-compatible value, got {type(value).__name__}")
+
+
+def _coerce_optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    raise TypeError(f"Expected int-compatible value, got {type(value).__name__}")
 
 
 @dataclass(frozen=True)
@@ -59,8 +95,55 @@ class CliArgs:
     output: Path | None
 
 
-def _default_output_path(instance: int, batch: int) -> Path:
-    return LOGS_DIR / f"baseline_inst{instance}_b{batch}.json"
+@dataclass(frozen=True)
+class BenchmarkConfig:
+    name: str
+    display_name: str
+    conv_mode: str
+    strict_patches: bool
+
+
+@dataclass(frozen=True)
+class InstanceTarget:
+    key: str
+    display_name: str
+    instance_idx: int
+    vnnlib_name: str | None
+
+
+@dataclass
+class LoadedInstance:
+    target: InstanceTarget
+    resolved_instance_idx: int
+    net: Net
+    vnnlib_name: str
+
+
+@dataclass
+class BenchmarkResult:
+    instance_key: str
+    instance_display_name: str
+    resolved_instance_idx: int
+    vnnlib_name: str
+    config_name: str
+    config_display_name: str
+    output_path: Path
+    payload: dict[str, object]
+    exit_code: int
+
+
+@dataclass
+class ConvVramTracker:
+    peak_conv_layer_vram_mb: float = 0.0
+    peak_total_vram_bytes: float = 0.0
+
+    def observe(self, bytes_value: float) -> None:
+        self.peak_total_vram_bytes = max(self.peak_total_vram_bytes, float(bytes_value))
+        self.peak_conv_layer_vram_mb = max(self.peak_conv_layer_vram_mb, float(bytes_value) / 1e6)
+
+
+def _default_output_path(instance_key: str, config_name: str, batch: int) -> Path:
+    return LOGS_DIR / f"wave5_{instance_key}_{config_name}_b{batch}.json"
 
 
 def _peak_vram_gb(device: str) -> float | None:
@@ -122,14 +205,13 @@ def _parse_args(argv: Sequence[str] | None = None) -> CliArgs:
 def _build_payload(
     args: CliArgs,
     *,
-    instance_idx: int,
-    vnnlib_name: str,
-    elapsed_s: float,
-    config_name: str = "matrix-baseline",
+    loaded: LoadedInstance,
+    config: BenchmarkConfig,
 ) -> dict[str, object]:
-    peak_vram_gb = _peak_vram_gb(args.device)
     payload: dict[str, object] = {
-        "instance_idx": instance_idx,
+        "instance_key": loaded.target.key,
+        "instance_display_name": loaded.target.display_name,
+        "instance_idx": loaded.resolved_instance_idx,
         "batch_size": args.batch,
         "eta_iters": args.eta_iters,
         "max_depth": args.max_depth,
@@ -138,82 +220,152 @@ def _build_payload(
         "device": args.device,
         "requested_device": args.requested_device,
         "dtype": args.dtype,
-        "vnnlib_name": vnnlib_name,
-        "config_name": config_name,
-        "wall_time_s": elapsed_s,
-        "peak_vram_gb": peak_vram_gb,
+        "vnnlib_name": loaded.vnnlib_name,
+        "config_name": config.name,
+        "config_display_name": config.display_name,
+        "conv_mode": config.conv_mode,
+        "strict_patches": config.strict_patches,
+        "wall_time_s": 0.0,
+        "peak_vram_gb": None,
     }
     if args.feature_a_only:
         payload["feature_a_only"] = True
-    if args.measure_vram:
-        peak_total_vram_gb = 0.0 if peak_vram_gb is None else float(peak_vram_gb)
-        payload.update(
-            {
-                "peak_conv_layer_vram_mb": 0.0,
-                "peak_conv_layer_vram_gb": 0.0,
-                "peak_total_vram_gb": peak_total_vram_gb,
-            }
-        )
     return payload
 
 
 def _emit_measure_vram_lines(payload: dict[str, object]) -> None:
+    peak_conv_layer_vram_mb = _coerce_optional_float(payload.get("peak_conv_layer_vram_mb")) or 0.0
+    peak_conv_layer_vram_gb = _coerce_optional_float(payload.get("peak_conv_layer_vram_gb")) or 0.0
     peak_total = _coerce_optional_float(payload.get("peak_total_vram_gb"))
     if peak_total is None:
         raw_peak = _coerce_optional_float(payload.get("peak_vram_gb"))
         peak_total = 0.0 if raw_peak is None else raw_peak
-    print("peak_conv_layer_vram_mb: 0.0")
-    print("peak_conv_layer_vram_gb: 0.0")
+    print(f"peak_conv_layer_vram_mb: {peak_conv_layer_vram_mb:.1f}")
+    print(f"peak_conv_layer_vram_gb: {peak_conv_layer_vram_gb:.1f}")
     print(f"peak_total_vram_gb: {peak_total:.1f}")
 
 
 def _summary_output_path(output: Path | None) -> Path:
-    if output is not None and output.suffix.lower() == ".md":
-        return output
-    return LOGS_DIR / "wave_summary.md"
+    return output if output is not None else LOGS_DIR / "wave5_summary.md"
 
 
-def _write_wave_summary(
-    summary_path: Path,
-    *,
-    instance_indices: list[int],
-    config_names: list[str],
-) -> None:
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text(
-        "\n".join(
-            [
-                "# Wave Summary",
-                "",
-                "- TODO(W5): full sweep with metrics per instance/config.",
-                f"- instances: {instance_indices}",
-                f"- configs: {config_names}",
-            ]
+def _build_instance_targets(args: CliArgs) -> list[InstanceTarget]:
+    if args.all_instances:
+        return [
+            InstanceTarget(key="instance0", display_name="Instance 0", instance_idx=0, vnnlib_name=None),
+            InstanceTarget(key="instance1", display_name="Instance 1", instance_idx=1, vnnlib_name=None),
+            InstanceTarget(key="instance2", display_name="Instance 2", instance_idx=2, vnnlib_name=None),
+            InstanceTarget(key="instance3995", display_name="Instance 3995", instance_idx=0, vnnlib_name=KNOWN_3995_VNNLIB),
+        ]
+    if args.vnnlib_name is not None:
+        stem = Path(args.vnnlib_name).stem
+        return [
+            InstanceTarget(
+                key=stem.replace("-", "_").replace(".", "_"),
+                display_name=f"Instance {stem}",
+                instance_idx=0,
+                vnnlib_name=args.vnnlib_name,
+            )
+        ]
+    return [
+        InstanceTarget(
+            key=f"instance{args.instance}",
+            display_name=f"Instance {args.instance}",
+            instance_idx=args.instance,
+            vnnlib_name=None,
         )
-        + "\n",
-        encoding="utf-8",
-    )
+    ]
 
 
-def _run_single_benchmark(
-    args: CliArgs,
-    *,
-    instance_idx: int,
-    config_name: str = "matrix-baseline",
-    output_path: Path | None = None,
-) -> int:
-    effective_output = output_path or _default_output_path(instance_idx, args.batch)
-    effective_output.parent.mkdir(parents=True, exist_ok=True)
+def _build_benchmark_configs(args: CliArgs) -> list[BenchmarkConfig]:
+    if args.all_configs:
+        return [
+            BenchmarkConfig(
+                name="baseline_matrix",
+                display_name="ACT baseline (matrix)",
+                conv_mode="matrix",
+                strict_patches=False,
+            ),
+            BenchmarkConfig(
+                name="patches_with_matrix_fallback",
+                display_name="ACT patches (mixed)",
+                conv_mode="patches",
+                strict_patches=False,
+            ),
+            BenchmarkConfig(
+                name="patches_strict",
+                display_name="ACT patches (strict)",
+                conv_mode="patches",
+                strict_patches=True,
+            ),
+        ]
+    return [
+        BenchmarkConfig(
+            name="baseline_matrix",
+            display_name="ACT baseline (matrix)",
+            conv_mode="matrix",
+            strict_patches=False,
+        )
+    ]
 
-    if args.feature_a_only:
-        print("feature_a_only=True")
 
+def _load_instance(target: InstanceTarget) -> LoadedInstance:
     net, vnnlib_name = load_model_and_instance(
-        instance_idx=instance_idx,
-        vnnlib_name=args.vnnlib_name,
+        instance_idx=target.instance_idx,
+        vnnlib_name=target.vnnlib_name,
+    )
+    resolved_instance_idx = (
+        resolve_vnnlib_row_index(vnnlib_name, instance_idx=target.instance_idx)
+        if target.vnnlib_name is not None
+        else resolve_medium_instance_index(instance_idx=target.instance_idx)
+    )
+    return LoadedInstance(
+        target=target,
+        resolved_instance_idx=resolved_instance_idx,
+        net=net,
+        vnnlib_name=vnnlib_name,
     )
 
-    config = BaBConfig(
+
+@contextmanager
+def _configured_conv_mode(config: BenchmarkConfig):
+    previous_mode = get_conv_mode()
+    previous_strict = get_strict_patches()
+    set_conv_mode(config.conv_mode)
+    set_strict_patches(config.strict_patches)
+    try:
+        yield
+    finally:
+        set_conv_mode(previous_mode)
+        set_strict_patches(previous_strict)
+
+
+@contextmanager
+def _measure_conv_layer_vram(enabled: bool, tracker: ConvVramTracker):
+    if not enabled or not torch.cuda.is_available():
+        yield
+        return
+
+    import act.back_end.bounds_dispatch as bounds_dispatch
+
+    original_dispatch = bounds_dispatch.dispatch_conv_forward
+
+    def _wrapped_dispatch(*args: Any, **kwargs: Any):
+        tracker.observe(torch.cuda.memory_allocated())
+        result = original_dispatch(*args, **kwargs)
+        torch.cuda.synchronize()
+        tracker.observe(torch.cuda.memory_allocated())
+        return result
+
+    bounds_dispatch.dispatch_conv_forward = _wrapped_dispatch
+    try:
+        yield
+    finally:
+        bounds_dispatch.dispatch_conv_forward = original_dispatch
+
+
+def _build_bab_config(args: CliArgs) -> BaBConfig:
+    return BaBConfig(
         branching_method="babsr",
         bounding_method="bfs",
         subproblem_batch_size=args.batch,
@@ -224,26 +376,88 @@ def _run_single_benchmark(
         verbose=False,
     )
 
+
+def _update_vram_payload(
+    payload: dict[str, object],
+    *,
+    args: CliArgs,
+    tracker: ConvVramTracker,
+) -> None:
+    peak_vram_gb = _peak_vram_gb(args.device)
+    payload["peak_vram_gb"] = peak_vram_gb
+    if not args.measure_vram:
+        return
+    peak_total_vram_gb = (
+        peak_vram_gb
+        if peak_vram_gb is not None
+        else (tracker.peak_total_vram_bytes / 1e9 if tracker.peak_total_vram_bytes > 0 else 0.0)
+    )
+    peak_conv_layer_vram_mb = tracker.peak_conv_layer_vram_mb
+    payload.update(
+        {
+            "peak_conv_layer_vram_mb": peak_conv_layer_vram_mb,
+            "peak_conv_layer_vram_gb": peak_conv_layer_vram_mb / 1000.0,
+            "peak_total_vram_gb": peak_total_vram_gb,
+        }
+    )
+
+
+def _set_densify_metadata(
+    payload: dict[str, object],
+    *,
+    args: CliArgs,
+    config: BenchmarkConfig,
+) -> None:
+    if config.conv_mode != "patches":
+        if args.assert_no_densify:
+            print("ALL_CONV_LAYERS_PATCHES=None")
+        return
+    materializations = get_conv_materialization_count()
+    payload["conv_materializations"] = materializations
+    payload["all_conv_layers_patches"] = materializations == 0
+    if args.assert_no_densify:
+        if materializations == 0:
+            print("ALL_CONV_LAYERS_PATCHES=True")
+        else:
+            print(f"ALL_CONV_LAYERS_PATCHES=False ({materializations} materializations)")
+
+
+def _persist_payload(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _run_single_benchmark(
+    args: CliArgs,
+    *,
+    loaded: LoadedInstance,
+    config: BenchmarkConfig,
+    output_path: Path | None = None,
+) -> BenchmarkResult:
+    effective_output = output_path or _default_output_path(loaded.target.key, config.name, args.batch)
+    payload = _build_payload(args, loaded=loaded, config=config)
+    tracker = ConvVramTracker()
+    if args.feature_a_only:
+        print("feature_a_only=True")
+
+    if config.conv_mode == "patches":
+        reset_conv_materialization_count()
+
     if torch.cuda.is_available() and args.device.startswith(("cuda", "gpu")):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
+        tracker.observe(torch.cuda.memory_allocated())
 
     started = time.time()
-    payload = _build_payload(
-        args,
-        instance_idx=instance_idx,
-        vnnlib_name=vnnlib_name,
-        elapsed_s=0.0,
-        config_name=config_name,
-    )
     try:
-        result = verify_bab(
-            net,
-            solver=TorchLPSolver(),
-            dual_solver=DualSolver(DualTF()),
-            config=config,
-            time_budget_s=args.budget,
-        )
+        with _configured_conv_mode(config), _measure_conv_layer_vram(args.measure_vram, tracker):
+            result = verify_bab(
+                copy.deepcopy(loaded.net),
+                solver=TorchLPSolver(),
+                dual_solver=DualSolver(DualTF()),
+                config=_build_bab_config(args),
+                time_budget_s=args.budget,
+            )
         elapsed_s = time.time() - started
         payload.update(
             {
@@ -253,96 +467,181 @@ def _run_single_benchmark(
                     "ces_attempted": result.metadata.get("ces_attempted"),
                 },
                 "wall_time_s": elapsed_s,
-                "peak_vram_gb": _peak_vram_gb(args.device),
                 "oom": False,
             }
         )
-        if args.measure_vram:
-            peak_vram_gb = _coerce_optional_float(payload.get("peak_vram_gb"))
-            payload["peak_total_vram_gb"] = 0.0 if peak_vram_gb is None else peak_vram_gb
-        effective_output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        peak_vram_value = _coerce_optional_float(payload.get("peak_vram_gb"))
-        peak_vram = 0.0 if peak_vram_value is None else peak_vram_value
-        print(
-            f"baseline inst={instance_idx} batch={args.batch} status={result.status.name} nodes={result.metadata.get('nodes')} time={elapsed_s:.2f}s peak_vram={peak_vram:.3f} GB"
-        )
+        _update_vram_payload(payload, args=args, tracker=tracker)
+        _set_densify_metadata(payload, args=args, config=config)
+        _persist_payload(effective_output, payload)
+        peak_vram = _coerce_optional_float(payload.get("peak_total_vram_gb"))
+        if peak_vram is None:
+            peak_vram = _coerce_optional_float(payload.get("peak_vram_gb")) or 0.0
+        print(f"baseline inst={loaded.resolved_instance_idx} config={config.name} batch={args.batch} status={result.status.name} nodes={result.metadata.get('nodes')} time={elapsed_s:.2f}s peak_vram={peak_vram:.3f} GB")
         if args.measure_vram:
             _emit_measure_vram_lines(payload)
-        return 0
+        return BenchmarkResult(
+            instance_key=loaded.target.key,
+            instance_display_name=loaded.target.display_name,
+            resolved_instance_idx=loaded.resolved_instance_idx,
+            vnnlib_name=loaded.vnnlib_name,
+            config_name=config.name,
+            config_display_name=config.display_name,
+            output_path=effective_output,
+            payload=payload,
+            exit_code=0,
+        )
     except torch.OutOfMemoryError as exc:
-        elapsed_s = time.time() - started
-        payload.update(
-            {
-                "result": {
-                    "status": None,
-                    "nodes": None,
-                    "ces_attempted": None,
-                },
-                "wall_time_s": elapsed_s,
-                "peak_vram_gb": _peak_vram_gb(args.device),
-                "oom": True,
-                "error": str(exc),
-            }
-        )
-        if args.measure_vram:
-            peak_vram_gb = _coerce_optional_float(payload.get("peak_vram_gb"))
-            payload["peak_total_vram_gb"] = 0.0 if peak_vram_gb is None else peak_vram_gb
-        effective_output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        peak_vram_value = _coerce_optional_float(payload.get("peak_vram_gb"))
-        peak_vram = 0.0 if peak_vram_value is None else peak_vram_value
-        print(
-            f"baseline inst={instance_idx} batch={args.batch} status=OOM nodes=null time={elapsed_s:.2f}s peak_vram={peak_vram:.3f} GB"
-        )
-        if args.measure_vram:
-            _emit_measure_vram_lines(payload)
-        return 2
+        status = "OOM"
+        exit_code = 2
+        error = str(exc)
+    except Exception as exc:  # noqa: BLE001
+        status = "ERROR"
+        exit_code = 1
+        error = str(exc)
+
+    elapsed_s = time.time() - started
+    payload.update(
+        {
+            "result": {
+                "status": status,
+                "nodes": None,
+                "ces_attempted": None,
+            },
+            "wall_time_s": elapsed_s,
+            "oom": status == "OOM",
+            "error": error,
+        }
+    )
+    _update_vram_payload(payload, args=args, tracker=tracker)
+    _set_densify_metadata(payload, args=args, config=config)
+    _persist_payload(effective_output, payload)
+    peak_vram = _coerce_optional_float(payload.get("peak_total_vram_gb"))
+    if peak_vram is None:
+        peak_vram = _coerce_optional_float(payload.get("peak_vram_gb")) or 0.0
+    print(f"baseline inst={loaded.resolved_instance_idx} config={config.name} batch={args.batch} status={status} nodes=null time={elapsed_s:.2f}s peak_vram={peak_vram:.3f} GB")
+    if args.measure_vram:
+        _emit_measure_vram_lines(payload)
+    return BenchmarkResult(
+        instance_key=loaded.target.key,
+        instance_display_name=loaded.target.display_name,
+        resolved_instance_idx=loaded.resolved_instance_idx,
+        vnnlib_name=loaded.vnnlib_name,
+        config_name=config.name,
+        config_display_name=config.display_name,
+        output_path=effective_output,
+        payload=payload,
+        exit_code=exit_code,
+    )
+
+
+def _format_secs(value: object) -> str:
+    number = _coerce_optional_float(value)
+    return "—" if number is None else f"{number:.1f}s"
+
+
+def _format_nodes(value: object) -> str:
+    number = _coerce_optional_int(value)
+    return "—" if number is None else str(number)
+
+
+def _format_gb(value: object) -> str:
+    number = _coerce_optional_float(value)
+    return "—" if number is None else f"{number:.2f} GB"
+
+
+def _format_vs_abcrown(vnnlib_name: str, wall_time_s: object) -> str:
+    baseline = ABCROWN_BASELINES.get(vnnlib_name)
+    if baseline is None:
+        return "—"
+    baseline_wall = _coerce_optional_float(baseline.get("wall_time_s"))
+    wall = _coerce_optional_float(wall_time_s)
+    if baseline_wall in (None, 0.0) or wall is None:
+        return "—"
+    return f"{wall / baseline_wall:.2f}×"
+
+
+def _write_wave_summary(summary_path: Path, results: list[BenchmarkResult]) -> None:
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    grouped: dict[str, list[BenchmarkResult]] = defaultdict(list)
+    for result in results:
+        grouped[result.instance_key].append(result)
+
+    lines = ["# Wave 5 A/B Benchmark Summary", ""]
+    for _instance_key, instance_results in grouped.items():
+        instance_results.sort(key=lambda item: item.config_name)
+        first = instance_results[0]
+        lines.append(f"## {first.instance_display_name} ({first.vnnlib_name})")
+        lines.append("| Config | Verdict | Wall-clock | Nodes | Peak VRAM | vs α-β-CROWN |")
+        lines.append("|---|---|---|---|---|---|")
+        abcrown = ABCROWN_BASELINES.get(first.vnnlib_name)
+        if abcrown is not None:
+            lines.append(
+                "| {display_name} | {status} | {wall} | {nodes} | — | 1.00× |".format(
+                    display_name=abcrown["display_name"],
+                    status=abcrown["status"],
+                    wall=_format_secs(abcrown.get("wall_time_s")),
+                    nodes=_format_nodes(abcrown.get("nodes")),
+                )
+            )
+        for result in instance_results:
+            payload = result.payload
+            outcome = cast(dict[str, object] | None, payload.get("result") if isinstance(payload.get("result"), dict) else None)
+            verdict = str(outcome.get("status")) if outcome is not None else "—"
+            peak = payload.get("peak_total_vram_gb", payload.get("peak_vram_gb"))
+            lines.append(
+                "| {config} | {verdict} | {wall} | {nodes} | {peak} | {vs} |".format(
+                    config=result.config_display_name,
+                    verdict=verdict,
+                    wall=_format_secs(payload.get("wall_time_s")),
+                    nodes=_format_nodes(outcome.get("nodes") if outcome is not None else None),
+                    peak=_format_gb(peak),
+                    vs=_format_vs_abcrown(result.vnnlib_name, payload.get("wall_time_s")),
+                )
+            )
+        notes: list[str] = []
+        for result in instance_results:
+            payload = result.payload
+            error = payload.get("error")
+            materializations = _coerce_optional_int(payload.get("conv_materializations"))
+            if error:
+                notes.append(f"- {result.config_display_name}: {error}")
+            if materializations is not None:
+                notes.append(f"- {result.config_display_name}: conv materializations={materializations}")
+        if notes:
+            lines.append("")
+            lines.append("Notes:")
+            lines.extend(notes)
+        lines.append("")
+    summary_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-
-    if args.assert_no_densify:
-        print("ALL_CONV_LAYERS_PATCHES=None")
-        return 0
-
     initialize_device(args.device, args.dtype)
 
-    if args.all_instances or args.all_configs:
-        instance_indices = [0, 1, 2] if args.all_instances else [
-            (
-                resolve_vnnlib_row_index(args.vnnlib_name, instance_idx=args.instance)
-                if args.vnnlib_name is not None
-                else resolve_medium_instance_index(instance_idx=args.instance)
-            )
-        ]
-        config_names = (
-            ["matrix-baseline", "patches+matrix-fallback", "full-patches"]
-            if args.all_configs
-            else ["matrix-baseline"]
-        )
-        # TODO(W5): real all-instance/config sweep with per-config behavior and metrics.
-        exit_codes = [
-            _run_single_benchmark(args, instance_idx=instance_idx, config_name=config_name)
-            for config_name in config_names
-            for instance_idx in instance_indices
-        ]
-        _write_wave_summary(
-            _summary_output_path(args.output),
-            instance_indices=instance_indices,
-            config_names=config_names,
-        )
-        return max(exit_codes, default=0)
+    instance_targets = _build_instance_targets(args)
+    benchmark_configs = _build_benchmark_configs(args)
 
-    selected_instance_idx = (
-        resolve_vnnlib_row_index(args.vnnlib_name, instance_idx=args.instance)
-        if args.vnnlib_name is not None
-        else resolve_medium_instance_index(instance_idx=args.instance)
-    )
-    return _run_single_benchmark(
-        args,
-        instance_idx=selected_instance_idx,
-        output_path=args.output or _default_output_path(selected_instance_idx, args.batch),
-    )
+    loaded_instances = [_load_instance(target) for target in instance_targets]
+    results: list[BenchmarkResult] = []
+    exit_code = 0
+    is_multi_run = args.all_instances or args.all_configs
+
+    for loaded in loaded_instances:
+        for config in benchmark_configs:
+            result = _run_single_benchmark(
+                args,
+                loaded=loaded,
+                config=config,
+                output_path=None if is_multi_run else (args.output or _default_output_path(loaded.target.key, config.name, args.batch)),
+            )
+            results.append(result)
+            exit_code = max(exit_code, result.exit_code)
+
+    if is_multi_run:
+        _write_wave_summary(_summary_output_path(args.output), results)
+
+    return exit_code
 
 
 if __name__ == "__main__":

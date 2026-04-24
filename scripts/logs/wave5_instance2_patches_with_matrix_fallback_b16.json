@@ -1,0 +1,31 @@
+{
+  "instance_key": "instance2",
+  "instance_display_name": "Instance 2",
+  "instance_idx": 2,
+  "batch_size": 16,
+  "eta_iters": 10,
+  "max_depth": 20,
+  "max_nodes": 300,
+  "budget": 120.0,
+  "device": "cuda",
+  "requested_device": "cuda",
+  "dtype": "float32",
+  "vnnlib_name": "CIFAR100_resnet_medium_prop_idx_3995_sidx_7978_eps_0.0039.vnnlib",
+  "config_name": "patches_with_matrix_fallback",
+  "config_display_name": "ACT patches (mixed)",
+  "conv_mode": "patches",
+  "strict_patches": false,
+  "wall_time_s": 126.18031334877014,
+  "peak_vram_gb": 83.129383424,
+  "result": {
+    "status": "UNKNOWN",
+    "nodes": 239,
+    "ces_attempted": null
+  },
+  "oom": false,
+  "peak_conv_layer_vram_mb": 80712.415744,
+  "peak_conv_layer_vram_gb": 80.712415744,
+  "peak_total_vram_gb": 83.129383424,
+  "conv_materializations": 342,
+  "all_conv_layers_patches": false
+}

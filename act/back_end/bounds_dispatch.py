@@ -27,6 +27,8 @@ log = logging.getLogger(__name__)
 
 _VALID_CONV_MODES = {"matrix", "patches"}
 _conv_mode = BackendConfig.from_yaml().conv_mode
+_strict_patches = False
+_conv_materialization_count = 0
 
 
 class LinearBoundLike(Protocol):
@@ -51,6 +53,31 @@ def set_conv_mode(mode: str) -> None:
         raise ValueError(f"Invalid conv_mode {mode!r}; expected one of {_VALID_CONV_MODES}")
     global _conv_mode
     _conv_mode = mode
+
+
+def get_strict_patches() -> bool:
+    return _strict_patches
+
+
+def set_strict_patches(enabled: bool) -> None:
+    global _strict_patches
+    _strict_patches = bool(enabled)
+
+
+def get_conv_materialization_count() -> int:
+    return _conv_materialization_count
+
+
+def reset_conv_materialization_count() -> None:
+    global _conv_materialization_count
+    _conv_materialization_count = 0
+
+
+def _record_conv_materialization(message: str) -> None:
+    global _conv_materialization_count
+    _conv_materialization_count += 1
+    if get_strict_patches():
+        raise RuntimeError(message)
 
 
 def is_rank3_view(x: object) -> bool:
@@ -184,9 +211,12 @@ def dispatch_conv_forward(
                 device,
                 dtype,
             )
-        log.warning(
-            "dispatch_conv_forward: conv_mode=patches received LinearBound input; materializing and falling back to matrix path"
+        message = (
+            "dispatch_conv_forward: conv_mode=patches received LinearBound input; "
+            "materializing and falling back to matrix path"
         )
+        log.warning(message)
+        _record_conv_materialization(message)
         materialized = [materialize_if_needed(cast(LinearBoundLike, parent_lins[0]))]
         return tf_cnn.forward_conv2d(
             layer,
@@ -360,6 +390,10 @@ __all__ = [
     "dispatch_pool_forward",
     "dispatch_relu_backward",
     "expand_rank3",
+    "get_conv_materialization_count",
     "is_rank3_view",
     "materialize_if_needed",
+    "get_strict_patches",
+    "reset_conv_materialization_count",
+    "set_strict_patches",
 ]
