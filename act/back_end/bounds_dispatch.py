@@ -11,7 +11,9 @@ to every consumer. Wave 3-4 fills the Patches branches.
 
 import importlib
 import logging
+import atexit
 from collections.abc import Mapping, Sequence
+from collections import Counter
 from typing import Protocol, TypeVar, cast, overload
 
 import torch
@@ -29,6 +31,8 @@ _VALID_CONV_MODES = {"matrix", "patches"}
 _conv_mode = BackendConfig.from_yaml().conv_mode
 _strict_patches = False
 _conv_materialization_count = 0
+_WARNED_SITES: set[tuple[str, int]] = set()
+_MATERIALIZATION_COUNTS: Counter[tuple[str, int]] = Counter()
 
 
 class LinearBoundLike(Protocol):
@@ -70,12 +74,41 @@ def get_conv_materialization_count() -> int:
 
 def reset_conv_materialization_count() -> None:
     global _conv_materialization_count
+    emit_materialization_summary(log)
+    _WARNED_SITES.clear()
+    _MATERIALIZATION_COUNTS.clear()
     _conv_materialization_count = 0
+    try:
+        babsr = importlib.import_module("act.back_end.bab.branching.babsr")
+        reset_babsr = getattr(babsr, "reset_materialization_tracking", None)
+        if callable(reset_babsr):
+            reset_babsr()
+    except Exception:
+        log.debug("reset_conv_materialization_count: unable to reset BaBSR tracking", exc_info=True)
 
 
-def _record_conv_materialization(message: str) -> None:
+def _warn_once(site: str, layer_id: int, message: str) -> None:
+    key = (site, layer_id)
+    if key in _WARNED_SITES:
+        log.debug(message)
+        return
+    _WARNED_SITES.add(key)
+    log.warning(message)
+
+
+def emit_materialization_summary(logger: logging.Logger) -> None:
+    if not _MATERIALIZATION_COUNTS:
+        return
+    logger.warning("[bounds_dispatch] conv materializations during run:")
+    for (site, layer_id), count in sorted(_MATERIALIZATION_COUNTS.items()):
+        logger.warning("  layer_id=%s  site=%s  count=%s", layer_id, site, count)
+
+
+def _record_conv_materialization(site: str, layer_id: int, message: str) -> None:
     global _conv_materialization_count
     _conv_materialization_count += 1
+    _MATERIALIZATION_COUNTS[(site, layer_id)] += 1
+    _warn_once(site, layer_id, message)
     if get_strict_patches():
         raise RuntimeError(message)
 
@@ -215,8 +248,11 @@ def dispatch_conv_forward(
             "dispatch_conv_forward: conv_mode=patches received LinearBound input; "
             "materializing and falling back to matrix path"
         )
-        log.warning(message)
-        _record_conv_materialization(message)
+        _record_conv_materialization(
+            "dispatch_conv_forward",
+            int(layer.id),
+            message,
+        )
         materialized = [materialize_if_needed(cast(LinearBoundLike, parent_lins[0]))]
         return tf_cnn.forward_conv2d(
             layer,
@@ -389,6 +425,7 @@ __all__ = [
     "dispatch_conv_forward",
     "dispatch_pool_forward",
     "dispatch_relu_backward",
+    "emit_materialization_summary",
     "expand_rank3",
     "get_conv_materialization_count",
     "is_rank3_view",
@@ -397,3 +434,6 @@ __all__ = [
     "reset_conv_materialization_count",
     "set_strict_patches",
 ]
+
+
+atexit.register(emit_materialization_summary, log)

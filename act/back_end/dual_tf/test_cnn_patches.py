@@ -13,7 +13,12 @@ import torch.nn.functional as F
 
 from act.back_end.bab.branching.babsr import BaBSRBranching, compute_lA_per_layer
 from act.back_end.bab.node import SubproblemBatch
-from act.back_end.bounds_dispatch import dispatch_conv_forward, get_conv_mode, set_conv_mode
+from act.back_end.bounds_dispatch import (
+    dispatch_conv_forward,
+    get_conv_mode,
+    reset_conv_materialization_count,
+    set_conv_mode,
+)
 from act.back_end.core import Bounds, Layer, Net
 from act.back_end.dual_tf import compute_forward_bounds
 from act.back_end.dual_tf.tf_cnn import backward_conv2d, forward_conv2d
@@ -282,6 +287,7 @@ def _conv_dense_relu_net(seed: int = 0) -> tuple[Net, int, int]:
 
 def _score_picks(net: Net, lb_4d: torch.Tensor, ub_4d: torch.Tensor, *, mode: str):
     batch_size = lb_4d.shape[0]
+    reset_conv_materialization_count()
     with _conv_mode(mode):
         bounds = compute_forward_bounds(net, lb_4d.reshape(batch_size, -1), ub_4d.reshape(batch_size, -1))
         batch = SubproblemBatch(lb=lb_4d.reshape(batch_size, -1), ub=ub_4d.reshape(batch_size, -1), depths=torch.zeros(batch_size, dtype=torch.long))

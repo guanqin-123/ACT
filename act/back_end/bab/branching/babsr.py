@@ -20,6 +20,8 @@
 from __future__ import annotations
 
 import logging
+import atexit
+from collections import Counter
 from typing import Callable, Dict, List, Optional, Tuple, cast
 
 import torch
@@ -38,6 +40,40 @@ from act.back_end.layer_schema import LayerKind
 from act.back_end.patches import Patches
 
 log = logging.getLogger(__name__)
+_WARNED_SITES: set[tuple[str, int]] = set()
+_MATERIALIZATION_COUNTS: Counter[int] = Counter()
+
+def _warn_once(site: str, layer_id: int, message: str) -> None:
+    key = (site, layer_id)
+    if key in _WARNED_SITES:
+        log.debug(message)
+        return
+    _WARNED_SITES.add(key)
+    log.warning(message)
+
+
+def _record_lA_materialization(layer_id: int) -> None:
+    _MATERIALIZATION_COUNTS[layer_id] += 1
+    _warn_once(
+        "select_neurons_lA_materialize",
+        layer_id,
+        f"BaBSR select_neurons: materializing patches lA for layer {layer_id}",
+    )
+
+
+def emit_materialization_summary(logger: logging.Logger) -> None:
+    if not _MATERIALIZATION_COUNTS:
+        return
+    logger.warning("[bab.branching.babsr] lA materializations during run:")
+    for layer_id, count in sorted(_MATERIALIZATION_COUNTS.items()):
+        logger.warning("  layer_id=%s count=%s", layer_id, count)
+
+
+def reset_materialization_tracking() -> None:
+    emit_materialization_summary(log)
+    _WARNED_SITES.clear()
+    _MATERIALIZATION_COUNTS.clear()
+
 
 # ---------------------------------------------------------------------------
 # Configuration / activation classification
@@ -188,7 +224,11 @@ def compute_lA_per_layer(
         )
     sample_bound = next(iter(bounds_dict.values()))
     if sample_bound.lb.dim() >= 3 and sample_bound.lb.stride(1) == 0:
-        log.warning("compute_lA_per_layer: materializing rank-3 bounds at BaBSR boundary")
+        _warn_once(
+            "compute_lA_per_layer_rank3_boundary",
+            -1,
+            "compute_lA_per_layer: materializing rank-3 bounds at BaBSR boundary",
+        )
         bounds_dict = {
             lid: Bounds(
                 lb=bounds.lb.contiguous().reshape(bounds.lb.shape[0] * bounds.lb.shape[1], *bounds.lb.shape[2:]),
@@ -348,7 +388,7 @@ def _lA_to_score_tensor(
     else:
         input_shape = tuple(int(dim) for dim in output_shape)
     dense = value.to_matrix(input_shape)
-    log.warning("BaBSR select_neurons: materializing patches lA for layer %s", layer_id)
+    _record_lA_materialization(layer_id)
     if dense.ndim != 3:
         raise ValueError(
             f"BaBSR select_neurons: expected dense lA [B, rows, D], got {tuple(dense.shape)}"
@@ -394,6 +434,7 @@ class BaBSRBranching(BranchingStrategy):
     SCORE_THRESHOLD: float = 1e-4
     SMOOTH_SPLIT_MIN_GAP: float = 1e-2
     EPS: float = 1e-12
+
 
     # -- BranchingStrategy ABC shim ----------------------------------------
 
@@ -595,3 +636,6 @@ class BaBSRBranching(BranchingStrategy):
             else:
                 results.append((-1, -1, "none"))
         return results
+
+
+atexit.register(emit_materialization_summary, log)
