@@ -416,6 +416,45 @@ def test_deterministic_patches_ctx_nested_restore() -> None:
     assert is_deterministic_patches() is True
 
 
+def test_deterministic_ctx_saves_torch_state() -> None:
+    before = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(False)
+    try:
+        with deterministic_patches_ctx(deterministic=True):
+            assert is_deterministic_patches() is True
+            assert torch.are_deterministic_algorithms_enabled() is True
+        assert torch.are_deterministic_algorithms_enabled() is False
+    finally:
+        torch.use_deterministic_algorithms(before)
+
+
+def test_deterministic_ctx_emits_deprecation_on_as_strided() -> None:
+    tensor = torch.arange(1.0, 17.0).reshape(1, 1, 4, 4)
+    with deterministic_patches_ctx(deterministic=True), pytest.warns(
+        DeprecationWarning,
+        match="as_strided path in inplace_unfold is non-deterministic; use F.unfold in production",
+    ):
+        result = inplace_unfold(tensor, kernel_size=2, stride=1, padding=0)
+    torch.testing.assert_close(result, F.unfold(tensor, kernel_size=2, stride=1, padding=0))
+
+
+def test_deterministic_ctx_nested() -> None:
+    before = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(False)
+    try:
+        with deterministic_patches_ctx(deterministic=False):
+            assert is_deterministic_patches() is False
+            assert torch.are_deterministic_algorithms_enabled() is False
+            with deterministic_patches_ctx(deterministic=True):
+                assert is_deterministic_patches() is True
+                assert torch.are_deterministic_algorithms_enabled() is True
+            assert is_deterministic_patches() is False
+            assert torch.are_deterministic_algorithms_enabled() is False
+        assert torch.are_deterministic_algorithms_enabled() is False
+    finally:
+        torch.use_deterministic_algorithms(before)
+
+
 def test_config_default_patches() -> None:
     config = BackendConfig.from_yaml()
     assert config.conv_mode == "patches"

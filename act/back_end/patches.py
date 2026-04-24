@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import os
 import threading
+import warnings
 from typing import override
 
 import torch
@@ -10,6 +12,10 @@ import torch.nn.functional as F
 
 
 _DETERMINISTIC_PATCHES = threading.local()
+_DETERMINISTIC_ENV_OVERRIDES = {
+    "PYTHONHASHSEED": "0",
+    "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+}
 
 
 def _tensor_shape_or_none(
@@ -405,14 +411,59 @@ def is_deterministic_patches() -> bool:
     return getattr(_DETERMINISTIC_PATCHES, "value", True)
 
 
+def _deterministic_ctx_depth() -> int:
+    return int(getattr(_DETERMINISTIC_PATCHES, "depth", 0))
+
+
+def _torch_deterministic_state() -> tuple[bool, bool | None]:
+    warn_only_getter = getattr(torch, "is_deterministic_algorithms_warn_only_enabled", None)
+    warn_only = bool(warn_only_getter()) if callable(warn_only_getter) else None
+    return torch.are_deterministic_algorithms_enabled(), warn_only
+
+
+def _restore_torch_deterministic_state(enabled: bool, warn_only: bool | None) -> None:
+    if warn_only is None:
+        torch.use_deterministic_algorithms(enabled)
+        return
+    torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
+
+
+def _apply_deterministic_env_overrides() -> dict[str, str | None]:
+    previous = {key: os.environ.get(key) for key in _DETERMINISTIC_ENV_OVERRIDES}
+    for key, value in _DETERMINISTIC_ENV_OVERRIDES.items():
+        os.environ.setdefault(key, value)
+    return previous
+
+
+def _restore_deterministic_env_overrides(previous: dict[str, str | None]) -> None:
+    for key, value in previous.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
 @contextmanager
 def deterministic_patches_ctx(deterministic: bool = True):
     previous = is_deterministic_patches()
+    previous_torch_enabled, previous_torch_warn_only = _torch_deterministic_state()
+    previous_env = (
+        _apply_deterministic_env_overrides() if deterministic else None
+    )
+    _DETERMINISTIC_PATCHES.depth = _deterministic_ctx_depth() + 1
     _DETERMINISTIC_PATCHES.value = deterministic
+    _restore_torch_deterministic_state(deterministic, previous_torch_warn_only)
     try:
         yield
     finally:
         _DETERMINISTIC_PATCHES.value = previous
+        _DETERMINISTIC_PATCHES.depth = max(0, _deterministic_ctx_depth() - 1)
+        _restore_torch_deterministic_state(
+            previous_torch_enabled,
+            previous_torch_warn_only,
+        )
+        if previous_env is not None:
+            _restore_deterministic_env_overrides(previous_env)
 
 
 def inplace_unfold(
@@ -422,6 +473,12 @@ def inplace_unfold(
     padding: int | tuple[int, int],
 ) -> torch.Tensor:
     if is_deterministic_patches():
+        if _deterministic_ctx_depth() > 0:
+            warnings.warn(
+                "as_strided path in inplace_unfold is non-deterministic; use F.unfold in production",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return F.unfold(tensor, kernel_size=kernel_size, stride=stride, padding=padding)
 
     kernel_h, kernel_w = _normalize_pair(kernel_size)
