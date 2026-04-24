@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union, cast
 
 import yaml
 
@@ -19,6 +19,7 @@ _DEFAULT_YAML = Path(__file__).parent / "config.yaml"
 _VALID_SOLVERS = {"auto", "gurobi", "torch"}
 _VALID_DEVICES = {"cpu", "cuda", "gpu"}
 _VALID_DTYPES = {"float32", "float64"}
+_VALID_CONV_MODES = {"matrix", "patches"}
 _VALID_REGISTRY_MODES = {"intersection", "union"}
 _VALID_COVERAGE_MODES = {"basic", "full"}
 
@@ -74,14 +75,16 @@ class BaBConfig:
             )
 
         with open(path) as f:
-            yaml_data = yaml.safe_load(f) or {}
+            yaml_data = cast(dict[str, Any], yaml.safe_load(f) or {})
 
         # Support both nested (backend.bab) and flat (bab) YAML layouts.
-        backend_section = yaml_data.get("backend", {})
-        yaml_config: dict = backend_section.get("bab", yaml_data.get("bab", {}))
+        backend_section = cast(dict[str, Any], yaml_data.get("backend", {}))
+        yaml_config = cast(dict[str, Any], backend_section.get(
+            "bab", yaml_data.get("bab", {})
+        ))
 
         valid_keys = {fld.name for fld in fields(cls)}
-        merged = {k: v for k, v in yaml_config.items() if k in valid_keys}
+        merged: dict[str, Any] = {k: v for k, v in yaml_config.items() if k in valid_keys}
         merged.update({k: v for k, v in overrides.items() if k in valid_keys})
 
         return cls(**merged)
@@ -165,6 +168,7 @@ class BackendConfig:
     solver: str = "auto"
     device: str = "cpu"
     dtype: str = "float64"
+    conv_mode: str = "matrix"
     verbose: bool = False
     timeout: float = 300.0
 
@@ -187,6 +191,10 @@ class BackendConfig:
         if self.dtype not in _VALID_DTYPES:
             raise ValueError(
                 f"Invalid dtype {self.dtype!r}; expected one of {_VALID_DTYPES}"
+            )
+        if self.conv_mode not in _VALID_CONV_MODES:
+            raise ValueError(
+                f"Invalid conv_mode {self.conv_mode!r}; expected one of {_VALID_CONV_MODES}"
             )
 
     # -- YAML I/O -----------------------------------------------------------
@@ -221,11 +229,11 @@ class BackendConfig:
             raise FileNotFoundError(f"Backend config not found: {path}")
 
         with open(path) as f:
-            raw = yaml.safe_load(f) or {}
+            raw = cast(dict[str, Any], yaml.safe_load(f) or {})
 
-        backend_raw: dict = raw.get("backend", {})
-        bab_raw: dict = backend_raw.pop("bab", {})
-        gen_raw: dict = backend_raw.pop("generation", {})
+        backend_raw = cast(dict[str, Any], raw.get("backend", {}))
+        bab_raw = cast(dict[str, Any], backend_raw.pop("bab", {}))
+        gen_raw = cast(dict[str, Any], backend_raw.pop("generation", {}))
 
         # Extract "enabled" from bab section → top-level bab_enabled
         bab_enabled = bab_raw.pop("enabled", None)
@@ -233,9 +241,9 @@ class BackendConfig:
         # Route prefixed overrides to the right sub-config
         bab_fields = {fld.name for fld in fields(BaBConfig)}
         gen_fields = {fld.name for fld in fields(GenerationConfig)}
-        bab_overrides: dict = {}
-        gen_overrides: dict = {}
-        top_overrides: dict = {}
+        bab_overrides: dict[str, Any] = {}
+        gen_overrides: dict[str, Any] = {}
+        top_overrides: dict[str, Any] = {}
         for k, v in overrides.items():
             if k.startswith("bab_") and k[4:] in bab_fields:
                 bab_overrides[k[4:]] = v
@@ -245,18 +253,18 @@ class BackendConfig:
                 top_overrides[k] = v
 
         # Build BaBConfig
-        bab_merged = {k: v for k, v in bab_raw.items() if k in bab_fields}
+        bab_merged: dict[str, Any] = {k: v for k, v in bab_raw.items() if k in bab_fields}
         bab_merged.update(bab_overrides)
         bab_config = BaBConfig(**bab_merged)
 
         # Build GenerationConfig
-        gen_merged = {k: v for k, v in gen_raw.items() if k in gen_fields}
+        gen_merged: dict[str, Any] = {k: v for k, v in gen_raw.items() if k in gen_fields}
         gen_merged.update(gen_overrides)
         gen_config = GenerationConfig(**gen_merged)
 
         # Build top-level config
         top_fields = {fld.name for fld in fields(cls)} - {"bab", "generation"}
-        top_merged: dict = {}
+        top_merged: dict[str, Any] = {}
         for k, v in backend_raw.items():
             if k in top_fields:
                 top_merged[k] = v

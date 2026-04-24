@@ -27,6 +27,11 @@ backend:
   #   "float32" – single precision (faster, may cause numerical drift)
   dtype: "float64"
 
+  # Representation for Conv A/b matrices in dual verification.
+  #   "matrix"  – dense LinearBound (current default, baseline)
+  #   "patches" – sparse auto_LiRPA-style Patches (memory-efficient; enabled in W3)
+  conv_mode: "matrix"
+
   # Print extra diagnostic output across all commands.
   verbose: false
 
