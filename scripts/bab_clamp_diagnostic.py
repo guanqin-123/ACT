@@ -7,15 +7,19 @@ deep-depth "bound barely moves" pattern is the parent-margin clamp masking
 Adam regression.
 """
 
+# pyright: reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportUnusedCallResult=false, reportImplicitStringConcatenation=false, reportAttributeAccessIssue=false, reportAny=false, reportCallIssue=false, reportArgumentType=false, reportUnusedVariable=false
+
 from __future__ import annotations
 
 import csv
+import logging
 import time
 from pathlib import Path
 
 import torch
 
-from act.back_end.bab import BoundTrace, verify_bab
+from act.back_end.bab.bab import verify_bab
+from act.back_end.bab.trace import BoundTrace
 from act.back_end.config import BaBConfig
 from act.back_end.dual_tf import DualTF
 from act.back_end.solver.solver_dual import DualSolver
@@ -45,29 +49,86 @@ BENCHMARK_DIR = Path(
 INSTANCES_CSV = BENCHMARK_DIR / "instances.csv"
 ONNX_DIR = BENCHMARK_DIR / "onnx"
 
+LOGGER = logging.getLogger(__name__)
 
-def load_model_and_instance(instance_idx: int = 0):
-    """Load the ResNet-medium ONNX and one CIFAR-100 VNNLIB instance.
 
-    Returns (net, vnnlib_name). `net` is an ACT Net ready for verify_bab.
-    """
-    with open(INSTANCES_CSV) as f:
-        rows = list(csv.reader(f))
+def _load_medium_rows() -> list[tuple[int, str, str, float]]:
+    with open(INSTANCES_CSV, encoding="utf-8") as handle:
+        rows = list(csv.reader(handle))
 
-    medium_rows = [
+    return [
         (i, onnx_rel, vnnlib_rel, float(timeout_s))
         for i, (onnx_rel, vnnlib_rel, timeout_s) in enumerate(rows)
         if Path(onnx_rel).name == "CIFAR100_resnet_medium.onnx"
         and (BENCHMARK_DIR / vnnlib_rel).exists()
     ]
+
+
+def resolve_medium_instance_index(
+    instance_idx: int | None = 0,
+) -> int:
+    medium_rows = _load_medium_rows()
     if not medium_rows:
         raise RuntimeError("No CIFAR100_resnet_medium instances found under BENCHMARK_DIR.")
 
-    if instance_idx >= len(medium_rows):
+    resolved_idx = 0 if instance_idx is None else int(instance_idx)
+    if resolved_idx >= len(medium_rows):
         raise IndexError(
-            f"instance_idx={instance_idx} out of range (have {len(medium_rows)} instances)"
+            f"instance_idx={resolved_idx} out of range (have {len(medium_rows)} instances)"
         )
-    idx, onnx_rel, vnnlib_rel, _timeout_s = medium_rows[instance_idx]
+    return resolved_idx
+
+
+def resolve_vnnlib_row_index(
+    vnnlib_name: str,
+    *,
+    instance_idx: int | None = None,
+) -> int:
+    medium_rows = _load_medium_rows()
+    if not medium_rows:
+        raise RuntimeError("No CIFAR100_resnet_medium instances found under BENCHMARK_DIR.")
+
+    if instance_idx not in (None, 0):
+        LOGGER.warning(
+            "Both instance_idx=%s and vnnlib_name=%s were provided; vnnlib_name wins.",
+            instance_idx,
+            vnnlib_name,
+        )
+
+    for csv_idx, _onnx_rel, vnnlib_rel, _timeout_s in medium_rows:
+        if Path(vnnlib_rel).name == vnnlib_name:
+            return csv_idx
+    raise ValueError(
+        f"Unknown CIFAR100_resnet_medium vnnlib_name={vnnlib_name!r}; "
+        f"expected one of the entries from {INSTANCES_CSV}."
+    )
+
+
+def load_model_and_instance(
+    instance_idx: int = 0,
+    *,
+    vnnlib_name: str | None = None,
+):
+    """Load the ResNet-medium ONNX and one CIFAR-100 VNNLIB instance.
+
+    Returns (net, vnnlib_name). `net` is an ACT Net ready for verify_bab.
+    """
+    medium_rows = _load_medium_rows()
+    if vnnlib_name is not None:
+        resolved_row_idx = resolve_vnnlib_row_index(
+            vnnlib_name,
+            instance_idx=instance_idx,
+        )
+        matching_rows = [row for row in medium_rows if row[0] == resolved_row_idx]
+        if not matching_rows:
+            raise ValueError(
+                f"Resolved vnnlib_name={vnnlib_name!r} to CSV row {resolved_row_idx}, "
+                "but no matching CIFAR100_resnet_medium entry was found."
+            )
+        idx, _onnx_rel, vnnlib_rel, _timeout_s = matching_rows[0]
+    else:
+        resolved_idx = resolve_medium_instance_index(instance_idx=instance_idx)
+        idx, _onnx_rel, vnnlib_rel, _timeout_s = medium_rows[resolved_idx]
     vnnlib_path = BENCHMARK_DIR / vnnlib_rel
     onnx_path = ONNX_DIR / "CIFAR100_resnet_medium.onnx"
 
@@ -80,7 +141,7 @@ def load_model_and_instance(instance_idx: int = 0):
     label = extract_label_from_vnnlib(vnnlib_path)
     if label is None:
         raise RuntimeError(f"Missing label comment in {vnnlib_path.name}")
-    input_tensor, _ = parse_vnnlib_to_tensors(vnnlib_path, input_shape)
+    input_tensor, _unused_bounds = parse_vnnlib_to_tensors(vnnlib_path, input_shape)
     labeled = LabeledInputTensor(
         tensor=input_tensor, label=torch.tensor([label], dtype=torch.int64)
     )
