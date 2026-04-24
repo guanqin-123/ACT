@@ -324,10 +324,15 @@ config = BaBConfig(
     bounding_method="bfs",
     subproblem_batch_size=16,
     eta_iters=10, lr_eta=0.05,
-    time_budget_s=100.0,
     record_bound_trace=False,
 )
-result = verify_bab(net, solver=GurobiSolver(), dual_solver=dual_solver, config=config)
+result = verify_bab(
+    net,
+    solver=GurobiSolver(),
+    dual_solver=dual_solver,
+    config=config,
+    time_budget_s=100.0,
+)
 ```
 
 The `solver=` argument is retained for CE-extraction fallback but BaB's hot path is

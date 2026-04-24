@@ -45,12 +45,11 @@ class BaBConfig:
     branching_method: str = "random"
     bounding_method: str = "random"
 
-    subproblem_batch_size: int = 32
+    subproblem_batch_size: int = 64
     eta_iters: int = 20
     lr_eta: float = 0.05
     smooth_split_min_gap: float = 1e-2
     max_splits_per_neuron: int = 4
-    time_budget_s: float = 300.0
     spec_chunk_size: Optional[int] = None
     record_bound_trace: bool = False
 

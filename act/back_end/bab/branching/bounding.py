@@ -9,11 +9,12 @@
 # Purpose:
 #   Subproblem pool management for Branch-and-Bound.
 #
-#   Contains the abstract base class ``BoundingStrategy`` and two
+#   Contains the abstract base class ``BoundingStrategy`` and three
 #   implementations:
 #
 #     * ``RandomBounding`` — uniform-random pop (baseline / ablation).
 #     * ``BFSBounding``    — FIFO deque; level-order traversal.
+#     * ``DFSBounding``    — LIFO stack; depth-first traversal.
 #
 #   A bounding strategy maintains a *pool* of pending subproblems and
 #   decides which ones to process next.  All data flows through
@@ -224,3 +225,72 @@ class BFSBounding(BoundingStrategy):
 
     def __len__(self) -> int:
         return sum(b.batch_size for b in self._queue)
+
+
+# ---------------------------------------------------------------------------
+# DFS (LIFO) pool — stack of SubproblemBatch, most-recent batch popped first
+# ---------------------------------------------------------------------------
+
+
+class DFSBounding(BoundingStrategy):
+    """Last-in-first-out pool using a stack of batches.
+
+    Push appends to the top; pop drains from the top. Matches a classical
+    depth-first search: when a subproblem is split into ``left`` / ``right``
+    and both are pushed, the batch pushed **last** (``right``) is popped
+    first, so BaB dives down the most recent branch before backtracking.
+
+    Semantics at batch granularity
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    * Batches pop in reverse of their push order (stack LIFO).
+    * **Within a single batch, rows keep their insertion order.** When
+      ``pop(k)`` asks for fewer rows than the top batch holds, the first
+      ``k`` rows are returned and the tail is pushed back on top of the
+      stack, so a subsequent ``pop`` still sees those tail rows next.
+      This pairs naturally with BaB's ``push(left); push(right)`` idiom
+      where each batch is a set of siblings at the same depth.
+
+    Unlike :class:`RandomBounding`, this class does not re-stack tensors
+    internally — it keeps each pushed batch shape intact.
+    """
+
+    def __init__(self) -> None:
+        self._stack: list[SubproblemBatch] = []
+
+    # -- BoundingStrategy interface -----------------------------------------
+
+    def push(self, batch: SubproblemBatch) -> None:
+        if batch.batch_size == 0:
+            return
+        self._stack.append(batch)
+
+    def pop(self, batch_size: int = 1) -> SubproblemBatch:
+        if self.empty:
+            raise IndexError("pop from empty pool")
+        if batch_size <= 0:
+            raise ValueError(f"pop: batch_size must be positive, got {batch_size}")
+
+        pieces: list[SubproblemBatch] = []
+        remaining = batch_size
+
+        while remaining > 0 and len(self._stack) > 0:
+            top = self._stack.pop()
+            n = top.batch_size
+
+            if n <= remaining:
+                pieces.append(top)
+                remaining -= n
+            else:
+                device = top.lb.device
+                head_idx = torch.arange(remaining, dtype=torch.long, device=device)
+                tail_idx = torch.arange(remaining, n, dtype=torch.long, device=device)
+                pieces.append(top.select(head_idx))
+                # Push the unclaimed tail back on top so the next pop() still
+                # drains the most-recently-pushed batch's remaining rows first.
+                self._stack.append(top.select(tail_idx))
+                remaining = 0
+
+        return _concat_subproblem_batches(*pieces)
+
+    def __len__(self) -> int:
+        return sum(b.batch_size for b in self._stack)

@@ -10,6 +10,7 @@
 # pyright: reportMissingImports=false
 
 from __future__ import annotations
+import logging
 import torch
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, cast
 from act.back_end.bab.eta import EtaState, expand_eta_state
@@ -21,6 +22,8 @@ from act.back_end.solver.spec_batching import (
 )
 from act.front_end.specs import OutputSpec, OutKind
 from act.util.device_manager import get_default_device, get_default_dtype
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from act.back_end.bab.trace import BoundTrace
@@ -71,6 +74,7 @@ class DualSolver(Solver):
         self.eta_iters = 20
         self.lr_eta = 0.05
         self._eta_state: Optional[EtaState] = None
+        self._alpha_state: Optional[Dict[int, torch.Tensor]] = None
         self._last_bounds: Optional[Bounds] = None
         self._bound_trace: Optional["BoundTrace"] = None
         self._bound_trace_bab_iter: int = 0
@@ -90,6 +94,25 @@ class DualSolver(Solver):
 
     def clear_eta(self) -> None:
         self._eta_state = None
+
+    def set_alphas(self, alphas: Optional[Dict[int, torch.Tensor]]) -> None:
+        """Install per-ReLU warm-start α (slopes) for the next backward pass.
+
+        Mirrors :meth:`set_eta`. When set, ``evaluate_spec`` routes through
+        the joint α/η KKT path and initialises α from these values instead
+        of the default heuristic. BaB calls this with the parent
+        subproblem's optimised α before evaluating a child node.
+        """
+        if alphas is None:
+            self._alpha_state = None
+            return
+        device, dtype = get_default_device(), get_default_dtype()
+        self._alpha_state = {
+            lid: t.to(device=device, dtype=dtype) for lid, t in alphas.items()
+        }
+
+    def clear_alphas(self) -> None:
+        self._alpha_state = None
 
     def set_bound_trace(
         self,
@@ -600,17 +623,109 @@ class DualSolver(Solver):
             torch.where(on, torch.ones_like(lb), torch.zeros_like(lb)),
         )
 
+    def _compute_amb_masks(
+        self,
+        net: Net,
+        bounds_dict: Dict[int, Bounds],
+    ) -> Dict[int, torch.Tensor]:
+        """Per-ReLU-layer ambiguity mask: True where ``lb < 0 < ub``.
+
+        Stable neurons (``on = lb >= 0`` or ``off = ub <= 0``) are already
+        gated out of α usage in both ``_fwd_relu`` and ``dual_relu_backward``
+        via ``torch.where(amb, alpha, heuristic)``. This helper surfaces that
+        same ``amb`` mask to the Adam-loop driver so it can enforce the
+        invariant "α at stable positions stays at heuristic value" explicitly,
+        avoiding stale warm-start values from propagating across BaB splits.
+
+        Returns: ``Dict[lid, BoolTensor(B, D_layer)]`` keyed by ReLU layer id,
+        shape matches the flattened α-param layout.
+        """
+        alpha_shapes = self._discover_alpha_shapes(net, bounds_dict)
+        masks: Dict[int, torch.Tensor] = {}
+        for lid in alpha_shapes:
+            bound = bounds_dict[lid]
+            lb = (
+                bound.lb.flatten(start_dim=1)
+                if bound.lb.dim() >= 2
+                else bound.lb.flatten().unsqueeze(0)
+            )
+            ub = (
+                bound.ub.flatten(start_dim=1)
+                if bound.ub.dim() >= 2
+                else bound.ub.flatten().unsqueeze(0)
+            )
+            masks[lid] = (lb < 0) & (ub > 0)
+        return masks
+
+    def _align_alpha_to_batch(
+        self,
+        t: torch.Tensor,
+        batch_size: int,
+        lid: int,
+        name: str,
+    ) -> torch.Tensor:
+        """Broadcast/collapse a (B_src, W) α tensor to (batch_size, W)."""
+        if t.shape[0] == batch_size:
+            return t
+        if batch_size % t.shape[0] == 0:
+            return t.repeat_interleave(batch_size // t.shape[0], dim=0)
+        if t.shape[0] % batch_size == 0:
+            factor = t.shape[0] // batch_size
+            return t.view(batch_size, factor, t.shape[-1]).mean(dim=1)
+        raise ValueError(
+            f"DualSolver.compute_bound: {name} batch mismatch at layer {lid}; "
+            f"target batch {batch_size}, got {t.shape[0]}"
+        )
+
+    def _align_amb_mask_to_batch(
+        self,
+        mask: Optional[torch.Tensor],
+        batch_size: int,
+        lid: int,
+    ) -> Optional[torch.Tensor]:
+        """Broadcast a (B_src, W) bool mask to (batch_size, W). Collapse via
+        any() — if any row in the collapsed group had the neuron ambiguous,
+        the merged row is ambiguous (conservative for warm-start retention)."""
+        if mask is None:
+            return None
+        if mask.shape[0] == batch_size:
+            return mask
+        if batch_size % mask.shape[0] == 0:
+            return mask.repeat_interleave(batch_size // mask.shape[0], dim=0)
+        if mask.shape[0] % batch_size == 0:
+            factor = mask.shape[0] // batch_size
+            return mask.view(batch_size, factor, mask.shape[-1]).any(dim=1)
+        raise ValueError(
+            f"DualSolver: amb mask batch mismatch at layer {lid}; "
+            f"target batch {batch_size}, got {mask.shape[0]}"
+        )
+
     def _prepare_alpha_params(
         self,
         net: Net,
         bounds_dict: Dict[int, Bounds],
         batch_size: int,
         warm_alphas: Optional[Dict[int, torch.Tensor]],
+        amb_masks: Optional[Dict[int, torch.Tensor]] = None,
     ) -> Dict[int, torch.nn.Parameter]:
         device, dtype = get_default_device(), get_default_dtype()
         alpha_shapes = self._discover_alpha_shapes(net, bounds_dict)
+        # Compute amb masks lazily if caller didn't supply pre-aligned ones.
+        # Prepare-time sanitization: at stable positions we ALWAYS use the
+        # heuristic value, never the warm-start value carried from a parent
+        # subproblem where that neuron was ambiguous. This prevents stale
+        # α values from leaking into ``best_alpha_params`` snapshots (which
+        # are taken pre-step in the Adam loop) and from there into the
+        # returned ``out_alphas`` that warm-starts children.
+        if amb_masks is None:
+            amb_masks = self._compute_amb_masks(net, bounds_dict)
         params: Dict[int, torch.nn.Parameter] = {}
         for lid, width in alpha_shapes.items():
+            heur = self._heuristic_alpha(bounds_dict[lid])
+            heur_aligned = self._align_alpha_to_batch(heur, batch_size, lid, "heuristic alpha")
+            amb_aligned = self._align_amb_mask_to_batch(
+                amb_masks.get(lid), batch_size, lid
+            ) if amb_masks.get(lid) is not None else None
             if warm_alphas is not None and lid in warm_alphas:
                 init = warm_alphas[lid].to(device=device, dtype=dtype)
                 init_flat = (
@@ -623,29 +738,15 @@ class DualSolver(Solver):
                         f"DualSolver.compute_bound: warm alpha width mismatch at layer {lid}; "
                         f"expected {width}, got {init_flat.shape[-1]}"
                     )
-                if init_flat.shape[0] == batch_size:
-                    prepared = init_flat
-                elif batch_size % init_flat.shape[0] == 0:
-                    prepared = init_flat.repeat_interleave(batch_size // init_flat.shape[0], dim=0)
-                elif init_flat.shape[0] % batch_size == 0:
-                    factor = init_flat.shape[0] // batch_size
-                    prepared = init_flat.view(batch_size, factor, width).mean(dim=1)
+                warm_aligned = self._align_alpha_to_batch(
+                    init_flat, batch_size, lid, "warm alpha"
+                )
+                if amb_aligned is not None:
+                    prepared = torch.where(amb_aligned, warm_aligned, heur_aligned)
                 else:
-                    raise ValueError(
-                        f"DualSolver.compute_bound: warm alpha batch mismatch at layer {lid}; "
-                        f"target batch {batch_size}, got {init_flat.shape[0]}"
-                    )
+                    prepared = warm_aligned
             else:
-                prepared = self._heuristic_alpha(bounds_dict[lid])
-                if prepared.shape[0] == batch_size:
-                    pass
-                elif batch_size % prepared.shape[0] == 0:
-                    prepared = prepared.repeat_interleave(batch_size // prepared.shape[0], dim=0)
-                else:
-                    raise ValueError(
-                        f"DualSolver.compute_bound: heuristic alpha batch mismatch at layer {lid}; "
-                        f"target batch {batch_size}, got {prepared.shape[0]}"
-                    )
+                prepared = heur_aligned
             params[lid] = torch.nn.Parameter(prepared.detach().clone().clamp(0.0, 1.0))
         return params
 
@@ -740,6 +841,33 @@ class DualSolver(Solver):
             sign=self._clone_tensor_dict(template.sign),
             point=self._clone_tensor_dict(template.point),
         )
+
+    def _expand_alpha_dict(
+        self, alphas: Dict[int, torch.Tensor], factor: int
+    ) -> Dict[int, torch.Tensor]:
+        if factor <= 1 or not alphas:
+            return {lid: t for lid, t in alphas.items()}
+        return {
+            lid: t.repeat_interleave(factor, dim=0) for lid, t in alphas.items()
+        }
+
+    def _collapse_alpha_dict(
+        self, alphas: Dict[int, torch.Tensor], target_batch: int
+    ) -> Dict[int, torch.Tensor]:
+        if not alphas:
+            return alphas
+        result: Dict[int, torch.Tensor] = {}
+        for lid, t in alphas.items():
+            if t.shape[0] == target_batch:
+                result[lid] = t
+            elif t.shape[0] % target_batch == 0:
+                factor = t.shape[0] // target_batch
+                result[lid] = t.view(target_batch, factor, *t.shape[1:]).mean(dim=1)
+            else:
+                raise ValueError(
+                    f"DualSolver: cannot collapse alpha batch {t.shape[0]} to {target_batch}"
+                )
+        return result
 
     def _collapse_eta_state(self, eta: EtaState, target_batch: int) -> EtaState:
         if eta.batch_size == target_batch:
@@ -1023,21 +1151,51 @@ class DualSolver(Solver):
             device=device, dtype=dtype,
         )
 
+        optimized_eta_expanded: Optional[EtaState] = None
+        optimized_alpha_expanded: Optional[Dict[int, torch.Tensor]] = None
         with torch.set_grad_enabled(enable_grad):
             if chunk_size is None or spec.M <= chunk_size:
                 bounds_k = expand_bounds_dict(bounds_dict, spec.M)
                 saved_eta = self._eta_state
+                saved_alpha = self._alpha_state
                 saved_sid_map = self._bound_trace_sid_map
                 try:
                     if saved_eta is not None:
                         self._eta_state = expand_eta_state(saved_eta, spec.M)
                     if saved_sid_map is not None and spec.M > 1:
                         self._bound_trace_sid_map = saved_sid_map.repeat_interleave(spec.M, dim=0)
-                    margins_flat = self.compute_bound(
-                        net, bounds_k, spec.C, enable_grad=enable_grad,
+                    # Always route through the joint α/η KKT path so that
+                    # BaB gets both out_alphas and out_etas for warm-starting
+                    # child subproblems. Passing n_iters=self.eta_iters
+                    # triggers the joint KKT branch in compute_bound.
+                    warm_alphas = (
+                        self._expand_alpha_dict(saved_alpha, spec.M)
+                        if saved_alpha is not None
+                        else None
                     )
+                    compute_result = self.compute_bound(
+                        net, bounds_k, spec.C,
+                        enable_grad=enable_grad,
+                        n_iters=self.eta_iters,
+                        lr=self.lr_eta,
+                        warm_alphas=warm_alphas,
+                    )
+                    # Joint KKT path returns a 5-tuple; extract α/η for BaB
+                    # before finally restores the un-optimised snapshots.
+                    if isinstance(compute_result, tuple) and len(compute_result) == 5:
+                        margins_flat = compute_result[0]
+                        optimized_alpha_expanded = compute_result[3]
+                        optimized_eta_expanded = compute_result[4]
+                    else:
+                        margins_flat = (
+                            compute_result[0] if isinstance(compute_result, tuple)
+                            else compute_result
+                        )
+                        if saved_eta is not None and self._eta_state is not None:
+                            optimized_eta_expanded = self._eta_state
                 finally:
                     self._eta_state = saved_eta
+                    self._alpha_state = saved_alpha
                     self._bound_trace_sid_map = saved_sid_map
             else:
                 margins_flat = self._chunked_eval(
@@ -1052,11 +1210,28 @@ class DualSolver(Solver):
             violations = (slack < 0) & spec.active_mask
             certified = ~violations.any(dim=-1)
 
+        out_etas: Optional[EtaState] = None
+        if optimized_eta_expanded is not None:
+            if optimized_eta_expanded.batch_size == B:
+                out_etas = optimized_eta_expanded
+            elif optimized_eta_expanded.batch_size % B == 0:
+                out_etas = self._collapse_eta_state(optimized_eta_expanded, B)
+
+        out_alphas: Optional[Dict[int, torch.Tensor]] = None
+        if optimized_alpha_expanded is not None and optimized_alpha_expanded:
+            sample_batch = next(iter(optimized_alpha_expanded.values())).shape[0]
+            if sample_batch == B:
+                out_alphas = optimized_alpha_expanded
+            elif sample_batch % B == 0:
+                out_alphas = self._collapse_alpha_dict(optimized_alpha_expanded, B)
+
         return SpecBatchResult(
             margins=margins,
             slack=slack,
             active_mask=spec.active_mask,
             certified=certified,
+            out_etas=out_etas,
+            out_alphas=out_alphas,
         )
 
     def _chunked_eval(
@@ -1067,7 +1242,28 @@ class DualSolver(Solver):
 
         For large M (e.g. CIFAR-100 K=100), this trades time for memory by
         processing chunk_size specs per sample at a time.
+
+        Known limitation
+        ----------------
+        This path does NOT propagate α warm-start or joint α/η KKT optimization
+        across chunks: each chunk calls ``compute_bound`` without ``n_iters``
+        or ``warm_alphas``, so BaB α warm-start is silently dropped when
+        ``spec_chunk_size`` is active. The non-chunked path at
+        ``evaluate_spec`` does propagate both (captures ``out_alphas``/
+        ``out_etas`` from compute_bound's joint-KKT tuple return). A full
+        fix would require thread-through of warm_alphas per chunk and a
+        strategy for aggregating per-chunk ``out_alphas`` (mean? worst?
+        per-chunk-store?) — non-obvious, so left as follow-up. For CIFAR-100
+        ResNet with default ``spec_chunk_size=None``, this limitation has
+        no effect.
         """
+        if self._alpha_state is not None:
+            log.warning(
+                "DualSolver._chunked_eval: α warm-start is silently dropped "
+                "in chunked mode (spec_chunk_size=%d). Consider setting "
+                "spec_chunk_size=None for α-sensitive BaB runs.",
+                chunk_size,
+            )
         B, M = spec.B, spec.M
         n_out = spec.C.shape[-1]
         C_view = spec.C.view(B, M, n_out)

@@ -578,6 +578,7 @@ def _collect_backend_overrides(args, _user_set) -> dict:
 
     if args.verbose:
         overrides["verbose"] = True
+        overrides["bab_verbose"] = True
 
     # ── Verification ──
     if args.timeout is not None:

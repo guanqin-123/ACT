@@ -10,7 +10,7 @@ from act.back_end.config import BaBConfig
 from act.back_end.bab.node import BabNode, Split, SubproblemBatch, split_subproblems
 from act.back_end.bab.eta import EtaState, expand_eta_state, get_pre_activation_layer_id
 from act.back_end.bab.branching.branching import BranchingStrategy
-from act.back_end.bab.branching.bounding import BoundingStrategy, BFSBounding
+from act.back_end.bab.branching.bounding import BoundingStrategy, BFSBounding, DFSBounding
 from act.back_end.bab.trace import BoundTrace
 
 __all__ = [
@@ -28,6 +28,7 @@ __all__ = [
     "BranchingStrategy",
     "BoundingStrategy",
     "BFSBounding",
+    "DFSBounding",
     "BaBSRBranching",
     "BoundTrace",
 ]

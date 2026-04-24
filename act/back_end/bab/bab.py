@@ -20,7 +20,7 @@ import numpy as np
 import torch
 
 from act.back_end.bab.branching.babsr import BaBSRBranching
-from act.back_end.bab.branching.bounding import BFSBounding, BoundingStrategy, RandomBounding
+from act.back_end.bab.branching.bounding import BFSBounding, BoundingStrategy, DFSBounding, RandomBounding
 from act.back_end.bab.branching.branching import BranchingStrategy, RandomBranching
 from act.back_end.bab.eta import get_pre_activation_layer_id
 from act.back_end.bab.node import BabNode, SubproblemBatch, split_subproblems
@@ -220,6 +220,8 @@ def _build_bounding(method: str) -> BoundingStrategy:
         return RandomBounding()
     if method == "bfs":
         return BFSBounding()
+    if method == "dfs":
+        return DFSBounding()
     raise ValueError(f"Unknown bounding method: {method!r}")
 
 
@@ -359,6 +361,54 @@ def _select_random_neurons(
     return decisions
 
 
+def _log_batched_step(
+    *,
+    iter_num: int,
+    processed: int,
+    batch: SubproblemBatch,
+    safe_min_slack: torch.Tensor,
+    safe_certified: torch.Tensor,
+    raw_min_slack: torch.Tensor,
+    clamp_mask: torch.Tensor,
+    elapsed: float,
+) -> None:
+    """Emit one line per subproblem in the just-evaluated batch.
+
+    Called from `_verify_bab_batched` when ``BaBConfig.verbose=True``.
+    Each line reports:
+      - ``depth`` = number of neuron splits on the path to this subproblem,
+      - ``lb`` = certified lower bound on min-slack AFTER the parent-margin
+                clamp (what BaB actually uses downstream),
+      - ``raw`` = the dual solver's unclamped output for this subproblem;
+                when ``lb != raw`` the parent-margin clamp kicked in, marked
+                with ``CLAMP``. A high CLAMP rate at deep BaB levels signals
+                that Adam is producing worse bounds than the parent and the
+                clamp is masking the regression,
+      - ``CERT``/``open`` status marker for quick scanning.
+    """
+    n = batch.batch_size
+    depths = batch.depths
+    n_clamped = int(clamp_mask.sum().item())
+    for row in range(n):
+        d = int(depths[row].item())
+        lb = float(safe_min_slack[row].item())
+        raw = float(raw_min_slack[row].item())
+        clamped = bool(clamp_mask[row].item())
+        mark = "CERT" if bool(safe_certified[row].item()) else "open"
+        clamp_tag = " CLAMP" if clamped else ""
+        node_id = processed - n + row + 1
+        print(
+            f"[BaB] iter={iter_num:3d} node={node_id:4d} "
+            f"depth={d:2d} lb={lb:+.4f} raw={raw:+.4f}{clamp_tag} "
+            f"[{mark}] t={elapsed:.2f}s"
+        )
+    if n > 0:
+        print(
+            f"[BaB] iter={iter_num:3d} summary: clamp_hits={n_clamped}/{n} "
+            f"({100.0 * n_clamped / n:.0f}%)"
+        )
+
+
 def _verify_bab_legacy(
     net: Net,
     solver: Solver,
@@ -382,6 +432,13 @@ def _verify_bab_legacy(
             processed += 1
             iter_solver = type(solver)()
             status, ce_input, _ = setup_and_solve(net, bounds, iter_solver, timelimit=None)
+            if config.verbose:
+                depth = int(batch.depths[0].item())
+                print(
+                    f"[BaB] node={processed:4d} depth={depth:2d} "
+                    f"status={getattr(status, 'name', status)} "
+                    f"t={time.time() - start:.2f}s"
+                )
             if status == SolveStatus.UNSAT:
                 continue
             if status == SolveStatus.SAT and ce_input is not None:
@@ -472,6 +529,7 @@ def _verify_bab_batched(
         )
 
         dual_solver.set_eta(batch.eta)
+        dual_solver.set_alphas(batch.alphas)
         try:
             if trace is not None and batch.subproblem_ids is not None:
                 dual_solver.set_bound_trace(
@@ -490,17 +548,24 @@ def _verify_bab_batched(
         finally:
             dual_solver.clear_bound_trace()
             dual_solver.clear_eta()
+            dual_solver.clear_alphas()
 
         safe_min_slack = result.min_slack
         safe_certified = result.certified
+        raw_min_slack = result.min_slack.detach().clone()
+        regressed_mask = torch.zeros(
+            result.min_slack.shape[0],
+            dtype=torch.bool,
+            device=result.min_slack.device,
+        )
         if batch.parent_margins is not None:
             with torch.no_grad():
                 current = result.min_slack
                 parent_pm = batch.parent_margins.to(current.device)
                 valid_parent = ~torch.isnan(parent_pm)
-                regressed = valid_parent & (current < parent_pm)
-                if regressed.any():
-                    safe_min_slack = torch.where(regressed, parent_pm, current)
+                regressed_mask = valid_parent & (current < parent_pm)
+                if regressed_mask.any():
+                    safe_min_slack = torch.where(regressed_mask, parent_pm, current)
                     safe_certified = safe_min_slack >= 0
 
         if trace is not None and batch.subproblem_ids is not None:
@@ -508,6 +573,29 @@ def _verify_bab_batched(
                 sid = int(batch.subproblem_ids[row].item())
                 min_slack = float(safe_min_slack[row].item())
                 trace.record(sid, iteration_counter, min_slack)
+
+        if config.verbose:
+            _log_batched_step(
+                iter_num=iteration_counter,
+                processed=processed,
+                batch=batch,
+                safe_min_slack=safe_min_slack,
+                safe_certified=safe_certified,
+                raw_min_slack=raw_min_slack,
+                clamp_mask=regressed_mask,
+                elapsed=time.time() - start,
+            )
+
+        # Warm-start propagation: overwrite the batch's α and η with the
+        # Adam-optimised values returned by evaluate_spec. Children spawned
+        # below via split_neuron_batched inherit these (α copied wholesale;
+        # η val carried forward for pre-existing splits, newly-split neuron
+        # reset to 0).
+        if result.out_etas is not None:
+            batch.eta = result.out_etas
+        if result.out_alphas is not None:
+            batch.alphas = result.out_alphas
+
         iteration_counter += 1
 
         proven = safe_certified
@@ -687,9 +775,10 @@ def verify_bab(
             }
         )
 
-    budget = time_budget_s or timelimit or config.time_budget_s
+    budget = time_budget_s or timelimit or 300.0
     use_batched = (
-        config.branching_method == "babsr" or config.bounding_method == "bfs"
+        config.branching_method == "babsr"
+        or config.bounding_method in ("bfs", "dfs")
     )
     if use_batched:
         return _verify_bab_batched(
@@ -744,7 +833,6 @@ def test_config_yaml_roundtrip():
         assert c4.branching_method == "kfsb"
     finally:
         os.unlink(tmp)
-    assert hasattr(c1, "time_budget_s")
 
 
 def test_subproblem_batch():

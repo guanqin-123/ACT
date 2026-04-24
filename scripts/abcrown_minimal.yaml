@@ -1,0 +1,16 @@
+general:
+  device: cuda
+  conv_mode: patches
+  deterministic: true
+solver:
+  batch_size: 256
+  alpha-crown:
+    iteration: 100
+  beta-crown:
+    iteration: 20
+bab:
+  timeout: 120
+  branching:
+    reduceop: max
+  cut:
+    enabled: false

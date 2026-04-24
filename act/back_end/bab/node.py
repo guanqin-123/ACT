@@ -98,6 +98,7 @@ class SubproblemBatch:
 
     # Optional per-subproblem state for neuron-space BaB with eta penalty.
     eta: Optional[EtaState] = None
+    alphas: Optional[dict[int, torch.Tensor]] = None
     histories: Optional[list[list[Split]]] = None
     parent_margins: Optional[torch.Tensor] = None
     subproblem_ids: Optional[torch.Tensor] = None
@@ -215,6 +216,11 @@ class SubproblemBatch:
         depths = self.depths.index_select(0, idx)
 
         eta = self.eta.select(idx) if self.eta is not None else None
+        alphas = (
+            {lid: t.index_select(0, idx) for lid, t in self.alphas.items()}
+            if self.alphas is not None
+            else None
+        )
         histories = (
             [self.histories[int(i)] for i in idx.tolist()]
             if self.histories is not None
@@ -236,6 +242,7 @@ class SubproblemBatch:
             ub=ub,
             depths=depths,
             eta=eta,
+            alphas=alphas,
             histories=histories,
             parent_margins=parent_margins,
             subproblem_ids=subproblem_ids,
@@ -357,6 +364,21 @@ class SubproblemBatch:
         left_eta = _build_child_eta(+1.0)  # INACTIVE: z ≤ split_point
         right_eta = _build_child_eta(-1.0)  # ACTIVE:   z ≥ split_point
 
+        # Propagate parent's Adam-optimised α wholesale to both children.
+        # Unlike η, α has no structural change at a split — it's a per-ReLU
+        # relaxation slope that remains meaningful as bounds tighten. Copy
+        # (not share) so each child can re-optimise independently in Adam.
+        if self.alphas is not None:
+            left_alphas: Optional[dict[int, torch.Tensor]] = {
+                lid: t.clone() for lid, t in self.alphas.items()
+            }
+            right_alphas: Optional[dict[int, torch.Tensor]] = {
+                lid: t.clone() for lid, t in self.alphas.items()
+            }
+        else:
+            left_alphas = None
+            right_alphas = None
+
         new_depths = self.depths + 1
 
         # Extend per-row history lists (copy parent's, append new Split).
@@ -399,6 +421,7 @@ class SubproblemBatch:
             ub=self.ub.clone(),
             depths=new_depths.clone(),
             eta=left_eta,
+            alphas=left_alphas,
             histories=left_histories,
             parent_margins=None,
             subproblem_ids=None,
@@ -408,6 +431,7 @@ class SubproblemBatch:
             ub=self.ub.clone(),
             depths=new_depths.clone(),
             eta=right_eta,
+            alphas=right_alphas,
             histories=right_histories,
             parent_margins=None,
             subproblem_ids=None,

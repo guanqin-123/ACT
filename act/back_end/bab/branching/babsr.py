@@ -269,7 +269,7 @@ class BaBSRBranching(BranchingStrategy):
         intercept_term = clamp(lA, max=0) * intercept
         bias_cand_1    = b_layer * (slope_ratio - 1)
         bias_cand_2    = b_layer * slope_ratio
-        bias_term      = min(bias_cand_1, bias_cand_2)    # AND-clause
+        bias_term      = max(bias_cand_1, bias_cand_2)    # AND-clause (α-β-CROWN default)
         score          = |bias_term + intercept_term| * amb_mask
 
     where ``lA`` comes from a single reverse-topo backward sweep with
@@ -414,13 +414,19 @@ class BaBSRBranching(BranchingStrategy):
             intercept = -lb * ub / denom
             intercept_term = lA.clamp(max=0) * intercept
 
-            # Bias term via AND-clause reduction (MUST DO #1 in plan).
+            # Bias term via AND-clause reduction. Uses ``max`` to match
+            # α-β-CROWN's canonical default (``branching_reduceop='max'``):
+            # picking the larger of the two candidate bias terms selects
+            # neurons whose split weakens the worse child more aggressively,
+            # producing a tighter overall BaB tree. (``min`` is an alternate
+            # reduction used in some BFS variants but empirically selects
+            # lower-impact neurons on ResNet-scale networks.)
             pre_layer = net.by_id[pre_lid]
             b_layer = _get_pre_act_bias(pre_layer, D, device=device, dtype=dtype)
             b_layer_b = b_layer.unsqueeze(0).expand(B, -1)
             bias_cand_1 = b_layer_b * (slope_ratio - 1.0)
             bias_cand_2 = b_layer_b * slope_ratio
-            bias_term = torch.minimum(bias_cand_1, bias_cand_2)
+            bias_term = torch.maximum(bias_cand_1, bias_cand_2)
 
             if kind == "relu":
                 amb_mask = (lb < 0) & (ub > 0)

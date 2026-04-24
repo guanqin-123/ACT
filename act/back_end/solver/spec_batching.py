@@ -16,6 +16,7 @@ import torch
 from dataclasses import dataclass
 from typing import Dict, List, Optional, TYPE_CHECKING
 
+from act.back_end.bab.eta import EtaState
 from act.back_end.core import Bounds
 from act.front_end.specs import OutputSpec, OutKind
 
@@ -86,11 +87,24 @@ class SpecBatchResult:
                passes certification).
         active_mask: [B, M] bool - which cells participated.
         certified: [B] bool - True iff all active cells have slack >= 0.
+        out_etas: Optional EtaState with batch_size == B, carrying the Adam-
+               optimised η values from this evaluation. Consumed by BaB as a
+               warm start for child subproblems so that η state survives
+               across splits instead of being recomputed from scratch.
+               None when no η was in play (root subproblem / fast path / the
+               chunked evaluation path where per-chunk η is not aggregated).
+        out_alphas: Optional Dict[lid, Tensor[B, D_layer]] of Adam-optimised
+               ReLU relaxation slopes, keyed by ReLU layer id. Same warm-start
+               semantics as out_etas: BaB copies into the subproblem batch so
+               children inherit the parent's tuned α instead of re-deriving
+               from the default heuristic. None on the legacy / chunked path.
     """
     margins: torch.Tensor
     slack: torch.Tensor
     active_mask: torch.Tensor
     certified: torch.Tensor
+    out_etas: Optional[EtaState] = None
+    out_alphas: Optional[Dict[int, torch.Tensor]] = None
 
     def __post_init__(self) -> None:
         assert self.margins.dim() == 2, f"margins must be [B, M], got {self.margins.shape}"

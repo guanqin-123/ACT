@@ -412,8 +412,8 @@ class VerifyResult:
 @torch.no_grad()
 def verify_once(net, solver: Solver, timelimit: Optional[float]=None) -> VerifyResult: ...
 
-def verify_bab(net, solver: Solver,
-               max_depth: int=20, max_nodes: int=2000, time_budget_s: float=300.0) -> VerifyResult: ...
+def verify_bab(net, solver: Solver, *, config: Optional[BaBConfig]=None,
+               time_budget_s: Optional[float]=None) -> VerifyResult: ...
 ```
 
 ### How it works

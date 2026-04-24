@@ -32,7 +32,9 @@ backend:
 
   # ── BaBVerification ────────────────────────────────────────────────────────
 
-  # Wall-clock budget in seconds for both single execution and BaB verification.
+  # Wall-clock budget in seconds for verification.
+  # Single source of truth for BOTH verify_once and verify_bab.
+  # (CLI wires this into verify_bab's time_budget_s parameter.)
   timeout: 60.0
 
   bab:
@@ -43,15 +45,47 @@ backend:
     max_depth: 3
 
     # Maximum number of subproblems (nodes) to explore.
+    #   null – no node cap (stop on time_budget_s or pool exhaustion)
     max_nodes: 10
 
-    # How to pick the next input dimension to split.
+    # How to pick the next input dimension / neuron to split.
     #   "random" – uniform random selection (baseline)
     branching_method: "random"
 
     # How to order subproblems in the work pool.
     #   "random" – random ordering (baseline)
+    #   "bfs"    – breadth-first (FIFO)
+    #   "dfs"    – depth-first (LIFO)
     bounding_method: "random"
+
+    # Number of subproblems evaluated together in each forward/backward batch.
+    # Tune to GPU memory; larger = better throughput, more memory.
+    subproblem_batch_size: 64
+
+    # Number of Adam iterations for η (eta) per BaB node.
+    # Higher = tighter bounds but more compute per node.
+    eta_iters: 20
+
+    # Learning rate for the η (eta) Adam optimizer.
+    lr_eta: 0.05
+
+    # Minimum pre-activation bound gap (|ub - lb|) required before a smooth
+    # activation is considered splittable. Smaller = more aggressive splitting.
+    smooth_split_min_gap: 0.01
+
+    # Maximum number of times a single neuron may be split along any path.
+    max_splits_per_neuron: 4
+
+    # Chunk size for batching specs within a subproblem.
+    #   null – no chunking (process all specs together)
+    spec_chunk_size: null
+
+    # Record per-subproblem α/η Adam trajectories for diagnostics (BoundTrace).
+    # Disable in production for performance.
+    record_bound_trace: false
+
+    # Emit verbose per-node BaB progress logging.
+    verbose: false
 
   # ── Network Generation (net_factory) ────────────────────────────────────
   # Controls how many networks to generate, where, and TF filtering.
