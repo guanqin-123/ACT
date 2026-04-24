@@ -238,9 +238,7 @@ def dispatch_relu_backward(
     nu: torch.Tensor | Patches,
     bounds_dict: object,
     preds: list[int],
-) -> tuple[list[torch.Tensor], torch.Tensor]:
-    if isinstance(nu, Patches) or _contains_patches(bounds_dict):
-        raise NotImplementedError("Filled in W3/W4")
+) -> tuple[list[torch.Tensor | Patches], torch.Tensor]:
     tf_mlp = importlib.import_module("act.back_end.dual_tf.tf_mlp")
     return tf_mlp.backward_relu(layer, nu, cast(dict[int, Bounds], bounds_dict), preds)
 
@@ -254,9 +252,7 @@ def dispatch_bn_forward(
     post_activation: bool,
     device: torch.device,
     dtype: torch.dtype,
-) -> tuple[Bounds, Bounds, LinearBoundLike, FrameLike]:
-    if _contains_patches(parent_lins):
-        raise NotImplementedError("Filled in W3/W4")
+ ) -> tuple[Bounds, Bounds, LinearBoundLike | Patches, FrameLike]:
     tf_mlp = importlib.import_module("act.back_end.dual_tf.tf_mlp")
 
     return tf_mlp.forward_bn(
@@ -280,9 +276,7 @@ def dispatch_add_forward(
     post_activation: bool,
     device: torch.device,
     dtype: torch.dtype,
-) -> tuple[Bounds, Bounds, LinearBoundLike, FrameLike]:
-    if _contains_patches(parent_lins):
-        raise NotImplementedError("Filled in W3/W4")
+ ) -> tuple[Bounds, Bounds, LinearBoundLike | Patches, FrameLike]:
     tf_forward = importlib.import_module("act.back_end.dual_tf.tf_forward")
 
     return tf_forward.forward_add(
@@ -306,9 +300,7 @@ def dispatch_concat_forward(
     post_activation: bool,
     device: torch.device,
     dtype: torch.dtype,
-) -> tuple[Bounds, Bounds, LinearBoundLike, FrameLike]:
-    if _contains_patches(parent_lins):
-        raise NotImplementedError("Filled in W3/W4")
+ ) -> tuple[Bounds, Bounds, LinearBoundLike | Patches, FrameLike]:
     tf_forward = importlib.import_module("act.back_end.dual_tf.tf_forward")
 
     return tf_forward.forward_concat(
@@ -332,9 +324,7 @@ def dispatch_pool_forward(
     post_activation: bool,
     device: torch.device,
     dtype: torch.dtype,
-) -> tuple[Bounds, Bounds, LinearBoundLike, FrameLike]:
-    if _contains_patches(parent_lins):
-        raise NotImplementedError("Filled in W3/W4")
+ ) -> tuple[Bounds, Bounds, LinearBoundLike | Patches, FrameLike]:
     tf_cnn = importlib.import_module("act.back_end.dual_tf.tf_cnn")
 
     if layer.kind == LayerKind.MAXPOOL2D.value:

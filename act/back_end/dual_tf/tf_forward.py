@@ -16,7 +16,7 @@ with activation bounds stored PRE-activation unless ``post_activation=True``.
 """
 #===---------------------------------------------------------------------===#
 
-# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownArgumentType=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false, reportMissingParameterType=false, reportUntypedFunctionDecorator=false, reportDeprecated=false
+# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownArgumentType=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false, reportMissingParameterType=false, reportUntypedFunctionDecorator=false, reportDeprecated=false, reportArgumentType=false, reportOperatorIssue=false, reportGeneralTypeIssues=false, reportMissingTypeArgument=false, reportUndefinedVariable=false, reportCallIssue=false
 
 import contextlib
 import logging
@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
 
 from act.back_end.core import Bounds, Layer, Net
 from act.back_end.layer_schema import LayerKind
+from act.back_end.patches import Patches, patches_to_matrix, unify_shape
 from act.util.device_manager import get_default_device, get_default_dtype
 
 if TYPE_CHECKING:
@@ -36,6 +37,77 @@ if TYPE_CHECKING:
 
 
 log = logging.getLogger(__name__)
+
+
+def _patches_feature_shape(patches: Patches, fallback: torch.Tensor) -> tuple[int, int, int, int]:
+    batch_size = int(fallback.shape[0])
+    if patches.output_shape is not None:
+        shape = patches.output_shape
+        if len(shape) == 4:
+            _batch, channels, height, width = (int(dim) for dim in shape)
+            return (batch_size, channels, height, width)
+        if len(shape) == 3:
+            channels, height, width = (int(dim) for dim in shape)
+            return (batch_size, channels, height, width)
+    if patches.shape is not None and len(patches.shape) == 7:
+        return (int(patches.shape[1]), int(patches.shape[0]), int(patches.shape[2]), int(patches.shape[3]))
+    flat_dim = int(fallback.shape[1])
+    return (batch_size, flat_dim, 1, 1)
+
+
+def _patches_box_from_feature_shape(box: Bounds, feature_shape: tuple[int, int, int, int]) -> Bounds:
+    batch_size, channels, height, width = feature_shape
+    flat = channels * height * width
+    return Bounds(lb=box.lb.reshape(batch_size, flat), ub=box.ub.reshape(batch_size, flat))
+
+
+def _to_linear_bound_from_patches(patches: Patches, box: Bounds) -> "LinearBound":
+    input_shape = patches.input_shape
+    if input_shape is None:
+        batch_size = int(box.lb.shape[0])
+        input_shape = (batch_size, int(box.lb.shape[1]), 1, 1)
+    dense = patches_to_matrix(patches, cast(tuple[int, ...], input_shape))
+    zeros = dense.new_zeros((dense.shape[0], dense.shape[1]))
+    return LinearBound(A_lb=dense, b_lb=zeros, A_ub=dense.clone(), b_ub=zeros.clone())
+
+
+def _merge_patches_identity_flag(left: Patches, right: Patches) -> int:
+    return 1 if left.is_identity and right.is_identity else 0
+
+
+def _patches_cat_dim(concat_dim: int) -> int:
+    if concat_dim != 1:
+        raise NotImplementedError(f"forward_concat: Patches path only supports concat_dim=1, got {concat_dim}")
+    return 0
+
+
+def _patches_shape_metadata(patches: Patches, box: Bounds) -> tuple[int, ...]:
+    if patches.shape is not None:
+        return tuple(int(dim) for dim in patches.shape)
+    feature_shape = _patches_feature_shape(patches, box.lb)
+    input_shape = patches.input_shape or (feature_shape[0], feature_shape[1], 1, 1)
+    return (
+        feature_shape[1],
+        feature_shape[0],
+        feature_shape[2],
+        feature_shape[3],
+        int(input_shape[1]),
+        1,
+        1,
+    )
+
+
+def _patches_payload_or_identity(patches: Patches, box: Bounds) -> torch.Tensor:
+    if patches.patches is not None:
+        return patches.patches
+    shape = _patches_shape_metadata(patches, box)
+    out_c, batch_size, out_h, out_w, in_c, k_h, k_w = shape
+    pieces = box.lb.new_zeros(shape)
+    if k_h == 1 and k_w == 1 and out_c == in_c:
+        diag = torch.arange(out_c, device=box.lb.device)
+        pieces[diag, :, :, :, diag, 0, 0] = 1
+        return pieces
+    raise ValueError("forward patches path requires tensor payload for non-trivial identity metadata")
 
 
 @dataclass
@@ -947,10 +1019,10 @@ def _bias_contrib(
 
 # ---- ADD ----
 def forward_add(
-    L: Layer, parent_boxes: List[Bounds], parent_lins: List[LinearBound],
+    L: Layer, parent_boxes: List[Bounds], parent_lins: List[LinearBound | Patches],
     parent_frames: List[Frame], preds: List[int], post_activation: bool,
     device: torch.device, dtype: torch.dtype,
-) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
+) -> Tuple[Bounds, Bounds, LinearBound | Patches, Frame]:
     """ADD multi-pred forward handler.
 
     Semantics: when all predecessor frames share the same object identity and
@@ -960,19 +1032,54 @@ def forward_add(
     _align. Returns (stored, out, lin, frame) where stored == out.
     """
     assert len(parent_boxes) >= 2, "forward_add: requires >=2 predecessors"
-    rank3_flags = [_lin_has_rank3(lin) for lin in parent_lins]
+    if any(isinstance(lin, Patches) for lin in parent_lins):
+        if not all(isinstance(lin, Patches) for lin in parent_lins):
+            log.warning("forward_add: mixed Patches+LinearBound input, materializing")
+            materialized_lins = [
+                lin if isinstance(lin, LinearBound) else _to_linear_bound_from_patches(lin, box)
+                for lin, box in zip(parent_lins, parent_boxes, strict=True)
+            ]
+            return forward_add(L, parent_boxes, materialized_lins, parent_frames, preds, post_activation, device, dtype)
+        ref = cast(Patches, parent_lins[0])
+        target_shape = _patches_shape_metadata(ref, parent_boxes[0])
+        unified = [unify_shape(cast(Patches, lin), target_shape) for lin in parent_lins]
+        payloads = [_patches_payload_or_identity(lin, box) for lin, box in zip(unified, parent_boxes, strict=True)]
+        pieces = sum(payloads[1:], payloads[0])
+        bias_param = cast(Optional[torch.Tensor], L.params.get("bias"))
+        summed = _sum_interval_bounds(parent_boxes)
+        lb, ub = summed.lb, summed.ub
+        if bias_param is not None:
+            bias_vec = _align(bias_param.flatten(), lb.shape[-1])
+            lb = lb + bias_vec
+            ub = ub + bias_vec
+        out = Bounds(lb, ub)
+        lin_out = Patches(
+            patches=pieces,
+            stride=ref.stride,
+            padding=ref.padding,
+            shape=tuple(int(dim) for dim in pieces.shape),
+            identity=0,
+            unstable_idx=ref.unstable_idx,
+            output_shape=(lb.shape[0], lb.shape[1], 1, 1),
+            input_shape=ref.input_shape,
+            inserted_zeros=ref.inserted_zeros,
+            output_padding=ref.output_padding,
+        )
+        return out, out, lin_out, parent_frames[0]
+    matrix_parent_lins = cast(List[LinearBound], parent_lins)
+    rank3_flags = [_lin_has_rank3(lin) for lin in matrix_parent_lins]
     forced_interval = False
     if any(rank3_flags) and not all(rank3_flags):
-        parent_boxes, parent_lins = _normalize_mixed_rank_inputs(parent_boxes, parent_lins, fn_name="forward_add")
+        parent_boxes, matrix_parent_lins = _normalize_mixed_rank_inputs(parent_boxes, matrix_parent_lins, fn_name="forward_add")
         forced_interval = True
     can_dual = all(
         parent_frames[i] is parent_frames[0] for i in range(1, len(parent_frames))
     ) and all(
-        parent_lins[i].A_lb.shape == parent_lins[0].A_lb.shape
-        for i in range(1, len(parent_lins))
+        matrix_parent_lins[i].A_lb.shape == matrix_parent_lins[0].A_lb.shape
+        for i in range(1, len(matrix_parent_lins))
     )
     if can_dual and not forced_interval:
-        lin = _sum_linear_bounds(parent_lins)
+        lin = _sum_linear_bounds(matrix_parent_lins)
         bias_param = L.params.get("bias")
         if bias_param is not None:
             bias_vec = _align(cast(torch.Tensor, bias_param).flatten(), _linear_feature_dim(lin))
@@ -1011,10 +1118,10 @@ def backward_add(L: Layer, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
 
 # ---- CONCAT ----
 def forward_concat(
-    L: Layer, parent_boxes: List[Bounds], parent_lins: List[LinearBound],
+    L: Layer, parent_boxes: List[Bounds], parent_lins: List[LinearBound | Patches],
     parent_frames: List[Frame], preds: List[int], post_activation: bool,
     device: torch.device, dtype: torch.dtype,
-) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
+) -> Tuple[Bounds, Bounds, LinearBound | Patches, Frame]:
     """CONCAT multi-pred forward handler.
 
     Semantics: when all predecessor frames share the same object identity and
@@ -1025,24 +1132,65 @@ def forward_concat(
     """
     assert len(parent_boxes) >= 2, "forward_concat: requires >=2 predecessors"
     concat_dim = _int_param(L.params.get("concat_dim", 1), 1)
-    rank3_flags = [_lin_has_rank3(lin) for lin in parent_lins]
+    if any(isinstance(lin, Patches) for lin in parent_lins):
+        if not all(isinstance(lin, Patches) for lin in parent_lins):
+            log.warning("forward_concat: mixed Patches+LinearBound input, materializing")
+            materialized_lins = [
+                lin if isinstance(lin, LinearBound) else _to_linear_bound_from_patches(lin, box)
+                for lin, box in zip(parent_lins, parent_boxes, strict=True)
+            ]
+            return forward_concat(L, parent_boxes, materialized_lins, parent_frames, preds, post_activation, device, dtype)
+        patch_lins = [cast(Patches, lin) for lin in parent_lins]
+        box_shapes = [_patches_feature_shape(patch, box.lb) for patch, box in zip(patch_lins, parent_boxes, strict=True)]
+        batch_size = box_shapes[0][0]
+        out_h, out_w = box_shapes[0][2], box_shapes[0][3]
+        if any(shape[0] != batch_size or shape[2] != out_h or shape[3] != out_w for shape in box_shapes[1:]):
+            raise ValueError("forward_concat: Patches inputs must agree on batch/spatial shape")
+        total_channels = sum(shape[1] for shape in box_shapes)
+        target_shapes = [
+            _patches_shape_metadata(patch, box)
+            for patch, box in zip(patch_lins, parent_boxes, strict=True)
+        ]
+        unified = [unify_shape(patch, target_shape) for patch, target_shape in zip(patch_lins, target_shapes, strict=True)]
+        payloads = [_patches_payload_or_identity(patch, box) for patch, box in zip(unified, parent_boxes, strict=True)]
+        pieces = torch.cat(payloads, dim=_patches_cat_dim(concat_dim))
+        lb = torch.cat([box.lb for box in parent_boxes], dim=concat_dim)
+        ub = torch.cat([box.ub for box in parent_boxes], dim=concat_dim)
+        out = Bounds(lb, ub)
+        ref = patch_lins[0]
+        input_shape = ref.input_shape or (batch_size, int(parent_boxes[0].lb.shape[1]), 1, 1)
+        lin_out = Patches(
+            patches=pieces,
+            stride=ref.stride,
+            padding=ref.padding,
+            shape=tuple(int(dim) for dim in pieces.shape),
+            identity=0,
+            unstable_idx=ref.unstable_idx,
+            output_shape=(batch_size, total_channels, out_h, out_w),
+            input_shape=tuple(int(dim) for dim in input_shape),
+            inserted_zeros=ref.inserted_zeros,
+            output_padding=ref.output_padding,
+        )
+        return out, out, lin_out, parent_frames[0]
+    matrix_parent_lins = cast(List[LinearBound], parent_lins)
+    rank3_flags = [_lin_has_rank3(lin) for lin in matrix_parent_lins]
     rank3_mode = all(rank3_flags)
     if any(rank3_flags) and not all(rank3_flags):
-        parent_boxes, parent_lins = _normalize_mixed_rank_inputs(parent_boxes, parent_lins, fn_name="forward_concat")
+        parent_boxes, matrix_parent_lins = _normalize_mixed_rank_inputs(parent_boxes, matrix_parent_lins, fn_name="forward_concat")
     can_dual = all(
         parent_frames[i] is parent_frames[0] for i in range(1, len(parent_frames))
     ) and all(
-        parent_lins[i].A_lb.shape[0] == parent_lins[0].A_lb.shape[0]
-        and parent_lins[i].A_lb.shape[-1] == parent_lins[0].A_lb.shape[-1]
-        for i in range(1, len(parent_lins))
+        matrix_parent_lins[i].A_lb.shape[0] == matrix_parent_lins[0].A_lb.shape[0]
+        and matrix_parent_lins[i].A_lb.shape[-1] == matrix_parent_lins[0].A_lb.shape[-1]
+        for i in range(1, len(matrix_parent_lins))
     )
     if can_dual:
         lin_cat_dim = 2 if rank3_mode else 1
         lin = LinearBound(
-            A_lb=torch.cat([lin.A_lb for lin in parent_lins], dim=lin_cat_dim),
-            b_lb=torch.cat([lin.b_lb for lin in parent_lins], dim=lin_cat_dim),
-            A_ub=torch.cat([lin.A_ub for lin in parent_lins], dim=lin_cat_dim),
-            b_ub=torch.cat([lin.b_ub for lin in parent_lins], dim=lin_cat_dim),
+            A_lb=torch.cat([lin.A_lb for lin in matrix_parent_lins], dim=lin_cat_dim),
+            b_lb=torch.cat([lin.b_lb for lin in matrix_parent_lins], dim=lin_cat_dim),
+            A_ub=torch.cat([lin.A_ub for lin in matrix_parent_lins], dim=lin_cat_dim),
+            b_ub=torch.cat([lin.b_ub for lin in matrix_parent_lins], dim=lin_cat_dim),
         )
         frame = parent_frames[0]
         lb, ub = _concretize(lin, *frame)

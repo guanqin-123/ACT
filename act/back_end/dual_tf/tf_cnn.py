@@ -12,16 +12,22 @@
 # gradient flow during robust training; verify_once / verify_bab paths
 # remain under no_grad via their own outer guards.
 
+import logging
+
 import torch
 import torch.nn.functional as F
 from typing import Tuple, Optional, Dict, Any, List
 from act.back_end.core import Bounds, Layer
+from act.back_end.patches import Patches, patches_to_matrix
 
 from .tf_forward import (
     LinearBound, Frame,
     _fwd_conv2d, _fwd_conv2d_interval, _fwd_maxpool2d, _fwd_avgpool2d,
     _reset_forward_box, _concretize,
 )
+
+
+log = logging.getLogger(__name__)
 
 
 # ==========================================================================
@@ -91,7 +97,7 @@ def backward_conv2d(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
 def dual_conv2d_backward(
     nu: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None,
     stride: int = 1, padding: int = 0,
-    input_shape: Optional[tuple] = None, output_shape: Optional[tuple] = None,
+    input_shape: Optional[tuple[int, ...]] = None, output_shape: Optional[tuple[int, ...]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Conv2D backward via F.conv_transpose2d (naturally batched).
 
@@ -173,13 +179,13 @@ def dual_conv2d_backward(
 def forward_maxpool2d(
     L: Layer,
     parent_boxes: List[Bounds],
-    parent_lins: List[LinearBound],
+    parent_lins: List[LinearBound | Patches],
     parent_frames: List[Frame],
     preds: List[int],
     post_activation: bool,
     device: torch.device,
     dtype: torch.dtype,
-) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
+) -> Tuple[Bounds, Bounds, LinearBound | Patches, Frame]:
     """MaxPool2D forward bounds (interval-only; dual-track resets).
 
     Source: tf_forward.py lines 448-452 (pre-refactor monolithic MAXPOOL2D
@@ -190,6 +196,18 @@ def forward_maxpool2d(
     concrete box. ``stored`` equals ``out``.
     """
     assert len(parent_boxes) == 1, f"MAXPOOL2D expects 1 predecessor, got {len(parent_boxes)}"
+    if isinstance(parent_lins[0], Patches):
+        log.warning("forward_maxpool2d: pool materializes Patches in v1; consider refactor if hot")
+        patches = parent_lins[0]
+        input_shape = patches.input_shape or L.params.get("input_shape")
+        if input_shape is None:
+            raise ValueError("forward_maxpool2d: Patches input requires input_shape metadata")
+        shape_tuple = tuple(int(dim) for dim in input_shape) if isinstance(input_shape, (list, tuple)) else None
+        if shape_tuple is None:
+            raise ValueError("forward_maxpool2d: unsupported input_shape metadata")
+        dense = patches_to_matrix(patches, shape_tuple)
+        zeros = dense.new_zeros((dense.shape[0], dense.shape[1]))
+        parent_lins = [LinearBound(A_lb=dense, b_lb=zeros, A_ub=dense.clone(), b_ub=zeros.clone())]
     parent_box = parent_boxes[0]
     lb, ub = _fwd_maxpool2d(L, parent_box.lb, parent_box.ub)
     out = Bounds(lb, ub)
@@ -214,13 +232,13 @@ def dual_maxpool2d_backward(*args, **kwargs) -> Tuple[torch.Tensor, torch.Tensor
 def forward_avgpool2d(
     L: Layer,
     parent_boxes: List[Bounds],
-    parent_lins: List[LinearBound],
+    parent_lins: List[LinearBound | Patches],
     parent_frames: List[Frame],
     preds: List[int],
     post_activation: bool,
     device: torch.device,
     dtype: torch.dtype,
-) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
+) -> Tuple[Bounds, Bounds, LinearBound | Patches, Frame]:
     """AvgPool2D forward bounds (interval-only; dual-track resets).
 
     Source: tf_forward.py lines 454-458 (pre-refactor monolithic AVGPOOL2D
@@ -230,6 +248,18 @@ def forward_avgpool2d(
     ``stored`` equals ``out``.
     """
     assert len(parent_boxes) == 1, f"AVGPOOL2D expects 1 predecessor, got {len(parent_boxes)}"
+    if isinstance(parent_lins[0], Patches):
+        log.warning("forward_avgpool2d: pool materializes Patches in v1; consider refactor if hot")
+        patches = parent_lins[0]
+        input_shape = patches.input_shape or L.params.get("input_shape")
+        if input_shape is None:
+            raise ValueError("forward_avgpool2d: Patches input requires input_shape metadata")
+        shape_tuple = tuple(int(dim) for dim in input_shape) if isinstance(input_shape, (list, tuple)) else None
+        if shape_tuple is None:
+            raise ValueError("forward_avgpool2d: unsupported input_shape metadata")
+        dense = patches_to_matrix(patches, shape_tuple)
+        zeros = dense.new_zeros((dense.shape[0], dense.shape[1]))
+        parent_lins = [LinearBound(A_lb=dense, b_lb=zeros, A_ub=dense.clone(), b_ub=zeros.clone())]
     parent_box = parent_boxes[0]
     lb, ub = _fwd_avgpool2d(L, parent_box.lb, parent_box.ub)
     out = Bounds(lb, ub)

@@ -66,7 +66,7 @@ def _assert_linear_bound_close(actual: LinearBound, expected: LinearBound) -> No
 
 def _assert_forward_tuple_close(
     actual: tuple[Bounds, Bounds, LinearBoundLike | Patches, Frame],
-    expected: tuple[Bounds, Bounds, LinearBound, Frame],
+    expected: tuple[Bounds, Bounds, LinearBoundLike | Patches, Frame],
 ) -> None:
     actual_stored, actual_out, actual_lin, actual_frame = actual
     expected_stored, expected_out, expected_lin, expected_frame = expected
@@ -75,6 +75,7 @@ def _assert_forward_tuple_close(
     torch.testing.assert_close(actual_out.lb, expected_out.lb)
     torch.testing.assert_close(actual_out.ub, expected_out.ub)
     assert isinstance(actual_lin, LinearBound)
+    assert isinstance(expected_lin, LinearBound)
     _assert_linear_bound_close(actual_lin, expected_lin)
     torch.testing.assert_close(actual_frame[0], expected_frame[0])
     torch.testing.assert_close(actual_frame[1], expected_frame[1])
@@ -381,7 +382,7 @@ def test_dispatch_conv_forward_identity_patches_matches_kernel() -> None:
     _assert_forward_tuple_close(cast(tuple[Bounds, Bounds, LinearBound, Frame], dispatched), direct)
 
 
-def test_dispatch_relu_backward_matrix_matches_direct_and_patches_raise() -> None:
+def test_dispatch_relu_backward_matrix_matches_direct_and_patches_path() -> None:
     layer = Layer(id=51, kind=LayerKind.RELU.value, params={}, in_vars=[], out_vars=[])
     nu = _t([[1.0, -0.5, 0.2], [-0.3, 0.4, -0.1]])
     bounds_dict = {51: Bounds(lb=_t([[-1.0, -0.5, 0.0], [-0.2, -0.1, -0.3]]), ub=_t([[0.5, 1.0, 0.8], [0.7, 0.4, 0.2]]))}
@@ -389,84 +390,103 @@ def test_dispatch_relu_backward_matrix_matches_direct_and_patches_raise() -> Non
     dispatched = dispatch_relu_backward(layer, nu, bounds_dict, [0])
     torch.testing.assert_close(dispatched[0][0], direct[0][0])
     torch.testing.assert_close(dispatched[1], direct[1])
-    with pytest.raises(NotImplementedError, match="Filled in W3/W4"):
-        dispatch_relu_backward(layer, Patches(identity=1), bounds_dict, [0])
+    identity = Patches(
+        patches=torch.eye(3, dtype=torch.float32).view(3, 1, 1, 1, 3, 1, 1),
+        shape=(3, 1, 1, 1, 3, 1, 1),
+        input_shape=(1, 3, 1, 1),
+        output_shape=(1, 3, 1, 1),
+    )
+    pred_nus, contrib = dispatch_relu_backward(layer, identity, {51: Bounds(lb=bounds_dict[51].lb[:1], ub=bounds_dict[51].ub[:1])}, [0])
+    assert isinstance(pred_nus[0], Patches)
+    assert contrib.shape == (1,)
 
 
-def test_dispatch_bn_forward_matrix_matches_direct_and_patches_raise() -> None:
-    args = _make_bn_case()
-    direct = forward_bn(*args)
+def test_dispatch_bn_forward_matrix_matches_direct_and_patches_path() -> None:
+    layer, parent_boxes, parent_lins, parent_frames, preds, post_activation, device, dtype = _make_bn_case()
+    direct = forward_bn(layer, parent_boxes, cast(list[LinearBound | Patches], parent_lins), parent_frames, preds, post_activation, device, dtype)
+    args = (layer, parent_boxes, parent_lins, parent_frames, preds, post_activation, device, dtype)
     dispatched = dispatch_bn_forward(*args)
     _assert_forward_tuple_close(dispatched, direct)
-    layer, parent_boxes, _parent_lins, parent_frames, preds, post_activation, device, dtype = args
-    with pytest.raises(NotImplementedError, match="Filled in W3/W4"):
-        dispatch_bn_forward(
-            layer,
-            parent_boxes,
-            [Patches(identity=1)],
-            parent_frames,
-            preds,
-            post_activation,
-            device,
-            dtype,
-        )
+    patch = Patches(
+        patches=torch.eye(4, dtype=torch.float32).view(4, 1, 1, 1, 4, 1, 1),
+        shape=(4, 1, 1, 1, 4, 1, 1),
+        input_shape=(1, 4, 1, 1),
+        output_shape=(1, 4, 1, 1),
+    )
+    dispatched_patch = dispatch_bn_forward(
+        layer,
+        [Bounds(lb=parent_boxes[0].lb[:1], ub=parent_boxes[0].ub[:1])],
+        [patch],
+        [parent_frames[0]],
+        preds,
+        post_activation,
+        device,
+        dtype,
+    )
+    assert isinstance(dispatched_patch[2], Patches)
 
 
-def test_dispatch_add_forward_matrix_matches_direct_and_patches_raise() -> None:
-    args = _make_add_case()
-    direct = forward_add(*args)
+def test_dispatch_add_forward_matrix_matches_direct_and_patches_path() -> None:
+    layer, parent_boxes, parent_lins, parent_frames, preds, post_activation, device, dtype = _make_add_case()
+    direct = forward_add(layer, parent_boxes, cast(list[LinearBound | Patches], parent_lins), parent_frames, preds, post_activation, device, dtype)
+    args = (layer, parent_boxes, parent_lins, parent_frames, preds, post_activation, device, dtype)
     dispatched = dispatch_add_forward(*args)
     _assert_forward_tuple_close(dispatched, direct)
-    layer, parent_boxes, parent_lins, parent_frames, preds, post_activation, device, dtype = args
-    with pytest.raises(NotImplementedError, match="Filled in W3/W4"):
-        dispatch_add_forward(
-            layer,
-            parent_boxes,
-            [parent_lins[0], Patches(identity=1)],
-            parent_frames,
-            preds,
-            post_activation,
-            device,
-            dtype,
-        )
+    patch = Patches(
+        patches=torch.eye(4, dtype=torch.float32).view(4, 1, 1, 1, 4, 1, 1),
+        shape=(4, 1, 1, 1, 4, 1, 1),
+        input_shape=(1, 4, 1, 1),
+        output_shape=(1, 4, 1, 1),
+    )
+    dispatched_patch = dispatch_add_forward(
+        layer,
+        [Bounds(lb=parent_boxes[0].lb[:1], ub=parent_boxes[0].ub[:1]), Bounds(lb=parent_boxes[1].lb[:1], ub=parent_boxes[1].ub[:1])],
+        [patch, patch],
+        [parent_frames[0], parent_frames[0]],
+        preds,
+        post_activation,
+        device,
+        dtype,
+    )
+    assert isinstance(dispatched_patch[2], Patches)
 
 
-def test_dispatch_pool_forward_max_matrix_matches_direct_and_patches_raise() -> None:
-    args = _make_pool_case(LayerKind.MAXPOOL2D.value)
-    direct = forward_maxpool2d(*args)
+def test_dispatch_pool_forward_max_matrix_matches_direct_and_patches_path() -> None:
+    layer, parent_boxes, parent_lins, parent_frames, preds, post_activation, device, dtype = _make_pool_case(LayerKind.MAXPOOL2D.value)
+    direct = forward_maxpool2d(layer, parent_boxes, cast(list[LinearBound | Patches], parent_lins), parent_frames, preds, post_activation, device, dtype)
+    args = (layer, parent_boxes, parent_lins, parent_frames, preds, post_activation, device, dtype)
     dispatched = dispatch_pool_forward(*args)
     _assert_forward_tuple_close(dispatched, direct)
-    layer, parent_boxes, _parent_lins, parent_frames, preds, post_activation, device, dtype = args
-    with pytest.raises(NotImplementedError, match="Filled in W3/W4"):
-        dispatch_pool_forward(
-            layer,
-            parent_boxes,
-            [Patches(identity=1)],
-            parent_frames,
-            preds,
-            post_activation,
-            device,
-            dtype,
-        )
+    dispatched_patch = dispatch_pool_forward(
+        layer,
+        parent_boxes,
+        [Patches(identity=1, input_shape=(2, 1, 4, 4))],
+        parent_frames,
+        preds,
+        post_activation,
+        device,
+        dtype,
+    )
+    assert dispatched_patch[0].lb.shape == direct[0].lb.shape
 
 
-def test_dispatch_pool_forward_avg_matrix_matches_direct_and_patches_raise() -> None:
-    args = _make_pool_case(LayerKind.AVGPOOL2D.value)
-    direct = forward_avgpool2d(*args)
+def test_dispatch_pool_forward_avg_matrix_matches_direct_and_patches_path() -> None:
+    layer, parent_boxes, parent_lins, parent_frames, preds, post_activation, device, dtype = _make_pool_case(LayerKind.AVGPOOL2D.value)
+    direct = forward_avgpool2d(layer, parent_boxes, cast(list[LinearBound | Patches], parent_lins), parent_frames, preds, post_activation, device, dtype)
+    args = (layer, parent_boxes, parent_lins, parent_frames, preds, post_activation, device, dtype)
     dispatched = dispatch_pool_forward(*args)
     _assert_forward_tuple_close(dispatched, direct)
-    layer, parent_boxes, _parent_lins, parent_frames, preds, post_activation, device, dtype = args
-    with pytest.raises(NotImplementedError, match="Filled in W3/W4"):
-        dispatch_pool_forward(
-            layer,
-            parent_boxes,
-            [Patches(identity=1)],
-            parent_frames,
-            preds,
-            post_activation,
-            device,
-            dtype,
-        )
+    dispatched_patch = dispatch_pool_forward(
+        layer,
+        parent_boxes,
+        [Patches(identity=1, input_shape=(2, 1, 4, 4))],
+        parent_frames,
+        preds,
+        post_activation,
+        device,
+        dtype,
+    )
+    assert dispatched_patch[0].ub.shape == direct[0].ub.shape
 
 
 def test_cli_feature_a_only_flag_parses() -> None:
