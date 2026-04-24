@@ -478,7 +478,9 @@ def test_resnet_block_parity_single_block() -> None:
     )
 
 
-def test_resnet_block_parity_identity_skip_now_stops_before_second_conv() -> None:
+def test_resnet_block_parity_identity_skip_reseeds_patches_end_to_end(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     fixture = _build_resnet_fixture(num_blocks=1, seed=31)
     block = fixture.blocks[0]
     lb_4d, ub_4d = _make_input_box(seed=303)
@@ -488,17 +490,23 @@ def test_resnet_block_parity_identity_skip_now_stops_before_second_conv() -> Non
     bn1 = _make_bn_stub(fixture.net.by_id[block.scale1], fixture.net.by_id[block.bias1])
     bn2 = _make_bn_stub(fixture.net.by_id[block.scale2], fixture.net.by_id[block.bias2])
     reset_conv_materialization_count()
-    with _conv_mode("patches", strict_patches=False):
-        conv1 = dispatch_conv_forward(fixture.net.by_id[block.conv1], [box], [patches_in], [frame], [1], False, torch.device("cpu"), torch.float64)
-        bn1_out = dispatch_bn_forward(bn1, [conv1[1]], [conv1[2]], [conv1[3]], [block.conv1], False, torch.device("cpu"), torch.float64)
-        relu1 = forward_relu(fixture.net.by_id[block.relu1], [bn1_out[1]], [bn1_out[2]], [bn1_out[3]], [block.scale1], False, torch.device("cpu"), torch.float64)
-        conv2 = dispatch_conv_forward(fixture.net.by_id[block.conv2], [relu1[1]], [relu1[2]], [relu1[3]], [block.relu1], False, torch.device("cpu"), torch.float64)
-        bn2_out = dispatch_bn_forward(bn2, [conv2[1]], [conv2[2]], [conv2[3]], [block.conv2], False, torch.device("cpu"), torch.float64)
-        added = dispatch_add_forward(fixture.net.by_id[block.add], [bn2_out[1], box], [bn2_out[2], patches_in], [bn2_out[3], frame], [block.scale2, 1], False, torch.device("cpu"), torch.float64)
+    with caplog.at_level("WARNING"):
+        with _conv_mode("patches", strict_patches=False):
+            conv1 = dispatch_conv_forward(fixture.net.by_id[block.conv1], [box], [patches_in], [frame], [1], False, torch.device("cpu"), torch.float64)
+            bn1_out = dispatch_bn_forward(bn1, [conv1[1]], [conv1[2]], [conv1[3]], [block.conv1], False, torch.device("cpu"), torch.float64)
+            relu1 = forward_relu(fixture.net.by_id[block.relu1], [bn1_out[1]], [bn1_out[2]], [bn1_out[3]], [block.scale1], False, torch.device("cpu"), torch.float64)
+            conv2 = dispatch_conv_forward(fixture.net.by_id[block.conv2], [relu1[1]], [relu1[2]], [relu1[3]], [block.relu1], False, torch.device("cpu"), torch.float64)
+            bn2_out = dispatch_bn_forward(bn2, [conv2[1]], [conv2[2]], [conv2[3]], [block.conv2], False, torch.device("cpu"), torch.float64)
+            added = dispatch_add_forward(fixture.net.by_id[block.add], [bn2_out[1], box], [bn2_out[2], patches_in], [bn2_out[3], frame], [block.scale2, 1], False, torch.device("cpu"), torch.float64)
     assert isinstance(conv1[2], LinearBound)
     assert isinstance(relu1[2], LinearBound)
+    assert isinstance(conv2[2], LinearBound)
     assert isinstance(added[2], LinearBound)
-    assert get_conv_materialization_count() >= 1
+    assert get_conv_materialization_count() == 0
+    assert not any(
+        "mixed Patches+LinearBound" in record.message or "falling back to matrix path" in record.message
+        for record in caplog.records
+    )
 
 
 def test_resnet_block_soundness_single_block() -> None:

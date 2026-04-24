@@ -38,6 +38,23 @@ from .tf_forward import (
 log = logging.getLogger(__name__)
 
 
+def _is_identity_reset_input(
+    lin: LinearBound | Patches,
+    bounds: Bounds,
+    frame: Frame,
+    *,
+    post_activation: bool,
+) -> bool:
+    if post_activation or isinstance(lin, Patches):
+        return False
+    from act.back_end.bounds_dispatch import _is_identity_linear_reset, get_conv_mode
+
+    if get_conv_mode() != "patches":
+        return False
+
+    return _is_identity_linear_reset(lin, bounds, frame)
+
+
 def _normalize_feature_shape(shape: tuple[int, ...] | list[int], batch_size: int) -> tuple[int, int, int, int]:
     if len(shape) == 4:
         _batch, channels, height, width = (int(dim) for dim in shape)
@@ -472,7 +489,7 @@ def forward_relu(
     parent_frame = parent_frames[0]
     x_L, x_U = parent_frame
     pre_lb, pre_ub = parent_box.lb, parent_box.ub
-    if isinstance(parent_lin, Patches):
+    if isinstance(parent_lin, Patches) or _is_identity_reset_input(parent_lin, parent_box, parent_frame, post_activation=post_activation):
         int_lb, int_ub = _box_relu(pre_lb, pre_ub)
         out = Bounds(int_lb, int_ub)
         stored = out if post_activation else Bounds(pre_lb, pre_ub)
@@ -518,7 +535,7 @@ def forward_lrelu(
     x_L, x_U = parent_frame
     pre_lb, pre_ub = parent_box.lb, parent_box.ub
     alpha = L.params.get("alpha", 0.01)
-    if isinstance(parent_lin, Patches):
+    if isinstance(parent_lin, Patches) or _is_identity_reset_input(parent_lin, parent_box, parent_frame, post_activation=post_activation):
         int_lb, int_ub = _box_lrelu(pre_lb, pre_ub, alpha)
         out = Bounds(int_lb, int_ub)
         stored = out if post_activation else Bounds(pre_lb, pre_ub)
@@ -628,6 +645,12 @@ def forward_bias(
     parent_frame = parent_frames[0]
     x_L, x_U = parent_frame
     prev_lb, prev_ub = parent_box.lb, parent_box.ub
+    if _is_identity_reset_input(parent_lin, parent_box, parent_frame, post_activation=post_activation):
+        lb, ub = _box_bias(L, prev_lb, prev_ub)
+        out = Bounds(lb, ub)
+        stored = out
+        lin, frame = _reset_forward_box(lb, ub, device, dtype)
+        return stored, out, lin, frame
     lin = _fwd_bias(L, parent_lin)
     crown_lb, crown_ub = _concretize(lin, x_L, x_U)
     int_lb, int_ub = _box_bias(L, prev_lb, prev_ub)
@@ -671,6 +694,12 @@ def forward_scale(
     parent_frame = parent_frames[0]
     x_L, x_U = parent_frame
     prev_lb, prev_ub = parent_box.lb, parent_box.ub
+    if _is_identity_reset_input(parent_lin, parent_box, parent_frame, post_activation=post_activation):
+        lb, ub = _box_scale(L, prev_lb, prev_ub)
+        out = Bounds(lb, ub)
+        stored = out
+        lin, frame = _reset_forward_box(lb, ub, device, dtype)
+        return stored, out, lin, frame
     lin = _fwd_scale(L, parent_lin)
     crown_lb, crown_ub = _concretize(lin, x_L, x_U)
     int_lb, int_ub = _box_scale(L, prev_lb, prev_ub)
@@ -716,7 +745,7 @@ def forward_bn(
     parent_frame = parent_frames[0]
     x_L, x_U = parent_frame
     prev_lb, prev_ub = parent_box.lb, parent_box.ub
-    if isinstance(parent_lin, Patches):
+    if isinstance(parent_lin, Patches) or _is_identity_reset_input(parent_lin, parent_box, parent_frame, post_activation=post_activation):
         lb, ub = _box_bn(L, prev_lb, prev_ub)
         out = Bounds(lb, ub)
         stored = out

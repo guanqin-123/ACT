@@ -197,7 +197,17 @@ def forward_maxpool2d(
     """
     assert len(parent_boxes) == 1, f"MAXPOOL2D expects 1 predecessor, got {len(parent_boxes)}"
     if isinstance(parent_lins[0], Patches):
-        log.warning("forward_maxpool2d: pool materializes Patches in v1; consider refactor if hot")
+        from act.back_end.bounds_dispatch import get_strict_patches
+
+        message = (
+            "forward_maxpool2d: pool materializes Patches at the planned dense boundary in v1"
+            if get_strict_patches()
+            else "forward_maxpool2d: pool materializes Patches in v1; consider refactor if hot"
+        )
+        if get_strict_patches():
+            log.debug(message)
+        else:
+            log.warning(message)
         patches = parent_lins[0]
         input_shape = patches.input_shape or L.params.get("input_shape")
         if input_shape is None:
@@ -249,7 +259,17 @@ def forward_avgpool2d(
     """
     assert len(parent_boxes) == 1, f"AVGPOOL2D expects 1 predecessor, got {len(parent_boxes)}"
     if isinstance(parent_lins[0], Patches):
-        log.warning("forward_avgpool2d: pool materializes Patches in v1; consider refactor if hot")
+        from act.back_end.bounds_dispatch import get_strict_patches
+
+        message = (
+            "forward_avgpool2d: pool materializes Patches at the planned dense boundary in v1"
+            if get_strict_patches()
+            else "forward_avgpool2d: pool materializes Patches in v1; consider refactor if hot"
+        )
+        if get_strict_patches():
+            log.debug(message)
+        else:
+            log.warning(message)
         patches = parent_lins[0]
         input_shape = patches.input_shape or L.params.get("input_shape")
         if input_shape is None:

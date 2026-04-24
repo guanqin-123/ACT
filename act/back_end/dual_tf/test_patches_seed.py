@@ -157,6 +157,36 @@ def _build_dense_net() -> Net:
     )
 
 
+def _build_conv_relu_conv_net() -> tuple[Net, int]:
+    input_vars = list(range(1 * 4 * 4))
+    conv1_out = list(range(1000, 1000 + 1 * 4 * 4))
+    relu_out = list(range(2000, 2000 + 1 * 4 * 4))
+    conv2_out = list(range(3000, 3000 + 1 * 4 * 4))
+    conv1 = _make_conv_layer(layer_id=2, in_c=1, out_c=1, height=4, width=4, seed=21, bias=False)
+    conv2 = _make_conv_layer(layer_id=4, in_c=1, out_c=1, height=4, width=4, seed=22, bias=False)
+    return (
+        Net(
+            layers=[
+                Layer(
+                    0,
+                    LayerKind.INPUT.value,
+                    {"shape": (1, 1, 4, 4), "dtype": "float64", "num_classes": 1, "value_range": (0.0, 1.0)},
+                    input_vars,
+                    input_vars,
+                ),
+                Layer(1, LayerKind.INPUT_SPEC.value, {"kind": "BOX"}, input_vars, input_vars),
+                Layer(2, LayerKind.CONV2D.value, conv1.params, input_vars, conv1_out),
+                Layer(3, LayerKind.RELU.value, {}, conv1_out, relu_out),
+                Layer(4, LayerKind.CONV2D.value, conv2.params, relu_out, conv2_out),
+                Layer(5, LayerKind.ASSERT.value, {"kind": "RANGE"}, conv2_out, conv2_out),
+            ],
+            preds={0: [], 1: [0], 2: [1], 3: [2], 4: [3], 5: [4]},
+            succs={0: [1], 1: [2], 2: [3], 3: [4], 4: [5], 5: []},
+        ),
+        4,
+    )
+
+
 def test_seed_patches_when_first_layer_is_conv(monkeypatch: pytest.MonkeyPatch) -> None:
     net, _ = _build_conv_net(with_second_conv=False)
     lb, ub = _make_input_box(batch_size=2, channels=1, height=4, width=4, seed=10)
@@ -235,3 +265,24 @@ def test_parity_matrix_vs_patches_seeded() -> None:
         patches = compute_forward_bounds(net, lb, ub)
     torch.testing.assert_close(patches[final_id].lb, matrix[final_id].lb, rtol=1e-5, atol=1e-7)
     torch.testing.assert_close(patches[final_id].ub, matrix[final_id].ub, rtol=1e-5, atol=1e-7)
+
+
+def test_identity_resets_reseed_patches_before_next_conv(monkeypatch: pytest.MonkeyPatch) -> None:
+    net, _ = _build_conv_relu_conv_net()
+    lb, ub = _make_input_box(batch_size=2, channels=1, height=4, width=4, seed=13)
+    seen_types: list[str] = []
+
+    from act.back_end.dual_tf import tf_cnn_patches
+
+    original = tf_cnn_patches.forward_conv2d_patches
+
+    def wrapped(*args, **kwargs):
+        seen_types.append(type(args[2][0]).__name__)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tf_cnn_patches, "forward_conv2d_patches", wrapped)
+    reset_conv_materialization_count()
+    with _conv_mode("patches"):
+        compute_forward_bounds(net, lb, ub)
+    assert seen_types == [Patches.__name__, Patches.__name__]
+    assert get_conv_materialization_count() == 0

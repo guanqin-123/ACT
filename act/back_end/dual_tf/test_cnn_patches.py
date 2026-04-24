@@ -583,14 +583,14 @@ def test_identity_patches_shape_inference() -> None:
     assert lin.shape == (4, 2, 7, 7, 4, 1, 1)
 
 
-def test_mixed_mode_patches_mode_with_linearbound_input_warns_and_materializes(caplog: pytest.LogCaptureFixture) -> None:
+def test_mixed_mode_patches_mode_reseeds_identity_linearbound_input(caplog: pytest.LogCaptureFixture) -> None:
     layer = _make_conv_layer(layer_id=31, in_c=2, out_c=3, kernel=3, stride=1, padding=1, height=5, width=5, seed=43)
     bounds, frame, _lb_4d, _ub_4d = _make_input_box(2, 2, 5, 5, seed=44)
     lin = _identity_linear_bound(2, bounds.lb.shape[1], dtype=bounds.lb.dtype)
     with _conv_mode("patches"), caplog.at_level("WARNING"):
         dispatched = dispatch_conv_forward(layer, [bounds], [lin], [frame], [0], False, torch.device("cpu"), bounds.lb.dtype)
     matrix = forward_conv2d(layer, [bounds], [lin], [frame], [0], False, torch.device("cpu"), bounds.lb.dtype)
-    assert any("LinearBound input" in record.message for record in caplog.records)
+    assert not any("LinearBound input" in record.message for record in caplog.records)
     torch.testing.assert_close(dispatched[0].lb, matrix[0].lb)
     torch.testing.assert_close(dispatched[0].ub, matrix[0].ub)
 

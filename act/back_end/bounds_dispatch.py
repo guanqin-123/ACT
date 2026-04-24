@@ -22,7 +22,7 @@ from act.back_end.bab.eta import EtaState
 from act.back_end.config import BackendConfig
 from act.back_end.core import Bounds, Layer
 from act.back_end.layer_schema import LayerKind
-from act.back_end.patches import Patches
+from act.back_end.patches import Patches, build_identity_patches
 
 
 log = logging.getLogger(__name__)
@@ -218,6 +218,114 @@ def materialize_if_needed(bounds: LinearBoundLike) -> LinearBoundLike:
     )
 
 
+def _flatten_feature_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.reshape(int(tensor.shape[0]), -1)
+
+
+def _normalize_feature_shape(
+    shape: tuple[int, ...] | list[int],
+    batch_size: int,
+) -> tuple[int, int, int, int]:
+    if len(shape) == 4:
+        _batch, channels, height, width = (int(dim) for dim in shape)
+        return (batch_size, channels, height, width)
+    if len(shape) == 3:
+        channels, height, width = (int(dim) for dim in shape)
+        return (batch_size, channels, height, width)
+    raise ValueError(f"Expected feature shape with 3 or 4 dims, got {shape!r}")
+
+
+def _patch_feature_shape(patches: Patches, box: Bounds) -> tuple[int, int, int, int]:
+    batch_size = int(box.lb.shape[0])
+    if patches.output_shape is not None:
+        return _normalize_feature_shape(
+            cast(tuple[int, ...] | list[int], patches.output_shape),
+            batch_size,
+        )
+    if patches.input_shape is not None:
+        return _normalize_feature_shape(
+            cast(tuple[int, ...] | list[int], patches.input_shape),
+            batch_size,
+        )
+    if patches.shape is not None and len(patches.shape) == 7:
+        return (
+            batch_size,
+            int(patches.shape[0]),
+            int(patches.shape[2]),
+            int(patches.shape[3]),
+        )
+    flat = int(box.lb.reshape(batch_size, -1).shape[1])
+    return (batch_size, flat, 1, 1)
+
+
+def _is_identity_linear_reset(
+    lin: LinearBoundLike,
+    box: Bounds,
+    frame: FrameLike,
+) -> bool:
+    linear = cast(LinearBoundLike, materialize_if_needed(lin))
+    if linear.A_lb.dim() != 3 or linear.A_ub.dim() != 3:
+        return False
+    batch_size = int(box.lb.shape[0])
+    box_lb = _flatten_feature_tensor(box.lb)
+    box_ub = _flatten_feature_tensor(box.ub)
+    frame_lb = _flatten_feature_tensor(frame[0])
+    frame_ub = _flatten_feature_tensor(frame[1])
+    if not torch.equal(box_lb, frame_lb) or not torch.equal(box_ub, frame_ub):
+        return False
+    if linear.A_lb.shape != linear.A_ub.shape:
+        return False
+    if linear.A_lb.shape[0] != batch_size:
+        return False
+    if linear.A_lb.shape[1] != linear.A_lb.shape[2]:
+        return False
+    feature_dim = int(box_lb.shape[1])
+    if linear.A_lb.shape[1] != feature_dim:
+        return False
+    if torch.count_nonzero(linear.b_lb).item() != 0 or torch.count_nonzero(linear.b_ub).item() != 0:
+        return False
+    diag_lb = linear.A_lb.diagonal(dim1=1, dim2=2)
+    diag_ub = linear.A_ub.diagonal(dim1=1, dim2=2)
+    if not torch.all(diag_lb == 1) or not torch.all(diag_ub == 1):
+        return False
+    return (
+        torch.count_nonzero(linear.A_lb).item() == batch_size * feature_dim
+        and torch.count_nonzero(linear.A_ub).item() == batch_size * feature_dim
+    )
+
+
+def _maybe_reseed_identity_patches(
+    lin: LinearBoundLike,
+    box: Bounds,
+    frame: FrameLike,
+    feature_shape: tuple[int, int, int, int] | None,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Patches | None:
+    if not _is_identity_linear_reset(lin, box, frame):
+        return None
+    if feature_shape is None:
+        if box.lb.dim() >= 4:
+            feature_shape = _normalize_feature_shape(
+                tuple(int(dim) for dim in box.lb.shape),
+                int(box.lb.shape[0]),
+            )
+        else:
+            flat = int(box.lb.reshape(int(box.lb.shape[0]), -1).shape[1])
+            feature_shape = (int(box.lb.shape[0]), flat, 1, 1)
+    if int(feature_shape[1]) * int(feature_shape[2]) * int(feature_shape[3]) != int(box.lb.reshape(int(box.lb.shape[0]), -1).shape[1]):
+        return None
+    return build_identity_patches(
+        int(feature_shape[0]),
+        int(feature_shape[1]),
+        int(feature_shape[2]),
+        int(feature_shape[3]),
+        dtype=dtype,
+        device=device,
+    )
+
+
 def dispatch_conv_forward(
     layer: Layer,
     parent_boxes: list[Bounds],
@@ -233,6 +341,26 @@ def dispatch_conv_forward(
 
     conv_mode = get_conv_mode()
     if conv_mode == "patches":
+        patch_parent = parent_lins[0]
+        if not post_activation and not isinstance(patch_parent, Patches):
+            input_shape_param = layer.params.get("input_shape")
+            feature_shape = None
+            if isinstance(input_shape_param, (tuple, list)):
+                feature_shape = _normalize_feature_shape(
+                    cast(tuple[int, ...] | list[int], input_shape_param),
+                    int(parent_boxes[0].lb.shape[0]),
+                )
+            reseeded = _maybe_reseed_identity_patches(
+                cast(LinearBoundLike, patch_parent),
+                parent_boxes[0],
+                parent_frames[0],
+                feature_shape,
+                device=device,
+                dtype=dtype,
+            )
+            if reseeded is not None:
+                patch_parent = reseeded
+                parent_lins = [patch_parent]
         if _contains_patches(parent_lins):
             stored, out, lin, frame = tf_cnn_patches.forward_conv2d_patches(
                 layer,
@@ -353,6 +481,33 @@ def dispatch_add_forward(
  ) -> tuple[Bounds, Bounds, LinearBoundLike | Patches, FrameLike]:
     tf_forward = importlib.import_module("act.back_end.dual_tf.tf_forward")
 
+    if not post_activation and get_conv_mode() == "patches" and any(isinstance(lin, Patches) for lin in parent_lins):
+        if not all(isinstance(lin, Patches) for lin in parent_lins):
+            ref_index = next(i for i, lin in enumerate(parent_lins) if isinstance(lin, Patches))
+            ref_shape = _patch_feature_shape(cast(Patches, parent_lins[ref_index]), parent_boxes[ref_index])
+            converted: list[LinearBoundLike | Patches] = []
+            for box, lin, frame in zip(parent_boxes, parent_lins, parent_frames, strict=True):
+                if isinstance(lin, Patches):
+                    converted.append(lin)
+                    continue
+                reseeded = _maybe_reseed_identity_patches(
+                    cast(LinearBoundLike, lin),
+                    box,
+                    frame,
+                    ref_shape,
+                    device=device,
+                    dtype=dtype,
+                )
+                if reseeded is None:
+                    if get_strict_patches():
+                        raise RuntimeError(
+                            "strict_patches: ADD received non-reset LinearBound alongside Patches"
+                        )
+                    break
+                converted.append(reseeded)
+            else:
+                parent_lins = converted
+
     return tf_forward.forward_add(
         layer,
         parent_boxes,
@@ -376,6 +531,33 @@ def dispatch_concat_forward(
     dtype: torch.dtype,
  ) -> tuple[Bounds, Bounds, LinearBoundLike | Patches, FrameLike]:
     tf_forward = importlib.import_module("act.back_end.dual_tf.tf_forward")
+
+    if not post_activation and get_conv_mode() == "patches" and any(isinstance(lin, Patches) for lin in parent_lins):
+        if not all(isinstance(lin, Patches) for lin in parent_lins):
+            ref_index = next(i for i, lin in enumerate(parent_lins) if isinstance(lin, Patches))
+            ref_shape = _patch_feature_shape(cast(Patches, parent_lins[ref_index]), parent_boxes[ref_index])
+            converted: list[LinearBoundLike | Patches] = []
+            for box, lin, frame in zip(parent_boxes, parent_lins, parent_frames, strict=True):
+                if isinstance(lin, Patches):
+                    converted.append(lin)
+                    continue
+                reseeded = _maybe_reseed_identity_patches(
+                    cast(LinearBoundLike, lin),
+                    box,
+                    frame,
+                    ref_shape,
+                    device=device,
+                    dtype=dtype,
+                )
+                if reseeded is None:
+                    if get_strict_patches():
+                        raise RuntimeError(
+                            "strict_patches: CONCAT received non-reset LinearBound alongside Patches"
+                        )
+                    break
+                converted.append(reseeded)
+            else:
+                parent_lins = converted
 
     return tf_forward.forward_concat(
         layer,
