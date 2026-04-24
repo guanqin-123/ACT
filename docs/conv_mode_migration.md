@@ -41,6 +41,8 @@ When adding a new forward op to `DualTF._FORWARD_REGISTRY`:
 Current intentional materialization points:
 
 - Conv dispatcher fallback from matrix-seeded input
+- biased Conv outputs in patches mode
+- BN / ReLU / Add safety resets
 - pool ops in v1
 - dense boundary
 - BaBSR scoring when a dense lA tensor is required

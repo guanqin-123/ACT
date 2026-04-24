@@ -31,8 +31,9 @@ Waves 1-5 introduced:
 - a central dispatcher in `act/back_end/bounds_dispatch.py`
 - zero-copy rank-3 spec expansion for bounds-only batching
 - patches-aware Conv2D forward/backward kernels
-- per-op support for ReLU, BN, Add, Concat, pool materialization, and dense
-  boundary fallback
+- per-op coverage for ReLU, BN, Add, Concat, pool materialization, and dense
+  boundary fallback, with Tier 1 safety hardening that resets BN/ReLU/Add back
+  to dense LinearBound form before downstream affine consumers
 - ResNet parity/soundness tests and a realistic CIFAR-100 benchmark harness
 
 Wave 6 does not change hot-path math. It finalizes documentation, deterministic
@@ -76,13 +77,16 @@ across unrelated files would make mixed-mode behavior impossible to audit.
 The dispatcher keeps these cases centralized so tests can assert parity and
 warning behavior.
 
-### 3. Dense is the materialization boundary
+### 3. Dense is the main materialization boundary, with a few safety resets
 
 The current rule is simple and deliberate:
 
 - Conv-like structure stays sparse when possible.
 - Once the flow crosses the Conv→Dense boundary, `Patches` materializes back to
   dense matrix form.
+- Tier 1 also narrows sparse propagation at BN/ReLU/Add and biased Conv outputs,
+  because those sites need intercept-aware linear state that v1 `Patches` does
+  not encode.
 
 This mirrors α-β-CROWN's practical convention. It avoids infecting fully dense
 MLP logic with sparse-conv bookkeeping that buys little in late layers.
@@ -90,7 +94,9 @@ MLP logic with sparse-conv bookkeeping that buys little in late layers.
 ### 4. Pooling is v1 materialize-on-entry
 
 `MAXPOOL2D` and `AVGPOOL2D` currently materialize patch inputs before applying
-interval pool bounds. This is an explicit v1 choice, not a hidden regression.
+interval pool bounds. ReLU, BN, Add, and biased Conv outputs also reset to a
+dense `LinearBound` in Tier 1 for soundness hardening. These are explicit v1
+choices, not hidden regressions.
 For the target ResNet-medium benchmark this is acceptable because the only hot
 pool is near the dense boundary.
 
@@ -188,6 +194,7 @@ These items are intentionally out of scope for the current merge:
 Also explicit non-goals for v1 patches propagation:
 
 - no end-to-end sparse path through a matrix-seeded `InputSpec` yet
+- no fully sparse propagation through BN / ReLU / Add / biased Conv outputs in v1
 - no pool-native sparse kernel yet
 - no Tier 2 kernel rewrites in this merge-prep tier
 
@@ -220,6 +227,13 @@ Meaning:
 
 Tier 1 throttles this warning so it fires once per layer and then moves to
 debug-level logging.
+
+### ReLU / BN / Add now materialize instead of staying sparse
+
+This is a deliberate Tier 1 hardening step. v1 `Patches` stores coefficient
+payloads only; it does not carry lower/upper affine tensors plus intercepts.
+Operators that introduce bias or asymmetric relaxation terms therefore reset to
+dense `LinearBound` form before a later affine op can consume them.
 
 ### Pool warnings in patches mode
 

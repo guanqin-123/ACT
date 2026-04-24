@@ -234,7 +234,7 @@ def dispatch_conv_forward(
     conv_mode = get_conv_mode()
     if conv_mode == "patches":
         if _contains_patches(parent_lins):
-            return tf_cnn_patches.forward_conv2d_patches(
+            stored, out, lin, frame = tf_cnn_patches.forward_conv2d_patches(
                 layer,
                 parent_boxes,
                 list(parent_lins),
@@ -244,6 +244,14 @@ def dispatch_conv_forward(
                 device,
                 dtype,
             )
+            if isinstance(lin, Patches) and layer.params.get("bias") is not None:
+                tf_forward = importlib.import_module("act.back_end.dual_tf.tf_forward")
+                log.debug(
+                    "dispatch_conv_forward: materializing biased Patches conv output at layer %s",
+                    layer.id,
+                )
+                lin, frame = tf_forward._reset_forward_box(out.lb, out.ub, device, dtype)
+            return stored, out, lin, frame
         message = (
             "dispatch_conv_forward: conv_mode=patches received LinearBound input; "
             "materializing and falling back to matrix path"

@@ -351,12 +351,8 @@ def test_dispatch_conv_forward_patches_matches_kernel() -> None:
         )
     torch.testing.assert_close(dispatched[0].lb, direct[0].lb)
     torch.testing.assert_close(dispatched[0].ub, direct[0].ub)
-    assert isinstance(dispatched[2], Patches)
+    assert isinstance(dispatched[2], LinearBound)
     assert isinstance(direct[2], Patches)
-    torch.testing.assert_close(
-        dispatched[2].to_matrix((2, 1, 4, 4)),
-        direct[2].to_matrix((2, 1, 4, 4)),
-    )
 
 
 def test_dispatch_conv_forward_identity_patches_matches_kernel() -> None:
@@ -423,7 +419,7 @@ def test_dispatch_bn_forward_matrix_matches_direct_and_patches_path() -> None:
         device,
         dtype,
     )
-    assert isinstance(dispatched_patch[2], Patches)
+    assert isinstance(dispatched_patch[2], LinearBound)
 
 
 def test_dispatch_add_forward_matrix_matches_direct_and_patches_path() -> None:
@@ -448,7 +444,7 @@ def test_dispatch_add_forward_matrix_matches_direct_and_patches_path() -> None:
         device,
         dtype,
     )
-    assert isinstance(dispatched_patch[2], Patches)
+    assert isinstance(dispatched_patch[2], LinearBound)
 
 
 def test_dispatch_pool_forward_max_matrix_matches_direct_and_patches_path() -> None:

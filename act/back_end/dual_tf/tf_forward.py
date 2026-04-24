@@ -1040,11 +1040,6 @@ def forward_add(
                 for lin, box in zip(parent_lins, parent_boxes, strict=True)
             ]
             return forward_add(L, parent_boxes, materialized_lins, parent_frames, preds, post_activation, device, dtype)
-        ref = cast(Patches, parent_lins[0])
-        target_shape = _patches_shape_metadata(ref, parent_boxes[0])
-        unified = [unify_shape(cast(Patches, lin), target_shape) for lin in parent_lins]
-        payloads = [_patches_payload_or_identity(lin, box) for lin, box in zip(unified, parent_boxes, strict=True)]
-        pieces = sum(payloads[1:], payloads[0])
         bias_param = cast(Optional[torch.Tensor], L.params.get("bias"))
         summed = _sum_interval_bounds(parent_boxes)
         lb, ub = summed.lb, summed.ub
@@ -1053,19 +1048,9 @@ def forward_add(
             lb = lb + bias_vec
             ub = ub + bias_vec
         out = Bounds(lb, ub)
-        lin_out = Patches(
-            patches=pieces,
-            stride=ref.stride,
-            padding=ref.padding,
-            shape=tuple(int(dim) for dim in pieces.shape),
-            identity=0,
-            unstable_idx=ref.unstable_idx,
-            output_shape=(lb.shape[0], lb.shape[1], 1, 1),
-            input_shape=ref.input_shape,
-            inserted_zeros=ref.inserted_zeros,
-            output_padding=ref.output_padding,
-        )
-        return out, out, lin_out, parent_frames[0]
+        log.debug("forward_add: materializing Patches inputs to LinearBound for soundness")
+        lin, frame = _reset_forward_box(lb, ub, device, dtype)
+        return out, out, lin, frame
     matrix_parent_lins = cast(List[LinearBound], parent_lins)
     rank3_flags = [_lin_has_rank3(lin) for lin in matrix_parent_lins]
     forced_interval = False

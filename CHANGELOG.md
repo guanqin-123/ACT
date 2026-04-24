@@ -21,6 +21,9 @@
   matrix-only code paths keep their previous semantics
 - warning spam from repeated dispatcher/BaBSR materializations is now throttled
   and summarized
+- Tier 1 soundness hardening narrows strict-Patches propagation by resetting
+  biased Conv outputs and BN / ReLU / Add to dense LinearBound form before
+  downstream affine consumers
 
 ### User-facing summary of Waves 1-5
 

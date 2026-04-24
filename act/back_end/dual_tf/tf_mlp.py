@@ -473,12 +473,15 @@ def forward_relu(
     x_L, x_U = parent_frame
     pre_lb, pre_ub = parent_box.lb, parent_box.ub
     if isinstance(parent_lin, Patches):
-        alpha = cast(Optional[torch.Tensor], L.params.get("alpha"))
-        lin = _forward_relu_patches(parent_lin, pre_lb, pre_ub, alpha=alpha, layer_id=getattr(L, "id", None))
         int_lb, int_ub = _box_relu(pre_lb, pre_ub)
         out = Bounds(int_lb, int_ub)
         stored = out if post_activation else Bounds(pre_lb, pre_ub)
-        return stored, out, lin, parent_frame
+        log.debug(
+            "forward_relu: materializing Patches to LinearBound for layer %s",
+            getattr(L, "id", "?"),
+        )
+        lin, frame = _reset_forward_box(int_lb, int_ub, device, dtype)
+        return stored, out, lin, frame
     lin = _fwd_relu(parent_lin, pre_lb, pre_ub)
     crown_lb, crown_ub = _concretize(lin, x_L, x_U)
     int_lb, int_ub = _box_relu(pre_lb, pre_ub)
@@ -704,11 +707,15 @@ def forward_bn(
     x_L, x_U = parent_frame
     prev_lb, prev_ub = parent_box.lb, parent_box.ub
     if isinstance(parent_lin, Patches):
-        lin = _forward_bn_patches(L, parent_lin, parent_box)
         lb, ub = _box_bn(L, prev_lb, prev_ub)
         out = Bounds(lb, ub)
         stored = out
-        return stored, out, lin, parent_frame
+        log.debug(
+            "forward_bn: materializing Patches to LinearBound for layer %s",
+            getattr(L, "id", "?"),
+        )
+        lin, frame = _reset_forward_box(lb, ub, device, dtype)
+        return stored, out, lin, frame
     lin = _fwd_bn(L, parent_lin)
     crown_lb, crown_ub = _concretize(lin, x_L, x_U)
     int_lb, int_ub = _box_bn(L, prev_lb, prev_ub)

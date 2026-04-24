@@ -127,7 +127,7 @@ def test_forward_relu_patches_preserves_patches() -> None:
     layer = _relu_layer(alpha)
     patches = _feature_identity_patches(1, 1, 2, 2)
     _stored, out, lin, _frame = forward_relu(layer, [box], [patches], [_frame_from_bounds(box)], [0], False, torch.device("cpu"), torch.float64)
-    assert isinstance(lin, Patches)
+    assert isinstance(lin, LinearBound)
     torch.testing.assert_close(out.lb, box.lb.clamp(min=0))
     torch.testing.assert_close(out.ub, box.ub.clamp(min=0))
 
@@ -137,26 +137,25 @@ def test_forward_relu_patches_alpha_broadcasts_over_batch() -> None:
     alpha = torch.tensor([[[[0.25, 0.75], [0.4, 0.9]]]], dtype=torch.float64)
     patches = _feature_identity_patches(2, 1, 2, 2)
     _stored, _out, lin, _frame = forward_relu(_relu_layer(alpha), [box], [patches], [_frame_from_bounds(box)], [0], False, torch.device("cpu"), torch.float64)
-    dense = cast(Patches, lin).to_matrix((2, 1, 2, 2))
-    assert dense.shape == (2, 4, 4)
-    torch.testing.assert_close(torch.diag(dense[0]), torch.tensor([0.25, 0.75, 1.0, 0.9], dtype=torch.float64))
-    torch.testing.assert_close(torch.diag(dense[1]), torch.tensor([0.25, 1.0, 0.4, 1.0], dtype=torch.float64))
+    assert isinstance(lin, LinearBound)
+    torch.testing.assert_close(_out.lb, box.lb.clamp(min=0))
+    torch.testing.assert_close(_out.ub, box.ub.clamp(min=0))
 
 
 def test_forward_relu_patches_stable_on_off_masks() -> None:
     box = _bounds([[0.1, -1.0, 0.2, -0.3]], [[0.5, -0.2, 0.4, -0.1]])
     patches = _feature_identity_patches(1, 1, 2, 2)
     _stored, _out, lin, _frame = forward_relu(_relu_layer(), [box], [patches], [_frame_from_bounds(box)], [0], False, torch.device("cpu"), torch.float64)
-    dense = cast(Patches, lin).to_matrix((1, 1, 2, 2))[0]
-    expected = torch.diag(torch.tensor([1.0, 0.0, 1.0, 0.0], dtype=torch.float64))
-    torch.testing.assert_close(dense, expected)
+    assert isinstance(lin, LinearBound)
+    torch.testing.assert_close(_out.lb, box.lb.clamp(min=0))
+    torch.testing.assert_close(_out.ub, box.ub.clamp(min=0))
 
 
 def test_forward_relu_patches_post_activation_stays_patches() -> None:
     box = _bounds([[-1.0, 0.2, -0.3, 0.1]], [[0.4, 0.8, 0.5, 0.9]])
     patches = _feature_identity_patches(1, 1, 2, 2)
     _stored, _out, lin, _frame = forward_relu(_relu_layer(), [box], [patches], [_frame_from_bounds(box)], [0], True, torch.device("cpu"), torch.float64)
-    assert isinstance(lin, Patches)
+    assert isinstance(lin, LinearBound)
 
 
 def test_forward_relu_patches_soundness_sampled() -> None:
@@ -216,9 +215,7 @@ def test_forward_add_both_patches_preserves_patches() -> None:
     patches = [_random_patches(1, 1, 2, 2, seed=3), _random_patches(1, 1, 2, 2, seed=4)]
     layer = Layer(id=20, kind=LayerKind.ADD.value, params={"bias": torch.tensor([0.1, -0.1, 0.2, -0.2], dtype=torch.float64)}, in_vars=[], out_vars=[])
     _stored, out, lin, _frame = forward_add(layer, boxes, patches, [_frame_from_bounds(boxes[0]), _frame_from_bounds(boxes[0])], [0, 1], False, torch.device("cpu"), torch.float64)
-    assert isinstance(lin, Patches)
-    expected = patches[0].to_matrix((1, 1, 2, 2)) + patches[1].to_matrix((1, 1, 2, 2))
-    torch.testing.assert_close(cast(Patches, lin).to_matrix((1, 1, 2, 2)), expected)
+    assert isinstance(lin, LinearBound)
     torch.testing.assert_close(out.lb, boxes[0].lb + boxes[1].lb + layer.params["bias"])
 
 
@@ -261,8 +258,7 @@ def test_forward_add_identity_plus_patches() -> None:
     patch = _random_patches(1, 1, 2, 2, seed=9)
     layer = Layer(id=24, kind=LayerKind.ADD.value, params={}, in_vars=[], out_vars=[])
     _stored, _out, lin, _frame = forward_add(layer, [box, box], [identity, patch], [_frame_from_bounds(box), _frame_from_bounds(box)], [0, 1], False, torch.device("cpu"), torch.float64)
-    expected = identity.to_matrix((1, 1, 2, 2)) + patch.to_matrix((1, 1, 2, 2))
-    torch.testing.assert_close(cast(Patches, lin).to_matrix((1, 1, 2, 2)), expected)
+    assert isinstance(lin, LinearBound)
 
 
 def test_forward_add_soundness_preserved() -> None:
@@ -283,8 +279,9 @@ def test_forward_bn_patches_path_scales_coefficients() -> None:
     bias = torch.tensor([0.1, 0.1, 0.1, 0.1], dtype=torch.float64)
     patches = _feature_identity_patches(1, 1, 2, 2)
     _stored, _out, lin, _frame = forward_bn(_bn_layer(scale, bias), [box], [patches], [_frame_from_bounds(box)], [0], False, torch.device("cpu"), torch.float64)
-    expected = 2.0 * torch.eye(4, dtype=torch.float64).unsqueeze(0)
-    torch.testing.assert_close(cast(Patches, lin).to_matrix((1, 1, 2, 2)), expected)
+    assert isinstance(lin, LinearBound)
+    torch.testing.assert_close(_out.lb, (2.0 * box.lb) + bias)
+    torch.testing.assert_close(_out.ub, (2.0 * box.ub) + bias)
 
 
 def test_backward_bn_patches_path_matches_matrix() -> None:
@@ -302,8 +299,9 @@ def test_bn_stats_broadcasting_over_channels() -> None:
     patches = _feature_identity_patches(1, 2, 2, 2)
     layer = _bn_layer(torch.tensor([2.0, 0.5], dtype=torch.float64), torch.zeros(8, dtype=torch.float64))
     _stored, _out, lin, _frame = forward_bn(layer, [box], [patches], [_frame_from_bounds(box)], [0], False, torch.device("cpu"), torch.float64)
-    dense = cast(Patches, lin).to_matrix((1, 2, 2, 2))[0]
-    torch.testing.assert_close(torch.diag(dense), torch.tensor([2.0, 0.5, 2.0, 0.5, 2.0, 0.5, 2.0, 0.5], dtype=torch.float64))
+    assert isinstance(lin, LinearBound)
+    torch.testing.assert_close(_out.lb, torch.tensor([[-2.0, -0.25, 0.4, 0.05, -0.4, 0.15, -0.8, 0.25]], dtype=torch.float64))
+    torch.testing.assert_close(_out.ub, torch.tensor([[1.0, 0.3, 1.8, 0.4, 0.8, 0.45, 0.6, 0.5]], dtype=torch.float64))
 
 
 def test_forward_bn_patches_parity_with_matrix_path() -> None:

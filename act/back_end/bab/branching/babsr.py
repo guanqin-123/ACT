@@ -56,7 +56,7 @@ def _record_lA_materialization(layer_id: int) -> None:
     _MATERIALIZATION_COUNTS[layer_id] += 1
     _warn_once(
         "select_neurons_lA_materialize",
-        layer_id,
+        -1,
         f"BaBSR select_neurons: materializing patches lA for layer {layer_id}",
     )
 
