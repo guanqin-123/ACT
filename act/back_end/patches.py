@@ -247,6 +247,36 @@ class Patches:
         raise TypeError("unhashable type: 'Patches'")
 
 
+def build_identity_patches(
+    batch_size: int,
+    channels: int,
+    height: int,
+    width: int,
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> Patches:
+    del dtype, device
+    feature_shape = (int(batch_size), int(channels), int(height), int(width))
+    return Patches(
+        patches=None,
+        stride=1,
+        padding=0,
+        shape=(
+            int(channels),
+            int(batch_size),
+            int(height),
+            int(width),
+            int(channels),
+            1,
+            1,
+        ),
+        identity=1,
+        output_shape=feature_shape,
+        input_shape=feature_shape,
+    )
+
+
 def patches_to_matrix(patches: Patches, input_shape: tuple[int, ...]) -> torch.Tensor:
     if patches.inserted_zeros > 0:
         raise ValueError("dilation > 1 not supported in v1 (S1 regime)")
@@ -509,6 +539,7 @@ def inplace_unfold(
 
 __all__ = [
     "Patches",
+    "build_identity_patches",
     "compute_patches_stride_padding",
     "deterministic_patches_ctx",
     "inplace_unfold",

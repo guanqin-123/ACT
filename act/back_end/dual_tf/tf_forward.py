@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
 
 from act.back_end.core import Bounds, Layer, Net
 from act.back_end.layer_schema import LayerKind
-from act.back_end.patches import Patches, patches_to_matrix, unify_shape
+from act.back_end.patches import Patches, build_identity_patches, patches_to_matrix, unify_shape
 from act.util.device_manager import get_default_device, get_default_dtype
 
 if TYPE_CHECKING:
@@ -116,6 +116,10 @@ class LinearBound:
     b_lb: torch.Tensor
     A_ub: torch.Tensor
     b_ub: torch.Tensor
+
+
+ForwardLin = LinearBound | Patches
+
 
 Frame = Tuple[torch.Tensor, torch.Tensor]  # (x_L, x_U) over which lin is defined
 
@@ -264,12 +268,12 @@ def _box_lrelu(lb: torch.Tensor, ub: torch.Tensor, alpha: float) -> Tuple[torch.
 
 def _store_forward_state(bounds_dict: Dict[int, Bounds],
                           box_state: Dict[int, Bounds],
-                          lin_state: Dict[int, LinearBound],
+                          lin_state: Dict[int, ForwardLin],
                           frame_dict: Dict[int, Frame],
                           layer_id: int,
                           stored: Bounds,
                           out_box: Bounds,
-                          lin: LinearBound,
+                          lin: ForwardLin,
                           frame: Frame) -> None:
     """Store public bounds plus internal forward state for a layer."""
     bounds_dict[layer_id] = stored.copy()
@@ -301,6 +305,94 @@ def _topological_sort(net: Net) -> List[int]:
     if len(order) != len(layer_ids):
         raise ValueError(f"compute_forward_bounds: graph has cycle or disconnected layers ({len(order)}/{len(layer_ids)} sorted)")
     return order
+
+
+def _normalize_feature_shape(
+    shape: tuple[int, ...] | list[int],
+    batch_size: int,
+) -> tuple[int, int, int, int]:
+    if len(shape) == 4:
+        _batch, channels, height, width = (int(dim) for dim in shape)
+        return (batch_size, channels, height, width)
+    if len(shape) == 3:
+        channels, height, width = (int(dim) for dim in shape)
+        return (batch_size, channels, height, width)
+    raise ValueError(f"Expected feature shape with 3 or 4 dims, got {shape!r}")
+
+
+def _first_non_wrapper_layer(net: Net, topo_order: List[int]) -> Layer | None:
+    wrapper_kinds = {
+        LayerKind.INPUT.value,
+        LayerKind.INPUT_SPEC.value,
+        LayerKind.ASSERT.value,
+    }
+    for lid in topo_order:
+        layer = net.by_id[lid]
+        if layer.kind.upper() not in wrapper_kinds:
+            return layer
+    return None
+
+
+def _seed_entry_linear_state(
+    net: Net,
+    topo_order: List[int],
+    *,
+    batch_size: int,
+    input_dim: int,
+    input_feature_shape: tuple[int, int, int, int] | None,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> ForwardLin:
+    from act.back_end.bounds_dispatch import get_conv_mode, get_strict_patches
+
+    if get_conv_mode() != "patches":
+        return _identity_lin(batch_size, input_dim, device, dtype)
+
+    first_layer = _first_non_wrapper_layer(net, topo_order)
+    if first_layer is None:
+        return _identity_lin(batch_size, input_dim, device, dtype)
+    if first_layer.kind.upper() != LayerKind.CONV2D.value:
+        if get_strict_patches():
+            raise RuntimeError(
+                "strict_patches: network does not start with Conv2d — cannot seed Patches"
+            )
+        return _identity_lin(batch_size, input_dim, device, dtype)
+
+    conv_input_shape_param = first_layer.params.get("input_shape")
+    conv_input_shape: tuple[int, int, int, int] | None = None
+    if isinstance(conv_input_shape_param, (tuple, list)):
+        conv_input_shape = _normalize_feature_shape(
+            cast(tuple[int, ...] | list[int], conv_input_shape_param),
+            batch_size,
+        )
+    elif input_feature_shape is not None:
+        conv_input_shape = input_feature_shape
+
+    if conv_input_shape is None:
+        if get_strict_patches():
+            raise RuntimeError(
+                "strict_patches: first Conv2d missing input_shape metadata — cannot seed Patches"
+            )
+        return _identity_lin(batch_size, input_dim, device, dtype)
+
+    feature_dim = (
+        int(conv_input_shape[1]) * int(conv_input_shape[2]) * int(conv_input_shape[3])
+    )
+    if feature_dim != input_dim:
+        if get_strict_patches():
+            raise RuntimeError(
+                "strict_patches: first Conv2d input_shape does not match input bounds — cannot seed Patches"
+            )
+        return _identity_lin(batch_size, input_dim, device, dtype)
+
+    return build_identity_patches(
+        batch_size,
+        int(conv_input_shape[1]),
+        int(conv_input_shape[2]),
+        int(conv_input_shape[3]),
+        dtype=dtype,
+        device=device,
+    )
 
 
 def _sum_interval_bounds(boxes: List[Bounds]) -> Bounds:
@@ -536,17 +628,34 @@ def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Ten
             input_ub = input_ub.unsqueeze(0)
 
         B = input_lb.shape[0]
+        input_feature_shape = (
+            _normalize_feature_shape(tuple(int(dim) for dim in input_lb.shape), B)
+            if input_lb.dim() >= 4
+            else None
+        )
         lb_in = input_lb.reshape(B, -1)
         ub_in = input_ub.reshape(B, -1)
         input_dim = lb_in.shape[1]
 
         bounds_dict: Dict[int, Bounds] = {}
         box_state: Dict[int, Bounds] = {}
-        lin_state: Dict[int, LinearBound] = {}
+        lin_state: Dict[int, ForwardLin] = {}
         frame_dict: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
         topo_order = _topological_sort(net)
         entry_box = Bounds(lb_in, ub_in)
-        entry_lin = _identity_lin(B, input_dim, device, dtype)
+        entry_lin = (
+            _seed_entry_linear_state(
+                net,
+                topo_order,
+                batch_size=B,
+                input_dim=input_dim,
+                input_feature_shape=input_feature_shape,
+                device=device,
+                dtype=dtype,
+            )
+            if not post_activation
+            else _identity_lin(B, input_dim, device, dtype)
+        )
         entry_frame = (lb_in, ub_in)
 
         for lid in topo_order:

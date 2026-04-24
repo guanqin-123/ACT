@@ -527,7 +527,28 @@ def forward_conv2d_patches(
         parent_lin.inserted_zeros,
     )
     if parent_lin.is_identity:
-        pieces = _identity_forward_patches(layer, batch_size, output_shape)
+        tf_cnn = importlib.import_module("act.back_end.dual_tf.tf_cnn")
+        dense_parent = _patches_to_linear_bound(parent_lin, input_shape)
+        dense_result = tf_cnn.forward_conv2d(
+            layer,
+            parent_boxes,
+            [dense_parent],
+            parent_frames,
+            preds,
+            False,
+            device,
+            dtype,
+        )
+        weight = cast(torch.Tensor, layer.params["weight"])
+        pieces = _dense_matrix_to_patches(
+            dense_result[2].A_lb,
+            input_shape,
+            output_shape[1],
+            output_shape[-2:],
+            (int(weight.shape[-2]), int(weight.shape[-1])),
+            new_stride,
+            new_padding,
+        )
         lin = Patches(
             patches=pieces,
             stride=new_stride,
@@ -536,14 +557,7 @@ def forward_conv2d_patches(
             input_shape=input_shape,
             output_shape=output_shape,
         )
-        lb, ub = _concretize_patches(
-            lin,
-            parent_frames[0],
-            cast(torch.Tensor | None, layer.params.get("bias")),
-            output_shape,
-        )
-        out = Bounds(lb=lb.to(device=device, dtype=dtype), ub=ub.to(device=device, dtype=dtype))
-        return out, out, lin, parent_frames[0]
+        return dense_result[0], dense_result[1], lin, parent_frames[0]
 
     tf_cnn = importlib.import_module("act.back_end.dual_tf.tf_cnn")
     dense_parent = _patches_to_linear_bound(parent_lin, input_shape)

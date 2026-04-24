@@ -497,13 +497,13 @@ def forward_relu(
 def forward_lrelu(
     L: Any,
     parent_boxes: List[Bounds],
-    parent_lins: List[LinearBound],
+    parent_lins: List[LinearBound | Patches],
     parent_frames: List[Frame],
     preds: List[int],
     post_activation: bool,
     device: torch.device,
     dtype: torch.dtype,
-) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
+) -> Tuple[Bounds, Bounds, LinearBound | Patches, Frame]:
     """Forward handler for LRELU / LEAKY_RELU (triangle linear relaxation).
 
     Source: tf_forward.py lines 436-446. Reads ``alpha`` from
@@ -518,6 +518,16 @@ def forward_lrelu(
     x_L, x_U = parent_frame
     pre_lb, pre_ub = parent_box.lb, parent_box.ub
     alpha = L.params.get("alpha", 0.01)
+    if isinstance(parent_lin, Patches):
+        int_lb, int_ub = _box_lrelu(pre_lb, pre_ub, alpha)
+        out = Bounds(int_lb, int_ub)
+        stored = out if post_activation else Bounds(pre_lb, pre_ub)
+        log.debug(
+            "forward_lrelu: materializing Patches to LinearBound for layer %s",
+            getattr(L, "id", "?"),
+        )
+        lin, frame = _reset_forward_box(int_lb, int_ub, device, dtype)
+        return stored, out, lin, frame
     lin = _fwd_lrelu(parent_lin, pre_lb, pre_ub, alpha)
     crown_lb, crown_ub = _concretize(lin, x_L, x_U)
     int_lb, int_ub = _box_lrelu(pre_lb, pre_ub, alpha)
