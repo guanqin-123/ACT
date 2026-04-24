@@ -416,9 +416,9 @@ def test_deterministic_patches_ctx_nested_restore() -> None:
     assert is_deterministic_patches() is True
 
 
-def test_config_default_matrix() -> None:
+def test_config_default_patches() -> None:
     config = BackendConfig.from_yaml()
-    assert config.conv_mode == "matrix"
+    assert config.conv_mode == "patches"
 
 
 def test_config_conv_mode_patches_allowed(tmp_path: Path) -> None:

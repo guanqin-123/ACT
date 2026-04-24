@@ -149,6 +149,12 @@ from .tf_cnn import (
     backward_conv2d, backward_maxpool2d, backward_avgpool2d,
     forward_conv2d, forward_maxpool2d, forward_avgpool2d,
 )
+from .tf_cnn_patches import (
+    backward_conv2d_patches,
+    forward_conv2d_patches,
+    linear_form_patches_to_tensor,
+    linear_form_tensor_to_patches,
+)
 
 # Smooth activation batched kernels + dispatch (backward) and forward handlers
 from .tf_smooth import (
@@ -179,6 +185,8 @@ __all__ = [
     'dual_conv2d_backward', 'dual_maxpool2d_backward', 'dual_avgpool2d_backward',
     'backward_conv2d', 'backward_maxpool2d', 'backward_avgpool2d',
     'forward_conv2d', 'forward_maxpool2d', 'forward_avgpool2d',
+    'backward_conv2d_patches', 'forward_conv2d_patches',
+    'linear_form_patches_to_tensor', 'linear_form_tensor_to_patches',
     'dual_smooth_backward', 'dual_sigmoid_backward', 'dual_tanh_backward',
     'compute_smooth_relaxation', 'sigmoid', 'dsigmoid', 'tanh', 'dtanh',
     'backward_sigmoid', 'backward_tanh',

@@ -20,16 +20,22 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, cast
 
 import torch
 
+from act.back_end.bounds_dispatch import get_conv_mode
 from act.back_end.bab.branching.branching import BranchingStrategy
 from act.back_end.bab.eta import get_pre_activation_layer_id
 from act.back_end.bab.node import SubproblemBatch
-from act.back_end.core import Bounds, Net
+from act.back_end.core import Bounds, Layer, Net
+from act.back_end.dual_tf.tf_cnn_patches import (
+    linear_form_patches_to_tensor,
+    linear_form_tensor_to_patches,
+)
 from act.back_end.dual_tf.dual_tf import DualTF
 from act.back_end.layer_schema import LayerKind
+from act.back_end.patches import Patches
 
 log = logging.getLogger(__name__)
 
@@ -141,7 +147,7 @@ def compute_lA_per_layer(
     c: torch.Tensor,
     dual_tf: DualTF,
     target_layer_ids: Optional[List[int]] = None,
-) -> Dict[int, torch.Tensor]:
+) -> Dict[int, torch.Tensor | Patches]:
     """Run ONE reverse-topo backward sweep through ``dual_tf._BACKWARD_REGISTRY``,
     collecting per-pre-activation-layer ``lA`` coefficients.
 
@@ -207,14 +213,14 @@ def compute_lA_per_layer(
     if output_lid is None:
         raise ValueError("compute_lA_per_layer: net has no ASSERT layer")
 
-    nu_accum: Dict[int, torch.Tensor] = {output_lid: c.clone()}
+    nu_accum: Dict[int, torch.Tensor | Patches] = {output_lid: c.clone()}
     topo_order = _reverse_topological_sort(net)
     registry = dual_tf._BACKWARD_REGISTRY
     target_set: Optional[set[int]] = (
         set(target_layer_ids) if target_layer_ids is not None else None
     )
 
-    lA: Dict[int, torch.Tensor] = {}
+    lA: Dict[int, torch.Tensor | Patches] = {}
 
     for lid in topo_order:
         layer = net.by_id[lid]
@@ -235,9 +241,37 @@ def compute_lA_per_layer(
         # output z used by BaBSR scoring. Detach to keep the scoring pass
         # gradient-free.
         if target_set is None or lid in target_set:
-            lA[lid] = nu_accum[lid].detach().clone()
+            current = nu_accum[lid]
+            snapshot = current.detach() if isinstance(current, Patches) else current.detach().clone()
+            if (
+                isinstance(snapshot, torch.Tensor)
+                and get_conv_mode() == "patches"
+                and k == LayerKind.CONV2D.value
+            ):
+                output_shape = layer.params.get("output_shape")
+                if isinstance(output_shape, (tuple, list)):
+                    lA[lid] = linear_form_tensor_to_patches(
+                        snapshot.reshape(snapshot.shape[0], -1),
+                        tuple(int(dim) for dim in output_shape),
+                    )
+                else:
+                    lA[lid] = snapshot
+            else:
+                lA[lid] = snapshot
 
         nu_here = nu_accum.pop(lid)
+        if isinstance(nu_here, Patches) and k != LayerKind.CONV2D.value:
+            output_shape = layer.params.get("output_shape")
+            if isinstance(output_shape, (tuple, list)):
+                nu_here = linear_form_patches_to_tensor(
+                    nu_here,
+                    tuple(int(dim) for dim in output_shape),
+                )
+            else:
+                nu_here = linear_form_patches_to_tensor(
+                    nu_here,
+                    tuple(int(dim) for dim in bounds_dict[lid].lb.shape),
+                )
         handler = registry.get(k)
         if handler is None:
             raise ValueError(
@@ -246,7 +280,18 @@ def compute_lA_per_layer(
             )
 
         preds = list(net.preds.get(lid, []))
-        pred_nus, _contrib = handler(layer, nu_here, bounds_dict, preds)
+        if k == LayerKind.CONV2D.value:
+            conv_handler = cast(
+                Callable[[Layer, torch.Tensor | Patches, Dict[int, Bounds], List[int]], tuple[list[torch.Tensor | Patches], torch.Tensor]],
+                handler,
+            )
+            pred_nus, _contrib = conv_handler(layer, nu_here, bounds_dict, preds)
+        else:
+            dense_handler = cast(
+                Callable[[Layer, torch.Tensor, Dict[int, Bounds], List[int]], tuple[list[torch.Tensor], torch.Tensor]],
+                handler,
+            )
+            pred_nus, _contrib = dense_handler(layer, cast(torch.Tensor, nu_here), bounds_dict, preds)
         if len(pred_nus) != len(preds):
             raise ValueError(
                 f"compute_lA_per_layer: handler {k} at layer {lid} returned "
@@ -255,11 +300,62 @@ def compute_lA_per_layer(
 
         for pred_id, pred_nu in zip(preds, pred_nus):
             if pred_id in nu_accum:
-                nu_accum[pred_id] = nu_accum[pred_id] + pred_nu
+                current_nu = nu_accum[pred_id]
+                if isinstance(current_nu, torch.Tensor) and isinstance(pred_nu, torch.Tensor):
+                    nu_accum[pred_id] = current_nu + pred_nu
+                else:
+                    pred_bounds = bounds_dict[pred_id]
+                    feature_shape = tuple(int(dim) for dim in (
+                        current_nu.input_shape if isinstance(current_nu, Patches) and current_nu.input_shape is not None
+                        else pred_nu.input_shape if isinstance(pred_nu, Patches) and pred_nu.input_shape is not None
+                        else pred_bounds.lb.shape
+                    ))
+                    lhs = (
+                        linear_form_patches_to_tensor(current_nu, feature_shape)
+                        if isinstance(current_nu, Patches)
+                        else current_nu.reshape(current_nu.shape[0], -1)
+                    )
+                    rhs = (
+                        linear_form_patches_to_tensor(pred_nu, feature_shape)
+                        if isinstance(pred_nu, Patches)
+                        else pred_nu.reshape(pred_nu.shape[0], -1)
+                    )
+                    nu_accum[pred_id] = lhs + rhs
             else:
-                nu_accum[pred_id] = pred_nu.clone()
+                nu_accum[pred_id] = pred_nu.detach() if isinstance(pred_nu, Patches) else pred_nu.clone()
 
     return lA
+
+
+def _lA_to_score_tensor(
+    layer_id: int,
+    value: torch.Tensor | Patches,
+    bounds: Bounds,
+    pre_layer: Layer,
+    batch_size: int,
+) -> torch.Tensor:
+    if isinstance(value, torch.Tensor):
+        return value.reshape(batch_size, -1)
+
+    output_shape = pre_layer.params.get("output_shape")
+    if not isinstance(output_shape, (tuple, list)):
+        if bounds.lb.dim() == 4:
+            input_shape = tuple(int(dim) for dim in bounds.lb.shape)
+        else:
+            raise ValueError(
+                f"BaBSR select_neurons: layer {layer_id} needs output_shape metadata to materialize Patches lA"
+            )
+    else:
+        input_shape = tuple(int(dim) for dim in output_shape)
+    dense = value.to_matrix(input_shape)
+    log.warning("BaBSR select_neurons: materializing patches lA for layer %s", layer_id)
+    if dense.ndim != 3:
+        raise ValueError(
+            f"BaBSR select_neurons: expected dense lA [B, rows, D], got {tuple(dense.shape)}"
+        )
+    if dense.shape[1] == 1:
+        return dense[:, 0, :]
+    return dense.reshape(batch_size, -1)
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +496,8 @@ class BaBSRBranching(BranchingStrategy):
             if pre_lid not in lA_dict or pre_lid not in bounds_dict:
                 continue
 
-            lA = lA_dict[pre_lid].reshape(B, -1)
+            pre_layer = net.by_id[pre_lid]
+            lA = _lA_to_score_tensor(pre_lid, lA_dict[pre_lid], bounds_dict[pre_lid], pre_layer, B)
             bnd = bounds_dict[pre_lid]
             lb_t, ub_t = bnd.lb, bnd.ub
             if lb_t.dim() < 2:
@@ -434,7 +531,6 @@ class BaBSRBranching(BranchingStrategy):
             # producing a tighter overall BaB tree. (``min`` is an alternate
             # reduction used in some BFS variants but empirically selects
             # lower-impact neurons on ResNet-scale networks.)
-            pre_layer = net.by_id[pre_lid]
             b_layer = _get_pre_act_bias(pre_layer, D, device=device, dtype=dtype)
             b_layer_b = b_layer.unsqueeze(0).expand(B, -1)
             bias_cand_1 = b_layer_b * (slope_ratio - 1.0)

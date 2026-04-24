@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# pyright: reportImportCycles=false
+
 """Shared bounds dispatcher and rank-3 expansion helpers.
 
 All consumers of bounds MUST route through dispatch_* functions. Direct isinstance
@@ -8,15 +10,23 @@ to every consumer. Wave 3-4 fills the Patches branches.
 """
 
 import importlib
+import logging
 from collections.abc import Mapping, Sequence
 from typing import Protocol, TypeVar, cast, overload
 
 import torch
 
 from act.back_end.bab.eta import EtaState
+from act.back_end.config import BackendConfig
 from act.back_end.core import Bounds, Layer
 from act.back_end.layer_schema import LayerKind
 from act.back_end.patches import Patches
+
+
+log = logging.getLogger(__name__)
+
+_VALID_CONV_MODES = {"matrix", "patches"}
+_conv_mode = BackendConfig.from_yaml().conv_mode
 
 
 class LinearBoundLike(Protocol):
@@ -30,6 +40,17 @@ FrameLike = tuple[torch.Tensor, torch.Tensor]
 
 
 LinearBoundT = TypeVar("LinearBoundT", bound=LinearBoundLike)
+
+
+def get_conv_mode() -> str:
+    return _conv_mode
+
+
+def set_conv_mode(mode: str) -> None:
+    if mode not in _VALID_CONV_MODES:
+        raise ValueError(f"Invalid conv_mode {mode!r}; expected one of {_VALID_CONV_MODES}")
+    global _conv_mode
+    _conv_mode = mode
 
 
 def is_rank3_view(x: object) -> bool:
@@ -146,10 +167,59 @@ def dispatch_conv_forward(
     post_activation: bool,
     device: torch.device,
     dtype: torch.dtype,
-) -> tuple[Bounds, Bounds, LinearBoundLike, FrameLike]:
-    if _contains_patches(parent_lins):
-        raise NotImplementedError("Filled in W3 — conv patches forward")
+) -> tuple[Bounds, Bounds, LinearBoundLike | Patches, FrameLike]:
     tf_cnn = importlib.import_module("act.back_end.dual_tf.tf_cnn")
+    tf_cnn_patches = importlib.import_module("act.back_end.dual_tf.tf_cnn_patches")
+
+    conv_mode = get_conv_mode()
+    if conv_mode == "patches":
+        if _contains_patches(parent_lins):
+            return tf_cnn_patches.forward_conv2d_patches(
+                layer,
+                parent_boxes,
+                list(parent_lins),
+                parent_frames,
+                preds,
+                post_activation,
+                device,
+                dtype,
+            )
+        log.warning(
+            "dispatch_conv_forward: conv_mode=patches received LinearBound input; materializing and falling back to matrix path"
+        )
+        materialized = [materialize_if_needed(cast(LinearBoundLike, parent_lins[0]))]
+        return tf_cnn.forward_conv2d(
+            layer,
+            parent_boxes,
+            cast(list[object], materialized),
+            parent_frames,
+            preds,
+            post_activation,
+            device,
+            dtype,
+        )
+
+    if _contains_patches(parent_lins):
+        log.warning(
+            "dispatch_conv_forward: conv_mode=matrix received Patches input; converting to dense LinearBound"
+        )
+        input_shape = layer.params.get("input_shape")
+        converted = [
+            tf_cnn_patches._patches_to_linear_bound(
+                cast(Patches, parent_lins[0]),
+                cast(tuple[int, int, int, int], cast(Patches, parent_lins[0]).input_shape or input_shape),
+            )
+        ]
+        return tf_cnn.forward_conv2d(
+            layer,
+            parent_boxes,
+            cast(list[object], converted),
+            parent_frames,
+            preds,
+            post_activation,
+            device,
+            dtype,
+        )
 
     return tf_cnn.forward_conv2d(
         layer,

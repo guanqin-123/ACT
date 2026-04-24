@@ -13,7 +13,7 @@
 import importlib
 
 import torch
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, cast
 from act.back_end.core import Bounds, Fact, Layer, Net, ConSet
 from act.back_end.layer_schema import LayerKind
 from act.back_end.transfer_functions import TransferFunction
@@ -24,9 +24,10 @@ from .tf_mlp import (
     forward_bn, forward_lrelu, forward_identity, forward_reshape,
 )
 from .tf_cnn import (
-    backward_conv2d, backward_maxpool2d, backward_avgpool2d,
-    forward_conv2d, forward_maxpool2d, forward_avgpool2d,
+    backward_maxpool2d, backward_avgpool2d,
+    forward_maxpool2d, forward_avgpool2d,
 )
+from .tf_cnn_patches import backward_conv2d_patches
 from .tf_smooth import (
     backward_sigmoid, backward_tanh,
     forward_sigmoid, forward_tanh,
@@ -42,6 +43,12 @@ from .tf_forward import (
     forward_add, backward_add,
     forward_concat, backward_concat,
 )
+
+
+def _forward_conv2d_dispatch(*args, **kwargs):
+    from act.back_end.bounds_dispatch import dispatch_conv_forward
+
+    return dispatch_conv_forward(*args, **kwargs)
 
 
 class DualTF(TransferFunction):
@@ -73,7 +80,7 @@ class DualTF(TransferFunction):
         "LEAKY_RELU":               forward_lrelu,   # alias (not a LayerKind member)
         LayerKind.SIGMOID.value:    forward_sigmoid,
         LayerKind.TANH.value:       forward_tanh,
-        LayerKind.CONV2D.value:     forward_conv2d,
+        LayerKind.CONV2D.value:     _forward_conv2d_dispatch,
         LayerKind.MAXPOOL2D.value:  forward_maxpool2d,
         LayerKind.AVGPOOL2D.value:  forward_avgpool2d,
         LayerKind.FLATTEN.value:    forward_reshape,
@@ -107,7 +114,7 @@ class DualTF(TransferFunction):
         "LEAKY_RELU":               backward_relu,   # alias (not a LayerKind member)
         LayerKind.SIGMOID.value:    backward_sigmoid,
         LayerKind.TANH.value:       backward_tanh,
-        LayerKind.CONV2D.value:     backward_conv2d,
+        LayerKind.CONV2D.value:     backward_conv2d_patches,
         LayerKind.MAXPOOL2D.value:  backward_maxpool2d,
         LayerKind.AVGPOOL2D.value:  backward_avgpool2d,
         LayerKind.FLATTEN.value:    backward_identity,
@@ -155,8 +162,8 @@ class DualTF(TransferFunction):
                         input_ub = before[layer.id].bounds.ub
                         break
                     elif "lb" in layer.params and "ub" in layer.params:
-                        input_lb = layer.params["lb"]
-                        input_ub = layer.params["ub"]
+                        input_lb = cast(torch.Tensor, layer.params["lb"])
+                        input_ub = cast(torch.Tensor, layer.params["ub"])
                         break
             if input_lb is None or input_ub is None:
                 input_lb, input_ub = input_bounds.lb, input_bounds.ub

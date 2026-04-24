@@ -2,21 +2,26 @@ from __future__ import annotations
 
 # pyright: reportPrivateUsage=false, reportPrivateLocalImportUsage=false, reportUnknownMemberType=false, reportMissingTypeArgument=false, reportUnannotatedClassAttribute=false, reportUnusedFunction=false, reportUnusedCallResult=false, reportUnknownArgumentType=false, reportUnknownLambdaType=false, reportUnknownVariableType=false, reportImplicitStringConcatenation=false
 
+from contextlib import contextmanager
 from pathlib import Path
+from typing import cast
 
 import pytest
 import torch
 
 from act.back_end.bab.eta import EtaState
 from act.back_end.bounds_dispatch import (
+    LinearBoundLike,
     dispatch_add_forward,
     dispatch_bn_forward,
     dispatch_conv_forward,
     dispatch_pool_forward,
     dispatch_relu_backward,
     expand_rank3,
+    get_conv_mode,
     is_rank3_view,
     materialize_if_needed,
+    set_conv_mode,
 )
 from act.back_end.core import Bounds, Layer
 from act.back_end.dual_tf.tf_cnn import (
@@ -24,6 +29,7 @@ from act.back_end.dual_tf.tf_cnn import (
     forward_conv2d,
     forward_maxpool2d,
 )
+from act.back_end.dual_tf.tf_cnn_patches import forward_conv2d_patches
 from act.back_end.dual_tf.tf_forward import Frame, LinearBound, forward_add
 from act.back_end.dual_tf.tf_mlp import backward_relu, forward_bn
 from act.back_end.layer_schema import LayerKind
@@ -59,7 +65,7 @@ def _assert_linear_bound_close(actual: LinearBound, expected: LinearBound) -> No
 
 
 def _assert_forward_tuple_close(
-    actual: tuple[Bounds, Bounds, LinearBound, Frame],
+    actual: tuple[Bounds, Bounds, LinearBoundLike | Patches, Frame],
     expected: tuple[Bounds, Bounds, LinearBound, Frame],
 ) -> None:
     actual_stored, actual_out, actual_lin, actual_frame = actual
@@ -68,9 +74,29 @@ def _assert_forward_tuple_close(
     torch.testing.assert_close(actual_stored.ub, expected_stored.ub)
     torch.testing.assert_close(actual_out.lb, expected_out.lb)
     torch.testing.assert_close(actual_out.ub, expected_out.ub)
+    assert isinstance(actual_lin, LinearBound)
     _assert_linear_bound_close(actual_lin, expected_lin)
     torch.testing.assert_close(actual_frame[0], expected_frame[0])
     torch.testing.assert_close(actual_frame[1], expected_frame[1])
+
+
+@contextmanager
+def _conv_mode(mode: str):
+    previous = get_conv_mode()
+    set_conv_mode(mode)
+    try:
+        yield
+    finally:
+        set_conv_mode(previous)
+
+
+def _identity_patches(batch: int, channels: int, height: int, width: int) -> Patches:
+    return Patches(
+        identity=1,
+        shape=(channels, batch, height, width, channels, 1, 1),
+        input_shape=(batch, channels, height, width),
+        output_shape=(batch, channels, height, width),
+    )
 
 
 def _make_linear_bound(batch: int = 2, out_dim: int = 4, input_dim: int = 3) -> LinearBound:
@@ -79,6 +105,12 @@ def _make_linear_bound(batch: int = 2, out_dim: int = 4, input_dim: int = 3) -> 
     b_lb = torch.arange(batch * out_dim, dtype=torch.float32).reshape(batch, out_dim) / 20.0
     b_ub = b_lb + 0.25
     return LinearBound(A_lb=A_lb, b_lb=b_lb, A_ub=A_ub, b_ub=b_ub)
+
+
+def _make_identity_linear_bound(batch: int, dim: int) -> LinearBound:
+    eye = torch.eye(dim, dtype=torch.float32).unsqueeze(0).expand(batch, -1, -1).clone()
+    zeros = torch.zeros((batch, dim), dtype=torch.float32)
+    return LinearBound(A_lb=eye, b_lb=zeros, A_ub=eye.clone(), b_ub=zeros.clone())
 
 
 def _make_conv_case(*, stride: int = 1, padding: int = 1) -> tuple[Layer, list[Bounds], list[LinearBound], list[tuple[torch.Tensor, torch.Tensor]], list[int], bool, torch.device, torch.dtype]:
@@ -112,6 +144,15 @@ def _make_conv_case(*, stride: int = 1, padding: int = 1) -> tuple[Layer, list[B
         _t([[0.3, 0.4, 0.5], [0.4, 0.3, 0.6]]),
     )
     return layer, [parent_box], [parent_lin], [parent_frame], [0], False, torch.device("cpu"), torch.float32
+
+
+def _make_conv_patch_case(*, stride: int = 1, padding: int = 1) -> tuple[Layer, list[Bounds], list[tuple[torch.Tensor, torch.Tensor]], list[int], bool, torch.device, torch.dtype]:
+    layer, parent_boxes, _parent_lins, _parent_frames, preds, post_activation, device, dtype = _make_conv_case(stride=stride, padding=padding)
+    frame = (
+        torch.linspace(-0.4, 0.2, steps=32, dtype=torch.float32).reshape(2, 16),
+        torch.linspace(0.1, 0.8, steps=32, dtype=torch.float32).reshape(2, 16),
+    )
+    return layer, parent_boxes, [frame], preds, post_activation, device, dtype
 
 
 def _make_bn_case() -> tuple[object, list[Bounds], list[LinearBound], list[tuple[torch.Tensor, torch.Tensor]], list[int], bool, torch.device, torch.dtype]:
@@ -279,34 +320,65 @@ def test_dispatch_conv_forward_matrix_matches_direct_stride_two() -> None:
     _assert_forward_tuple_close(dispatched, direct)
 
 
-def test_dispatch_conv_forward_patches_raises() -> None:
-    layer, parent_boxes, _parent_lins, parent_frames, preds, post_activation, device, dtype = _make_conv_case()
-    with pytest.raises(NotImplementedError, match="Filled in W3"):
-        dispatch_conv_forward(
+def test_dispatch_conv_forward_patches_matches_kernel() -> None:
+    layer, parent_boxes, parent_frames, preds, post_activation, device, dtype = _make_conv_patch_case()
+    parent_patches = _identity_patches(batch=2, channels=1, height=4, width=4)
+    identity_frame = (
+        torch.linspace(-0.4, 0.2, steps=32, dtype=torch.float32).reshape(2, 16),
+        torch.linspace(0.1, 0.8, steps=32, dtype=torch.float32).reshape(2, 16),
+    )
+    with _conv_mode("patches"):
+        direct = forward_conv2d_patches(
             layer,
             parent_boxes,
-            [Patches()],
-            parent_frames,
+            [parent_patches],
+            [identity_frame],
             preds,
             post_activation,
             device,
             dtype,
         )
-
-
-def test_dispatch_conv_forward_identity_patches_raises() -> None:
-    layer, parent_boxes, _parent_lins, parent_frames, preds, post_activation, device, dtype = _make_conv_case()
-    with pytest.raises(NotImplementedError, match="Filled in W3"):
-        dispatch_conv_forward(
+        dispatched = dispatch_conv_forward(
             layer,
             parent_boxes,
-            [Patches(identity=1)],
-            parent_frames,
+            [parent_patches],
+            [identity_frame],
             preds,
             post_activation,
             device,
             dtype,
         )
+    torch.testing.assert_close(dispatched[0].lb, direct[0].lb)
+    torch.testing.assert_close(dispatched[0].ub, direct[0].ub)
+    assert isinstance(dispatched[2], Patches)
+    assert isinstance(direct[2], Patches)
+    torch.testing.assert_close(
+        dispatched[2].to_matrix((2, 1, 4, 4)),
+        direct[2].to_matrix((2, 1, 4, 4)),
+    )
+
+
+def test_dispatch_conv_forward_identity_patches_matches_kernel() -> None:
+    layer, parent_boxes, parent_frames, preds, post_activation, device, dtype = _make_conv_patch_case()
+    parent_patches = _identity_patches(batch=2, channels=1, height=4, width=4)
+    identity_frame = (
+        torch.linspace(-0.4, 0.2, steps=32, dtype=torch.float32).reshape(2, 16),
+        torch.linspace(0.1, 0.8, steps=32, dtype=torch.float32).reshape(2, 16),
+    )
+    with _conv_mode("matrix"):
+        dispatched = dispatch_conv_forward(
+            layer,
+            parent_boxes,
+            [parent_patches],
+            [identity_frame],
+            preds,
+            post_activation,
+            device,
+            dtype,
+        )
+    identity_lin = _make_identity_linear_bound(batch=2, dim=16)
+    direct = forward_conv2d(layer, parent_boxes, [identity_lin], parent_frames, preds, post_activation, device, dtype)
+    _assert_forward_tuple_close(cast(tuple[Bounds, Bounds, LinearBound, Frame], dispatched), direct)
 
 
 def test_dispatch_relu_backward_matrix_matches_direct_and_patches_raise() -> None:
