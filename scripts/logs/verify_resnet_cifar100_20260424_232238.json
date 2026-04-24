@@ -1,0 +1,47 @@
+{
+  "generated_at": "2026-04-24T23:22:38",
+  "runs": [
+    {
+      "instance": "3995",
+      "vnnlib_name": "CIFAR100_resnet_medium_prop_idx_3995_sidx_7978_eps_0.0039.vnnlib",
+      "conv_mode": "matrix",
+      "strict_patches": false,
+      "status": "UNKNOWN",
+      "wall_time_s": 60.08072352409363,
+      "nodes": 415,
+      "peak_vram_gb": 83.188460032,
+      "conv_materializations": 0,
+      "warning_count": 0,
+      "expected_statuses": [
+        "CERTIFIED",
+        "UNKNOWN",
+        "TIMEOUT"
+      ],
+      "abcrown_status": "CERTIFIED",
+      "abcrown_wall_s": 43.5,
+      "abcrown_nodes": 516,
+      "error": null,
+      "warning_samples": []
+    },
+    {
+      "instance": "8028",
+      "vnnlib_name": "CIFAR100_resnet_medium_prop_idx_8028_sidx_5238_eps_0.0039.vnnlib",
+      "conv_mode": "matrix",
+      "strict_patches": false,
+      "status": "FALSIFIED",
+      "wall_time_s": 0.3479800224304199,
+      "nodes": 1,
+      "peak_vram_gb": 5.196086784,
+      "conv_materializations": 0,
+      "warning_count": 0,
+      "expected_statuses": [
+        "FALSIFIED"
+      ],
+      "abcrown_status": "FALSIFIED",
+      "abcrown_wall_s": 0.3,
+      "abcrown_nodes": 1,
+      "error": null,
+      "warning_samples": []
+    }
+  ]
+}
