@@ -738,3 +738,35 @@ def test_conv2d_patches_matrix_parity(
     matrix = _run_forward_matrix(layer, bounds, frame)
     torch.testing.assert_close(patches[0].lb, matrix[0].lb, rtol=1e-5, atol=1e-7)
     torch.testing.assert_close(patches[0].ub, matrix[0].ub, rtol=1e-5, atol=1e-7)
+
+
+def test_dense_matrix_to_patches_perf_no_python_loop_blowup() -> None:
+    # Regression for the seven-deep Python-loop hang in
+    # _dense_matrix_to_patches on CIFAR-100 ResNet-medium first conv
+    # (B=16, out_c=16, OH=OW=32, in_c=3, kh=kw=3 -> ~7M scalar CUDA
+    # dispatches, ~10 minutes wall-time before fix). The vectorized
+    # path completes in <1s on CPU; we set the budget at 5s to allow
+    # for slow CI runners.
+    from act.back_end.dual_tf.tf_cnn_patches import _dense_matrix_to_patches
+    import time
+
+    torch.manual_seed(0)
+    batch_size = 16
+    in_c, in_h, in_w = 3, 32, 32
+    out_c, k = 16, 3
+    out_h, out_w = 32, 32
+    matrix = torch.randn(batch_size, out_c * out_h * out_w, in_c * in_h * in_w, dtype=torch.float64)
+
+    t0 = time.time()
+    pieces = _dense_matrix_to_patches(
+        matrix,
+        (batch_size, in_c, in_h, in_w),
+        out_c,
+        (out_h, out_w),
+        (k, k),
+        1,
+        1,
+    )
+    elapsed = time.time() - t0
+    assert pieces.shape == (out_c, batch_size, out_h, out_w, in_c, k, k), pieces.shape
+    assert elapsed < 5.0, f"perf regression: dense->patches took {elapsed:.2f}s (was ~600s pre-fix)"

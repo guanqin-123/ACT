@@ -177,6 +177,74 @@ def _patches_to_linear_bound(
     return LinearBound(A_lb=dense, b_lb=zeros, A_ub=dense.clone(), b_ub=zeros.clone())
 
 
+def _interval_conv_box(layer: Layer, box: Bounds) -> Bounds:
+    tf_forward = importlib.import_module("act.back_end.dual_tf.tf_forward")
+    new_lb, new_ub = tf_forward._fwd_conv2d_interval(layer, box.lb, box.ub)
+    return Bounds(lb=new_lb, ub=new_ub)
+
+
+def _gather_patches_vectorized(
+    matrix: torch.Tensor,
+    input_shape: tuple[int, int, int, int],
+    out_channels: int,
+    output_hw: tuple[int, int],
+    kernel_size: tuple[int, int],
+    stride: tuple[int, int],
+    padding: tuple[int, int],
+) -> torch.Tensor:
+    # Vectorised mapping from a dense [B, out_c*OH*OW, in_c*IH*IW] CROWN A
+    # matrix to a [out_c, B, OH, OW, in_c, kh, kw] patches tensor.
+    #
+    # The original implementation walked seven nested Python loops doing one
+    # CUDA scalar copy per iteration; on CIFAR-100 ResNet-medium that was
+    # millions of dispatches per BaB iter and caused a 10+ minute hang in
+    # ``forward_conv2d_patches``. This version stays inside a constant
+    # number of CUDA kernels.
+    batch_size, in_channels, in_h, in_w = input_shape
+    out_h, out_w = output_hw
+    k_h, k_w = kernel_size
+    stride_h, stride_w = stride
+    pad_h, pad_w = padding
+    device = matrix.device
+
+    if matrix.shape != (batch_size, out_channels * out_h * out_w, in_channels * in_h * in_w):
+        raise ValueError(
+            "matrix shape "
+            f"{tuple(matrix.shape)} does not match expected "
+            f"{(batch_size, out_channels * out_h * out_w, in_channels * in_h * in_w)}"
+        )
+
+    matrix_view = matrix.view(batch_size, out_channels, out_h, out_w, in_channels, in_h, in_w)
+
+    oh_arr = torch.arange(out_h, device=device)
+    ow_arr = torch.arange(out_w, device=device)
+    kh_arr = torch.arange(k_h, device=device)
+    kw_arr = torch.arange(k_w, device=device)
+
+    in_y = oh_arr[:, None] * stride_h - pad_h + kh_arr[None, :]
+    in_x = ow_arr[:, None] * stride_w - pad_w + kw_arr[None, :]
+
+    valid_y = (in_y >= 0) & (in_y < in_h)
+    valid_x = (in_x >= 0) & (in_x < in_w)
+    in_y_clamped = in_y.clamp(0, max(in_h - 1, 0))
+    in_x_clamped = in_x.clamp(0, max(in_w - 1, 0))
+
+    iy_idx = in_y_clamped.view(1, 1, out_h, 1, 1, k_h, 1).expand(
+        batch_size, out_channels, out_h, out_w, in_channels, k_h, in_w
+    )
+    gathered_y = torch.gather(matrix_view, 5, iy_idx)
+
+    ix_idx = in_x_clamped.view(1, 1, 1, out_w, 1, 1, k_w).expand(
+        batch_size, out_channels, out_h, out_w, in_channels, k_h, k_w
+    )
+    pieces = torch.gather(gathered_y, 6, ix_idx)
+
+    valid = valid_y.view(1, 1, out_h, 1, 1, k_h, 1) & valid_x.view(1, 1, 1, out_w, 1, 1, k_w)
+    pieces = pieces * valid
+
+    return pieces.permute(1, 0, 2, 3, 4, 5, 6).contiguous()
+
+
 def _dense_matrix_to_patches(
     matrix: torch.Tensor,
     input_shape: tuple[int, int, int, int],
@@ -186,30 +254,15 @@ def _dense_matrix_to_patches(
     stride: int | tuple[int, int],
     padding: int | tuple[int, int],
 ) -> torch.Tensor:
-    batch_size, in_channels, in_h, in_w = input_shape
-    out_h, out_w = output_hw
-    k_h, k_w = kernel_size
-    stride_h, stride_w = _normalize_pair(cast(int | tuple[int, int], stride))
-    pad_h, pad_w = _normalize_pair(cast(int | tuple[int, int], padding))
-    pieces = matrix.new_zeros((out_channels, batch_size, out_h, out_w, in_channels, k_h, k_w))
-    for batch_idx in range(batch_size):
-        flat = matrix[batch_idx]
-        for out_c in range(out_channels):
-            for oh in range(out_h):
-                for ow in range(out_w):
-                    row_idx = out_c * (out_h * out_w) + oh * out_w + ow
-                    top = oh * stride_h - pad_h
-                    left = ow * stride_w - pad_w
-                    for in_c in range(in_channels):
-                        for kh in range(k_h):
-                            in_y = top + kh
-                            if 0 <= in_y < in_h:
-                                for kw in range(k_w):
-                                    in_x = left + kw
-                                    if 0 <= in_x < in_w:
-                                        col_idx = in_c * (in_h * in_w) + in_y * in_w + in_x
-                                        pieces[out_c, batch_idx, oh, ow, in_c, kh, kw] = flat[row_idx, col_idx]
-    return pieces
+    return _gather_patches_vectorized(
+        matrix,
+        input_shape,
+        out_channels,
+        output_hw,
+        kernel_size,
+        _normalize_pair(cast(int | tuple[int, int], stride)),
+        _normalize_pair(cast(int | tuple[int, int], padding)),
+    )
 
 
 def _matrix_to_patches(
@@ -222,28 +275,15 @@ def _matrix_to_patches(
     stride: tuple[int, int],
     padding: tuple[int, int],
 ) -> torch.Tensor:
-    batch_size, in_channels, in_h, in_w = input_shape
-    out_h, out_w = output_hw
-    k_h, k_w = kernel_size
-    stride_h, stride_w = stride
-    pad_h, pad_w = padding
-    pieces = matrix.new_zeros((out_channels, batch_size, out_h, out_w, in_channels, k_h, k_w))
-    for out_c in range(out_channels):
-        for oh in range(out_h):
-            for ow in range(out_w):
-                row_idx = out_c * (out_h * out_w) + oh * out_w + ow
-                top = oh * stride_h - pad_h
-                left = ow * stride_w - pad_w
-                for in_c in range(in_channels):
-                    for kh in range(k_h):
-                        in_y = top + kh
-                        if 0 <= in_y < in_h:
-                            for kw in range(k_w):
-                                in_x = left + kw
-                                if 0 <= in_x < in_w:
-                                    col_idx = in_c * (in_h * in_w) + in_y * in_w + in_x
-                                    pieces[out_c, :, oh, ow, in_c, kh, kw] = matrix[:, row_idx, col_idx]
-    return pieces
+    return _gather_patches_vectorized(
+        matrix,
+        input_shape,
+        out_channels,
+        output_hw,
+        kernel_size,
+        stride,
+        padding,
+    )
 
 
 def linear_form_tensor_to_patches(
@@ -527,27 +567,41 @@ def forward_conv2d_patches(
         parent_lin.inserted_zeros,
     )
     if parent_lin.is_identity:
+        # Fast path: parent_lin = identity Patches representing f(x) = x.
+        # The CROWN linear coefficients of Conv(W,b) ∘ identity are exactly
+        # W broadcast across every output spatial position. Building the
+        # patches tensor directly avoids a Patches→dense→Patches round-trip
+        # whose dense intermediate caused OOM on CIFAR-100 ResNet-medium.
+        weight = cast(torch.Tensor, layer.params["weight"])
+        out_c = int(weight.shape[0])
+        in_c = int(weight.shape[1])
+        k_h = int(weight.shape[-2])
+        k_w = int(weight.shape[-1])
+        out_h = int(output_shape[-2])
+        out_w = int(output_shape[-1])
+        pieces = (
+            weight.view(out_c, 1, 1, 1, in_c, k_h, k_w)
+            .expand(out_c, batch_size, out_h, out_w, in_c, k_h, k_w)
+            .contiguous()
+        )
+        # Box still goes through the dense Patches→LinearBound round-trip
+        # because the tight CROWN box requires the cumulative linear form
+        # evaluated on the original input box; replacing it with
+        # `_fwd_conv2d_interval(parent_box)` gives a strictly looser bound
+        # (verified by test_parity_matrix_vs_patches_seeded). Cheap-and-tight
+        # box computation is a TODO for non-identity composition; for now
+        # the round-trip caps batch≈4 on CIFAR-100 ResNet-medium.
         tf_cnn = importlib.import_module("act.back_end.dual_tf.tf_cnn")
-        dense_parent = _patches_to_linear_bound(parent_lin, input_shape)
-        dense_result = tf_cnn.forward_conv2d(
+        box_dense_parent = _patches_to_linear_bound(parent_lin, input_shape)
+        box_dense_result = tf_cnn.forward_conv2d(
             layer,
             parent_boxes,
-            [dense_parent],
+            [box_dense_parent],
             parent_frames,
             preds,
             False,
             device,
             dtype,
-        )
-        weight = cast(torch.Tensor, layer.params["weight"])
-        pieces = _dense_matrix_to_patches(
-            dense_result[2].A_lb,
-            input_shape,
-            output_shape[1],
-            output_shape[-2:],
-            (int(weight.shape[-2]), int(weight.shape[-1])),
-            new_stride,
-            new_padding,
         )
         lin = Patches(
             patches=pieces,
@@ -557,37 +611,78 @@ def forward_conv2d_patches(
             input_shape=input_shape,
             output_shape=output_shape,
         )
-        return dense_result[0], dense_result[1], lin, parent_frames[0]
+        return box_dense_result[0], box_dense_result[1], lin, parent_frames[0]
 
+    # Translation-invariant kernel fusion fast-path.
+    # When parent_lin came from another conv on the same input (the only
+    # case our v1 produces), parent_lin.patches[c1,b,oh,ow,c0,kh,kw] is
+    # the same kernel W1[c1,c0,kh,kw] at every spatial position. Fusing
+    # Conv(W2,b2,s2,p2) ∘ Conv(W1,b1,s1,p1) collapses to a single
+    # F.conv_transpose2d on the kernels (proof: chain of two convs
+    # rewrites as one conv with kernel = transposed-conv of W2 and W1
+    # at stride s1, and stride/padding from compute_patches_stride_padding).
+    # This avoids the O(B*OH*OW*in_c*IH*IW) dense round-trip that OOMed
+    # CIFAR-100 ResNet-medium at batch≥8.
+    parent_patches = parent_lin.patches
+    if parent_patches is None:
+        raise RuntimeError(
+            "non-identity parent_lin.patches=None — invariant violated by upstream"
+        )
+    out_c1 = int(parent_patches.shape[0])
+    in_c0 = int(parent_patches.shape[4])
+    k1h = int(parent_patches.shape[-2])
+    k1w = int(parent_patches.shape[-1])
+    weight = cast(torch.Tensor, layer.params["weight"])
+    out_c2 = int(weight.shape[0])
+    if int(weight.shape[1]) != out_c1:
+        raise RuntimeError(
+            f"channel mismatch: parent out_c1={out_c1} vs layer in_c={int(weight.shape[1])}"
+        )
+    k2h = int(weight.shape[-2])
+    k2w = int(weight.shape[-1])
+    prev_stride_h, prev_stride_w = _normalize_pair(
+        cast(int | tuple[int, int], parent_lin.stride)
+    )
+    if prev_stride_h != prev_stride_w:
+        raise NotImplementedError(_S1_ERROR)
+
+    parent_kernel = parent_patches[:, 0, 0, 0, :, :, :].contiguous()
+    fused_kernel = F.conv_transpose2d(
+        weight,
+        parent_kernel,
+        stride=(prev_stride_h, prev_stride_w),
+    )
+    fused_kh = int(fused_kernel.shape[-2])
+    fused_kw = int(fused_kernel.shape[-1])
+    expected_kh = k1h + (k2h - 1) * prev_stride_h
+    expected_kw = k1w + (k2w - 1) * prev_stride_w
+    if fused_kh != expected_kh or fused_kw != expected_kw:
+        raise RuntimeError(
+            f"fused kernel shape {(fused_kh, fused_kw)} != expected "
+            f"{(expected_kh, expected_kw)}"
+        )
+
+    out_h = int(output_shape[-2])
+    out_w = int(output_shape[-1])
+    pieces = (
+        fused_kernel.view(out_c2, 1, 1, 1, in_c0, fused_kh, fused_kw)
+        .expand(out_c2, batch_size, out_h, out_w, in_c0, fused_kh, fused_kw)
+        .contiguous()
+    )
+
+    # See identity-branch note: the box must come from the cumulative
+    # linear form on the input frame, not from interval-conv on parent_box.
     tf_cnn = importlib.import_module("act.back_end.dual_tf.tf_cnn")
-    dense_parent = _patches_to_linear_bound(parent_lin, input_shape)
-    dense_result = tf_cnn.forward_conv2d(
+    box_dense_parent = _patches_to_linear_bound(parent_lin, input_shape)
+    box_dense_result = tf_cnn.forward_conv2d(
         layer,
         parent_boxes,
-        [dense_parent],
+        [box_dense_parent],
         parent_frames,
         preds,
         False,
         device,
         dtype,
-    )
-    prev_kernel_h = int(parent_lin.patches.shape[-2]) if parent_lin.patches is not None else 1
-    prev_kernel_w = int(parent_lin.patches.shape[-1]) if parent_lin.patches is not None else 1
-    cur_kernel_h = int(cast(torch.Tensor, layer.params["weight"]).shape[-2])
-    cur_kernel_w = int(cast(torch.Tensor, layer.params["weight"]).shape[-1])
-    prev_stride_h, prev_stride_w = _normalize_pair(cast(int | tuple[int, int], parent_lin.stride))
-    fused_kernel = (
-        prev_kernel_h + (cur_kernel_h - 1) * prev_stride_h,
-        prev_kernel_w + (cur_kernel_w - 1) * prev_stride_w,
-    )
-    pieces = _dense_matrix_to_patches(
-        dense_result[2].A_lb,
-        input_shape,
-        output_shape[1],
-        output_shape[-2:],
-        fused_kernel,
-        new_stride,
-        new_padding,
     )
     lin = Patches(
         patches=pieces,
@@ -597,7 +692,7 @@ def forward_conv2d_patches(
         input_shape=input_shape,
         output_shape=output_shape,
     )
-    return dense_result[0], dense_result[1], lin, parent_frames[0]
+    return box_dense_result[0], box_dense_result[1], lin, parent_frames[0]
 
 
 def backward_conv2d_patches(
