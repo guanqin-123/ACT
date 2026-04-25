@@ -1,0 +1,26 @@
+instance: 3995 mode: matrix
+verdict: UNKNOWN wall: 60.73s nodes: 495 vram: 83.3 GB
+bound_trace fields: ['min_slack_history', 'iteration_history', 'parent', 'depth', 'adam_trajectory']
+per-layer widths captured for 43 layers
+per-layer median/max widths:
+  L0: median_width=0.0293 max_width=0.0293 n_neurons_sampled=1000
+  L1: median_width=0.0293 max_width=0.0293 n_neurons_sampled=1000
+  L2: median_width=0.0228 max_width=0.2483 n_neurons_sampled=1000
+  L3: median_width=0.0228 max_width=0.2483 n_neurons_sampled=1000
+  L4: median_width=0.0857 max_width=0.3464 n_neurons_sampled=1000
+  L7: median_width=0.0355 max_width=0.2134 n_neurons_sampled=1000
+  L5: median_width=0.0857 max_width=0.3464 n_neurons_sampled=1000
+  L6: median_width=0.1599 max_width=0.9889 n_neurons_sampled=1000
+  L8: median_width=0.2161 max_width=0.9890 n_neurons_sampled=1000
+  L9: median_width=0.1487 max_width=0.3704 n_neurons_sampled=1000
+  L10: median_width=0.1487 max_width=0.3704 n_neurons_sampled=1000
+  L11: median_width=0.0000 max_width=0.0119 n_neurons_sampled=1000
+  L12: median_width=0.2161 max_width=0.9890 n_neurons_sampled=1000
+  L13: median_width=0.0417 max_width=0.3111 n_neurons_sampled=1000
+  L14: median_width=0.0417 max_width=0.3111 n_neurons_sampled=1000
+  L15: median_width=0.0000 max_width=0.0000 n_neurons_sampled=1000
+  L16: median_width=0.2161 max_width=0.9890 n_neurons_sampled=1000
+  L17: median_width=0.0492 max_width=0.0863 n_neurons_sampled=1000
+  L18: median_width=0.0492 max_width=0.0863 n_neurons_sampled=1000
+  L19: median_width=0.0000 max_width=0.0000 n_neurons_sampled=1000
+BASELINE_METRIC_OK
