@@ -20,6 +20,7 @@ from act.back_end.bab.eta import EtaState
 from act.back_end.bounds_dispatch import expand_rank3, materialize_if_needed
 from act.back_end.core import Bounds
 from act.back_end.dual_tf.tf_forward import LinearBound
+from act.back_end.solver.alpha_state import AlphaState
 from act.front_end.specs import OutputSpec, OutKind
 
 if TYPE_CHECKING:
@@ -95,20 +96,25 @@ class SpecBatchResult:
                across splits instead of being recomputed from scratch.
                None when no η was in play (root subproblem / fast path / the
                chunked evaluation path where per-chunk η is not aggregated).
-        out_alphas: Optional Dict[lid, Tensor[B, D_layer]] of Adam-optimised
-               ReLU relaxation slopes, keyed by ReLU layer id. Same warm-start
-               semantics as out_etas: BaB copies into the subproblem batch so
-               children inherit the parent's tuned α instead of re-deriving
-               from the default heuristic. None on the legacy / chunked path.
+        out_alphas: Optional AlphaState of Adam-optimised ReLU relaxation
+               slopes, keyed by (ReLU layer id, start_node_id). Phase 1 only
+               uses AlphaState.FINAL_SID = -1, but the container is typed for
+               future intermediate start nodes. Same warm-start semantics as
+               out_etas: BaB copies into the subproblem batch so children
+               inherit the parent's tuned α instead of re-deriving from the
+               default heuristic. None on the legacy / chunked path.
     """
     margins: torch.Tensor
     slack: torch.Tensor
     active_mask: torch.Tensor
     certified: torch.Tensor
     out_etas: Optional[EtaState] = None
-    out_alphas: Optional[Dict[int, torch.Tensor]] = None
+    out_alphas: Optional[AlphaState] = None
 
     def __post_init__(self) -> None:
+        raw_out_alphas = self.__dict__.get("out_alphas")
+        if isinstance(raw_out_alphas, dict):
+            object.__setattr__(self, "out_alphas", AlphaState.from_legacy(raw_out_alphas))
         assert self.margins.dim() == 2, f"margins must be [B, M], got {self.margins.shape}"
         assert self.slack.shape == self.margins.shape
         assert self.active_mask.shape == self.margins.shape

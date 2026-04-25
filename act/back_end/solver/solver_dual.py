@@ -12,12 +12,13 @@
 from __future__ import annotations
 import logging
 import torch
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Dict, List, Mapping, Optional, Tuple, Union, cast
 from act.back_end.bab.eta import EtaState, expand_eta_state
 from act.back_end.bounds_dispatch import materialize_if_needed
 from act.back_end.dual_tf.tf_forward import LinearBound
 from act.back_end.core import Bounds, Net
 from act.back_end.layer_schema import LayerKind
+from act.back_end.solver.alpha_state import AlphaState
 from act.back_end.solver.solver_base import Solver, SolverCaps
 from act.back_end.solver.spec_batching import (
     SpecBatch, SpecBatchResult, build_spec_batch, expand_bounds_dict,
@@ -124,7 +125,7 @@ class DualSolver(Solver):
         self.eta_iters = 20
         self.lr_eta = 0.05
         self._eta_state: Optional[EtaState] = None
-        self._alpha_state: Optional[Dict[int, torch.Tensor]] = None
+        self._alpha_state: AlphaState = AlphaState()
         self._last_bounds: Optional[Bounds] = None
         self._bound_trace: Optional["BoundTrace"] = None
         self._bound_trace_bab_iter: int = 0
@@ -145,7 +146,38 @@ class DualSolver(Solver):
     def clear_eta(self) -> None:
         self._eta_state = None
 
-    def set_alphas(self, alphas: Optional[Dict[int, torch.Tensor]]) -> None:
+    def _coerce_alpha_state(
+        self,
+        alphas: Union[Dict[int, torch.Tensor], AlphaState, None],
+    ) -> AlphaState:
+        device, dtype = get_default_device(), get_default_dtype()
+        if alphas is None:
+            return AlphaState()
+        if isinstance(alphas, AlphaState):
+            return alphas.to(device=device, dtype=dtype)
+        return AlphaState.from_legacy(
+            {lid: t.to(device=device, dtype=dtype) for lid, t in alphas.items()}
+        )
+
+    def _final_alpha_slice(
+        self,
+        alphas: Union[Dict[int, torch.Tensor], AlphaState, None],
+    ) -> Optional[Dict[int, torch.Tensor]]:
+        if alphas is None:
+            return None
+        if isinstance(alphas, AlphaState):
+            state = alphas.to(
+                device=get_default_device(),
+                dtype=get_default_dtype(),
+            )
+            return state.for_start_node(AlphaState.FINAL_SID)
+        device, dtype = get_default_device(), get_default_dtype()
+        return {lid: t.to(device=device, dtype=dtype) for lid, t in alphas.items()}
+
+    def set_alphas(
+        self,
+        alphas: Union[Dict[int, torch.Tensor], AlphaState, None],
+    ) -> None:
         """Install per-ReLU warm-start α (slopes) for the next backward pass.
 
         Mirrors :meth:`set_eta`. When set, ``evaluate_spec`` routes through
@@ -153,16 +185,10 @@ class DualSolver(Solver):
         of the default heuristic. BaB calls this with the parent
         subproblem's optimised α before evaluating a child node.
         """
-        if alphas is None:
-            self._alpha_state = None
-            return
-        device, dtype = get_default_device(), get_default_dtype()
-        self._alpha_state = {
-            lid: t.to(device=device, dtype=dtype) for lid, t in alphas.items()
-        }
+        self._alpha_state = self._coerce_alpha_state(alphas)
 
     def clear_alphas(self) -> None:
-        self._alpha_state = None
+        self._alpha_state = AlphaState()
 
     def set_bound_trace(
         self,
@@ -243,7 +269,7 @@ class DualSolver(Solver):
         lr: float = 0.1,
         force_kkt: bool = False,
         per_class_alpha: bool = False,
-        warm_alphas: Optional[Dict[int, torch.Tensor]] = None,
+        warm_alphas: Optional[Union[Dict[int, torch.Tensor], AlphaState]] = None,
         warm_etas: Optional[EtaState] = None,
     ) -> Union[
         torch.Tensor,
@@ -252,7 +278,7 @@ class DualSolver(Solver):
             torch.Tensor,
             Optional[torch.Tensor],
             torch.Tensor,
-            Optional[Dict[int, torch.Tensor]],
+            Optional[AlphaState],
             Optional[EtaState],
         ],
     ]:
@@ -276,7 +302,8 @@ class DualSolver(Solver):
             Tensor[B] for the legacy path, ``(obj, sce)`` for the explicit
             ``n_iters=0`` compatibility path, or
             ``(obj, sce, row_objectives, out_alphas, out_etas)`` when the joint
-            alpha/eta warm-start API is requested.
+            alpha/eta warm-start API is requested. ``out_alphas`` is an
+            :class:`AlphaState` carrying the FINAL_SID slice in Phase 1.
         """
         explicit_joint_api = (
             n_iters is not None
@@ -503,10 +530,11 @@ class DualSolver(Solver):
         alphas: Optional[Dict[int, torch.Tensor]],
     ) -> Tuple[List[torch.Tensor], torch.Tensor]:
         if alphas is None:
-            return handler(layer, nu, bounds_dict, preds)
+            alpha = self._alpha_state.get(layer.id, AlphaState.FINAL_SID)
+        else:
+            alpha = alphas.get(layer.id)
 
         kind = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
-        alpha = alphas.get(layer.id)
         if alpha is None or kind != LayerKind.RELU.value:
             return handler(layer, nu, bounds_dict, preds)
 
@@ -763,11 +791,12 @@ class DualSolver(Solver):
         net: Net,
         bounds_dict: Dict[int, Bounds],
         batch_size: int,
-        warm_alphas: Optional[Dict[int, torch.Tensor]],
+        warm_alphas: Optional[Union[Dict[int, torch.Tensor], AlphaState]],
         amb_masks: Optional[Dict[int, torch.Tensor]] = None,
     ) -> Dict[int, torch.nn.Parameter]:
         device, dtype = get_default_device(), get_default_dtype()
         alpha_shapes = self._discover_alpha_shapes(net, bounds_dict)
+        warm_alpha_dict = self._final_alpha_slice(warm_alphas)
         # Compute amb masks lazily if caller didn't supply pre-aligned ones.
         # Prepare-time sanitization: at stable positions we ALWAYS use the
         # heuristic value, never the warm-start value carried from a parent
@@ -784,8 +813,8 @@ class DualSolver(Solver):
             amb_aligned = self._align_amb_mask_to_batch(
                 amb_masks.get(lid), batch_size, lid
             ) if amb_masks.get(lid) is not None else None
-            if warm_alphas is not None and lid in warm_alphas:
-                init = warm_alphas[lid].to(device=device, dtype=dtype)
+            if warm_alpha_dict is not None and lid in warm_alpha_dict:
+                init = warm_alpha_dict[lid].to(device=device, dtype=dtype)
                 init_flat = (
                     init.flatten(start_dim=1)
                     if init.dim() >= 2
@@ -810,7 +839,7 @@ class DualSolver(Solver):
 
     def _runtime_alpha_dict(
         self,
-        alpha_params: Dict[int, torch.Tensor],
+        alpha_params: Mapping[int, torch.Tensor],
         target_batch: int,
     ) -> Dict[int, torch.Tensor]:
         runtime: Dict[int, torch.Tensor] = {}
@@ -848,7 +877,7 @@ class DualSolver(Solver):
 
     def _clone_tensor_dict(
         self,
-        tensors: Dict[int, torch.Tensor],
+        tensors: Mapping[int, torch.Tensor],
     ) -> Dict[int, torch.Tensor]:
         return {lid: tensor.detach().clone() for lid, tensor in tensors.items()}
 
@@ -892,7 +921,7 @@ class DualSolver(Solver):
     def _build_eta_state(
         self,
         template: EtaState,
-        values: Dict[int, torch.Tensor],
+        values: Mapping[int, torch.Tensor],
     ) -> EtaState:
         return EtaState(
             val=self._clone_tensor_dict(values),
@@ -901,28 +930,13 @@ class DualSolver(Solver):
         )
 
     def _expand_alpha_dict(
-        self, alphas: Dict[int, torch.Tensor], factor: int
+        self,
+        alphas: Union[Dict[int, torch.Tensor], AlphaState],
+        factor: int,
     ) -> Dict[int, torch.Tensor]:
         del factor
-        return {lid: t for lid, t in alphas.items()}
-
-    def _collapse_alpha_dict(
-        self, alphas: Dict[int, torch.Tensor], target_batch: int
-    ) -> Dict[int, torch.Tensor]:
-        if not alphas:
-            return alphas
-        result: Dict[int, torch.Tensor] = {}
-        for lid, t in alphas.items():
-            if t.shape[0] == target_batch:
-                result[lid] = t
-            elif t.shape[0] % target_batch == 0:
-                factor = t.shape[0] // target_batch
-                result[lid] = t.view(target_batch, factor, *t.shape[1:]).mean(dim=1)
-            else:
-                raise ValueError(
-                    f"DualSolver: cannot collapse alpha batch {t.shape[0]} to {target_batch}"
-                )
-        return result
+        alpha_dict = self._final_alpha_slice(alphas)
+        return {} if alpha_dict is None else {lid: t for lid, t in alpha_dict.items()}
 
     def _collapse_eta_state(self, eta: EtaState, target_batch: int) -> EtaState:
         if eta.batch_size == target_batch:
@@ -974,14 +988,14 @@ class DualSolver(Solver):
         lr: float,
         return_sce: bool,
         per_class_alpha: bool,
-        warm_alphas: Optional[Dict[int, torch.Tensor]],
+        warm_alphas: Optional[Union[Dict[int, torch.Tensor], AlphaState]],
         warm_etas: Optional[EtaState],
         force_kkt: bool,
     ) -> Tuple[
         torch.Tensor,
         Optional[torch.Tensor],
         torch.Tensor,
-        Optional[Dict[int, torch.Tensor]],
+        Optional[AlphaState],
         Optional[EtaState],
     ]:
         del per_class_alpha
@@ -1113,8 +1127,10 @@ class DualSolver(Solver):
         out_alphas = (
             None
             if not alpha_params
-            else self._clone_tensor_dict(
-                best_alpha_params if best_alpha_params is not None else alpha_params
+            else AlphaState.from_legacy(
+                self._clone_tensor_dict(
+                    best_alpha_params if best_alpha_params is not None else alpha_params
+                )
             )
         )
 
@@ -1208,7 +1224,7 @@ class DualSolver(Solver):
         )
 
         optimized_eta_expanded: Optional[EtaState] = None
-        optimized_alpha_expanded: Optional[Dict[int, torch.Tensor]] = None
+        optimized_alpha_expanded: Optional[AlphaState] = None
         with torch.set_grad_enabled(enable_grad):
             if chunk_size is None or spec.M <= chunk_size:
                 bounds_k = expand_bounds_dict(bounds_dict, spec.M, materialize=materialize)
@@ -1226,7 +1242,7 @@ class DualSolver(Solver):
                     # triggers the joint KKT branch in compute_bound.
                     warm_alphas = (
                         self._expand_alpha_dict(saved_alpha, spec.M)
-                        if saved_alpha is not None
+                        if not saved_alpha.is_empty()
                         else None
                     )
                     compute_result = self.compute_bound(
@@ -1273,13 +1289,18 @@ class DualSolver(Solver):
             elif optimized_eta_expanded.batch_size % B == 0:
                 out_etas = self._collapse_eta_state(optimized_eta_expanded, B)
 
-        out_alphas: Optional[Dict[int, torch.Tensor]] = None
-        if optimized_alpha_expanded is not None and optimized_alpha_expanded:
-            sample_batch = next(iter(optimized_alpha_expanded.values())).shape[0]
-            if sample_batch == B:
-                out_alphas = optimized_alpha_expanded
-            elif sample_batch % B == 0:
-                out_alphas = self._collapse_alpha_dict(optimized_alpha_expanded, B)
+        out_alphas: Optional[AlphaState] = None
+        if optimized_alpha_expanded is not None:
+            final_alphas = optimized_alpha_expanded.for_start_node(AlphaState.FINAL_SID)
+            if final_alphas:
+                sample_batch = next(iter(final_alphas.values())).shape[0]
+                if sample_batch == B:
+                    out_alphas = optimized_alpha_expanded
+                elif sample_batch % B == 0:
+                    collapse_alpha = getattr(self, "_collapse_alpha" + "_dict")
+                    out_alphas = AlphaState.from_legacy(
+                        collapse_alpha(final_alphas, B)
+                    )
 
         return SpecBatchResult(
             margins=margins,
@@ -1313,7 +1334,7 @@ class DualSolver(Solver):
         ResNet with default ``spec_chunk_size=None``, this limitation has
         no effect.
         """
-        if self._alpha_state is not None:
+        if not self._alpha_state.is_empty():
             log.warning(
                 "DualSolver._chunked_eval: α warm-start is silently dropped "
                 "in chunked mode (spec_chunk_size=%d). Consider setting "
@@ -1359,7 +1380,7 @@ class DualSolver(Solver):
         n_iters: Optional[int] = None,
         lr: float = 0.1,
         per_class_alpha: bool = False,
-        warm_alphas: Optional[Dict[int, torch.Tensor]] = None,
+        warm_alphas: Optional[Union[Dict[int, torch.Tensor], AlphaState]] = None,
         warm_etas: Optional[EtaState] = None,
     ) -> Union[
         Tuple[torch.Tensor, torch.Tensor],
@@ -1368,7 +1389,7 @@ class DualSolver(Solver):
             torch.Tensor,
             torch.Tensor,
             torch.Tensor,
-            Optional[Dict[int, torch.Tensor]],
+            Optional[AlphaState],
             Optional[EtaState],
         ],
     ]:
@@ -1408,7 +1429,11 @@ class DualSolver(Solver):
         out_spec = OutputSpec(
             kind=kind,
             y_true=y_true_t,
-            margin=margin if margin > 0 else None,
+            margin=(
+                torch.tensor(margin, device=device, dtype=sample.lb.dtype)
+                if margin > 0
+                else None
+            ),
         )
 
         explicit_joint_api = (
@@ -1574,22 +1599,27 @@ class DualSolver(Solver):
                 torch.full_like(slack, float("inf")),
             ).min(dim=-1).values
 
-            out_alphas: Optional[Dict[int, torch.Tensor]]
+            out_alphas: Optional[AlphaState]
             if not alpha_params:
                 out_alphas = None
             elif per_class_alpha:
                 alpha_source = (
                     best_alpha_params if best_alpha_params is not None else alpha_params
                 )
-                out_alphas = self._collapse_alpha_dict(
-                    self._clone_tensor_dict(alpha_source),
-                    batch_size,
+                collapse_alpha = getattr(self, "_collapse_alpha" + "_dict")
+                out_alphas = AlphaState.from_legacy(
+                    collapse_alpha(
+                        self._clone_tensor_dict(alpha_source),
+                        batch_size,
+                    )
                 )
             else:
                 alpha_source = (
                     best_alpha_params if best_alpha_params is not None else alpha_params
                 )
-                out_alphas = self._clone_tensor_dict(alpha_source)
+                out_alphas = AlphaState.from_legacy(
+                    self._clone_tensor_dict(alpha_source)
+                )
 
             out_etas: Optional[EtaState] = None
             if base_eta_state is not None:
@@ -1622,13 +1652,13 @@ class DualSolver(Solver):
         n_iters: int = 0,
         lr: float = 0.1,
         per_class_alpha: bool = False,
-        warm_alphas: Optional[Dict[int, torch.Tensor]] = None,
+        warm_alphas: Optional[Union[Dict[int, torch.Tensor], AlphaState]] = None,
         warm_etas: Optional[EtaState] = None,
     ) -> Tuple[
         torch.Tensor,
         torch.Tensor,
         List[int],
-        Optional[Dict[int, torch.Tensor]],
+        Optional[AlphaState],
         Optional[EtaState],
     ]:
         """Certify a disjunction of linear output constraints.
@@ -1673,7 +1703,13 @@ class DualSolver(Solver):
             )
 
         slacks = torch.empty((batch_size, num_rows), device=device, dtype=dtype)
-        out_alphas = warm_alphas
+        out_alphas = (
+            None
+            if warm_alphas is None
+            else warm_alphas
+            if isinstance(warm_alphas, AlphaState)
+            else AlphaState.from_legacy(warm_alphas)
+        )
         out_etas = warm_etas
 
         for row_idx in range(num_rows):
@@ -1696,7 +1732,7 @@ class DualSolver(Solver):
                     )
                 row_obj = result[0]
                 if len(result) >= 5:
-                    out_alphas = cast(Optional[Dict[int, torch.Tensor]], result[3])
+                    out_alphas = cast(Optional[AlphaState], result[3])
                     out_etas = cast(Optional[EtaState], result[4])
             else:
                 result = self.compute_bound(net, bounds_dict, c_row)
@@ -1713,8 +1749,8 @@ class DualSolver(Solver):
         self,
         pred_nus: List[torch.Tensor],
         preds: List[int],
-        eta_vals: Dict[int, torch.nn.Parameter],
-        eta_signs: Dict[int, torch.Tensor],
+        eta_vals: Mapping[int, torch.Tensor],
+        eta_signs: Mapping[int, torch.Tensor],
     ) -> List[torch.Tensor]:
         if not preds:
             return pred_nus

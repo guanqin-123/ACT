@@ -24,6 +24,7 @@ import torch
 from act.back_end.core import Bounds, Layer, Net
 from act.back_end.dual_tf import DualTF, compute_forward_bounds
 from act.back_end.layer_schema import LayerKind
+from act.back_end.solver.alpha_state import AlphaState
 from act.back_end.solver.solver_dual import DualSolver
 from act.util.device_manager import (
     get_default_device,
@@ -60,7 +61,7 @@ def _make_relu_net(output_dim: int = 1) -> Tuple[Net, int]:
         raise ValueError(f"output_dim={output_dim} unsupported in this fixture")
     layers = [
         Layer(0, LayerKind.INPUT.value,
-              {"shape": [2], "dtype": "float32", "num_classes": 1, "value_range": [0.0, 1.0]},
+              {"shape": (2,), "dtype": "float32", "num_classes": 1, "value_range": (0.0, 1.0)},
               in_vars, in_vars),
         Layer(1, LayerKind.INPUT_SPEC.value, {"kind": "BOX"}, in_vars, in_vars),
         Layer(2, LayerKind.DENSE.value,
@@ -173,7 +174,7 @@ def test_stable_alpha_invariant_under_adam() -> None:
 
     # Run the joint KKT path with this stale warm α.
     obj, _sce, _row_obj, out_alphas, _out_etas = cast(
-        tuple,
+        tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, AlphaState | None, object],
         solver.compute_bound(
             net,
             bounds_dict,
@@ -258,7 +259,7 @@ def test_adam_monotone_with_mask() -> None:
     s1.eta_iters = 1
     s1.lr_eta = 0.1
     obj1_out = cast(
-        tuple,
+        tuple[torch.Tensor, torch.Tensor | None],
         s1.compute_bound(net, bounds_dict, c, return_sce=False, n_iters=1, lr=0.1, force_kkt=True),
     )
     obj1 = obj1_out[0]
@@ -267,7 +268,7 @@ def test_adam_monotone_with_mask() -> None:
     s10.eta_iters = 10
     s10.lr_eta = 0.1
     obj10_out = cast(
-        tuple,
+        tuple[torch.Tensor, torch.Tensor | None],
         s10.compute_bound(net, bounds_dict, c, return_sce=False, n_iters=10, lr=0.1, force_kkt=True),
     )
     obj10 = obj10_out[0]
@@ -295,3 +296,21 @@ def test_no_alpha_path_unaffected() -> None:
     direct_obj = cast(torch.Tensor, solver._compute_bound_direct(net, bounds_dict, c))
     public_obj = cast(torch.Tensor, solver.compute_bound(net, bounds_dict, c))
     assert torch.equal(public_obj, direct_obj)
+
+
+def test_alpha_state_auto_wrap_at_set_alphas_boundary() -> None:
+    solver = DualSolver(DualTF())
+    legacy = {1: torch.zeros((1, 3), dtype=get_default_dtype(), device=get_default_device())}
+
+    solver.set_alphas(legacy)
+    assert isinstance(solver._alpha_state, AlphaState)
+    assert solver._alpha_state.start_nodes == (AlphaState.FINAL_SID,)
+    torch.testing.assert_close(solver._alpha_state.to_legacy()[1], legacy[1])
+
+    wrapped = AlphaState.from_legacy(
+        {1: torch.ones((1, 3), dtype=get_default_dtype(), device=get_default_device())}
+    )
+    solver.set_alphas(wrapped)
+    assert isinstance(solver._alpha_state, AlphaState)
+    assert solver._alpha_state.start_nodes == (AlphaState.FINAL_SID,)
+    torch.testing.assert_close(solver._alpha_state.to_legacy()[1], wrapped.to_legacy()[1])

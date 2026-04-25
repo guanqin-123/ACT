@@ -28,6 +28,7 @@ import torch
 from act.back_end.bab.eta import EtaState
 from act.back_end.bab.trace import BoundTrace
 from act.back_end.core import Bounds
+from act.back_end.solver.alpha_state import AlphaState
 from act.util.device_manager import get_default_device, get_default_dtype
 
 
@@ -98,10 +99,15 @@ class SubproblemBatch:
 
     # Optional per-subproblem state for neuron-space BaB with eta penalty.
     eta: Optional[EtaState] = None
-    alphas: Optional[dict[int, torch.Tensor]] = None
+    alphas: Optional[AlphaState] = None
     histories: Optional[list[list[Split]]] = None
     parent_margins: Optional[torch.Tensor] = None
     subproblem_ids: Optional[torch.Tensor] = None
+
+    def __post_init__(self) -> None:
+        raw_alphas = self.__dict__.get("alphas")
+        if isinstance(raw_alphas, dict):
+            self.alphas = AlphaState.from_legacy(raw_alphas)
 
     # -- properties ---------------------------------------------------------
 
@@ -216,11 +222,7 @@ class SubproblemBatch:
         depths = self.depths.index_select(0, idx)
 
         eta = self.eta.select(idx) if self.eta is not None else None
-        alphas = (
-            {lid: t.index_select(0, idx) for lid, t in self.alphas.items()}
-            if self.alphas is not None
-            else None
-        )
+        alphas = self.alphas.select(idx) if self.alphas is not None else None
         histories = (
             [self.histories[row_idx] for row_idx in idx.detach().cpu().tolist()]
             if self.histories is not None
@@ -371,12 +373,8 @@ class SubproblemBatch:
         # relaxation slope that remains meaningful as bounds tighten. Copy
         # (not share) so each child can re-optimise independently in Adam.
         if self.alphas is not None:
-            left_alphas: Optional[dict[int, torch.Tensor]] = {
-                lid: t.clone() for lid, t in self.alphas.items()
-            }
-            right_alphas: Optional[dict[int, torch.Tensor]] = {
-                lid: t.clone() for lid, t in self.alphas.items()
-            }
+            left_alphas = self.alphas.clone()
+            right_alphas = self.alphas.clone()
         else:
             left_alphas = None
             right_alphas = None
