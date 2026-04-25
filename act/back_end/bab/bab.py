@@ -487,6 +487,7 @@ def _verify_bab_batched(
     budget: float,
     dual_solver: Optional[DualSolver] = None,
     trace: Optional[BoundTrace] = None,
+    out_bounds_dict: Optional[dict[int, dict[str, torch.Tensor]]] = None,
     network_path: Optional[Path] = None,
 ) -> VerifyResult:
     dual_solver = dual_solver or DualSolver(DualTF())
@@ -631,6 +632,14 @@ def _verify_bab_batched(
                                 "nodes": processed,
                             },
                         )
+                    if out_bounds_dict is not None:
+                        out_bounds_dict.clear()
+                        out_bounds_dict.update(
+                            {
+                                lid: {"lb": bounds.lb.detach().cpu(), "ub": bounds.ub.detach().cpu()}
+                                for lid, bounds in bounds_dict.items()
+                            }
+                        )
                     return _finalize(VerifyResult(
                         VerifyStatus.FALSIFIED,
                         counterexample=ce_tensor,
@@ -722,7 +731,23 @@ def _verify_bab_batched(
         pool.push(right)
 
     if not pool.empty and ((time.time() - start) >= budget or (config.max_nodes is not None and processed >= config.max_nodes)):
+        if out_bounds_dict is not None:
+            out_bounds_dict.clear()
+            out_bounds_dict.update(
+                {
+                    lid: {"lb": bounds.lb.detach().cpu(), "ub": bounds.ub.detach().cpu()}
+                    for lid, bounds in bounds_dict.items()
+                }
+            )
         return _finalize(VerifyResult(VerifyStatus.UNKNOWN, metadata={"nodes": processed}))
+    if out_bounds_dict is not None:
+        out_bounds_dict.clear()
+        out_bounds_dict.update(
+            {
+                lid: {"lb": bounds.lb.detach().cpu(), "ub": bounds.ub.detach().cpu()}
+                for lid, bounds in bounds_dict.items()
+            }
+        )
     return _finalize(VerifyResult(VerifyStatus.CERTIFIED, metadata={"nodes": processed}))
 
 
@@ -745,6 +770,7 @@ def verify_bab(
     verbose: bool = False,
     dual_solver: Optional[DualSolver] = None,
     trace: Optional[BoundTrace] = None,
+    out_bounds_dict: Optional[dict[int, dict[str, torch.Tensor]]] = None,
     network_path: Optional[Path] = None,
 ) -> VerifyResult:
     """Branch-and-bound verification with optional CE persistence.
@@ -787,6 +813,7 @@ def verify_bab(
             budget=budget,
             dual_solver=dual_solver,
             trace=trace,
+            out_bounds_dict=out_bounds_dict,
             network_path=network_path,
         )
     return _verify_bab_legacy(net, solver, config, budget=budget, network_path=network_path)

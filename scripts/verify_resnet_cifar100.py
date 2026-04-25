@@ -95,6 +95,8 @@ class VerifyResult:
     abcrown_nodes: int
     error: str | None = None
     warning_samples: list[str] = field(default_factory=list)
+    bound_trace: dict[str, Any] | None = None
+    intermediate_widths: dict[str, Any] | None = None
 
     @property
     def passed(self) -> bool:
@@ -177,6 +179,7 @@ def _build_config(
     max_depth: int,
     max_nodes: int | None,
     verbose: bool,
+    record_bound_trace: bool,
 ) -> BaBConfig:
     return BaBConfig(
         branching_method="babsr",
@@ -186,8 +189,24 @@ def _build_config(
         lr_eta=0.05,
         max_nodes=max_nodes,
         max_depth=max_depth,
+        record_bound_trace=record_bound_trace,
         verbose=verbose,
     )
+
+
+def _marshal_bound_trace(trace: Any) -> dict[str, Any]:
+    if hasattr(trace, "to_dict"):
+        return trace.to_dict()
+    return {
+        "min_slack_history": {str(k): v for k, v in getattr(trace, "min_slack_history", {}).items()},
+        "iteration_history": {str(k): v for k, v in getattr(trace, "iteration_history", {}).items()},
+        "parent": {str(k): v for k, v in getattr(trace, "parent", {}).items()},
+        "depth": {str(k): v for k, v in getattr(trace, "depth", {}).items()},
+        "adam_trajectory": {
+            f"{sid},{bab_iter}": v
+            for (sid, bab_iter), v in getattr(trace, "adam_trajectory", {}).items()
+        },
+    }
 
 
 def verify_instance(
@@ -201,6 +220,7 @@ def verify_instance(
     max_nodes: int | None,
     time_budget_s: float,
     verbose: bool,
+    bound_trace: bool = False,
 ) -> VerifyResult:
     if instance_key not in INSTANCE_REGISTRY:
         raise ValueError(
@@ -221,7 +241,14 @@ def verify_instance(
         max_depth=max_depth,
         max_nodes=max_nodes,
         verbose=verbose,
+        record_bound_trace=bound_trace,
     )
+    trace = None
+    out_bounds_dict: dict[int, dict[str, torch.Tensor]] = {}
+    if bound_trace:
+        from act.back_end.bab.trace import BoundTrace
+
+        trace = BoundTrace()
 
     started = time.time()
     error: str | None = None
@@ -246,6 +273,8 @@ def verify_instance(
                 dual_solver=DualSolver(DualTF()),
                 config=config,
                 time_budget_s=time_budget_s,
+                trace=trace,
+                out_bounds_dict=out_bounds_dict,
             )
             status = result.status.name
             nodes_meta = result.metadata.get("nodes")
@@ -272,6 +301,17 @@ def verify_instance(
         abcrown_wall_s=float(reg["abcrown_wall_s"]),
         abcrown_nodes=int(reg["abcrown_nodes"]),
         error=error,
+        bound_trace=_marshal_bound_trace(trace) if trace is not None else None,
+        intermediate_widths={
+            str(lid): {
+                "lb": v["lb"].flatten()[:1000].tolist(),
+                "ub": v["ub"].flatten()[:1000].tolist(),
+                "n_total": int(v["lb"].numel()),
+            }
+            for lid, v in out_bounds_dict.items()
+        }
+        if bound_trace
+        else None,
     )
 
 
@@ -359,6 +399,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="path to JSON report; defaults to scripts/logs/verify_resnet_cifar100_<stamp>.json.",
     )
+    parser.add_argument(
+        "--bound-trace",
+        action="store_true",
+        help="capture per-iter Adam best-objective trajectory + final per-layer pre-activation widths",
+    )
     return parser.parse_args(argv)
 
 
@@ -394,6 +439,7 @@ def main(argv: list[str] | None = None) -> int:
             max_nodes=args.max_nodes,
             time_budget_s=args.budget,
             verbose=args.verbose_bab,
+            bound_trace=args.bound_trace,
         )
         results.append(r)
         print(_format_row(r))
