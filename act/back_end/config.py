@@ -48,6 +48,9 @@ class BaBConfig:
 
     subproblem_batch_size: int = 64
     eta_iters: int = 20
+    alpha_split_objective: bool = False  # Tier 3 Phase 2a gate; default OFF
+    alpha_iters: int = 10  # iters for the pre-BaB α-CROWN tightening
+    lr_alpha: float = 0.5  # matches α-β-CROWN default; Phase 3 uses this
     lr_eta: float = 0.05
     smooth_split_min_gap: float = 1e-2
     max_splits_per_neuron: int = 4

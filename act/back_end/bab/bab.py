@@ -30,6 +30,11 @@ from act.back_end.core import Bounds, Net
 from act.back_end.dual_tf.dual_tf import DualTF
 from act.back_end.dual_tf.tf_forward import compute_forward_bounds
 from act.back_end.layer_schema import LayerKind
+from act.back_end.solver._initial_alpha_crown import (
+    enumerate_intermediate_start_nodes,
+    optimize_initial_intermediate_bounds,
+)
+from act.back_end.solver.alpha_state import AlphaState
 from act.back_end.solver.solver_base import SolveStatus, Solver
 from act.back_end.solver.solver_dual import DualSolver
 from act.back_end.solver.spec_batching import build_spec_batch
@@ -253,6 +258,48 @@ def _select_bounds_rows(bounds_dict: dict[int, Bounds], idx: torch.Tensor) -> di
         lid: Bounds(v.lb.index_select(0, idx), v.ub.index_select(0, idx))
         for lid, v in bounds_dict.items()
     }
+
+
+def _align_fixed_bound_batch(current: torch.Tensor, fixed: torch.Tensor) -> torch.Tensor:
+    fixed_t = fixed.to(device=current.device, dtype=current.dtype)
+    if fixed_t.shape[0] == current.shape[0]:
+        return fixed_t
+    if fixed_t.shape[0] == 1:
+        return fixed_t.expand(current.shape[0], *fixed_t.shape[1:])
+    raise ValueError(
+        f"fixed bounds batch mismatch: current={current.shape[0]} fixed={fixed_t.shape[0]}"
+    )
+
+
+def _apply_fixed_bounds(
+    bounds_dict: dict[int, Bounds],
+    fixed_bounds: dict[int, Bounds],
+) -> dict[int, Bounds]:
+    merged = dict(bounds_dict)
+    for lid, fixed in fixed_bounds.items():
+        current = merged.get(lid)
+        if current is None:
+            continue
+        fixed_lb = _align_fixed_bound_batch(current.lb, fixed.lb)
+        fixed_ub = _align_fixed_bound_batch(current.ub, fixed.ub)
+        merged[lid] = Bounds(
+            lb=torch.maximum(current.lb, fixed_lb),
+            ub=torch.minimum(current.ub, fixed_ub),
+        )
+    return merged
+
+
+def _merge_alpha_states(
+    existing: Optional[AlphaState],
+    updated: AlphaState,
+) -> AlphaState:
+    if existing is None or existing.is_empty():
+        return updated.clone()
+    merged = existing.clone()
+    for lid, by_sid in updated._store.items():
+        for sid, tensor in by_sid.items():
+            merged.set(lid, sid, tensor.detach().clone())
+    return merged
 
 
 def _compute_split_points(
@@ -506,7 +553,30 @@ def _verify_bab_batched(
     root_bounds = seed_from_input_specs(spec_layers)
     out_spec, num_classes = _extract_out_spec(net, assert_layer)
     layer_widths = _compute_pre_act_widths(net)
-    pool.push(SubproblemBatch.from_bounds_with_eta(root_bounds, layer_widths, trace=trace))
+    root_batch = SubproblemBatch.from_bounds_with_eta(root_bounds, layer_widths, trace=trace)
+    precomputed_root_bounds: Optional[dict[int, Bounds]] = None
+    fixed_bounds: Optional[dict[int, Bounds]] = None
+    if config.alpha_split_objective:
+        precomputed_root_bounds = compute_forward_bounds(
+            net,
+            root_batch.lb,
+            root_batch.ub,
+            post_activation=False,
+            eta_state=root_batch.eta,
+        )
+        precomputed_root_bounds, root_alpha_state = optimize_initial_intermediate_bounds(
+            net,
+            precomputed_root_bounds,
+            alpha_iters=config.alpha_iters,
+            lr_alpha=config.lr_alpha,
+        )
+        fixed_bounds = {
+            lid: precomputed_root_bounds[lid]
+            for lid in enumerate_intermediate_start_nodes(net)
+            if lid in precomputed_root_bounds
+        }
+        root_batch.alphas = root_alpha_state
+    pool.push(root_batch)
 
     start = time.time()
     processed = 0
@@ -521,13 +591,18 @@ def _verify_bab_batched(
         batch = pool.pop(batch_size=config.subproblem_batch_size)
         processed += batch.batch_size
 
-        bounds_dict = compute_forward_bounds(
-            net,
-            batch.lb,
-            batch.ub,
-            post_activation=False,
-            eta_state=batch.eta,
-        )
+        if iteration_counter == 0 and precomputed_root_bounds is not None:
+            bounds_dict = dict(precomputed_root_bounds)
+        else:
+            bounds_dict = compute_forward_bounds(
+                net,
+                batch.lb,
+                batch.ub,
+                post_activation=False,
+                eta_state=batch.eta,
+            )
+            if fixed_bounds is not None:
+                bounds_dict = _apply_fixed_bounds(bounds_dict, fixed_bounds)
 
         dual_solver.set_eta(batch.eta)
         dual_solver.set_alphas(batch.alphas)
@@ -595,7 +670,7 @@ def _verify_bab_batched(
         if result.out_etas is not None:
             batch.eta = result.out_etas
         if result.out_alphas is not None:
-            batch.alphas = result.out_alphas
+            batch.alphas = _merge_alpha_states(batch.alphas, result.out_alphas)
 
         iteration_counter += 1
 

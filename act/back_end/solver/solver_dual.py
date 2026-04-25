@@ -108,16 +108,19 @@ def _collapse_spec_axis(tensor: torch.Tensor) -> torch.Tensor:
     return tensor[:, 0, ...] if _is_spec_rank3(tensor) else tensor
 
 
+AFFINE_CONTRIB_KINDS = frozenset({
+    LayerKind.DENSE.value,
+    LayerKind.CONV2D.value,
+    "BIAS",
+    "BN",
+    "ADD",
+})
+
+
 class DualSolver(Solver):
     """Dual (Wong-Kolter) certified bounds solver. Strict [B, *shape] API."""
 
-    _AFFINE_CONTRIB_KINDS = {
-        LayerKind.DENSE.value,
-        LayerKind.CONV2D.value,
-        "BIAS",
-        "BN",
-        "ADD",
-    }
+    _AFFINE_CONTRIB_KINDS = AFFINE_CONTRIB_KINDS
 
     def __init__(self, tf: "DualTF", n_iters: int = 0):
         self.tf = tf
@@ -1884,3 +1887,90 @@ class DualSolver(Solver):
     add_vars = set_bounds = add_binary_vars = _csp_unsupported
     add_lin_eq = add_lin_ge = add_lin_le = _csp_unsupported
     set_objective_linear = optimize = get_values = _csp_unsupported
+
+
+def reverse_topological_sort(net: Net) -> List[int]:
+    return _reverse_topological_sort(net)
+
+
+def flatten_bounds_rows(bounds: Bounds, *, writable: bool = False) -> Bounds:
+    return _flatten_bounds_rows(bounds, writable=writable)
+
+
+def runtime_alpha_dict(
+    solver: DualSolver,
+    alpha_params: Mapping[int, torch.Tensor],
+    target_batch: int,
+) -> Dict[int, torch.Tensor]:
+    return solver._runtime_alpha_dict(alpha_params, target_batch)
+
+
+def maybe_apply_alpha(
+    solver: DualSolver,
+    handler,
+    layer,
+    nu: torch.Tensor,
+    bounds_dict: Dict[int, Bounds],
+    preds: List[int],
+    alphas: Optional[Dict[int, torch.Tensor]],
+) -> Tuple[List[torch.Tensor], torch.Tensor]:
+    return solver._maybe_apply_alpha(handler, layer, nu, bounds_dict, preds, alphas)
+
+
+def apply_eta_to_pred_nus(
+    solver: DualSolver,
+    pred_nus: List[torch.Tensor],
+    preds: List[int],
+    eta_vals: Mapping[int, torch.Tensor],
+    eta_signs: Mapping[int, torch.Tensor],
+) -> List[torch.Tensor]:
+    return solver._apply_eta_to_pred_nus(pred_nus, preds, eta_vals, eta_signs)
+
+
+def find_input_layer_id(solver: DualSolver, net: Net) -> Optional[int]:
+    return solver._find_input_layer_id(net)
+
+
+def input_contribution_from_nu(
+    solver: DualSolver,
+    net: Net,
+    input_lid: int,
+    nu: torch.Tensor,
+    bounds_dict: Dict[int, Bounds],
+    *,
+    return_sce: bool = False,
+    enable_grad: bool = False,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    return solver._input_contribution_from_nu(
+        net,
+        input_lid,
+        nu,
+        bounds_dict,
+        return_sce=return_sce,
+        enable_grad=enable_grad,
+    )
+
+
+def compute_amb_masks(
+    solver: DualSolver,
+    net: Net,
+    bounds_dict: Dict[int, Bounds],
+) -> Dict[int, torch.Tensor]:
+    return solver._compute_amb_masks(net, bounds_dict)
+
+
+def prepare_alpha_params(
+    solver: DualSolver,
+    net: Net,
+    bounds_dict: Dict[int, Bounds],
+    batch_size: int,
+    warm_alphas: Optional[Union[Dict[int, torch.Tensor], AlphaState]],
+    amb_masks: Optional[Dict[int, torch.Tensor]] = None,
+) -> Dict[int, torch.nn.Parameter]:
+    return solver._prepare_alpha_params(
+        net,
+        bounds_dict,
+        batch_size,
+        warm_alphas,
+        amb_masks=amb_masks,
+    )

@@ -208,6 +208,9 @@ class DualTF(TransferFunction):
         )
 
 
+BACKWARD_REGISTRY = DualTF._BACKWARD_REGISTRY
+
+
 # Explicit stub registry: any handler whose semantics are "raise NotImplementedError"
 # goes here. Membership is the ground truth for stub detection; net_factory filters
 # by identity against these sets.
