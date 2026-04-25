@@ -26,11 +26,12 @@ import json
 import logging
 import sys
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, override
 
 import torch
 
@@ -78,6 +79,23 @@ INSTANCE_REGISTRY: dict[str, dict[str, Any]] = {
 
 
 @dataclass
+class CliArgs:
+    instance: str
+    conv_mode: str
+    alpha_split: bool
+    device: str
+    dtype: str
+    batch: int
+    eta_iters: int
+    max_depth: int
+    max_nodes: int | None
+    budget: float
+    verbose_bab: bool
+    output: Path | None
+    bound_trace: bool
+
+
+@dataclass
 class VerifyResult:
     instance: str
     vnnlib_name: str
@@ -93,6 +111,7 @@ class VerifyResult:
     abcrown_status: str
     abcrown_wall_s: float
     abcrown_nodes: int
+    alpha_split: bool = False
     error: str | None = None
     warning_samples: list[str] = field(default_factory=list)
     bound_trace: dict[str, Any] | None = None
@@ -108,10 +127,11 @@ class VerifyResult:
 class _WarningCounter(logging.Handler):
     def __init__(self, sample_cap: int = 5) -> None:
         super().__init__(level=logging.WARNING)
-        self.count = 0
+        self.count: int = 0
         self.samples: list[str] = []
-        self._sample_cap = sample_cap
+        self._sample_cap: int = sample_cap
 
+    @override
     def emit(self, record: logging.LogRecord) -> None:  # noqa: D401
         if record.levelno < logging.WARNING:
             return
@@ -180,12 +200,17 @@ def _build_config(
     max_nodes: int | None,
     verbose: bool,
     record_bound_trace: bool,
+    alpha_split: bool,
 ) -> BaBConfig:
+    defaults = BaBConfig()
     return BaBConfig(
         branching_method="babsr",
         bounding_method="bfs",
         subproblem_batch_size=subproblem_batch_size,
         eta_iters=eta_iters,
+        alpha_split_objective=alpha_split,
+        alpha_iters=defaults.alpha_iters,
+        lr_alpha=defaults.lr_alpha,
         lr_eta=0.05,
         max_nodes=max_nodes,
         max_depth=max_depth,
@@ -221,12 +246,10 @@ def verify_instance(
     time_budget_s: float,
     verbose: bool,
     bound_trace: bool = False,
+    alpha_split: bool = False,
 ) -> VerifyResult:
     if instance_key not in INSTANCE_REGISTRY:
-        raise ValueError(
-            f"unknown instance {instance_key!r}; "
-            f"expected one of {list(INSTANCE_REGISTRY)}"
-        )
+        raise ValueError(f"unknown instance {instance_key!r}; expected one of {list(INSTANCE_REGISTRY)}")
     reg = INSTANCE_REGISTRY[instance_key]
     conv_mode, strict_patches = _resolve_conv_mode_args(conv_mode_arg)
 
@@ -242,6 +265,7 @@ def verify_instance(
         max_nodes=max_nodes,
         verbose=verbose,
         record_bound_trace=bound_trace,
+        alpha_split=alpha_split,
     )
     trace = None
     out_bounds_dict: dict[int, dict[str, torch.Tensor]] = {}
@@ -289,6 +313,7 @@ def verify_instance(
         vnnlib_name=vnnlib_name,
         conv_mode=conv_mode,
         strict_patches=strict_patches,
+        alpha_split=alpha_split,
         status=status,
         wall_time_s=wall_time,
         nodes=nodes,
@@ -304,8 +329,8 @@ def verify_instance(
         bound_trace=_marshal_bound_trace(trace) if trace is not None else None,
         intermediate_widths={
             str(lid): {
-                "lb": v["lb"].flatten()[:1000].tolist(),
-                "ub": v["ub"].flatten()[:1000].tolist(),
+                "lb": [float(x) for x in v["lb"].flatten()[:1000]],
+                "ub": [float(x) for x in v["ub"].flatten()[:1000]],
                 "n_total": int(v["lb"].numel()),
             }
             for lid, v in out_bounds_dict.items()
@@ -319,7 +344,7 @@ def _format_row(r: VerifyResult) -> str:
     vram = f"{r.peak_vram_gb:.1f} GB" if r.peak_vram_gb is not None else "-"
     nodes = str(r.nodes) if r.nodes is not None else "-"
     mark = "OK" if r.passed else "FAIL"
-    conv_tag = f"{r.conv_mode}{'+strict' if r.strict_patches else ''}"
+    conv_tag = f"{r.conv_mode}{'+strict' if r.strict_patches else ''}{'+α-split' if r.alpha_split else ''}"
     return (
         f"  {mark:<4} "
         f"inst={r.instance:<6} "
@@ -404,7 +429,30 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="capture per-iter Adam best-objective trajectory + final per-layer pre-activation widths",
     )
+    parser.add_argument(
+        "--alpha-split",
+        action="store_true",
+        help="enable Tier 3 pre-BaB α-CROWN intermediate-bound tightening",
+    )
     return parser.parse_args(argv)
+
+
+def _to_cli_args(args: argparse.Namespace) -> CliArgs:
+    return CliArgs(
+        instance=args.instance,
+        conv_mode=args.conv_mode,
+        alpha_split=args.alpha_split,
+        device=args.device,
+        dtype=args.dtype,
+        batch=args.batch,
+        eta_iters=args.eta_iters,
+        max_depth=args.max_depth,
+        max_nodes=args.max_nodes,
+        budget=args.budget,
+        verbose_bab=args.verbose_bab,
+        output=args.output,
+        bound_trace=args.bound_trace,
+    )
 
 
 def _instances_to_run(selector: str) -> list[str]:
@@ -414,21 +462,20 @@ def _instances_to_run(selector: str) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv)
+    args = _to_cli_args(_parse_args(argv))
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
     initialize_device(args.device, args.dtype)
-    print(
-        f"[verify] device={args.device} dtype={args.dtype} batch={args.batch} "
-        f"budget={args.budget}s conv_mode={args.conv_mode}"
-    )
+    print(f"[verify] device={args.device} dtype={args.dtype} batch={args.batch} budget={args.budget}s conv_mode={args.conv_mode} alpha_split={args.alpha_split}")
 
     results: list[VerifyResult] = []
     for key in _instances_to_run(args.instance):
-        print(f"\n--- instance {key} (conv_mode={args.conv_mode}) ---")
+        print(
+            f"\n--- instance {key} (conv_mode={args.conv_mode}, alpha_split={args.alpha_split}) ---"
+        )
         r = verify_instance(
             key,
             conv_mode_arg=args.conv_mode,
@@ -440,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
             time_budget_s=args.budget,
             verbose=args.verbose_bab,
             bound_trace=args.bound_trace,
+            alpha_split=args.alpha_split,
         )
         results.append(r)
         print(_format_row(r))

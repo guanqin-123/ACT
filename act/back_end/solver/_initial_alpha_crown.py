@@ -239,12 +239,15 @@ def optimize_initial_intermediate_bounds(
             candidate_ub = backward_truncated_ub(net, bounds_dict, sid_int, alpha_state).reshape_as(old_bounds.ub)
             new_lb = torch.maximum(candidate_lb, old_bounds.lb)
             new_ub = torch.minimum(candidate_ub, old_bounds.ub)
-            if (
-                not torch.isfinite(new_lb).all()
-                or not torch.isfinite(new_ub).all()
-                or torch.any(new_lb > new_ub + 1e-5)
-            ):
-                raise RuntimeError(f"initial α-CROWN unsound at layer {sid_int}")
+            invalid = (~torch.isfinite(new_lb)) | (~torch.isfinite(new_ub)) | (new_lb > new_ub + 1e-5)
+            if invalid.any():
+                _ = logger.warning(
+                    "initial α-CROWN produced %d invalid entries at layer %s; reverting those entries to forward bounds",
+                    int(invalid.sum().item()),
+                    sid_int,
+                )
+                new_lb = torch.where(invalid, old_bounds.lb, new_lb)
+                new_ub = torch.where(invalid, old_bounds.ub, new_ub)
             new_bounds[sid_int] = Bounds(lb=new_lb, ub=new_ub)
 
     return new_bounds, alpha_state

@@ -71,6 +71,20 @@ backend:
     # Higher = tighter bounds but more compute per node.
     eta_iters: 20
 
+    # Tier 3 — pre-BaB α-CROWN intermediate-bound tightening (default OFF).
+    # When True, runs an Adam loop before BaB starts that, for every
+    # pre-activation layer L, optimizes α at upstream ReLUs to tighten
+    # [lb_L, ub_L]. The tightened bounds replace bounds_dict for the rest
+    # of the run. See docs/tier3.md for the math.
+    alpha_split_objective: false
+
+    # Number of Adam iters for the pre-BaB α-intermediate loop.
+    # Ignored when alpha_split_objective=false.
+    alpha_iters: 10
+
+    # Adam learning rate for α (intermediate + final). Matches α-β-CROWN.
+    lr_alpha: 0.5
+
     # Learning rate for the η (eta) Adam optimizer.
     lr_eta: 0.05
 
