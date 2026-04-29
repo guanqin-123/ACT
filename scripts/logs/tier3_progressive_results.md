@@ -11,23 +11,52 @@ Source JSONs:
 - `scripts/logs/tier3_fix1_3995_cpu.json` (2026-04-29 13:24:49)
 - `scripts/logs/tier3_fix1_8028_cpu.json` (2026-04-29 13:15:08)
 
-## Empirical attempts (this session, after Fix 2/3/4)
+## Empirical evolution this session (matrix mode, --alpha-split, GPU with vLLM contention)
 
 ```
-fix1+2+3 cpu : 3995 = SIGKILL  wall=>15min  (OOM during pre-BaB α-CROWN; tier3_fix123_cpu.log)
+fix1+2+3 gpu  : 3995 = ERROR    peak=44.98 GB  (OOM 114 MiB alloc; pre-Fix-5 baseline, eye-expansion bottleneck)
+fix1+2+3 gpu  : 8028 = ERROR    peak=49.15 GB  (OOM 64 MiB alloc; same bottleneck)
+
+fix5  c=4096  : 3995 = ERROR    peak=20.14 GB  (OOM 226 MiB alloc; eye-expansion fixed, new bottleneck = joint-loss expansion)
+fix5  c=4096  : 8028 = ERROR    peak=20.14 GB  (same)
+
+fix5+5b       : 3995 = ERROR    peak=17.3 GB   (OOM 22 GiB alloc in joint-loss runtime_alpha_dict; pre-BaB autograd graph released)
+fix5+5b       : 8028 = ERROR    peak=17.3 GB   (same — Fix 2 joint loss in BaB hot path is the hog)
+
+fix6 (λ=0)    : 3995 = ERROR     wall=18.36s peak=20.7 GB  (OOM 96 MiB alloc; ~MiB from success)
+fix6 (λ=0)    : 8028 = FALSIFIED wall=11.94s peak=17.3 GB  ✓ (plan invariant D4 SATISFIED)
 ```
 
-GPU rerun blocked: resident vLLM (PID 3574892, 48.29 GB) + ResNet-medium pre-BaB α-CROWN (~50 GB peak)
-together exceed the 95 GB GPU. Tried `expandable_segments:True` + `--batch={4,8}`; same OOM at ~49 GB.
-CPU run with `--instance both --budget 60` was silently OOM-killed by the host.
+Source: `scripts/logs/tier3_lambda0_gpu.json` (post-Fix 6, the 8028 FALSIFIED run).
 
-Recommended next-session empirical:
-- Wait for resident vLLM to clear OR use a host with ≥80 GB GPU headroom OR ≥80 GB RAM for CPU.
-- Run `python -m scripts.verify_resnet_cifar100 --instance both --conv-mode matrix --alpha-split
-  --device cuda --batch 16 --budget 60.0 --bound-trace --output scripts/logs/tier3_full_stack.json`
-- Compare against `wave5_instance3995_baseline_matrix_b16.json` for Phase 5 success metric
-  (median pre-activation lb_L width tightening ≥ 10%).
-- Re-confirm 8028 stays FALSIFIED with `--alpha-split` ON (plan invariant D4).
+## Memory peak progression (matrix, batch=8, alpha-split, ResNet-medium)
+
+| Stack | Peak VRAM | OOM at | Status |
+|---|---|---|---|
+| Fix 1 baseline | 49 GB | 64-114 MiB | ERROR (vLLM contention) |
+| + Fix 5 (chunked obj rows) | 20 GB | 226 MiB | ERROR (joint-loss alpha expansion) |
+| + Fix 5b (per-sid backward in pre-BaB) | 17 GB | 22 GiB | ERROR (joint-loss runtime_alpha_dict in BaB) |
+| **+ Fix 6 (λ_intermediate=0 default)** | **17-21 GB** | **96 MiB / N/A** | **8028 FALSIFIED ✓ ; 3995 ERROR (gap closed except for last MiB)** |
+
+## What still needs a clean GPU
+
+3995 OOMs at 96 MiB allocation when only 83 MiB is free. The 17-20 GB peak fits comfortably on a 95 GB GPU when not shared. Currently other tenants:
+- vLLM PID 3574892: 48 GB
+- python PID 1315561: 22 GB
+- python PID 1315674: 5 GB
+- our peak: 20.7 GB
+- total: ~96 GB on a 95 GB GPU → tiny shortfall
+
+Recommended next-session command on a clean GPU:
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+python -m scripts.verify_resnet_cifar100 \
+  --instance both --conv-mode matrix --alpha-split \
+  --device cuda --batch 8 --budget 60.0 --bound-trace \
+  --output scripts/logs/tier3_full_stack_clean_gpu.json
+```
+
+Phase 5 success metric: median pre-activation `lb_L` width tightening on 3995 ≥ 10% (or CERTIFIED in <60s) — pending the above run on uncontended GPU.
 
 ## Soundness invariants known to hold (unit-test verified)
 
