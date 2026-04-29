@@ -936,10 +936,35 @@ class DualSolver(Solver):
         self,
         alphas: Union[Dict[int, torch.Tensor], AlphaState],
         factor: int,
-    ) -> Dict[int, torch.Tensor]:
-        del factor
-        alpha_dict = self._final_alpha_slice(alphas)
-        return {} if alpha_dict is None else {lid: t for lid, t in alpha_dict.items()}
+    ) -> AlphaState:
+        if isinstance(alphas, AlphaState):
+            state = alphas.to(device=get_default_device(), dtype=get_default_dtype())
+        else:
+            state = AlphaState.from_legacy(alphas).to(
+                device=get_default_device(),
+                dtype=get_default_dtype(),
+            )
+        if factor <= 1 or state.is_empty():
+            return state.clone(detach=False)
+
+        expanded = AlphaState()
+        for lid, sid, tensor in state.iter_entries():
+            if tensor.shape[0] == 0:
+                expanded.set(lid, sid, tensor.clone())
+            else:
+                expanded.set(lid, sid, tensor.repeat_interleave(factor, dim=0))
+        return expanded
+
+    def _snapshot_best_alpha_state(
+        self,
+        alpha_params: AlphaState,
+        best: Optional[AlphaState],
+        improved: torch.Tensor,
+    ) -> AlphaState:
+        snap = AlphaState() if best is None else best.clone()
+        for lid, sid, tensor in alpha_params.iter_entries():
+            snap.set(lid, sid, self._snapshot_best_rows(tensor, snap.get(lid, sid), improved))
+        return snap
 
     def _collapse_eta_state(self, eta: EtaState, target_batch: int) -> EtaState:
         if eta.batch_size == target_batch:
@@ -1010,12 +1035,33 @@ class DualSolver(Solver):
             c = c.to(device=device, dtype=dtype)
 
         target_batch = c.shape[0]
-        use_alpha = warm_alphas is not None or force_kkt or n_iters > 0
-        alpha_params = (
-            self._prepare_alpha_params(net, bounds_dict, target_batch, warm_alphas)
+        alpha_seed = warm_alphas if warm_alphas is not None else self._alpha_state
+        alpha_seed_state = self._coerce_alpha_state(alpha_seed)
+        use_alpha = (not alpha_seed_state.is_empty()) or force_kkt or n_iters > 0
+        alpha_final_params = (
+            self._prepare_alpha_params(net, bounds_dict, target_batch, alpha_seed_state)
             if use_alpha
             else {}
         )
+        alpha_params = AlphaState()
+        for lid, param in alpha_final_params.items():
+            alpha_params.set(lid, AlphaState.FINAL_SID, param)
+        if use_alpha:
+            for lid, sid, tensor in alpha_seed_state.iter_entries():
+                if sid == AlphaState.FINAL_SID:
+                    continue
+                prepared = tensor.to(device=device, dtype=dtype)
+                prepared = self._align_alpha_to_batch(
+                    prepared,
+                    target_batch,
+                    lid,
+                    f"warm alpha sid={sid}",
+                )
+                alpha_params.set(
+                    lid,
+                    sid,
+                    torch.nn.Parameter(prepared.detach().clone().clamp(0.0, 1.0)),
+                )
 
         eta_seed = warm_etas if warm_etas is not None else self._eta_state
         eta_state = self._prepare_eta_state(eta_seed, target_batch)
@@ -1027,7 +1073,7 @@ class DualSolver(Solver):
             }
 
         evaluate_only = not force_kkt and n_iters <= 0
-        opt_params = list(alpha_params.values())
+        opt_params = alpha_params.flat_params()
         if eta_params is not None:
             opt_params.extend(list(eta_params.values()))
         optim = (
@@ -1041,7 +1087,7 @@ class DualSolver(Solver):
         prev_best = best_obj.clone()
         plateau_count = 0
         best_sce: Optional[torch.Tensor] = None
-        best_alpha_params: Optional[Dict[int, torch.Tensor]] = None
+        best_alpha_params: Optional[AlphaState] = None
         best_eta_params: Optional[Dict[int, torch.Tensor]] = None
         num_iters = 1 if evaluate_only else max(n_iters, 1)
         plateau_threshold = 5e-4
@@ -1053,7 +1099,9 @@ class DualSolver(Solver):
                     optim.zero_grad()
 
                 alpha_snapshot = (
-                    self._clone_tensor_dict(alpha_params) if alpha_params else None
+                    alpha_params.clone()
+                    if not alpha_params.is_empty()
+                    else None
                 )
                 eta_snapshot = (
                     self._clone_tensor_dict(eta_params)
@@ -1061,9 +1109,10 @@ class DualSolver(Solver):
                     else None
                 )
 
+                final_alpha_params = alpha_params.for_start_node(AlphaState.FINAL_SID)
                 working_alpha = (
-                    self._runtime_alpha_dict(alpha_params, target_batch)
-                    if alpha_params
+                    self._runtime_alpha_dict(final_alpha_params, target_batch)
+                    if final_alpha_params
                     else None
                 )
                 working_eta = None
@@ -1093,7 +1142,7 @@ class DualSolver(Solver):
                     optim.step()
 
                 with torch.no_grad():
-                    for param in alpha_params.values():
+                    for param in alpha_params.flat_params():
                         param.clamp_(0.0, 1.0)
                     if eta_params is not None:
                         for param in eta_params.values():
@@ -1101,7 +1150,7 @@ class DualSolver(Solver):
                     improved = obj.detach() > best_obj
                     best_obj = torch.where(improved, obj.detach(), best_obj)
                     if alpha_snapshot is not None:
-                        best_alpha_params = self._snapshot_best_param_dict(
+                        best_alpha_params = self._snapshot_best_alpha_state(
                             alpha_snapshot,
                             best_alpha_params,
                             improved,
@@ -1129,12 +1178,8 @@ class DualSolver(Solver):
 
         out_alphas = (
             None
-            if not alpha_params
-            else AlphaState.from_legacy(
-                self._clone_tensor_dict(
-                    best_alpha_params if best_alpha_params is not None else alpha_params
-                )
-            )
+            if alpha_params.is_empty()
+            else (best_alpha_params.clone() if best_alpha_params is not None else alpha_params.clone())
         )
 
         out_etas: Optional[EtaState] = None
@@ -1301,9 +1346,19 @@ class DualSolver(Solver):
                     out_alphas = optimized_alpha_expanded
                 elif sample_batch % B == 0:
                     collapse_alpha = getattr(self, "_collapse_alpha" + "_dict")
-                    out_alphas = AlphaState.from_legacy(
-                        collapse_alpha(final_alphas, B)
-                    )
+                    collapsed = AlphaState()
+                    for lid, sid, tensor in optimized_alpha_expanded.iter_entries():
+                        if tensor.shape[0] == B:
+                            collapsed.set(lid, sid, tensor.detach().clone())
+                        elif tensor.shape[0] % B == 0:
+                            collapsed_tensor = collapse_alpha({lid: tensor}, B)[lid]
+                            collapsed.set(lid, sid, collapsed_tensor)
+                        else:
+                            raise ValueError(
+                                "DualSolver.evaluate_spec: cannot collapse alpha batch "
+                                f"at layer {lid}, sid {sid}; base batch {B}, got {tensor.shape[0]}"
+                            )
+                    out_alphas = collapsed
 
         return SpecBatchResult(
             margins=margins,

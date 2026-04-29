@@ -52,6 +52,8 @@ from act.back_end.counterexample_io import save_counterexample
 
 log = logging.getLogger(__name__)
 
+_RELU_KINDS = frozenset({LayerKind.RELU.value, LayerKind.LRELU.value})
+
 
 def _infer_output_dim(net: Net, assert_layer) -> int:
     preds = list(net.preds.get(assert_layer.id, []))
@@ -300,6 +302,56 @@ def _merge_alpha_states(
         for sid, tensor in by_sid.items():
             merged.set(lid, sid, tensor.detach().clone())
     return merged
+
+
+def project_alpha_for_forward(net: Net, alpha_state: AlphaState) -> dict[int, torch.Tensor]:
+    """Project ``AlphaState`` to flat ``{relu_lid: alpha}`` for forward CROWN.
+
+    For each ReLU layer ``L``, pick the α stored at ``(L, next_sid(L))`` where
+    ``next_sid(L)`` is the smallest intermediate pre-activation start node that
+    is downstream of ``L`` in the network DAG. ReLUs with no downstream
+    intermediate start node are skipped.
+    """
+    if alpha_state.is_empty():
+        return {}
+
+    start_nodes = sorted(
+        sid for sid in alpha_state.start_nodes if sid != AlphaState.FINAL_SID
+    )
+    if not start_nodes:
+        return {}
+
+    downstream_cache: dict[int, set[int]] = {}
+
+    def _is_downstream(src_lid: int, dst_lid: int) -> bool:
+        reachable = downstream_cache.get(src_lid)
+        if reachable is None:
+            seen: set[int] = set()
+            stack = list(net.succs.get(src_lid, []))
+            while stack:
+                current = stack.pop()
+                if current in seen:
+                    continue
+                seen.add(current)
+                stack.extend(net.succs.get(current, []))
+            downstream_cache[src_lid] = seen
+            reachable = seen
+        return dst_lid in reachable
+
+    projected: dict[int, torch.Tensor] = {}
+    for layer in net.layers:
+        kind = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
+        if kind not in _RELU_KINDS:
+            continue
+        for sid in start_nodes:
+            if sid <= layer.id or not _is_downstream(layer.id, sid):
+                continue
+            tensor = alpha_state.get(layer.id, sid)
+            if tensor is None:
+                continue
+            projected[layer.id] = tensor
+            break
+    return projected
 
 
 def _compute_split_points(
@@ -594,12 +646,21 @@ def _verify_bab_batched(
         if iteration_counter == 0 and precomputed_root_bounds is not None:
             bounds_dict = dict(precomputed_root_bounds)
         else:
+            flat_alphas = None
+            if (
+                config.alpha_split_objective
+                and batch.alphas is not None
+                and not batch.alphas.is_empty()
+            ):
+                projected_alphas = project_alpha_for_forward(net, batch.alphas)
+                flat_alphas = projected_alphas or None
             bounds_dict = compute_forward_bounds(
                 net,
                 batch.lb,
                 batch.ub,
                 post_activation=False,
                 eta_state=batch.eta,
+                alphas=flat_alphas,
             )
             if fixed_bounds is not None:
                 bounds_dict = _apply_fixed_bounds(bounds_dict, fixed_bounds)

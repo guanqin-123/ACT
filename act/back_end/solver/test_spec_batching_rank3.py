@@ -169,7 +169,7 @@ def test_expand_alpha_dict_rank3_no_expand() -> None:
     solver = DualSolver(DualTF())
     alpha = {3: torch.full((2, 3), 0.2, dtype=get_default_dtype(), device=get_default_device())}
     expanded = solver._expand_alpha_dict(alpha, 4)
-    assert expanded[3].shape == (2, 3)
+    assert expanded.for_start_node(-1)[3].shape == (8, 3)
 
 
 def test_backward_pass_rank3_parity_materialized() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import ClassVar, Dict, Iterator, List, Optional, Tuple
 
 import torch
@@ -47,6 +48,12 @@ class AlphaState:
                 params.append(self._store[lid][sid])
         return params
 
+    def iter_entries(self) -> Iterator[Tuple[int, int, torch.Tensor]]:
+        """Yield ``(layer_id, start_node_id, tensor)`` in stable order."""
+        for lid in sorted(self._store):
+            for sid in sorted(self._store[lid]):
+                yield lid, sid, self._store[lid][sid]
+
     def clone(self, *, detach: bool = True) -> "AlphaState":
         """Independent deep clone (for snapshot or BaB warm-start)."""
         cloned = AlphaState()
@@ -74,7 +81,7 @@ class AlphaState:
         return selected
 
     @classmethod
-    def from_legacy(cls, d: Optional[Dict[int, torch.Tensor]]) -> "AlphaState":
+    def from_legacy(cls, d: Optional[Mapping[int, torch.Tensor]]) -> "AlphaState":
         """Wrap a legacy {lid: tensor} dict at FINAL_SID."""
         state = cls()
         if d is None:
