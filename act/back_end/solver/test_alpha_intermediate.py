@@ -226,3 +226,33 @@ def test_intermediate_backward_truncated_matches_full() -> None:
     final_sid = net.preds[net.layers[-1].id][0]
     truncated = backward_truncated_objective(net, bounds, final_sid, spec.C, AlphaState()).reshape(1, spec.M)
     torch.testing.assert_close(truncated, result[2], rtol=1e-5, atol=1e-7)
+
+
+def test_chunked_objective_rows_match_unchunked() -> None:
+    net, start_nodes, input_lb, input_ub = _make_deep_relu_net()
+    bounds = compute_forward_bounds(net, input_lb, input_ub, post_activation=False)
+    _, alpha_state = optimize_initial_intermediate_bounds(
+        net, bounds, alpha_iters=3, lr_alpha=0.5,
+    )
+    for sid_int in start_nodes:
+        baseline_lb = backward_truncated_lb(net, bounds, sid_int, alpha_state)
+        baseline_ub = backward_truncated_ub(net, bounds, sid_int, alpha_state)
+        for chunk in (1, 2, 3, 5):
+            lb_chunked = backward_truncated_lb(
+                net, bounds, sid_int, alpha_state, objective_chunk_size=chunk,
+            )
+            ub_chunked = backward_truncated_ub(
+                net, bounds, sid_int, alpha_state, objective_chunk_size=chunk,
+            )
+            torch.testing.assert_close(lb_chunked, baseline_lb, rtol=1e-7, atol=1e-9)
+            torch.testing.assert_close(ub_chunked, baseline_ub, rtol=1e-7, atol=1e-9)
+
+
+def test_chunk_size_default_off_unchunked() -> None:
+    net, start_nodes, input_lb, input_ub = _make_deep_relu_net()
+    bounds = compute_forward_bounds(net, input_lb, input_ub, post_activation=False)
+    alpha_state = AlphaState()
+    sid_int = start_nodes[0]
+    lb_default = backward_truncated_lb(net, bounds, sid_int, alpha_state)
+    lb_explicit_none = backward_truncated_lb(net, bounds, sid_int, alpha_state, objective_chunk_size=None)
+    torch.testing.assert_close(lb_default, lb_explicit_none, rtol=0.0, atol=0.0)

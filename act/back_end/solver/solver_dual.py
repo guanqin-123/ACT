@@ -1166,6 +1166,7 @@ class DualSolver(Solver):
                             backward_truncated_ub,
                         )
 
+                        chunk = getattr(self, "alpha_objective_chunk_size", None)
                         for sid_int in non_final_sids:
                             lb_int = backward_truncated_lb(
                                 net,
@@ -1173,6 +1174,7 @@ class DualSolver(Solver):
                                 sid_int,
                                 alpha_params,
                                 eta_state=working_eta,
+                                objective_chunk_size=chunk,
                             )
                             ub_int = backward_truncated_ub(
                                 net,
@@ -1180,6 +1182,7 @@ class DualSolver(Solver):
                                 sid_int,
                                 alpha_params,
                                 eta_state=working_eta,
+                                objective_chunk_size=chunk,
                             )
                             loss_int = loss_int + (-lb_int.sum() + ub_int.sum())
                     loss = loss_final + (self.lambda_intermediate * loss_int)

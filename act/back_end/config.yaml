@@ -92,6 +92,12 @@ backend:
     # 0.0 reproduces Fix-1-only behaviour.
     lambda_intermediate: 1.0
 
+    # Per-call chunk size when enumerating coordinate-objective rows in the
+    # truncated backward pass (Phase 2a + Fix 2 joint loss). Setting >= the
+    # widest intermediate sid disables chunking (bit-identical to f527fff).
+    # 4096 keeps eye memory ≤ 1 GB for ResNet-medium-style conv widths.
+    alpha_objective_chunk_size: 4096
+
     # Minimum pre-activation bound gap (|ub - lb|) required before a smooth
     # activation is considered splittable. Smaller = more aggressive splitting.
     smooth_split_min_gap: 0.01

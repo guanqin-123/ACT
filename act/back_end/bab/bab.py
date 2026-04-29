@@ -594,6 +594,7 @@ def _verify_bab_batched(
     dual_solver.lr_eta = config.lr_eta
     dual_solver.lr_alpha = config.lr_alpha
     dual_solver.lambda_intermediate = config.lambda_intermediate
+    dual_solver.alpha_objective_chunk_size = config.alpha_objective_chunk_size
     if config.record_bound_trace and trace is None:
         trace = BoundTrace()
 
@@ -623,6 +624,7 @@ def _verify_bab_batched(
             precomputed_root_bounds,
             alpha_iters=config.alpha_iters,
             lr_alpha=config.lr_alpha,
+            objective_chunk_size=config.alpha_objective_chunk_size,
         )
         fixed_bounds = {
             lid: precomputed_root_bounds[lid]

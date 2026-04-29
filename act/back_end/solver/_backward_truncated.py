@@ -49,14 +49,23 @@ def _coordinate_objective_rows(
     sid_int: int,
     *,
     sign: float,
+    coord_start: int = 0,
+    coord_end: int | None = None,
 ) -> tuple[torch.Tensor, int, int]:
     if sid_int not in bounds_dict:
         raise ValueError(f"backward_truncated_lb: missing bounds for layer {sid_int}")
     base_batch, width = _flatten_layer_width(bounds_dict[sid_int])
+    end = width if coord_end is None else coord_end
+    if not (0 <= coord_start < end <= width):
+        raise ValueError(
+            f"_coordinate_objective_rows: invalid chunk range [{coord_start}, {end}) for width {width}"
+        )
     sample = solver_dual_module.flatten_bounds_rows(bounds_dict[sid_int]).lb
-    eye = torch.eye(width, device=sample.device, dtype=sample.dtype)
-    coeffs = sign * eye.unsqueeze(0).expand(base_batch, -1, -1)
-    return coeffs.reshape(base_batch * width, width).contiguous(), base_batch, width
+    chunk_size = end - coord_start
+    indices = torch.arange(coord_start, end, device=sample.device)
+    eye_chunk = torch.nn.functional.one_hot(indices, num_classes=width).to(dtype=sample.dtype)
+    coeffs = sign * eye_chunk.unsqueeze(0).expand(base_batch, -1, -1)
+    return coeffs.reshape(base_batch * chunk_size, width).contiguous(), base_batch, width
 
 
 def _backward_truncated_objective(
@@ -195,6 +204,40 @@ def backward_truncated_objective(
     )
 
 
+def _truncated_per_sign(
+    net: Net,
+    bounds_dict: dict[int, Bounds],
+    sid_int: int,
+    alpha_state: AlphaState,
+    *,
+    sign: float,
+    eta_state: EtaState | None,
+    objective_chunk_size: int | None,
+) -> torch.Tensor:
+    base_batch, width = _flatten_layer_width(bounds_dict[sid_int])
+    chunk = width if objective_chunk_size is None else min(int(objective_chunk_size), width)
+    if chunk <= 0:
+        raise ValueError(f"objective_chunk_size must be positive, got {objective_chunk_size}")
+    if chunk >= width:
+        coeffs, _, _ = _coordinate_objective_rows(bounds_dict, sid_int, sign=sign)
+        obj = _backward_truncated_objective(
+            net, bounds_dict, sid_int, coeffs, alpha_state, eta_state=eta_state,
+        )
+        return obj.reshape(base_batch, width)
+    obj_chunks: list[torch.Tensor] = []
+    for coord_start in range(0, width, chunk):
+        coord_end = min(coord_start + chunk, width)
+        coeffs, _, _ = _coordinate_objective_rows(
+            bounds_dict, sid_int, sign=sign,
+            coord_start=coord_start, coord_end=coord_end,
+        )
+        obj_chunk = _backward_truncated_objective(
+            net, bounds_dict, sid_int, coeffs, alpha_state, eta_state=eta_state,
+        )
+        obj_chunks.append(obj_chunk.reshape(base_batch, coord_end - coord_start))
+    return torch.cat(obj_chunks, dim=1)
+
+
 def backward_truncated_lb(
     net: Net,
     bounds_dict: dict[int, Bounds],
@@ -202,19 +245,14 @@ def backward_truncated_lb(
     alpha_state: AlphaState,
     *,
     eta_state: EtaState | None = None,
+    objective_chunk_size: int | None = None,
     log: logging.Logger | None = None,
 ) -> torch.Tensor:
     del log
-    coeffs, base_batch, width = _coordinate_objective_rows(bounds_dict, sid_int, sign=1.0)
-    obj = _backward_truncated_objective(
-        net,
-        bounds_dict,
-        sid_int,
-        coeffs,
-        alpha_state,
-        eta_state=eta_state,
+    return _truncated_per_sign(
+        net, bounds_dict, sid_int, alpha_state,
+        sign=1.0, eta_state=eta_state, objective_chunk_size=objective_chunk_size,
     )
-    return obj.reshape(base_batch, width)
 
 
 def backward_truncated_ub(
@@ -224,17 +262,12 @@ def backward_truncated_ub(
     alpha_state: AlphaState,
     *,
     eta_state: EtaState | None = None,
+    objective_chunk_size: int | None = None,
 ) -> torch.Tensor:
-    coeffs, base_batch, width = _coordinate_objective_rows(bounds_dict, sid_int, sign=-1.0)
-    obj = _backward_truncated_objective(
-        net,
-        bounds_dict,
-        sid_int,
-        coeffs,
-        alpha_state,
-        eta_state=eta_state,
+    return -_truncated_per_sign(
+        net, bounds_dict, sid_int, alpha_state,
+        sign=-1.0, eta_state=eta_state, objective_chunk_size=objective_chunk_size,
     )
-    return (-obj).reshape(base_batch, width)
 
 
 __all__ = [

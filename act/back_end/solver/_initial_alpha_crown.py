@@ -103,6 +103,7 @@ def optimize_initial_intermediate_bounds(
     *,
     alpha_iters: int,
     lr_alpha: float,
+    objective_chunk_size: int | None = None,
     log: logging.Logger | None = None,
 ) -> tuple[dict[int, Bounds], AlphaState]:
     logger = log or globals()["log"]
@@ -178,8 +179,8 @@ def optimize_initial_intermediate_bounds(
             current_lb: dict[int, torch.Tensor] = {}
             current_ub: dict[int, torch.Tensor] = {}
             for sid_int in intermediate_sids:
-                lb_sid = backward_truncated_lb(net, bounds_dict, sid_int, alpha_state)
-                ub_sid = backward_truncated_ub(net, bounds_dict, sid_int, alpha_state)
+                lb_sid = backward_truncated_lb(net, bounds_dict, sid_int, alpha_state, objective_chunk_size=objective_chunk_size)
+                ub_sid = backward_truncated_ub(net, bounds_dict, sid_int, alpha_state, objective_chunk_size=objective_chunk_size)
                 current_lb[sid_int] = lb_sid.detach()
                 current_ub[sid_int] = ub_sid.detach()
                 loss = loss - lb_sid.sum() + ub_sid.sum()
@@ -235,8 +236,8 @@ def optimize_initial_intermediate_bounds(
     with torch.no_grad():
         for sid_int in intermediate_sids:
             old_bounds = bounds_dict[sid_int]
-            candidate_lb = backward_truncated_lb(net, bounds_dict, sid_int, alpha_state).reshape_as(old_bounds.lb)
-            candidate_ub = backward_truncated_ub(net, bounds_dict, sid_int, alpha_state).reshape_as(old_bounds.ub)
+            candidate_lb = backward_truncated_lb(net, bounds_dict, sid_int, alpha_state, objective_chunk_size=objective_chunk_size).reshape_as(old_bounds.lb)
+            candidate_ub = backward_truncated_ub(net, bounds_dict, sid_int, alpha_state, objective_chunk_size=objective_chunk_size).reshape_as(old_bounds.ub)
             new_lb = torch.maximum(candidate_lb, old_bounds.lb)
             new_ub = torch.minimum(candidate_ub, old_bounds.ub)
             invalid = (~torch.isfinite(new_lb)) | (~torch.isfinite(new_ub)) | (new_lb > new_ub + 1e-5)

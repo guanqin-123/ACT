@@ -13,6 +13,7 @@ class BabSection(TypedDict):
     alpha_iters: int
     lr_alpha: float
     lambda_intermediate: float
+    alpha_objective_chunk_size: int
 
 
 class BackendSection(TypedDict):
@@ -45,3 +46,11 @@ def test_lr_alpha_default_matches_abcrown() -> None:
 
 def test_lambda_intermediate_default_is_one() -> None:
     assert BaBConfig().lambda_intermediate == 1.0
+
+
+def test_alpha_objective_chunk_size_default_yaml() -> None:
+    config_path = Path(__file__).with_name("config.yaml")
+    with config_path.open(encoding="utf-8") as handle:
+        config_doc = cast(ConfigDoc, yaml.safe_load(handle) or {})
+    assert config_doc["backend"]["bab"]["alpha_objective_chunk_size"] == 4096
+    assert BaBConfig().alpha_objective_chunk_size == 4096
