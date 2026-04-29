@@ -172,10 +172,14 @@ def test_alpha_intermediate_in_joint_adam_param_list(monkeypatch: pytest.MonkeyP
     original_adam = torch.optim.Adam
 
     def capture_adam(params: Any, *args: Any, **kwargs: Any):
-        param_list = list(cast(list[torch.nn.Parameter], params))
+        params_seq = list(params)
+        if params_seq and isinstance(params_seq[0], dict):
+            param_list = [p for group in params_seq for p in group["params"]]
+        else:
+            param_list = list(cast(list[torch.nn.Parameter], params_seq))
         captured.append(param_list)
         captured_clones.append([p.detach().clone() for p in param_list])
-        return original_adam(param_list, *args, **kwargs)
+        return original_adam(params_seq, *args, **kwargs)
 
     monkeypatch.setattr(torch.optim, "Adam", capture_adam)
     solver = DualSolver(DualTF())
@@ -236,7 +240,12 @@ def test_intermediate_grad_nonzero_at_bab_depth_1() -> None:
     class _NoStepAdam:
         def __init__(self, params: Any, *args: Any, **kwargs: Any) -> None:
             del args, kwargs
-            captured["params"] = list(cast(list[torch.nn.Parameter], params))
+            params_seq = list(params)
+            if params_seq and isinstance(params_seq[0], dict):
+                flat = [p for group in params_seq for p in group["params"]]
+            else:
+                flat = list(cast(list[torch.nn.Parameter], params_seq))
+            captured["params"] = flat
 
         def zero_grad(self) -> None:
             for param in captured["params"]:
@@ -294,3 +303,54 @@ def test_soundness_with_intermediate_loss() -> None:
     if result.out_alphas is not None:
         lb_int = backward_truncated_lb(net, bounds, 4, result.out_alphas)
         assert torch.isfinite(lb_int).all()
+
+
+def test_adam_uses_two_param_groups_with_lr_alpha(monkeypatch: pytest.MonkeyPatch) -> None:
+    net = _make_four_layer_relu_net()
+    bounds = compute_forward_bounds(net, _t([[-1.0, -1.0]]), _t([[1.0, 1.0]]), post_activation=False)
+    warm = AlphaState.from_legacy({3: torch.full((1, 2), 0.25, dtype=get_default_dtype(), device=get_default_device())})
+    captured_groups: list[list[Any]] = []
+    captured_kwargs: list[dict[str, Any]] = []
+    original_adam = torch.optim.Adam
+
+    def capture_adam(params: Any, *args: Any, **kwargs: Any):
+        params_seq = list(params)
+        captured_groups.append(params_seq)
+        captured_kwargs.append(dict(kwargs))
+        return original_adam(params_seq, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim, "Adam", capture_adam)
+    solver = DualSolver(DualTF())
+    solver.lr_alpha = 0.5
+    solver.lr_eta = 0.05
+    _ = solver.compute_bound(net, bounds, _t([[1.0]]), n_iters=1, lr=0.1, force_kkt=True, warm_alphas=warm)
+
+    assert captured_groups
+    groups = captured_groups[0]
+    assert all(isinstance(g, dict) for g in groups), f"expected param_groups dicts, got {[type(g) for g in groups]}"
+    assert len(groups) >= 1
+    alpha_groups = [g for g in groups if g.get("lr") == 0.5]
+    assert len(alpha_groups) == 1, f"expected exactly one α group with lr=0.5, got groups with lrs {[g.get('lr') for g in groups]}"
+    assert alpha_groups[0]["params"], "α group must contain at least one Parameter"
+
+
+def test_adam_lr_alpha_attribute_drives_param_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    net = _make_four_layer_relu_net()
+    bounds = compute_forward_bounds(net, _t([[-1.0, -1.0]]), _t([[1.0, 1.0]]), post_activation=False)
+    warm = AlphaState.from_legacy({3: torch.full((1, 2), 0.25, dtype=get_default_dtype(), device=get_default_device())})
+    captured_lrs: list[list[float]] = []
+    original_adam = torch.optim.Adam
+
+    def capture_adam(params: Any, *args: Any, **kwargs: Any):
+        params_seq = list(params)
+        if params_seq and isinstance(params_seq[0], dict):
+            captured_lrs.append([g.get("lr") for g in params_seq])
+        return original_adam(params_seq, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim, "Adam", capture_adam)
+    solver = DualSolver(DualTF())
+    solver.lr_alpha = 0.123
+    _ = solver.compute_bound(net, bounds, _t([[1.0]]), n_iters=1, lr=0.1, force_kkt=True, warm_alphas=warm)
+
+    assert captured_lrs
+    assert 0.123 in captured_lrs[0], f"lr_alpha=0.123 not propagated to any param group; got lrs {captured_lrs[0]}"
