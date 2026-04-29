@@ -175,7 +175,6 @@ def optimize_initial_intermediate_bounds(
                 sid_int: _clone_sid_snapshot(alpha_state, sid_int, upstream_relus[sid_int])
                 for sid_int in intermediate_sids
             }
-            loss = torch.zeros((), device=device, dtype=dtype)
             current_lb: dict[int, torch.Tensor] = {}
             current_ub: dict[int, torch.Tensor] = {}
             for sid_int in intermediate_sids:
@@ -183,10 +182,9 @@ def optimize_initial_intermediate_bounds(
                 ub_sid = backward_truncated_ub(net, bounds_dict, sid_int, alpha_state, objective_chunk_size=objective_chunk_size)
                 current_lb[sid_int] = lb_sid.detach()
                 current_ub[sid_int] = ub_sid.detach()
-                loss = loss - lb_sid.sum() + ub_sid.sum()
-
-            if loss.requires_grad:
-                torch.autograd.backward(loss)
+                loss_partial = -lb_sid.sum() + ub_sid.sum()
+                if loss_partial.requires_grad:
+                    torch.autograd.backward(loss_partial)
             _ = step_fn()
 
             with torch.no_grad():
