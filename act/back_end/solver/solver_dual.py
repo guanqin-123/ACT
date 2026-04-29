@@ -1078,17 +1078,28 @@ class DualSolver(Solver):
             }
 
         evaluate_only = not force_kkt and n_iters <= 0
-        opt_groups: List[Dict[str, Any]] = []
         alpha_flat = alpha_params.flat_params()
-        if alpha_flat:
-            opt_groups.append({"params": alpha_flat, "lr": self.lr_alpha})
-        if eta_params:
-            opt_groups.append({"params": list(eta_params.values()), "lr": self.lr_eta})
-        optim = (
-            torch.optim.Adam(opt_groups, lr=lr)
-            if opt_groups and not evaluate_only
-            else None
-        )
+        has_intermediate = bool(non_final_sids)
+        if has_intermediate:
+            opt_groups: List[Dict[str, Any]] = []
+            if alpha_flat:
+                opt_groups.append({"params": alpha_flat, "lr": self.lr_alpha})
+            if eta_params:
+                opt_groups.append({"params": list(eta_params.values()), "lr": self.lr_eta})
+            optim = (
+                torch.optim.Adam(opt_groups, lr=lr)
+                if opt_groups and not evaluate_only
+                else None
+            )
+        else:
+            opt_params = list(alpha_flat)
+            if eta_params is not None:
+                opt_params.extend(list(eta_params.values()))
+            optim = (
+                torch.optim.Adam(opt_params, lr=lr)
+                if opt_params and not evaluate_only
+                else None
+            )
 
         B = c.shape[0]
         best_obj = torch.full((B,), -float("inf"), device=c.device, dtype=c.dtype)

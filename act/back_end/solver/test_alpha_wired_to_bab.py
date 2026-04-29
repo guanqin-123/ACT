@@ -309,14 +309,13 @@ def test_adam_uses_two_param_groups_with_lr_alpha(monkeypatch: pytest.MonkeyPatc
     net = _make_four_layer_relu_net()
     bounds = compute_forward_bounds(net, _t([[-1.0, -1.0]]), _t([[1.0, 1.0]]), post_activation=False)
     warm = AlphaState.from_legacy({3: torch.full((1, 2), 0.25, dtype=get_default_dtype(), device=get_default_device())})
+    warm.set(3, 4, torch.full((1, 2), 0.5, dtype=get_default_dtype(), device=get_default_device()))
     captured_groups: list[list[Any]] = []
-    captured_kwargs: list[dict[str, Any]] = []
     original_adam = torch.optim.Adam
 
     def capture_adam(params: Any, *args: Any, **kwargs: Any):
         params_seq = list(params)
         captured_groups.append(params_seq)
-        captured_kwargs.append(dict(kwargs))
         return original_adam(params_seq, *args, **kwargs)
 
     monkeypatch.setattr(torch.optim, "Adam", capture_adam)
@@ -338,6 +337,7 @@ def test_adam_lr_alpha_attribute_drives_param_group(monkeypatch: pytest.MonkeyPa
     net = _make_four_layer_relu_net()
     bounds = compute_forward_bounds(net, _t([[-1.0, -1.0]]), _t([[1.0, 1.0]]), post_activation=False)
     warm = AlphaState.from_legacy({3: torch.full((1, 2), 0.25, dtype=get_default_dtype(), device=get_default_device())})
+    warm.set(3, 4, torch.full((1, 2), 0.5, dtype=get_default_dtype(), device=get_default_device()))
     captured_lrs: list[list[float]] = []
     original_adam = torch.optim.Adam
 
@@ -354,3 +354,28 @@ def test_adam_lr_alpha_attribute_drives_param_group(monkeypatch: pytest.MonkeyPa
 
     assert captured_lrs
     assert 0.123 in captured_lrs[0], f"lr_alpha=0.123 not propagated to any param group; got lrs {captured_lrs[0]}"
+
+
+def test_adam_default_off_uses_flat_param_list_with_lr(monkeypatch: pytest.MonkeyPatch) -> None:
+    net = _make_four_layer_relu_net()
+    bounds = compute_forward_bounds(net, _t([[-1.0, -1.0]]), _t([[1.0, 1.0]]), post_activation=False)
+    warm = AlphaState.from_legacy({3: torch.full((1, 2), 0.25, dtype=get_default_dtype(), device=get_default_device())})
+    captured_first_arg: list[Any] = []
+    original_adam = torch.optim.Adam
+
+    def capture_adam(params: Any, *args: Any, **kwargs: Any):
+        params_seq = list(params)
+        captured_first_arg.append(params_seq)
+        return original_adam(params_seq, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim, "Adam", capture_adam)
+    solver = DualSolver(DualTF())
+    solver.lr_alpha = 0.5
+    _ = solver.compute_bound(net, bounds, _t([[1.0]]), n_iters=1, lr=0.1, force_kkt=True, warm_alphas=warm)
+
+    assert captured_first_arg
+    items = captured_first_arg[0]
+    assert items, "expected non-empty param list when only FINAL_SID α is present"
+    assert not any(isinstance(item, dict) for item in items), (
+        f"D4 violation: default-off path used param_groups instead of flat params; got types {[type(i) for i in items]}"
+    )

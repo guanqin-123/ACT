@@ -519,6 +519,28 @@ def _concat_subproblem_batches(*batches: SubproblemBatch) -> SubproblemBatch:
     else:
         subproblem_ids = None
 
+    alphas: Optional[AlphaState]
+    alpha_states_present = [b.alphas for b in batches if b.alphas is not None]
+    if len(alpha_states_present) == len(batches) and len(batches) > 0:
+        first_keys = {(lid, sid) for lid, sid, _ in alpha_states_present[0].iter_entries()}
+        keys_match = all(
+            {(lid, sid) for lid, sid, _ in s.iter_entries()} == first_keys
+            for s in alpha_states_present[1:]
+        )
+        if keys_match and first_keys:
+            alphas = AlphaState()
+            for lid, sid, _ in alpha_states_present[0].iter_entries():
+                tensors_to_cat: list[torch.Tensor] = []
+                for s in alpha_states_present:
+                    tensor = s.get(lid, sid)
+                    assert tensor is not None
+                    tensors_to_cat.append(tensor)
+                alphas.set(lid, sid, torch.cat(tensors_to_cat, dim=0))
+        else:
+            alphas = None
+    else:
+        alphas = None
+
     return SubproblemBatch(
         lb=lb,
         ub=ub,
@@ -527,6 +549,7 @@ def _concat_subproblem_batches(*batches: SubproblemBatch) -> SubproblemBatch:
         histories=histories,
         parent_margins=parent_margins,
         subproblem_ids=subproblem_ids,
+        alphas=alphas,
     )
 
 

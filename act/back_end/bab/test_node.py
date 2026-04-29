@@ -11,6 +11,7 @@ from act.back_end.bab.node import (
     _concat_subproblem_batches,
 )
 from act.back_end.core import Bounds
+from act.back_end.solver.alpha_state import AlphaState
 
 
 def _make_eta(B: int, widths: dict[int, int]) -> EtaState:
@@ -265,3 +266,61 @@ def test_concat_subproblem_batches_preserves_all_fields():
     assert merged.histories[3][0].sign == -1
     assert merged.parent_margins is not None
     assert merged.parent_margins.tolist() == pytest.approx([0.5, 0.7, 0.9, 1.1])
+
+
+def test_concat_subproblem_batches_preserves_alphas():
+    lb1 = torch.tensor([[0.0, 0.0], [1.0, 1.0]])
+    ub1 = lb1 + 1.0
+    d1 = torch.tensor([0, 0], dtype=torch.long)
+    a1 = AlphaState()
+    a1.set(3, AlphaState.FINAL_SID, torch.tensor([[0.1, 0.2], [0.3, 0.4]]))
+    a1.set(3, 4, torch.tensor([[0.5, 0.5], [0.6, 0.6]]))
+    b1 = SubproblemBatch(lb=lb1, ub=ub1, depths=d1, alphas=a1)
+
+    lb2 = torch.tensor([[2.0, 2.0]])
+    ub2 = lb2 + 1.0
+    d2 = torch.tensor([1], dtype=torch.long)
+    a2 = AlphaState()
+    a2.set(3, AlphaState.FINAL_SID, torch.tensor([[0.7, 0.8]]))
+    a2.set(3, 4, torch.tensor([[0.9, 0.9]]))
+    b2 = SubproblemBatch(lb=lb2, ub=ub2, depths=d2, alphas=a2)
+
+    merged = _concat_subproblem_batches(b1, b2)
+
+    assert merged.alphas is not None
+    final_t = merged.alphas.get(3, AlphaState.FINAL_SID)
+    inter_t = merged.alphas.get(3, 4)
+    assert final_t is not None and inter_t is not None
+    assert final_t.shape == (3, 2)
+    assert torch.equal(final_t, torch.tensor([[0.1, 0.2], [0.3, 0.4], [0.7, 0.8]]))
+    assert torch.equal(inter_t, torch.tensor([[0.5, 0.5], [0.6, 0.6], [0.9, 0.9]]))
+
+
+def test_concat_subproblem_batches_drops_alphas_when_keysets_disagree():
+    lb1 = torch.tensor([[0.0]])
+    ub1 = torch.tensor([[1.0]])
+    d1 = torch.tensor([0], dtype=torch.long)
+    a1 = AlphaState()
+    a1.set(3, AlphaState.FINAL_SID, torch.tensor([[0.1]]))
+    b1 = SubproblemBatch(lb=lb1, ub=ub1, depths=d1, alphas=a1)
+
+    a2 = AlphaState()
+    a2.set(3, AlphaState.FINAL_SID, torch.tensor([[0.2]]))
+    a2.set(5, 6, torch.tensor([[0.3]]))
+    b2 = SubproblemBatch(lb=lb1, ub=ub1, depths=d1, alphas=a2)
+
+    merged = _concat_subproblem_batches(b1, b2)
+    assert merged.alphas is None
+
+
+def test_concat_subproblem_batches_drops_alphas_when_one_missing():
+    lb1 = torch.tensor([[0.0]])
+    ub1 = torch.tensor([[1.0]])
+    d1 = torch.tensor([0], dtype=torch.long)
+    a1 = AlphaState()
+    a1.set(3, AlphaState.FINAL_SID, torch.tensor([[0.1]]))
+    b1 = SubproblemBatch(lb=lb1, ub=ub1, depths=d1, alphas=a1)
+    b2 = SubproblemBatch(lb=lb1, ub=ub1, depths=d1, alphas=None)
+
+    merged = _concat_subproblem_batches(b1, b2)
+    assert merged.alphas is None
