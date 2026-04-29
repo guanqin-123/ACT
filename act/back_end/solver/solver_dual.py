@@ -126,7 +126,9 @@ class DualSolver(Solver):
         self.tf = tf
         self.n_iters = n_iters
         self.eta_iters = 20
+        self.lr_alpha = 0.5
         self.lr_eta = 0.05
+        self.lambda_intermediate = 1.0
         self._eta_state: Optional[EtaState] = None
         self._alpha_state: AlphaState = AlphaState()
         self._last_bounds: Optional[Bounds] = None
@@ -1062,6 +1064,9 @@ class DualSolver(Solver):
                     sid,
                     torch.nn.Parameter(prepared.detach().clone().clamp(0.0, 1.0)),
                 )
+        non_final_sids = tuple(
+            sid for sid in alpha_params.start_nodes if sid != AlphaState.FINAL_SID
+        )
 
         eta_seed = warm_etas if warm_etas is not None else self._eta_state
         eta_state = self._prepare_eta_state(eta_seed, target_batch)
@@ -1136,7 +1141,34 @@ class DualSolver(Solver):
                 )
 
                 if optim is not None:
-                    loss = -obj.sum()
+                    loss_final = -obj.sum()
+                    loss_int = obj.new_zeros(())
+                    if (
+                        self.lambda_intermediate != 0.0
+                        and non_final_sids
+                    ):
+                        from act.back_end.solver._backward_truncated import (
+                            backward_truncated_lb,
+                            backward_truncated_ub,
+                        )
+
+                        for sid_int in non_final_sids:
+                            lb_int = backward_truncated_lb(
+                                net,
+                                bounds_dict,
+                                sid_int,
+                                alpha_params,
+                                eta_state=working_eta,
+                            )
+                            ub_int = backward_truncated_ub(
+                                net,
+                                bounds_dict,
+                                sid_int,
+                                alpha_params,
+                                eta_state=working_eta,
+                            )
+                            loss_int = loss_int + (-lb_int.sum() + ub_int.sum())
+                    loss = loss_final + (self.lambda_intermediate * loss_int)
                     if loss.requires_grad:
                         loss.backward()
                     optim.step()

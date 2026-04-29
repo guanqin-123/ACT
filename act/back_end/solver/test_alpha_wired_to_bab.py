@@ -10,9 +10,11 @@ from act.back_end.config import BaBConfig
 from act.back_end.core import Layer, Net
 from act.back_end.dual_tf import DualTF, compute_forward_bounds
 from act.back_end.layer_schema import LayerKind
+from act.back_end.solver._backward_truncated import backward_truncated_lb
 from act.back_end.solver.alpha_state import AlphaState
 from act.back_end.solver.solver_dual import DualSolver
 from act.back_end.solver.solver_interval import TorchLPSolver
+from act.front_end.specs import OutKind, OutputSpec
 from act.util.device_manager import get_default_device, get_default_dtype, initialize_device
 from act.util.stats import VerifyStatus
 
@@ -166,11 +168,13 @@ def test_alpha_intermediate_in_joint_adam_param_list(monkeypatch: pytest.MonkeyP
     intermediate = torch.full((1, 2), 0.6, dtype=get_default_dtype(), device=get_default_device())
     warm.set(3, 4, intermediate)
     captured: list[list[torch.nn.Parameter]] = []
+    captured_clones: list[list[torch.Tensor]] = []
     original_adam = torch.optim.Adam
 
     def capture_adam(params: Any, *args: Any, **kwargs: Any):
         param_list = list(cast(list[torch.nn.Parameter], params))
         captured.append(param_list)
+        captured_clones.append([p.detach().clone() for p in param_list])
         return original_adam(param_list, *args, **kwargs)
 
     monkeypatch.setattr(torch.optim, "Adam", capture_adam)
@@ -180,7 +184,7 @@ def test_alpha_intermediate_in_joint_adam_param_list(monkeypatch: pytest.MonkeyP
 
     assert captured
     assert any(param is intermediate for param in captured[0]) is False
-    assert any(torch.equal(param.detach(), intermediate) for param in captured[0])
+    assert any(torch.equal(clone, intermediate) for clone in captured_clones[0])
 
 
 def test_alpha_final_unchanged_when_only_intermediate_added() -> None:
@@ -217,3 +221,76 @@ def test_soundness_preserved_with_alpha_wired() -> None:
         actual = preacts[lid]
         assert torch.all(wired_bounds[lid].lb[0].unsqueeze(0) <= actual + 1e-7)
         assert torch.all(wired_bounds[lid].ub[0].unsqueeze(0) >= actual - 1e-7)
+
+
+def test_intermediate_grad_nonzero_at_bab_depth_1() -> None:
+    net = _make_four_layer_relu_net()
+    bounds = compute_forward_bounds(net, _t([[-1.0, -1.0]]), _t([[1.0, 1.0]]), post_activation=False)
+    solver = DualSolver(DualTF())
+    solver.lambda_intermediate = 1.0
+    warm = AlphaState.from_legacy({3: torch.full((1, 2), 0.25, dtype=get_default_dtype(), device=get_default_device())})
+    warm.set(3, 4, torch.full((1, 2), 0.6, dtype=get_default_dtype(), device=get_default_device()))
+    captured: dict[str, list[torch.nn.Parameter]] = {}
+    original_adam = torch.optim.Adam
+
+    class _NoStepAdam:
+        def __init__(self, params: Any, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+            captured["params"] = list(cast(list[torch.nn.Parameter], params))
+
+        def zero_grad(self) -> None:
+            for param in captured["params"]:
+                param.grad = None
+
+        def step(self) -> None:
+            return None
+
+    torch.optim.Adam = _NoStepAdam  # type: ignore[assignment]
+    try:
+        _ = solver.compute_bound(net, bounds, _t([[1.0]]), n_iters=1, lr=0.1, force_kkt=True, warm_alphas=warm)
+    finally:
+        torch.optim.Adam = original_adam  # type: ignore[assignment]
+
+    params = captured["params"]
+    assert any(param.grad is not None and param.grad.abs().sum().item() > 0 for param in params)
+
+
+def test_lambda_zero_reproduces_fix1() -> None:
+    net = _make_four_layer_relu_net()
+    bounds = compute_forward_bounds(net, _t([[-1.0, -1.0]]), _t([[1.0, 1.0]]), post_activation=False)
+    warm = AlphaState.from_legacy({3: torch.full((1, 2), 0.25, dtype=get_default_dtype(), device=get_default_device())})
+    warm.set(3, 4, torch.full((1, 2), 0.4, dtype=get_default_dtype(), device=get_default_device()))
+
+    solver_a = DualSolver(DualTF())
+    solver_a.lambda_intermediate = 0.0
+    out_a = cast(
+        tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, AlphaState | None, object],
+        solver_a.compute_bound(net, bounds, _t([[1.0]]), n_iters=1, lr=0.1, force_kkt=True, warm_alphas=warm),
+    )
+
+    solver_b = DualSolver(DualTF())
+    solver_b.lambda_intermediate = 0.0
+    out_b = cast(
+        tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, AlphaState | None, object],
+        solver_b.compute_bound(net, bounds, _t([[1.0]]), n_iters=1, lr=0.1, force_kkt=True, warm_alphas=warm),
+    )
+
+    torch.testing.assert_close(out_a[0], out_b[0])
+    assert out_a[3] is not None and out_b[3] is not None
+    for lid, tensor in out_a[3].for_start_node(AlphaState.FINAL_SID).items():
+        torch.testing.assert_close(out_b[3].for_start_node(AlphaState.FINAL_SID)[lid], tensor)
+
+
+def test_soundness_with_intermediate_loss() -> None:
+    net = _make_four_layer_relu_net()
+    lb = _t([[-1.0, -1.0]])
+    ub = _t([[1.0, 1.0]])
+    bounds = compute_forward_bounds(net, lb, ub, post_activation=False)
+    solver = DualSolver(DualTF())
+    solver.lambda_intermediate = 1.0
+    spec = OutputSpec(kind=OutKind.LINEAR_LE, c=_t([1.0]), d=_t([0.0]))
+    result = solver.evaluate_spec(net, bounds, spec, enable_grad=True)
+    assert torch.isfinite(result.margins).all()
+    if result.out_alphas is not None:
+        lb_int = backward_truncated_lb(net, bounds, 4, result.out_alphas)
+        assert torch.isfinite(lb_int).all()

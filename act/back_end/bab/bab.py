@@ -592,6 +592,8 @@ def _verify_bab_batched(
     dual_solver = dual_solver or DualSolver(DualTF())
     dual_solver.eta_iters = config.eta_iters
     dual_solver.lr_eta = config.lr_eta
+    dual_solver.lr_alpha = config.lr_alpha
+    dual_solver.lambda_intermediate = config.lambda_intermediate
     if config.record_bound_trace and trace is None:
         trace = BoundTrace()
 

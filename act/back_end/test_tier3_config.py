@@ -12,6 +12,7 @@ class BabSection(TypedDict):
     alpha_split_objective: bool
     alpha_iters: int
     lr_alpha: float
+    lambda_intermediate: float
 
 
 class BackendSection(TypedDict):
@@ -35,7 +36,12 @@ def test_alpha_split_yaml_override() -> None:
     assert bab["alpha_split_objective"] is False
     assert bab["alpha_iters"] == 10
     assert bab["lr_alpha"] == 0.5
+    assert bab["lambda_intermediate"] == 1.0
 
 
 def test_lr_alpha_default_matches_abcrown() -> None:
     assert BaBConfig().lr_alpha == 0.5
+
+
+def test_lambda_intermediate_default_is_one() -> None:
+    assert BaBConfig().lambda_intermediate == 1.0

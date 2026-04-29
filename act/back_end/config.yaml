@@ -88,6 +88,10 @@ backend:
     # Learning rate for the η (eta) Adam optimizer.
     lr_eta: 0.05
 
+    # Weight for the BaB-time intermediate-bound tightening term.
+    # 0.0 reproduces Fix-1-only behaviour.
+    lambda_intermediate: 1.0
+
     # Minimum pre-activation bound gap (|ub - lb|) required before a smooth
     # activation is considered splittable. Smaller = more aggressive splitting.
     smooth_split_min_gap: 0.01
