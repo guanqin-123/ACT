@@ -52,7 +52,7 @@ class BaBConfig:
     alpha_iters: int = 10  # iters for the pre-BaB α-CROWN tightening
     lr_alpha: float = 0.5  # matches α-β-CROWN default; Phase 3 uses this
     lr_eta: float = 0.05
-    lambda_intermediate: float = 1.0
+    lambda_intermediate: float = 0.0
     alpha_objective_chunk_size: int = 4096
     smooth_split_min_gap: float = 1e-2
     max_splits_per_neuron: int = 4

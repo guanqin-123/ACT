@@ -1156,7 +1156,8 @@ class DualSolver(Solver):
 
                 if optim is not None:
                     loss_final = -obj.sum()
-                    loss_int = obj.new_zeros(())
+                    if loss_final.requires_grad:
+                        loss_final.backward()
                     if (
                         self.lambda_intermediate != 0.0
                         and non_final_sids
@@ -1184,10 +1185,11 @@ class DualSolver(Solver):
                                 eta_state=working_eta,
                                 objective_chunk_size=chunk,
                             )
-                            loss_int = loss_int + (-lb_int.sum() + ub_int.sum())
-                    loss = loss_final + (self.lambda_intermediate * loss_int)
-                    if loss.requires_grad:
-                        loss.backward()
+                            loss_partial = self.lambda_intermediate * (
+                                -lb_int.sum() + ub_int.sum()
+                            )
+                            if loss_partial.requires_grad:
+                                loss_partial.backward()
                     optim.step()
 
                 with torch.no_grad():

@@ -88,9 +88,12 @@ backend:
     # Learning rate for the η (eta) Adam optimizer.
     lr_eta: 0.05
 
-    # Weight for the BaB-time intermediate-bound tightening term.
-    # 0.0 reproduces Fix-1-only behaviour.
-    lambda_intermediate: 1.0
+    # Weight for the BaB-time intermediate-bound tightening term (Phase 2b
+    # semantics: re-optimise intermediate α at every BaB node). Per plan
+    # D9 this MUST default OFF — the dominant lever is Phase 2a's pre-BaB
+    # α-CROWN, not per-node re-opt. Setting >0 enables Phase 2b but blows
+    # up memory on multi-spec problems (BaB_batch × spec_count expansion).
+    lambda_intermediate: 0.0
 
     # Per-call chunk size when enumerating coordinate-objective rows in the
     # truncated backward pass (Phase 2a + Fix 2 joint loss). Setting >= the
