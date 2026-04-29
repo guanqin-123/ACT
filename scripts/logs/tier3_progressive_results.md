@@ -36,7 +36,8 @@ Source: `scripts/logs/tier3_lambda0_gpu.json` (post-Fix 6, the 8028 FALSIFIED ru
 | Fix 1 baseline | 49 GB | 64-114 MiB | ERROR (vLLM contention) |
 | + Fix 5 (chunked obj rows) | 20 GB | 226 MiB | ERROR (joint-loss alpha expansion) |
 | + Fix 5b (per-sid backward in pre-BaB) | 17 GB | 22 GiB | ERROR (joint-loss runtime_alpha_dict in BaB) |
-| **+ Fix 6 (λ_intermediate=0 default)** | **17-21 GB** | **96 MiB / N/A** | **8028 FALSIFIED ✓ ; 3995 ERROR (gap closed except for last MiB)** |
+| + Fix 6 (λ_intermediate=0 default) | 17-21 GB | 96 MiB / N/A | 8028 FALSIFIED ✓ ; 3995 ERROR (gap closed except for last MiB) |
+| **+ Fix 7 (cheap patches concretize identity branch + bias tracking)** | **17-21 GB** | **N/A on identity** | **identity-branch dense round-trip eliminated; fusion-branch unchanged** |
 
 ## What still needs a clean GPU
 
