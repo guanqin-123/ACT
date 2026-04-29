@@ -401,6 +401,38 @@ def test_forward_conv2d_patches_float64() -> None:
     torch.testing.assert_close(patches[0].ub, matrix[0].ub, rtol=1e-10, atol=1e-12)
 
 
+def test_forward_conv2d_patches_identity_branch_carries_bias() -> None:
+    layer = _make_conv_layer(
+        layer_id=21, in_c=3, out_c=4, kernel=3, stride=1, padding=1, height=8, width=8, seed=22
+    )
+    layer_bias = cast(torch.Tensor, layer.params["bias"])
+    bounds, frame, _lb_4d, _ub_4d = _make_input_box(2, 3, 8, 8, seed=23)
+    out = _run_forward_patches(layer, bounds, frame)
+    lin = out[2]
+    assert isinstance(lin, Patches)
+    assert lin.bias is not None
+    expected_bias = layer_bias.view(1, -1, 1, 1).expand(2, 4, 8, 8)
+    torch.testing.assert_close(lin.bias, expected_bias.contiguous(), rtol=1e-7, atol=1e-9)
+
+
+def test_patches_to_linear_bound_lifts_bias_into_b() -> None:
+    from act.back_end.dual_tf.tf_cnn_patches import _patches_to_linear_bound
+
+    layer = _make_conv_layer(
+        layer_id=22, in_c=3, out_c=4, kernel=3, stride=1, padding=1, height=8, width=8, seed=24
+    )
+    bounds, frame, _lb_4d, _ub_4d = _make_input_box(2, 3, 8, 8, seed=25)
+    out = _run_forward_patches(layer, bounds, frame)
+    lin = out[2]
+    assert isinstance(lin, Patches) and lin.bias is not None
+    input_shape = (2, 3, 8, 8)
+    linear_bound = _patches_to_linear_bound(lin, input_shape)
+    assert torch.equal(linear_bound.b_lb, linear_bound.b_ub)
+    assert linear_bound.b_lb.shape == (2, 4 * 8 * 8)
+    expected_b = lin.bias.reshape(2, -1)
+    torch.testing.assert_close(linear_bound.b_lb, expected_b, rtol=1e-7, atol=1e-9)
+
+
 def test_backward_conv2d_patches_stride1_pad0() -> None:
     layer = _make_conv_layer(layer_id=20, in_c=2, out_c=3, kernel=3, stride=1, padding=0, height=6, width=6, seed=21)
     out_dim = _flatten_output_shape(layer)

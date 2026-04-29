@@ -173,8 +173,14 @@ def _patches_to_linear_bound(
     if dense.ndim != 3:
         raise ValueError(f"Expected dense patches matrix [B, out_dim, in_dim], got {tuple(dense.shape)}")
     batch_size, out_dim, _ = dense.shape
-    zeros = dense.new_zeros((batch_size, out_dim))
-    return LinearBound(A_lb=dense, b_lb=zeros, A_ub=dense.clone(), b_ub=zeros.clone())
+    if patches.bias is not None:
+        bias_flat = patches.bias.reshape(batch_size, out_dim)
+        b_lb = bias_flat.to(device=dense.device, dtype=dense.dtype)
+        b_ub = b_lb.clone()
+    else:
+        b_lb = dense.new_zeros((batch_size, out_dim))
+        b_ub = b_lb.clone()
+    return LinearBound(A_lb=dense, b_lb=b_lb, A_ub=dense.clone(), b_ub=b_ub)
 
 
 def _interval_conv_box(layer: Layer, box: Bounds) -> Bounds:
@@ -335,6 +341,44 @@ def _bias_vector(
         return None
     _, out_c, out_h, out_w = output_shape
     return bias.view(1, out_c, 1, 1).expand(batch_size, -1, out_h, out_w).reshape(batch_size, -1)
+
+
+def _bias_is_zero(bias: torch.Tensor | None) -> bool:
+    if bias is None:
+        return True
+    return bool(torch.all(bias == 0).item())
+
+
+def _concretize_patches_against_input_box(
+    pieces: torch.Tensor,
+    stride: tuple[int, int],
+    padding: tuple[int, int],
+    x_L: torch.Tensor,
+    x_U: torch.Tensor,
+    input_shape: tuple[int, int, int, int],
+    fused_bias: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if pieces.ndim != 7:
+        raise ValueError(
+            f"_concretize_patches_against_input_box: expected 7D pieces, got shape {tuple(pieces.shape)!r}"
+        )
+    kernel = pieces[:, 0, 0, 0, :, :, :].contiguous()
+    x_L_4d = x_L.reshape(input_shape) if x_L.dim() != 4 else x_L
+    x_U_4d = x_U.reshape(input_shape) if x_U.dim() != 4 else x_U
+    x_L_dt = x_L_4d.to(device=kernel.device, dtype=kernel.dtype)
+    x_U_dt = x_U_4d.to(device=kernel.device, dtype=kernel.dtype)
+    W_pos = kernel.clamp(min=0)
+    W_neg = kernel.clamp(max=0)
+    lb = F.conv2d(x_L_dt, W_pos, bias=None, stride=stride, padding=padding) + F.conv2d(
+        x_U_dt, W_neg, bias=None, stride=stride, padding=padding
+    )
+    ub = F.conv2d(x_U_dt, W_pos, bias=None, stride=stride, padding=padding) + F.conv2d(
+        x_L_dt, W_neg, bias=None, stride=stride, padding=padding
+    )
+    if fused_bias is not None:
+        lb = lb + fused_bias
+        ub = ub + fused_bias
+    return lb, ub
 
 
 def _concretize_patches(
@@ -569,10 +613,11 @@ def forward_conv2d_patches(
     if parent_lin.is_identity:
         # Fast path: parent_lin = identity Patches representing f(x) = x.
         # The CROWN linear coefficients of Conv(W,b) ∘ identity are exactly
-        # W broadcast across every output spatial position. Building the
-        # patches tensor directly avoids a Patches→dense→Patches round-trip
-        # whose dense intermediate caused OOM on CIFAR-100 ResNet-medium.
+        # W broadcast across every output spatial position. Cumulative bias
+        # = layer.bias broadcast to per-coord, used directly in cheap
+        # concretize via F.conv2d on the input box (Fix 7 / Factor C).
         weight = cast(torch.Tensor, layer.params["weight"])
+        layer_bias_param = cast(torch.Tensor | None, layer.params.get("bias"))
         out_c = int(weight.shape[0])
         in_c = int(weight.shape[1])
         k_h = int(weight.shape[-2])
@@ -584,25 +629,19 @@ def forward_conv2d_patches(
             .expand(out_c, batch_size, out_h, out_w, in_c, k_h, k_w)
             .contiguous()
         )
-        # Box still goes through the dense Patches→LinearBound round-trip
-        # because the tight CROWN box requires the cumulative linear form
-        # evaluated on the original input box; replacing it with
-        # `_fwd_conv2d_interval(parent_box)` gives a strictly looser bound
-        # (verified by test_parity_matrix_vs_patches_seeded). Cheap-and-tight
-        # box computation is a TODO for non-identity composition; for now
-        # the round-trip caps batch≈4 on CIFAR-100 ResNet-medium.
-        tf_cnn = importlib.import_module("act.back_end.dual_tf.tf_cnn")
-        box_dense_parent = _patches_to_linear_bound(parent_lin, input_shape)
-        box_dense_result = tf_cnn.forward_conv2d(
-            layer,
-            parent_boxes,
-            [box_dense_parent],
-            parent_frames,
-            preds,
-            False,
-            device,
-            dtype,
+        if layer_bias_param is not None and not _bias_is_zero(layer_bias_param):
+            new_bias = (
+                layer_bias_param.view(1, out_c, 1, 1)
+                .expand(batch_size, out_c, out_h, out_w)
+                .contiguous()
+            )
+        else:
+            new_bias = None
+        frame_lb, frame_ub = parent_frames[0]
+        lb_box, ub_box = _concretize_patches_against_input_box(
+            pieces, new_stride, new_padding, frame_lb, frame_ub, input_shape, new_bias,
         )
+        bounds_out = Bounds(lb=lb_box.flatten(start_dim=1), ub=ub_box.flatten(start_dim=1))
         lin = Patches(
             patches=pieces,
             stride=new_stride,
@@ -610,8 +649,9 @@ def forward_conv2d_patches(
             shape=tuple(int(dim) for dim in pieces.shape),
             input_shape=input_shape,
             output_shape=output_shape,
+            bias=new_bias,
         )
-        return box_dense_result[0], box_dense_result[1], lin, parent_frames[0]
+        return bounds_out, bounds_out, lin, parent_frames[0]
 
     # Translation-invariant kernel fusion fast-path.
     # When parent_lin came from another conv on the same input (the only
@@ -670,8 +710,37 @@ def forward_conv2d_patches(
         .contiguous()
     )
 
-    # See identity-branch note: the box must come from the cumulative
-    # linear form on the input frame, not from interval-conv on parent_box.
+    # Cumulative bias for fused conv: Conv(W2,0)(parent_bias) + b2_broadcast.
+    # `_patches_to_linear_bound` already lifts parent_lin.bias into the dense
+    # LinearBound's b_lb/b_ub, so the dense round-trip below correctly
+    # produces the cumulative bound. We only need to track the resulting
+    # cumulative bias on the output Patches for any downstream fusion.
+    layer_bias_param = cast(torch.Tensor | None, layer.params.get("bias"))
+    layer_stride = _normalize_pair(cast(int | tuple[int, int], layer.params.get("stride", 1)))
+    layer_padding = _normalize_padding2(
+        cast(int | tuple[int, int] | tuple[int, int, int, int], layer.params.get("padding", 0))
+    )
+    bias_part1: torch.Tensor | None = None
+    if parent_lin.bias is not None:
+        bias_part1 = F.conv2d(
+            parent_lin.bias, weight, bias=None, stride=layer_stride, padding=layer_padding,
+        )
+    bias_part2: torch.Tensor | None = None
+    if layer_bias_param is not None and not _bias_is_zero(layer_bias_param):
+        bias_part2 = (
+            layer_bias_param.view(1, out_c2, 1, 1)
+            .expand(batch_size, out_c2, out_h, out_w)
+            .contiguous()
+        )
+    if bias_part1 is None and bias_part2 is None:
+        new_bias = None
+    elif bias_part1 is None:
+        new_bias = bias_part2
+    elif bias_part2 is None:
+        new_bias = bias_part1
+    else:
+        new_bias = bias_part1 + bias_part2
+
     tf_cnn = importlib.import_module("act.back_end.dual_tf.tf_cnn")
     box_dense_parent = _patches_to_linear_bound(parent_lin, input_shape)
     box_dense_result = tf_cnn.forward_conv2d(
@@ -684,6 +753,7 @@ def forward_conv2d_patches(
         device,
         dtype,
     )
+    bounds_out = box_dense_result[0]
     lin = Patches(
         patches=pieces,
         stride=new_stride,
@@ -691,6 +761,7 @@ def forward_conv2d_patches(
         shape=tuple(int(dim) for dim in pieces.shape),
         input_shape=input_shape,
         output_shape=output_shape,
+        bias=new_bias,
     )
     return box_dense_result[0], box_dense_result[1], lin, parent_frames[0]
 

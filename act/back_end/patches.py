@@ -143,11 +143,16 @@ def _canonicalize_patches_layout(
 
 @dataclass
 class Patches:
-    """Minimal sparse-conv scaffold for the Wave 1 dispatcher gate.
+    """Sparse-conv affine carrier with optional accumulated per-coord bias.
 
-    TODO(W2b): Methods (.to_matrix, .clone, .detach, __eq__) and helpers
-    (patches_to_matrix, insert_zeros, compute_patches_stride_padding,
-    unify_shape, inplace_unfold) to be filled in Wave 2b.
+    `bias`, when non-None, holds the cumulative additive constant from every
+    affine layer fused into this Patches so far, shaped
+    `[B, C_out, H_out, W_out]`. Required for cheap concretize (Fix 7) when
+    composing with downstream conv: `Conv(W, 0)(parent_pieces * x + parent_bias) + b
+    = Conv(W, 0)(parent_pieces * x) + Conv(W, 0)(parent_bias_broadcast) + b`.
+    Per-coord shape (vs per-channel) preserves zero-padding edge effects exactly.
+    A None bias means f(x) = pieces*x (no constant), the historical pre-Fix-7
+    behaviour and the safe default for identity Patches.
     """
 
     patches: torch.Tensor | None = None
@@ -160,6 +165,7 @@ class Patches:
     input_shape: tuple[int, ...] | None = None
     inserted_zeros: int = 0
     output_padding: int | tuple[int, int] | tuple[int, int, int, int] = 0
+    bias: torch.Tensor | None = None
 
     def __post_init__(self) -> None:
         if self.inserted_zeros > 0:
@@ -169,6 +175,10 @@ class Patches:
         if self.identity != 0 and self.patches is not None:
             raise ValueError(
                 "Patches.identity != 0 is mutually exclusive with a patches tensor."
+            )
+        if self.identity != 0 and self.bias is not None:
+            raise ValueError(
+                "Patches.identity != 0 must have bias=None (identity is f(x)=x)."
             )
 
     @property
@@ -188,7 +198,8 @@ class Patches:
             f"output_shape={self.output_shape}, "
             f"input_shape={self.input_shape}, "
             f"inserted_zeros={self.inserted_zeros}, "
-            f"output_padding={self.output_padding}"
+            f"output_padding={self.output_padding}, "
+            f"bias_shape={_tensor_shape_or_none(self.bias)}"
             ")"
         )
 
@@ -209,6 +220,7 @@ class Patches:
             input_shape=tuple(self.input_shape) if self.input_shape is not None else None,
             inserted_zeros=int(self.inserted_zeros),
             output_padding=_copy_padding(self.output_padding),
+            bias=_clone_tensor(self.bias),
         )
 
     def detach(self) -> Patches:
@@ -225,6 +237,7 @@ class Patches:
             input_shape=tuple(self.input_shape) if self.input_shape is not None else None,
             inserted_zeros=int(self.inserted_zeros),
             output_padding=_copy_padding(self.output_padding),
+            bias=_detach_tensor(self.bias),
         )
 
     def __eq__(self, other: object) -> bool:
@@ -241,6 +254,7 @@ class Patches:
             and self.input_shape == other.input_shape
             and self.inserted_zeros == other.inserted_zeros
             and self.output_padding == other.output_padding
+            and _tensor_like_equal(self.bias, other.bias)
         )
 
     def __hash__(self) -> int:
