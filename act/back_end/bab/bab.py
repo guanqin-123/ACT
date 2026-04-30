@@ -597,6 +597,7 @@ def _verify_bab_batched(
     dual_solver.alpha_objective_chunk_size = config.alpha_objective_chunk_size
     dual_solver.lambda_intermediate_max_width = config.lambda_intermediate_max_width
     dual_solver.alpha_per_spec = config.alpha_per_spec
+    dual_solver.eta_per_spec = config.eta_per_spec
     if config.record_bound_trace and trace is None:
         trace = BoundTrace()
 

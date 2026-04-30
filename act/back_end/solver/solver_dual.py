@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import torch
 from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple, Union, cast
-from act.back_end.bab.eta import EtaState, expand_eta_state
+from act.back_end.bab.eta import EtaState, collapse_eta_state, expand_eta_state
 from act.back_end.bounds_dispatch import materialize_if_needed
 from act.back_end.dual_tf.tf_forward import LinearBound
 from act.back_end.core import Bounds, Net
@@ -130,6 +130,7 @@ class DualSolver(Solver):
         self.lr_eta = 0.05
         self.lambda_intermediate = 1.0
         self.alpha_per_spec = False
+        self.eta_per_spec = False
         self._eta_state: Optional[EtaState] = None
         self._alpha_state: AlphaState = AlphaState()
         self._last_bounds: Optional[Bounds] = None
@@ -1414,7 +1415,31 @@ class DualSolver(Solver):
 
         out_etas: Optional[EtaState] = None
         if optimized_eta_expanded is not None:
-            if optimized_eta_expanded.batch_size == B:
+            if self.eta_per_spec:
+                if optimized_eta_expanded.batch_size == B:
+                    new_val = {
+                        lid: v.unsqueeze(1).detach().clone()
+                        for lid, v in optimized_eta_expanded.val.items()
+                    }
+                    new_sign = {
+                        lid: s.detach().clone()
+                        for lid, s in optimized_eta_expanded.sign.items()
+                    }
+                    new_point = {
+                        lid: p.detach().clone()
+                        for lid, p in optimized_eta_expanded.point.items()
+                    }
+                    out_etas = EtaState(
+                        val=new_val, sign=new_sign, point=new_point, per_spec=True,
+                    )
+                elif optimized_eta_expanded.batch_size % B == 0:
+                    out_etas = collapse_eta_state(optimized_eta_expanded, B, per_spec=True)
+                else:
+                    raise ValueError(
+                        "DualSolver.evaluate_spec: cannot reshape per-spec eta "
+                        f"base batch {B}, got {optimized_eta_expanded.batch_size}"
+                    )
+            elif optimized_eta_expanded.batch_size == B:
                 out_etas = optimized_eta_expanded
             elif optimized_eta_expanded.batch_size % B == 0:
                 out_etas = self._collapse_eta_state(optimized_eta_expanded, B)
