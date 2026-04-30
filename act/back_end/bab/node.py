@@ -352,18 +352,30 @@ class SubproblemBatch:
                 split_points.append(float(per_row_split_points[i].item()))
 
         def _build_child_eta(sign_for_new: float) -> EtaState:
-            """Clone parent eta and write the per-row new-split entries."""
+            """Clone parent eta and write the per-row new-split entries.
+
+            For per_spec=True parent: val is [B, M, *D]; new split must reset
+            val[lid][i, :, nidx] = 0 (all M specs at the split neuron) instead
+            of [i, nidx] (which would mis-index neuron axis as spec axis).
+            sign and point stay [B, *D] regardless of per_spec (split structure
+            is shared across specs by Tier 6 contract). The per_spec flag must
+            also be propagated to the child EtaState — mirror of the Tier 4
+            _concat flag-drop bug fixed at node.py:531."""
             assert self.eta is not None
+            per_spec = self.eta.per_spec
             new_val = {lid: t.clone() for lid, t in self.eta.val.items()}
             new_sign = {lid: t.clone() for lid, t in self.eta.sign.items()}
             new_point = {lid: t.clone() for lid, t in self.eta.point.items()}
             for i, (lid, nidx, _kind) in enumerate(decisions):
-                # Newly-split neuron starts at val=0 (warm-start for OTHER
-                # neurons is preserved via the clone above).
-                new_val[lid][i, nidx] = 0.0
+                if per_spec:
+                    new_val[lid][i, :, nidx] = 0.0
+                else:
+                    new_val[lid][i, nidx] = 0.0
                 new_sign[lid][i, nidx] = sign_for_new
                 new_point[lid][i, nidx] = split_points[i]
-            return EtaState(val=new_val, sign=new_sign, point=new_point)
+            return EtaState(
+                val=new_val, sign=new_sign, point=new_point, per_spec=per_spec,
+            )
 
         left_eta = _build_child_eta(+1.0)  # INACTIVE: z ≤ split_point
         right_eta = _build_child_eta(-1.0)  # ACTIVE:   z ≥ split_point

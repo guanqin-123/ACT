@@ -370,6 +370,53 @@ def test_concat_subproblem_batches_preserves_eta_per_spec_flag_and_3d_val():
     assert merged.eta.sign[7].shape == (2, D), f"sign shape regression: {merged.eta.sign[7].shape}"
 
 
+def test_split_neuron_batched_preserves_eta_per_spec_flag_and_resets_all_specs_at_split_neuron():
+    """Tier 6 regression: split_neuron_batched -> _build_child_eta must:
+
+    1. Preserve per_spec=True flag on child EtaState (mirror of the Tier 4
+       bug class at node.py:531; this commit fixes the analogous bug at
+       node.py:366).
+    2. Index per-spec val with [i, :, nidx] (3-D), NOT [i, nidx] (would
+       try to index neuron axis as spec axis -> IndexError on real nets).
+       All M specs at the split neuron must be reset to 0.
+
+    Discovered empirically by the Tier 6 Phase 5 sweep on instance 3995:
+    'IndexError: index 5842 is out of bounds for dimension 1 with size 100'
+    """
+    from act.back_end.bab.eta import EtaState
+
+    B, M, D = 2, 4, 6
+    lb = torch.zeros(B, 2)
+    ub = torch.ones(B, 2)
+    depths = torch.zeros(B, dtype=torch.long)
+    val_3d = torch.full((B, M, D), 0.5)
+    sign = torch.zeros(B, D)
+    point = torch.zeros(B, D)
+    eta = EtaState(val={9: val_3d}, sign={9: sign}, point={9: point}, per_spec=True)
+    parent = SubproblemBatch(lb=lb, ub=ub, depths=depths, eta=eta)
+
+    nidx = 3
+    decisions = [(9, nidx, "relu")] * B
+    left, right = parent.split_neuron_batched(decisions)
+
+    assert left.eta is not None and right.eta is not None
+    assert left.eta.per_spec is True, (
+        "regression: _build_child_eta dropped per_spec=True (Tier-4 mirror bug)"
+    )
+    assert right.eta.per_spec is True
+
+    for child, expected_sign in [(left, +1.0), (right, -1.0)]:
+        assert child.eta is not None
+        assert child.eta.val[9].shape == (B, M, D)
+        for b in range(B):
+            for m in range(M):
+                assert child.eta.val[9][b, m, nidx].item() == 0.0, (b, m, nidx)
+                for c in range(D):
+                    if c != nidx:
+                        assert child.eta.val[9][b, m, c].item() == 0.5, (b, m, c)
+            assert child.eta.sign[9][b, nidx].item() == expected_sign
+
+
 def test_concat_subproblem_batches_rejects_eta_per_spec_flag_mismatch():
     """Mixing per_spec=True and per_spec=False eta states must raise."""
     from act.back_end.bab.eta import EtaState

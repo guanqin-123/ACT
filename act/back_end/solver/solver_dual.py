@@ -486,6 +486,7 @@ class DualSolver(Solver):
                     val={lid: param for lid, param in eta_params.items()},
                     sign=eta_state.sign,
                     point=eta_state.point,
+                    per_spec=eta_state.per_spec,
                 )
                 obj, sce = self._backward_pass(
                     net,
@@ -923,6 +924,7 @@ class DualSolver(Solver):
             val=self._clone_tensor_dict(eta.val),
             sign=self._clone_tensor_dict(eta.sign),
             point=self._clone_tensor_dict(eta.point),
+            per_spec=eta.per_spec,
         )
 
     def _build_eta_state(
@@ -934,6 +936,7 @@ class DualSolver(Solver):
             val=self._clone_tensor_dict(values),
             sign=self._clone_tensor_dict(template.sign),
             point=self._clone_tensor_dict(template.point),
+            per_spec=template.per_spec,
         )
 
     def _expand_alpha_dict(
@@ -1025,6 +1028,16 @@ class DualSolver(Solver):
         if eta is None:
             return None
         prepared = eta.to(device=get_default_device(), dtype=get_default_dtype())
+        if prepared.per_spec and prepared.batch_size == target_batch:
+            collapsed_val = {
+                lid: v.mean(dim=1) for lid, v in prepared.val.items()
+            }
+            return EtaState(
+                val=collapsed_val,
+                sign=prepared.sign,
+                point=prepared.point,
+                per_spec=False,
+            )
         if prepared.batch_size == 0 or prepared.batch_size == target_batch:
             return prepared
         if prepared.batch_size < target_batch and target_batch % prepared.batch_size == 0:
@@ -1169,6 +1182,7 @@ class DualSolver(Solver):
                             val={lid: param for lid, param in eta_params.items()},
                             sign=eta_state.sign,
                             point=eta_state.point,
+                            per_spec=eta_state.per_spec,
                         )
 
                 obj, sce = self._backward_pass(
@@ -1719,6 +1733,7 @@ class DualSolver(Solver):
                                 val={lid: param for lid, param in eta_params.items()},
                                 sign=base_eta_state.sign,
                                 point=base_eta_state.point,
+                                per_spec=base_eta_state.per_spec,
                             )
                         runtime_eta = (
                             expand_eta_state(eta_runtime_base, spec.M)
