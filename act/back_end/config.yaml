@@ -78,6 +78,15 @@ backend:
     # of the run. See docs/tier3.md for the math.
     alpha_split_objective: false
 
+    # Tier 4 — per-spec α (default OFF).
+    # When True, AlphaState stores α as [B, M, D] (per-spec) instead of the
+    # legacy [B, D] (shared across all M specs). Per-spec α matches αβ-CROWN's
+    # `full alpha [2, M_spec, B, D]` and is the dominant remaining lever for
+    # closing the verdict gap on multi-spec problems (e.g. 99-spec CIFAR-100
+    # robustness). Costs M× α params and Adam state. Default OFF preserves
+    # session-3 bit-identical behaviour. See .sisyphus/plans/tier4_per_spec_alpha_plan.md.
+    alpha_per_spec: false
+
     # Number of Adam iters for the pre-BaB α-intermediate loop.
     # Ignored when alpha_split_objective=false.
     alpha_iters: 10
