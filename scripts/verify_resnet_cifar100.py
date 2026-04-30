@@ -99,6 +99,7 @@ class CliArgs:
     lambda_intermediate_max_width: int | None
     alpha_iters: int
     lr_alpha: float
+    alpha_per_spec: bool
 
 
 @dataclass
@@ -212,6 +213,7 @@ def _build_config(
     lambda_intermediate_max_width: int | None,
     alpha_iters: int,
     lr_alpha: float,
+    alpha_per_spec: bool,
 ) -> BaBConfig:
     return BaBConfig(
         branching_method="babsr",
@@ -219,6 +221,7 @@ def _build_config(
         subproblem_batch_size=subproblem_batch_size,
         eta_iters=eta_iters,
         alpha_split_objective=alpha_split,
+        alpha_per_spec=alpha_per_spec,
         alpha_iters=alpha_iters,
         lr_alpha=lr_alpha,
         lr_eta=0.05,
@@ -266,6 +269,7 @@ def verify_instance(
     bab_adam_iters: int = 0,
     alpha_iters: int = 10,
     lr_alpha: float = 0.5,
+    alpha_per_spec: bool = False,
 ) -> VerifyResult:
     if instance_key not in INSTANCE_REGISTRY:
         raise ValueError(f"unknown instance {instance_key!r}; expected one of {list(INSTANCE_REGISTRY)}")
@@ -290,6 +294,7 @@ def verify_instance(
         lambda_intermediate_max_width=lambda_intermediate_max_width,
         alpha_iters=alpha_iters,
         lr_alpha=lr_alpha,
+        alpha_per_spec=alpha_per_spec,
     )
     trace = None
     out_bounds_dict: dict[int, dict[str, torch.Tensor]] = {}
@@ -517,6 +522,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Default 0.5 matches αβ-CROWN. Try 1.0 for more aggressive convergence."
         ),
     )
+    parser.add_argument(
+        "--alpha-per-spec",
+        action="store_true",
+        help=(
+            "BaBConfig.alpha_per_spec: enable Tier 4 per-spec α "
+            "(AlphaState [B, M, *D] at FINAL_SID). Each of M specs gets its "
+            "own α optimization, matching αβ-CROWN's full alpha [2, M, B, D]. "
+            "Default OFF preserves session-3 bit-identical behaviour. "
+            "Memory cost: M× α params + Adam state at FINAL_SID."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -541,6 +557,7 @@ def _to_cli_args(args: argparse.Namespace) -> CliArgs:
         lambda_intermediate_max_width=args.lambda_intermediate_max_width,
         alpha_iters=args.alpha_iters,
         lr_alpha=args.lr_alpha,
+        alpha_per_spec=args.alpha_per_spec,
     )
 
 
@@ -589,6 +606,7 @@ def main(argv: list[str] | None = None) -> int:
             bab_adam_iters=args.bab_adam_iters,
             alpha_iters=args.alpha_iters,
             lr_alpha=args.lr_alpha,
+            alpha_per_spec=args.alpha_per_spec,
         )
         results.append(r)
         print(_format_row(r))
