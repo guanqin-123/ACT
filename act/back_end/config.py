@@ -54,6 +54,7 @@ class BaBConfig:
     lr_eta: float = 0.05
     lambda_intermediate: float = 0.0
     alpha_objective_chunk_size: int = 4096
+    lambda_intermediate_max_width: Optional[int] = None  # skip joint loss for sids whose layer width > this; None = no limit
     smooth_split_min_gap: float = 1e-2
     max_splits_per_neuron: int = 4
     spec_chunk_size: Optional[int] = None

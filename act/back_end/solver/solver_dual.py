@@ -1168,7 +1168,13 @@ class DualSolver(Solver):
                         )
 
                         chunk = getattr(self, "alpha_objective_chunk_size", None)
+                        max_width = getattr(self, "lambda_intermediate_max_width", None)
                         for sid_int in non_final_sids:
+                            if max_width is not None and sid_int in bounds_dict:
+                                sid_lb = bounds_dict[sid_int].lb
+                                sid_width = int(sid_lb.flatten(start_dim=1).shape[-1]) if sid_lb.dim() >= 2 else int(sid_lb.numel())
+                                if sid_width > max_width:
+                                    continue
                             lb_int = backward_truncated_lb(
                                 net,
                                 bounds_dict,

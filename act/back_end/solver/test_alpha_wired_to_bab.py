@@ -290,6 +290,99 @@ def test_lambda_zero_reproduces_fix1() -> None:
         torch.testing.assert_close(out_b[3].for_start_node(AlphaState.FINAL_SID)[lid], tensor)
 
 
+def test_lambda_intermediate_max_width_filter_skips_wide_sids() -> None:
+    net = _make_four_layer_relu_net()
+    bounds = compute_forward_bounds(net, _t([[-1.0, -1.0]]), _t([[1.0, 1.0]]), post_activation=False)
+    warm = AlphaState.from_legacy({3: torch.full((1, 2), 0.25, dtype=get_default_dtype(), device=get_default_device())})
+    warm.set(3, 4, torch.full((1, 2), 0.4, dtype=get_default_dtype(), device=get_default_device()))
+
+    solver_ref = DualSolver(DualTF())
+    solver_ref.lambda_intermediate = 0.0
+    out_ref = cast(
+        tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, AlphaState | None, object],
+        solver_ref.compute_bound(net, bounds, _t([[1.0]]), n_iters=1, lr=0.1, force_kkt=True, warm_alphas=warm),
+    )
+
+    solver_filt = DualSolver(DualTF())
+    solver_filt.lambda_intermediate = 1.0
+    solver_filt.lambda_intermediate_max_width = 0
+    out_filt = cast(
+        tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, AlphaState | None, object],
+        solver_filt.compute_bound(net, bounds, _t([[1.0]]), n_iters=1, lr=0.1, force_kkt=True, warm_alphas=warm),
+    )
+
+    torch.testing.assert_close(out_ref[0], out_filt[0])
+    assert out_ref[3] is not None and out_filt[3] is not None
+    for lid, tensor in out_ref[3].for_start_node(AlphaState.FINAL_SID).items():
+        torch.testing.assert_close(out_filt[3].for_start_node(AlphaState.FINAL_SID)[lid], tensor)
+
+
+def test_lambda_intermediate_max_width_none_keeps_all_sids() -> None:
+    net = _make_four_layer_relu_net()
+    bounds = compute_forward_bounds(net, _t([[-1.0, -1.0]]), _t([[1.0, 1.0]]), post_activation=False)
+    warm = AlphaState.from_legacy({3: torch.full((1, 2), 0.25, dtype=get_default_dtype(), device=get_default_device())})
+    warm.set(3, 4, torch.full((1, 2), 0.4, dtype=get_default_dtype(), device=get_default_device()))
+
+    solver_unfilt = DualSolver(DualTF())
+    solver_unfilt.lambda_intermediate = 1.0
+    out_unfilt = cast(
+        tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, AlphaState | None, object],
+        solver_unfilt.compute_bound(net, bounds, _t([[1.0]]), n_iters=1, lr=0.1, force_kkt=True, warm_alphas=warm),
+    )
+
+    solver_high = DualSolver(DualTF())
+    solver_high.lambda_intermediate = 1.0
+    solver_high.lambda_intermediate_max_width = 100_000
+    out_high = cast(
+        tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, AlphaState | None, object],
+        solver_high.compute_bound(net, bounds, _t([[1.0]]), n_iters=1, lr=0.1, force_kkt=True, warm_alphas=warm),
+    )
+
+    torch.testing.assert_close(out_unfilt[0], out_high[0])
+    assert out_unfilt[3] is not None and out_high[3] is not None
+    for lid, tensor in out_unfilt[3].for_start_node(AlphaState.FINAL_SID).items():
+        torch.testing.assert_close(out_high[3].for_start_node(AlphaState.FINAL_SID)[lid], tensor)
+
+
+def test_lambda_intermediate_max_width_filter_changes_intermediate_alpha() -> None:
+    net = _make_four_layer_relu_net()
+    bounds = compute_forward_bounds(net, _t([[-1.0, -1.0]]), _t([[1.0, 1.0]]), post_activation=False)
+    warm = AlphaState.from_legacy({3: torch.full((1, 2), 0.25, dtype=get_default_dtype(), device=get_default_device())})
+    warm.set(3, 4, torch.full((1, 2), 0.4, dtype=get_default_dtype(), device=get_default_device()))
+
+    solver_filt = DualSolver(DualTF())
+    solver_filt.lambda_intermediate = 1.0
+    solver_filt.lambda_intermediate_max_width = 0
+    out_filt = cast(
+        tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, AlphaState | None, object],
+        solver_filt.compute_bound(net, bounds, _t([[1.0]]), n_iters=2, lr=0.1, force_kkt=True, warm_alphas=warm),
+    )
+
+    solver_unfilt = DualSolver(DualTF())
+    solver_unfilt.lambda_intermediate = 1.0
+    out_unfilt = cast(
+        tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, AlphaState | None, object],
+        solver_unfilt.compute_bound(net, bounds, _t([[1.0]]), n_iters=2, lr=0.1, force_kkt=True, warm_alphas=warm),
+    )
+
+    assert out_filt[3] is not None and out_unfilt[3] is not None
+    any_intermediate_diff = False
+    for lid_relu, sid_int, tensor_filt in out_filt[3].iter_entries():
+        if sid_int == AlphaState.FINAL_SID:
+            continue
+        tensor_unfilt = out_unfilt[3].get(lid_relu, sid_int)
+        if tensor_unfilt is None:
+            continue
+        if not torch.allclose(tensor_filt, tensor_unfilt, rtol=1e-5, atol=1e-7):
+            any_intermediate_diff = True
+            break
+    assert any_intermediate_diff, (
+        "Expected joint-loss filter to change INTERMEDIATE alpha trajectory; "
+        "if intermediate alpha is identical, the joint-loss block isn't "
+        "actually contributing gradients to intermediate sids (silent no-op)."
+    )
+
+
 def test_soundness_with_intermediate_loss() -> None:
     net = _make_four_layer_relu_net()
     lb = _t([[-1.0, -1.0]])
