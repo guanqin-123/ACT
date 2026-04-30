@@ -98,10 +98,19 @@ def _backward_truncated_objective(
     if coeffs.shape[0] % base_batch != 0:
         raise ValueError(f"backward_truncated_lb: coeff batch {coeffs.shape[0]} is not divisible by base batch {base_batch}")
 
-    spec_count = coeffs.shape[0] // base_batch
+    # SOUNDNESS INVARIANT: bounds_dict may already carry a spec axis
+    # (e.g. _compute_bound_joint_kkt passes already-expanded final-margin
+    # bounds [B, M, *layer]). Flatten BEFORE replicating: otherwise
+    # expand_bounds_dict adds a second spec axis, breaking broadcast vs nu.
+    # row_repeat = objective rows per flat batch row (chunk_size, NOT M).
+    flat_bounds_dict = {
+        lid: solver_dual_module.flatten_bounds_rows(bounds)
+        for lid, bounds in bounds_dict.items()
+    }
+    row_repeat = coeffs.shape[0] // base_batch
     bounds_runtime = {
         lid: solver_dual_module.flatten_bounds_rows(bounds)
-        for lid, bounds in expand_bounds_dict(bounds_dict, spec_count).items()
+        for lid, bounds in expand_bounds_dict(flat_bounds_dict, row_repeat).items()
     }
     alpha_slice = alpha_state.for_start_node(sid_int)
     working_alpha = (
@@ -110,8 +119,8 @@ def _backward_truncated_objective(
         else None
     )
     working_eta = (
-        expand_eta_state(eta_state, spec_count)
-        if eta_state is not None and spec_count > 1
+        expand_eta_state(eta_state, row_repeat)
+        if eta_state is not None and row_repeat > 1
         else eta_state
     )
     registry = cast(dict[str, BackwardHandler], dual_tf_module.BACKWARD_REGISTRY)

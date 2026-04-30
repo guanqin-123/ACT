@@ -256,3 +256,35 @@ def test_chunk_size_default_off_unchunked() -> None:
     lb_default = backward_truncated_lb(net, bounds, sid_int, alpha_state)
     lb_explicit_none = backward_truncated_lb(net, bounds, sid_int, alpha_state, objective_chunk_size=None)
     torch.testing.assert_close(lb_default, lb_explicit_none, rtol=0.0, atol=0.0)
+
+
+def test_truncated_lb_handles_pre_expanded_spec_axis() -> None:
+    from act.back_end.solver.spec_batching import expand_bounds_dict
+
+    net, start_nodes, input_lb, input_ub = _make_deep_relu_net()
+    bounds = compute_forward_bounds(net, input_lb, input_ub, post_activation=False)
+    _, alpha_state = optimize_initial_intermediate_bounds(
+        net, bounds, alpha_iters=2, lr_alpha=0.5,
+    )
+    sid_int = start_nodes[0]
+    base_batch = bounds[sid_int].lb.shape[0]
+    width = bounds[sid_int].lb.shape[-1]
+
+    baseline_lb = backward_truncated_lb(net, bounds, sid_int, alpha_state)
+    baseline_ub = backward_truncated_ub(net, bounds, sid_int, alpha_state)
+    assert baseline_lb.shape == (base_batch, width)
+
+    for M in (1, 2, 5):
+        expanded = expand_bounds_dict(bounds, M)
+        lb_expanded = backward_truncated_lb(net, expanded, sid_int, alpha_state)
+        ub_expanded = backward_truncated_ub(net, expanded, sid_int, alpha_state)
+        assert lb_expanded.shape == (base_batch * M, width)
+        expected_lb = baseline_lb.repeat_interleave(M, dim=0)
+        expected_ub = baseline_ub.repeat_interleave(M, dim=0)
+        torch.testing.assert_close(lb_expanded, expected_lb, rtol=1e-7, atol=1e-9)
+        torch.testing.assert_close(ub_expanded, expected_ub, rtol=1e-7, atol=1e-9)
+        for chunk in (1, 3):
+            lb_chunked = backward_truncated_lb(
+                net, expanded, sid_int, alpha_state, objective_chunk_size=chunk,
+            )
+            torch.testing.assert_close(lb_chunked, expected_lb, rtol=1e-7, atol=1e-9)
