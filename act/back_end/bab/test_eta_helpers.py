@@ -212,3 +212,59 @@ def test_eta_state_per_spec_select_propagates_flag_and_indexes_batch():
     assert picked.val[7].shape == (3, 3, 4)
     assert picked.sign[7].shape == (3, 4)
     assert picked.val[7][:, 0, 0].tolist() == [1.0, 3.0, 5.0]
+
+
+def test_expand_eta_state_per_spec_reshapes_val_and_repeats_sign_point():
+    from act.back_end.bab.eta import collapse_eta_state
+
+    B, M, D = 2, 3, 4
+    eta = _make_eta_per_spec(B=B, M=M, widths={7: D})
+    for b in range(B):
+        for m in range(M):
+            for c in range(D):
+                eta.val[7][b, m, c] = b * 100.0 + m * 10.0 + c
+    for b in range(B):
+        eta.sign[7][b] = float(b + 1)
+
+    expanded = expand_eta_state(eta, M)
+    assert expanded is not None
+    assert expanded.per_spec is False, "expand collapses per_spec into flat 2-D form"
+    assert expanded.val[7].shape == (B * M, D)
+    assert expanded.sign[7].shape == (B * M, D)
+
+    for b in range(B):
+        for m in range(M):
+            row = b * M + m
+            for c in range(D):
+                expected = b * 100.0 + m * 10.0 + c
+                assert expanded.val[7][row, c].item() == expected, (b, m, c, row)
+            assert expanded.sign[7][row, 0].item() == float(b + 1), (b, m, row)
+
+    collapsed = collapse_eta_state(expanded, target_batch=B, per_spec=True)
+    assert collapsed.per_spec is True
+    assert collapsed.val[7].shape == (B, M, D)
+    assert collapsed.sign[7].shape == (B, D)
+    for b in range(B):
+        for m in range(M):
+            for c in range(D):
+                expected = b * 100.0 + m * 10.0 + c
+                assert collapsed.val[7][b, m, c].item() == expected, (b, m, c)
+
+
+def test_expand_eta_state_per_spec_validates_m_match():
+    eta = _make_eta_per_spec(B=2, M=3, widths={7: 4})
+    with pytest.raises(ValueError, match=r"per_spec=True.*val M=3 != expand factor M=5"):
+        expand_eta_state(eta, M=5)
+
+
+def test_collapse_eta_state_legacy_mean_collapse_unchanged():
+    from act.back_end.bab.eta import collapse_eta_state
+
+    eta = _make_eta(B=4, widths={7: 3})
+    for row in range(4):
+        eta.val[7][row, 0] = float(row + 1)
+    collapsed = collapse_eta_state(eta, target_batch=2, per_spec=False)
+    assert collapsed.per_spec is False
+    assert collapsed.val[7].shape == (2, 3)
+    assert collapsed.val[7][0, 0].item() == pytest.approx((1.0 + 2.0) / 2)
+    assert collapsed.val[7][1, 0].item() == pytest.approx((3.0 + 4.0) / 2)

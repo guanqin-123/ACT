@@ -206,6 +206,13 @@ def expand_eta_state(eta: Optional[EtaState], M: int) -> Optional[EtaState]:
     row ``b*M + j`` of the expanded eta corresponds to subproblem ``b``
     seen under spec row ``j``.
 
+    For ``per_spec=True`` input (Tier 6), ``val`` is RESHAPED from
+    ``[B, M_stored, *D]`` to ``[B*M, *D]`` (flattening the spec axis,
+    requires ``M_stored == M``); ``sign`` and ``point`` are
+    repeat-interleaved as in the legacy path. The returned EtaState has
+    ``per_spec=False`` because it is now in the flat 2-D form expected by
+    the joint-KKT internal loop.
+
     Pass-through if ``eta`` is None, empty, or ``M == 1``.
     """
     if eta is None:
@@ -214,8 +221,87 @@ def expand_eta_state(eta: Optional[EtaState], M: int) -> Optional[EtaState]:
         raise ValueError(f"expand_eta_state: M must be positive, got {M}")
     if M == 1 or not eta.val:
         return eta
+    if eta.per_spec:
+        new_val: Dict[int, torch.Tensor] = {}
+        for lid, v in eta.val.items():
+            if v.shape[1] != M:
+                raise ValueError(
+                    f"expand_eta_state(per_spec=True)[{lid}]: val M={v.shape[1]} "
+                    f"!= expand factor M={M}"
+                )
+            new_val[lid] = v.reshape(v.shape[0] * M, *v.shape[2:])
+        return EtaState(
+            val=new_val,
+            sign={k: s.repeat_interleave(M, dim=0) for k, s in eta.sign.items()},
+            point={k: p.repeat_interleave(M, dim=0) for k, p in eta.point.items()},
+            per_spec=False,
+        )
     return EtaState(
         val={k: v.repeat_interleave(M, dim=0) for k, v in eta.val.items()},
         sign={k: s.repeat_interleave(M, dim=0) for k, s in eta.sign.items()},
         point={k: p.repeat_interleave(M, dim=0) for k, p in eta.point.items()},
+    )
+
+
+def collapse_eta_state(
+    eta: EtaState,
+    target_batch: int,
+    *,
+    per_spec: bool = False,
+) -> EtaState:
+    """Inverse of :func:`expand_eta_state`: collapse a flat 2-D EtaState back
+    to per-subproblem form.
+
+    Two modes:
+
+    * ``per_spec=False`` (legacy): mean-collapse over the per-spec replicas.
+      Each tensor ``[B*factor, *D]`` becomes ``[B, *D]`` via
+      ``view(B, factor, *D).mean(dim=1)``. This loses spec-level
+      information and is used by warm-start paths that don't care about
+      per-spec resolution.
+
+    * ``per_spec=True`` (Tier 6): preserve the spec axis on ``val`` only.
+      ``val[B*factor, *D]`` becomes ``[B, factor, *D]`` (RESHAPE, not mean).
+      ``sign`` and ``point`` are de-replicated by taking every factor-th row
+      (``view(B, factor, *D)[:, 0]``); since they were
+      ``repeat_interleave``-d at expand time, all ``factor`` copies are
+      identical so any single representative is correct. Returns an
+      ``EtaState(per_spec=True)``.
+    """
+    if eta.batch_size == target_batch:
+        return eta
+    if eta.batch_size % target_batch != 0:
+        raise ValueError(
+            f"collapse_eta_state: cannot collapse eta batch {eta.batch_size} to {target_batch}"
+        )
+    factor = eta.batch_size // target_batch
+    if per_spec:
+        return EtaState(
+            val={
+                lid: value.view(target_batch, factor, *value.shape[1:])
+                for lid, value in eta.val.items()
+            },
+            sign={
+                lid: value.view(target_batch, factor, *value.shape[1:])[:, 0]
+                for lid, value in eta.sign.items()
+            },
+            point={
+                lid: value.view(target_batch, factor, *value.shape[1:])[:, 0]
+                for lid, value in eta.point.items()
+            },
+            per_spec=True,
+        )
+    return EtaState(
+        val={
+            lid: value.view(target_batch, factor, value.shape[1]).mean(dim=1)
+            for lid, value in eta.val.items()
+        },
+        sign={
+            lid: value.view(target_batch, factor, value.shape[1]).mean(dim=1)
+            for lid, value in eta.sign.items()
+        },
+        point={
+            lid: value.view(target_batch, factor, value.shape[1]).mean(dim=1)
+            for lid, value in eta.point.items()
+        },
     )
