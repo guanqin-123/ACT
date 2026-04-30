@@ -87,12 +87,18 @@ class CliArgs:
     dtype: str
     batch: int
     eta_iters: int
+    bab_adam_iters: int
     max_depth: int
     max_nodes: int | None
     budget: float
     verbose_bab: bool
     output: Path | None
     bound_trace: bool
+    lambda_intermediate: float
+    alpha_chunk_size: int
+    lambda_intermediate_max_width: int | None
+    alpha_iters: int
+    lr_alpha: float
 
 
 @dataclass
@@ -201,17 +207,24 @@ def _build_config(
     verbose: bool,
     record_bound_trace: bool,
     alpha_split: bool,
+    lambda_intermediate: float,
+    alpha_chunk_size: int,
+    lambda_intermediate_max_width: int | None,
+    alpha_iters: int,
+    lr_alpha: float,
 ) -> BaBConfig:
-    defaults = BaBConfig()
     return BaBConfig(
         branching_method="babsr",
         bounding_method="bfs",
         subproblem_batch_size=subproblem_batch_size,
         eta_iters=eta_iters,
         alpha_split_objective=alpha_split,
-        alpha_iters=defaults.alpha_iters,
-        lr_alpha=defaults.lr_alpha,
+        alpha_iters=alpha_iters,
+        lr_alpha=lr_alpha,
         lr_eta=0.05,
+        lambda_intermediate=lambda_intermediate,
+        alpha_objective_chunk_size=alpha_chunk_size,
+        lambda_intermediate_max_width=lambda_intermediate_max_width,
         max_nodes=max_nodes,
         max_depth=max_depth,
         record_bound_trace=record_bound_trace,
@@ -247,6 +260,12 @@ def verify_instance(
     verbose: bool,
     bound_trace: bool = False,
     alpha_split: bool = False,
+    lambda_intermediate: float = 0.0,
+    alpha_chunk_size: int = 4096,
+    lambda_intermediate_max_width: int | None = None,
+    bab_adam_iters: int = 0,
+    alpha_iters: int = 10,
+    lr_alpha: float = 0.5,
 ) -> VerifyResult:
     if instance_key not in INSTANCE_REGISTRY:
         raise ValueError(f"unknown instance {instance_key!r}; expected one of {list(INSTANCE_REGISTRY)}")
@@ -266,6 +285,11 @@ def verify_instance(
         verbose=verbose,
         record_bound_trace=bound_trace,
         alpha_split=alpha_split,
+        lambda_intermediate=lambda_intermediate,
+        alpha_chunk_size=alpha_chunk_size,
+        lambda_intermediate_max_width=lambda_intermediate_max_width,
+        alpha_iters=alpha_iters,
+        lr_alpha=lr_alpha,
     )
     trace = None
     out_bounds_dict: dict[int, dict[str, torch.Tensor]] = {}
@@ -294,7 +318,7 @@ def verify_instance(
             result = verify_bab(
                 net,
                 solver=TorchLPSolver(),
-                dual_solver=DualSolver(DualTF()),
+                dual_solver=DualSolver(DualTF(), n_iters=bab_adam_iters),
                 config=config,
                 time_budget_s=time_budget_s,
                 trace=trace,
@@ -405,6 +429,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     parser.add_argument("--batch", type=int, default=16, help="subproblem_batch_size")
     parser.add_argument("--eta-iters", type=int, default=10)
+    parser.add_argument(
+        "--bab-adam-iters",
+        type=int,
+        default=0,
+        help=(
+            "DualSolver.n_iters: Adam iterations per BaB node in the joint-KKT path. "
+            "Default 0 = single evaluation (no optimization). Set 5-10 to enable Phase 2b "
+            "optimization. Multiplies memory usage proportionally."
+        ),
+    )
     parser.add_argument("--max-depth", type=int, default=20)
     parser.add_argument(
         "--max-nodes",
@@ -434,6 +468,55 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="enable Tier 3 pre-BaB α-CROWN intermediate-bound tightening",
     )
+    parser.add_argument(
+        "--lambda-intermediate",
+        type=float,
+        default=0.0,
+        help=(
+            "Phase 2b ablation: weight of the intermediate-bound term in the joint "
+            "Adam loss (default 0.0 = Phase 2b OFF). Set to 1.0 to enable per-node "
+            "intermediate-bound re-optimisation. Requires --alpha-split."
+        ),
+    )
+    parser.add_argument(
+        "--alpha-chunk-size",
+        type=int,
+        default=4096,
+        help=(
+            "Chunk size for intermediate-bound coordinate-objective rows. "
+            "Reduce (e.g. 128) when --lambda-intermediate>0 on wide layers + many "
+            "specs to avoid OOM. Memory cost ~ chunk × specs × layer_width × dtype."
+        ),
+    )
+    parser.add_argument(
+        "--lambda-intermediate-max-width",
+        type=int,
+        default=None,
+        help=(
+            "Skip Phase 2b joint-loss for any intermediate sid whose layer width "
+            "exceeds this. Default None = apply to all sids. Use to bound memory "
+            "on wide first-conv layers (e.g. ResNet-medium first-conv = 14400)."
+        ),
+    )
+    parser.add_argument(
+        "--alpha-iters",
+        type=int,
+        default=10,
+        help=(
+            "BaBConfig.alpha_iters: pre-BaB α-CROWN tightening iterations. "
+            "Default 10. αβ-CROWN typically uses 50-100. Higher = tighter "
+            "intermediate bounds at root, but more memory and pre-BaB time."
+        ),
+    )
+    parser.add_argument(
+        "--lr-alpha",
+        type=float,
+        default=0.5,
+        help=(
+            "BaBConfig.lr_alpha: Adam learning rate for α parameters. "
+            "Default 0.5 matches αβ-CROWN. Try 1.0 for more aggressive convergence."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -446,12 +529,18 @@ def _to_cli_args(args: argparse.Namespace) -> CliArgs:
         dtype=args.dtype,
         batch=args.batch,
         eta_iters=args.eta_iters,
+        bab_adam_iters=args.bab_adam_iters,
         max_depth=args.max_depth,
         max_nodes=args.max_nodes,
         budget=args.budget,
         verbose_bab=args.verbose_bab,
         output=args.output,
         bound_trace=args.bound_trace,
+        lambda_intermediate=args.lambda_intermediate,
+        alpha_chunk_size=args.alpha_chunk_size,
+        lambda_intermediate_max_width=args.lambda_intermediate_max_width,
+        alpha_iters=args.alpha_iters,
+        lr_alpha=args.lr_alpha,
     )
 
 
@@ -469,12 +558,18 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     initialize_device(args.device, args.dtype)
-    print(f"[verify] device={args.device} dtype={args.dtype} batch={args.batch} budget={args.budget}s conv_mode={args.conv_mode} alpha_split={args.alpha_split}")
+    print(
+        f"[verify] device={args.device} dtype={args.dtype} batch={args.batch}"
+        + f" budget={args.budget}s conv_mode={args.conv_mode}"
+        + f" alpha_split={args.alpha_split} λ_int={args.lambda_intermediate}"
+    )
 
     results: list[VerifyResult] = []
     for key in _instances_to_run(args.instance):
         print(
-            f"\n--- instance {key} (conv_mode={args.conv_mode}, alpha_split={args.alpha_split}) ---"
+            f"\n--- instance {key} (conv_mode={args.conv_mode},"
+            + f" alpha_split={args.alpha_split},"
+            + f" λ_int={args.lambda_intermediate}) ---"
         )
         r = verify_instance(
             key,
@@ -488,6 +583,12 @@ def main(argv: list[str] | None = None) -> int:
             verbose=args.verbose_bab,
             bound_trace=args.bound_trace,
             alpha_split=args.alpha_split,
+            lambda_intermediate=args.lambda_intermediate,
+            alpha_chunk_size=args.alpha_chunk_size,
+            lambda_intermediate_max_width=args.lambda_intermediate_max_width,
+            bab_adam_iters=args.bab_adam_iters,
+            alpha_iters=args.alpha_iters,
+            lr_alpha=args.lr_alpha,
         )
         results.append(r)
         print(_format_row(r))
