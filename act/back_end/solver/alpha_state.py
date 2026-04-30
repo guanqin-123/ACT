@@ -16,14 +16,16 @@ class AlphaState:
     layer ids of pre-activation layers (added in Phase 2a).
 
     Shape contract for the stored tensor at ``_store[lid][sid]``:
-        per_spec=False (default, Tier 3): ``[B, *layer_shape]``
+        per_spec=False (default, Tier 3):
+            All sids: ``[B, *layer_shape]``
             α is shared across all M specs in a multi-spec problem.
-        per_spec=True  (Tier 4):           ``[B, M, *layer_shape]``
-            Each of M specs carries its own α (matches αβ-CROWN
-            ``full alpha [2, M, B, D]`` modulo the leading 2-slope axis).
-
-    The ``per_spec`` flag is invariant across all entries in a single
-    AlphaState; do not mix legacy and per-spec tensors in the same store.
+        per_spec=True  (Tier 4):
+            sid == FINAL_SID:    ``[B, M, *layer_shape]``  (per-spec α)
+            sid != FINAL_SID:    ``[B, *layer_shape]``     (intermediate, no spec axis)
+            FINAL_SID α matches αβ-CROWN's ``full alpha [2, M, B, D]``
+            modulo the leading 2-slope axis. Intermediate α stays at the
+            legacy per-batch shape because intermediate-bound tightening
+            is per-neuron, not per-spec.
     """
 
     FINAL_SID: ClassVar[int] = -1
@@ -40,13 +42,18 @@ class AlphaState:
         return self._store.get(lid, {}).get(sid)
 
     def set(self, lid: int, sid: int, tensor: torch.Tensor) -> None:
-        min_dim = 3 if self.per_spec else 2
-        if tensor.dim() < min_dim:
+        if self.per_spec and sid == self.FINAL_SID:
+            if tensor.dim() < 3:
+                raise ValueError(
+                    f"AlphaState(per_spec=True): tensor for "
+                    f"(lid={lid}, FINAL_SID={sid}) must be at least 3-D "
+                    f"([B, M, *D]); got shape {tuple(tensor.shape)}"
+                )
+        elif tensor.dim() < 2:
             raise ValueError(
                 f"AlphaState(per_spec={self.per_spec}): tensor for "
-                f"(lid={lid}, sid={sid}) must be at least {min_dim}-D "
-                f"(per_spec=False expects [B, *D]; per_spec=True expects "
-                f"[B, M, *D]); got shape {tuple(tensor.shape)}"
+                f"(lid={lid}, sid={sid}) must be at least 2-D "
+                f"([B, *D]); got shape {tuple(tensor.shape)}"
             )
         self._store.setdefault(lid, {})[sid] = tensor
 

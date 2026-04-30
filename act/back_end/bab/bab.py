@@ -627,6 +627,7 @@ def _verify_bab_batched(
             alpha_iters=config.alpha_iters,
             lr_alpha=config.lr_alpha,
             objective_chunk_size=config.alpha_objective_chunk_size,
+            per_spec=config.alpha_per_spec,
         )
         fixed_bounds = {
             lid: precomputed_root_bounds[lid]

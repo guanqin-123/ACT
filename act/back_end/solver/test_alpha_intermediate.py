@@ -288,3 +288,44 @@ def test_truncated_lb_handles_pre_expanded_spec_axis() -> None:
                 net, expanded, sid_int, alpha_state, objective_chunk_size=chunk,
             )
             torch.testing.assert_close(lb_chunked, expected_lb, rtol=1e-7, atol=1e-9)
+
+
+def test_optimize_initial_intermediate_bounds_per_spec_off_returns_legacy_state() -> None:
+    net, _start_nodes, input_lb, input_ub = _make_deep_relu_net()
+    bounds = compute_forward_bounds(net, input_lb, input_ub, post_activation=False)
+
+    new_bounds, alpha_state = optimize_initial_intermediate_bounds(
+        net,
+        bounds,
+        alpha_iters=2,
+        lr_alpha=0.5,
+    )
+
+    assert alpha_state.per_spec is False
+    for _lid, _sid, tensor in alpha_state.iter_entries():
+        assert tensor.dim() == 2
+
+
+def test_optimize_initial_intermediate_bounds_per_spec_on_returns_per_spec_state() -> None:
+    net, _start_nodes, input_lb, input_ub = _make_deep_relu_net()
+    bounds = compute_forward_bounds(net, input_lb, input_ub, post_activation=False)
+
+    new_bounds, alpha_state = optimize_initial_intermediate_bounds(
+        net,
+        bounds,
+        alpha_iters=2,
+        lr_alpha=0.5,
+        per_spec=True,
+    )
+
+    assert alpha_state.per_spec is True
+    assert not alpha_state.is_empty()
+    base_batch = next(iter(alpha_state.iter_entries()))[2].shape[0]
+    for _lid, sid, tensor in alpha_state.iter_entries():
+        assert sid != AlphaState.FINAL_SID
+        assert tensor.dim() == 2
+        assert tensor.shape[0] == base_batch
+
+    expanded = DualSolver(DualTF())._expand_alpha_dict(alpha_state, factor=3)
+    for _lid, _sid, tensor in expanded.iter_entries():
+        assert tensor.shape[0] == base_batch * 3

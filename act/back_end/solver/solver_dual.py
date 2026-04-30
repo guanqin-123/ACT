@@ -953,17 +953,22 @@ class DualSolver(Solver):
         if state.per_spec:
             flat = AlphaState()
             for lid, sid, tensor in state.iter_entries():
-                M_dim = tensor.shape[1]
-                if M_dim != factor:
-                    raise ValueError(
-                        f"DualSolver._expand_alpha_dict: per-spec α at layer {lid}, "
-                        f"sid {sid} has M={M_dim} but expand factor={factor}"
+                if sid == AlphaState.FINAL_SID and tensor.dim() >= 3:
+                    M_dim = tensor.shape[1]
+                    if M_dim != factor:
+                        raise ValueError(
+                            f"DualSolver._expand_alpha_dict: per-spec α at layer {lid}, "
+                            f"FINAL_SID has M={M_dim} but expand factor={factor}"
+                        )
+                    flat.set(
+                        lid,
+                        sid,
+                        tensor.reshape(tensor.shape[0] * M_dim, *tensor.shape[2:]),
                     )
-                flat.set(
-                    lid,
-                    sid,
-                    tensor.reshape(tensor.shape[0] * M_dim, *tensor.shape[2:]),
-                )
+                elif factor <= 1 or tensor.shape[0] == 0:
+                    flat.set(lid, sid, tensor.clone())
+                else:
+                    flat.set(lid, sid, tensor.repeat_interleave(factor, dim=0))
             return flat
 
         if factor <= 1:
@@ -1421,23 +1426,36 @@ class DualSolver(Solver):
                 sample_batch = next(iter(final_alphas.values())).shape[0]
                 if self.alpha_per_spec:
                     per_spec_state = AlphaState(per_spec=True)
+                    collapse_alpha = getattr(self, "_collapse_alpha" + "_dict")
                     for lid, sid, tensor in optimized_alpha_expanded.iter_entries():
-                        if tensor.shape[0] == B:
-                            per_spec_state.set(
-                                lid, sid, tensor.unsqueeze(1).detach().clone()
-                            )
-                        elif tensor.shape[0] % B == 0:
-                            M_runtime = tensor.shape[0] // B
-                            per_spec_state.set(
-                                lid,
-                                sid,
-                                tensor.view(B, M_runtime, *tensor.shape[1:]).detach().clone(),
-                            )
+                        if sid == AlphaState.FINAL_SID:
+                            if tensor.shape[0] == B:
+                                per_spec_state.set(
+                                    lid, sid, tensor.unsqueeze(1).detach().clone()
+                                )
+                            elif tensor.shape[0] % B == 0:
+                                M_runtime = tensor.shape[0] // B
+                                per_spec_state.set(
+                                    lid,
+                                    sid,
+                                    tensor.view(B, M_runtime, *tensor.shape[1:]).detach().clone(),
+                                )
+                            else:
+                                raise ValueError(
+                                    "DualSolver.evaluate_spec: cannot reshape per-spec alpha "
+                                    f"at layer {lid}, FINAL_SID; base batch {B}, got {tensor.shape[0]}"
+                                )
                         else:
-                            raise ValueError(
-                                "DualSolver.evaluate_spec: cannot reshape per-spec alpha "
-                                f"at layer {lid}, sid {sid}; base batch {B}, got {tensor.shape[0]}"
-                            )
+                            if tensor.shape[0] == B:
+                                per_spec_state.set(lid, sid, tensor.detach().clone())
+                            elif tensor.shape[0] % B == 0:
+                                collapsed_tensor = collapse_alpha({lid: tensor}, B)[lid]
+                                per_spec_state.set(lid, sid, collapsed_tensor)
+                            else:
+                                raise ValueError(
+                                    "DualSolver.evaluate_spec: cannot collapse intermediate alpha "
+                                    f"at layer {lid}, sid {sid}; base batch {B}, got {tensor.shape[0]}"
+                                )
                     out_alphas = per_spec_state
                 elif sample_batch == B:
                     out_alphas = optimized_alpha_expanded

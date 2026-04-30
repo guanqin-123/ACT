@@ -104,15 +104,16 @@ def optimize_initial_intermediate_bounds(
     alpha_iters: int,
     lr_alpha: float,
     objective_chunk_size: int | None = None,
+    per_spec: bool = False,
     log: logging.Logger | None = None,
 ) -> tuple[dict[int, Bounds], AlphaState]:
     logger = log or globals()["log"]
     if alpha_iters <= 0:
-        return dict(bounds_dict), AlphaState()
+        return dict(bounds_dict), AlphaState(per_spec=per_spec)
 
     intermediate_sids = enumerate_intermediate_start_nodes(net)
     if not intermediate_sids:
-        return dict(bounds_dict), AlphaState()
+        return dict(bounds_dict), AlphaState(per_spec=per_spec)
 
     solver = solver_dual_module.DualSolver(dual_tf_module.DualTF())
     sample = next(iter(bounds_dict.values()))
@@ -134,7 +135,7 @@ def optimize_initial_intermediate_bounds(
         sid_int: _enumerate_upstream_relus(net, sid_int)
         for sid_int in intermediate_sids
     }
-    alpha_state = AlphaState()
+    alpha_state = AlphaState(per_spec=per_spec)
     for sid_int, relu_ids in upstream_relus.items():
         for lid in relu_ids:
             template = alpha_templates.get(lid)
