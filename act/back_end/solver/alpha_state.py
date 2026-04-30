@@ -14,12 +14,22 @@ class AlphaState:
     start_node_id = -1 (FINAL_SID) means "α used in the backward pass to the
     final spec margin" (today's only path). Intermediate start_node_ids are
     layer ids of pre-activation layers (added in Phase 2a).
+
+    Shape contract for the stored tensor at ``_store[lid][sid]``:
+        per_spec=False (default, Tier 3): ``[B, *layer_shape]``
+            α is shared across all M specs in a multi-spec problem.
+        per_spec=True  (Tier 4):           ``[B, M, *layer_shape]``
+            Each of M specs carries its own α (matches αβ-CROWN
+            ``full alpha [2, M, B, D]`` modulo the leading 2-slope axis).
+
+    The ``per_spec`` flag is invariant across all entries in a single
+    AlphaState; do not mix legacy and per-spec tensors in the same store.
     """
 
     FINAL_SID: ClassVar[int] = -1
 
-    # _store[lid_relu][sid] -> Tensor[B, D_layer]
     _store: Dict[int, Dict[int, torch.Tensor]] = field(default_factory=dict)
+    per_spec: bool = False
 
     @property
     def start_nodes(self) -> Tuple[int, ...]:
@@ -30,6 +40,14 @@ class AlphaState:
         return self._store.get(lid, {}).get(sid)
 
     def set(self, lid: int, sid: int, tensor: torch.Tensor) -> None:
+        min_dim = 3 if self.per_spec else 2
+        if tensor.dim() < min_dim:
+            raise ValueError(
+                f"AlphaState(per_spec={self.per_spec}): tensor for "
+                f"(lid={lid}, sid={sid}) must be at least {min_dim}-D "
+                f"(per_spec=False expects [B, *D]; per_spec=True expects "
+                f"[B, M, *D]); got shape {tuple(tensor.shape)}"
+            )
         self._store.setdefault(lid, {})[sid] = tensor
 
     def for_start_node(self, sid: int) -> Dict[int, torch.Tensor]:
@@ -56,7 +74,7 @@ class AlphaState:
 
     def clone(self, *, detach: bool = True) -> "AlphaState":
         """Independent deep clone (for snapshot or BaB warm-start)."""
-        cloned = AlphaState()
+        cloned = AlphaState(per_spec=self.per_spec)
         for lid, by_sid in self._store.items():
             for sid, tensor in by_sid.items():
                 copied = tensor.detach().clone() if detach else tensor.clone()
@@ -64,17 +82,21 @@ class AlphaState:
         return cloned
 
     def to(self, device: torch.device, dtype: torch.dtype) -> "AlphaState":
-        moved = AlphaState()
+        moved = AlphaState(per_spec=self.per_spec)
         for lid, by_sid in self._store.items():
             for sid, tensor in by_sid.items():
                 moved.set(lid, sid, tensor.to(device=device, dtype=dtype))
         return moved
 
     def select(self, idx: torch.Tensor) -> "AlphaState":
-        """Index along batch axis [B] -> [|idx|]; mirrors SubproblemBatch.select."""
+        """Index along batch axis [B] -> [|idx|]; mirrors SubproblemBatch.select.
+
+        For per_spec=True tensors of shape [B, M, *D], the spec axis is preserved
+        (only batch axis 0 is indexed).
+        """
         if idx.dim() != 1:
             raise ValueError(f"select: idx must be 1-D, got shape {tuple(idx.shape)}")
-        selected = AlphaState()
+        selected = AlphaState(per_spec=self.per_spec)
         for lid, by_sid in self._store.items():
             for sid, tensor in by_sid.items():
                 selected.set(lid, sid, tensor.index_select(0, idx))
