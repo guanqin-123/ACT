@@ -84,10 +84,18 @@ def get_pre_activation_layer_id(net: Net, activation_layer_id: int) -> int:
 class EtaState:
     """Per-layer per-subproblem Lagrange multipliers for split constraints.
 
-    Shapes (all tensors dense, NO sparsity):
+    Shape contract:
+      per_spec=False (default, Tier-4-final):
         val[lid]   : (B, D_layer) >= 0, the eta values (optimizable)
         sign[lid]  : (B, D_layer) in {+1.0, -1.0, 0.0}
         point[lid] : (B, D_layer)  split point (0 for ReLU, midpoint for smooth)
+      per_spec=True (Tier 6):
+        val[lid]   : (B, M, D_layer) — PER-SPEC multiplier
+        sign[lid]  : (B, D_layer)    — UNCHANGED (split structure shared)
+        point[lid] : (B, D_layer)    — UNCHANGED (split point shared)
+      Per-spec semantics: each of M specs gets its own multiplier on the
+      same split-induced constraint. Matches αβ-CROWN's per_neuron_beta
+      `[M_spec, B, n_split]` modulo axis order.
 
     Sign convention (canonical beta-CROWN, Wang et al. 2021):
         sign = +1  ->  ReLU INACTIVE side, constraint z <= point
@@ -104,6 +112,7 @@ class EtaState:
     val:   Dict[int, torch.Tensor] = field(default_factory=dict)
     sign:  Dict[int, torch.Tensor] = field(default_factory=dict)
     point: Dict[int, torch.Tensor] = field(default_factory=dict)
+    per_spec: bool = False
 
     def __post_init__(self) -> None:
         if set(self.val) != set(self.sign) or set(self.val) != set(self.point):
@@ -111,14 +120,31 @@ class EtaState:
                 f"EtaState has mismatched keys: val={set(self.val)}, "
                 f"sign={set(self.sign)}, point={set(self.point)}")
         for lid in self.val:
-            if self.val[lid].shape != self.sign[lid].shape:
+            v_shape = self.val[lid].shape
+            s_shape = self.sign[lid].shape
+            p_shape = self.point[lid].shape
+            if s_shape != p_shape:
                 raise ValueError(
-                    f"EtaState[{lid}] shape mismatch val={self.val[lid].shape} "
-                    f"vs sign={self.sign[lid].shape}")
-            if self.val[lid].shape != self.point[lid].shape:
-                raise ValueError(
-                    f"EtaState[{lid}] shape mismatch val={self.val[lid].shape} "
-                    f"vs point={self.point[lid].shape}")
+                    f"EtaState[{lid}] sign/point shape mismatch "
+                    f"sign={tuple(s_shape)} vs point={tuple(p_shape)}")
+            if self.per_spec:
+                if self.val[lid].dim() < 3:
+                    raise ValueError(
+                        f"EtaState(per_spec=True)[{lid}]: val must be at least 3-D "
+                        f"[B, M, *D]; got shape {tuple(v_shape)}")
+                if v_shape[0] != s_shape[0]:
+                    raise ValueError(
+                        f"EtaState(per_spec=True)[{lid}]: batch mismatch "
+                        f"val={v_shape[0]} vs sign={s_shape[0]}")
+                if tuple(v_shape[2:]) != tuple(s_shape[1:]):
+                    raise ValueError(
+                        f"EtaState(per_spec=True)[{lid}]: D-dim mismatch "
+                        f"val.shape[2:]={tuple(v_shape[2:])} vs sign.shape[1:]={tuple(s_shape[1:])}")
+            else:
+                if v_shape != s_shape:
+                    raise ValueError(
+                        f"EtaState[{lid}] shape mismatch val={tuple(v_shape)} "
+                        f"vs sign={tuple(s_shape)}")
 
     def is_empty(self) -> bool:
         """True iff every sign tensor is all zero (no active splits)."""
@@ -141,18 +167,23 @@ class EtaState:
             val={k: v.to(device=device, dtype=dtype) for k, v in self.val.items()},
             sign={k: s.to(device=device, dtype=dtype) for k, s in self.sign.items()},
             point={k: p.to(device=device, dtype=dtype) for k, p in self.point.items()},
+            per_spec=self.per_spec,
         )
 
     def select(self, idx: torch.Tensor) -> "EtaState":
         """Return a new EtaState with all tensors indexed by ``idx`` along dim=0.
         ``idx`` must be a 1-D long tensor. Used by BaB when selecting an
-        open-subproblem subset from a larger batch."""
+        open-subproblem subset from a larger batch.
+
+        For per_spec=True ``val`` of shape [B, M, *D], the spec axis (dim 1)
+        is preserved; only batch axis 0 is indexed."""
         if idx.dim() != 1:
             raise ValueError(f"select: idx must be 1-D, got shape {tuple(idx.shape)}")
         return EtaState(
             val={k: v.index_select(0, idx) for k, v in self.val.items()},
             sign={k: s.index_select(0, idx) for k, s in self.sign.items()},
             point={k: p.index_select(0, idx) for k, p in self.point.items()},
+            per_spec=self.per_spec,
         )
 
     @property

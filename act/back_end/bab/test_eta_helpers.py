@@ -158,3 +158,57 @@ def test_expand_eta_state_matches_bounds_expansion():
                 assert big.val[2][row, c].item() == expected, (b, j, c, row)
     same = expand_eta_state(eta, 1)
     assert same is eta
+
+
+def _make_eta_per_spec(B: int, M: int, widths: dict[int, int]) -> EtaState:
+    val = {lid: torch.zeros(B, M, d) for lid, d in widths.items()}
+    sign = {lid: torch.zeros(B, d) for lid, d in widths.items()}
+    point = {lid: torch.zeros(B, d) for lid, d in widths.items()}
+    return EtaState(val=val, sign=sign, point=point, per_spec=True)
+
+
+def test_eta_state_per_spec_default_off():
+    eta = _make_eta(B=2, widths={1: 3})
+    assert eta.per_spec is False
+
+
+def test_eta_state_per_spec_on_validates_3d_val():
+    eta = _make_eta_per_spec(B=2, M=3, widths={1: 4, 2: 5})
+    assert eta.per_spec is True
+    assert eta.val[1].shape == (2, 3, 4)
+    assert eta.sign[1].shape == (2, 4)
+    assert eta.point[1].shape == (2, 4)
+
+
+def test_eta_state_per_spec_rejects_2d_val_when_on():
+    val = {1: torch.zeros(2, 4)}
+    sign = {1: torch.zeros(2, 4)}
+    point = {1: torch.zeros(2, 4)}
+    with pytest.raises(ValueError, match=r"per_spec=True.*val must be at least 3-D"):
+        EtaState(val=val, sign=sign, point=point, per_spec=True)
+
+
+def test_eta_state_per_spec_rejects_d_dim_mismatch_when_on():
+    val = {1: torch.zeros(2, 3, 4)}
+    sign = {1: torch.zeros(2, 5)}
+    point = {1: torch.zeros(2, 5)}
+    with pytest.raises(ValueError, match=r"per_spec=True.*D-dim mismatch"):
+        EtaState(val=val, sign=sign, point=point, per_spec=True)
+
+
+def test_eta_state_per_spec_to_propagates_flag():
+    eta = _make_eta_per_spec(B=2, M=3, widths={1: 4})
+    moved = eta.to(device=torch.device("cpu"), dtype=torch.float64)
+    assert moved.per_spec is True
+    assert moved.val[1].dtype == torch.float64
+
+
+def test_eta_state_per_spec_select_propagates_flag_and_indexes_batch():
+    eta = _make_eta_per_spec(B=5, M=3, widths={7: 4})
+    for b in range(5):
+        eta.val[7][b, :, 0] = float(b + 1)
+    picked = eta.select(torch.tensor([0, 2, 4], dtype=torch.long))
+    assert picked.per_spec is True
+    assert picked.val[7].shape == (3, 3, 4)
+    assert picked.sign[7].shape == (3, 4)
+    assert picked.val[7][:, 0, 0].tolist() == [1.0, 3.0, 5.0]

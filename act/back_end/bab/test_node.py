@@ -326,6 +326,76 @@ def test_concat_subproblem_batches_drops_alphas_when_one_missing():
     assert merged.alphas is None
 
 
+def test_concat_subproblem_batches_preserves_eta_per_spec_flag_and_3d_val():
+    """Tier 6 invariant (mirror of Tier 4 fix at node.py:531).
+
+    EtaState now carries a per_spec flag (Tier 6 Phase 1). Sibling-batch
+    concat MUST preserve it; otherwise downstream Adam routes per-spec val
+    through legacy 2-D expansion and corrupts shape (same bug class as the
+    Tier 4 _concat AlphaState flag drop).
+    """
+    from act.back_end.bab.eta import EtaState
+
+    M, D = 3, 5
+    lb1 = torch.tensor([[0.0, 0.0]])
+    ub1 = lb1 + 1.0
+    d1 = torch.tensor([0], dtype=torch.long)
+    eta1 = EtaState(
+        val={7: torch.full((1, M, D), 0.1)},
+        sign={7: torch.zeros(1, D)},
+        point={7: torch.zeros(1, D)},
+        per_spec=True,
+    )
+    b1 = SubproblemBatch(lb=lb1, ub=ub1, depths=d1, eta=eta1)
+
+    lb2 = torch.tensor([[2.0, 2.0]])
+    ub2 = lb2 + 1.0
+    d2 = torch.tensor([1], dtype=torch.long)
+    eta2 = EtaState(
+        val={7: torch.full((1, M, D), 0.7)},
+        sign={7: torch.zeros(1, D)},
+        point={7: torch.zeros(1, D)},
+        per_spec=True,
+    )
+    b2 = SubproblemBatch(lb=lb2, ub=ub2, depths=d2, eta=eta2)
+
+    merged = _concat_subproblem_batches(b1, b2)
+
+    assert merged.eta is not None
+    assert merged.eta.per_spec is True, (
+        "regression: per_spec flag was dropped during eta concat; downstream "
+        "evaluate_spec will mis-handle per-spec val through legacy expansion"
+    )
+    assert merged.eta.val[7].shape == (2, M, D), f"val shape regression: {merged.eta.val[7].shape}"
+    assert merged.eta.sign[7].shape == (2, D), f"sign shape regression: {merged.eta.sign[7].shape}"
+
+
+def test_concat_subproblem_batches_rejects_eta_per_spec_flag_mismatch():
+    """Mixing per_spec=True and per_spec=False eta states must raise."""
+    from act.back_end.bab.eta import EtaState
+
+    lb = torch.tensor([[0.0, 0.0]])
+    ub = lb + 1.0
+    d = torch.tensor([0], dtype=torch.long)
+    eta_off = EtaState(
+        val={7: torch.zeros(1, 4)},
+        sign={7: torch.zeros(1, 4)},
+        point={7: torch.zeros(1, 4)},
+        per_spec=False,
+    )
+    eta_on = EtaState(
+        val={7: torch.zeros(1, 3, 4)},
+        sign={7: torch.zeros(1, 4)},
+        point={7: torch.zeros(1, 4)},
+        per_spec=True,
+    )
+    b1 = SubproblemBatch(lb=lb, ub=ub, depths=d, eta=eta_off)
+    b2 = SubproblemBatch(lb=lb, ub=ub, depths=d, eta=eta_on)
+
+    with pytest.raises(ValueError, match=r"eta per_spec flag mismatch"):
+        _concat_subproblem_batches(b1, b2)
+
+
 def test_concat_subproblem_batches_preserves_per_spec_flag_and_3d_final_sid():
     """Tier 4 regression: per_spec=True must survive sibling-batch concat.
 

@@ -468,16 +468,21 @@ def _concat_subproblem_batches(*batches: SubproblemBatch) -> SubproblemBatch:
     ub = torch.cat([b.ub for b in batches], dim=0)
     depths = torch.cat([b.depths for b in batches], dim=0)
 
-    # eta — all-or-nothing to keep layer structure consistent.
     if all(b.eta is not None for b in batches):
         eta_batches = [b.eta for b in batches if b.eta is not None]
         layer_ids = eta_batches[0].layer_ids
+        per_spec_first = eta_batches[0].per_spec
         for b in batches[1:]:
             assert b.eta is not None
             if b.eta.layer_ids != layer_ids:
                 raise ValueError(
                     f"_concat_subproblem_batches: eta layer id mismatch "
                     f"{b.eta.layer_ids} vs {layer_ids}"
+                )
+            if b.eta.per_spec != per_spec_first:
+                raise ValueError(
+                    f"_concat_subproblem_batches: eta per_spec flag mismatch "
+                    f"{b.eta.per_spec} vs {per_spec_first}"
                 )
         new_val = {
             lid: torch.cat([eta.val[lid] for eta in eta_batches], dim=0)
@@ -491,7 +496,7 @@ def _concat_subproblem_batches(*batches: SubproblemBatch) -> SubproblemBatch:
             lid: torch.cat([eta.point[lid] for eta in eta_batches], dim=0)
             for lid in layer_ids
         }
-        eta = EtaState(val=new_val, sign=new_sign, point=new_point)
+        eta = EtaState(val=new_val, sign=new_sign, point=new_point, per_spec=per_spec_first)
     else:
         eta = None
 
