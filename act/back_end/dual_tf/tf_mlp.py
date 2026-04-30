@@ -580,6 +580,13 @@ def dual_relu_backward(nu: torch.Tensor, bounds: Bounds,
     pass nu and bounds with identical shape; any mismatch raises (no
     implicit flatten, no silent broadcast). Returns v_out at nu's shape and
     contrib reduced over all non-batch dims.
+
+    Per-spec α (Tier 4): when ``alpha`` carries a leading per-spec axis
+    (``alpha.dim() == nu.dim() + 1``, shape ``[B, M, *D]`` against flat
+    ``nu`` shape ``[B*M, *D]``), the spec axis is flattened in-place so each
+    of the M specs uses its own α slope on its own row of nu. Result and
+    contrib remain at nu's flat shape; soundness is preserved because the
+    flatten is a memory-layout reshape, not a value change.
     """
     _assert_broadcast_to_nu(bounds.lb.shape, nu.shape, "dual_relu_backward", "bounds")
     B = nu.shape[0]
@@ -608,6 +615,9 @@ def dual_relu_backward(nu: torch.Tensor, bounds: Bounds,
         else:
             contrib = torch.zeros(B, dtype=nu.dtype, device=nu.device)
         return v_out, contrib
+
+    if alpha.dim() == nu.dim() + 1:
+        alpha = alpha.reshape(alpha.shape[0] * alpha.shape[1], *alpha.shape[2:])
 
     _assert_broadcast_to_nu(alpha.shape, nu.shape, "dual_relu_backward", "alpha")
     if not torch.logical_and(alpha >= 0, alpha <= 1).all():
