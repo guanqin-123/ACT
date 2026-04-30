@@ -268,3 +268,47 @@ def test_collapse_eta_state_legacy_mean_collapse_unchanged():
     assert collapsed.val[7].shape == (2, 3)
     assert collapsed.val[7][0, 0].item() == pytest.approx((1.0 + 2.0) / 2)
     assert collapsed.val[7][1, 0].item() == pytest.approx((3.0 + 4.0) / 2)
+
+
+def test_per_spec_eta_through_expand_matches_legacy_kernel_input():
+    """Tier 6 invariant: per_spec=True eta + expand produces FLAT 2-D tensors
+    that are bit-identical to a hand-constructed legacy per_spec=False eta
+    with the spec axis manually flattened.
+
+    This proves the backward kernel _apply_eta_to_pred_nus needs ZERO code
+    changes for Tier 6 — Phase 2's expand_eta_state handles the boundary.
+    """
+    B, M, D = 2, 3, 4
+    val_3d = torch.zeros(B, M, D)
+    sign_2d = torch.zeros(B, D)
+    point_2d = torch.zeros(B, D)
+    for b in range(B):
+        for m in range(M):
+            for c in range(D):
+                val_3d[b, m, c] = b * 100.0 + m * 10.0 + c
+        sign_2d[b] = float(b + 1)
+        point_2d[b] = float(b + 1) * -1
+
+    eta_per_spec = EtaState(
+        val={7: val_3d.clone()},
+        sign={7: sign_2d.clone()},
+        point={7: point_2d.clone()},
+        per_spec=True,
+    )
+
+    val_flat = val_3d.reshape(B * M, D)
+    sign_flat = sign_2d.repeat_interleave(M, dim=0)
+    point_flat = point_2d.repeat_interleave(M, dim=0)
+    eta_legacy_equivalent = EtaState(
+        val={7: val_flat.clone()},
+        sign={7: sign_flat.clone()},
+        point={7: point_flat.clone()},
+        per_spec=False,
+    )
+
+    expanded = expand_eta_state(eta_per_spec, M)
+    assert expanded is not None
+    assert expanded.per_spec is False
+    assert torch.equal(expanded.val[7], eta_legacy_equivalent.val[7])
+    assert torch.equal(expanded.sign[7], eta_legacy_equivalent.sign[7])
+    assert torch.equal(expanded.point[7], eta_legacy_equivalent.point[7])
