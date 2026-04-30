@@ -67,6 +67,7 @@ def test_alpha_per_spec_cli_flag_threads_to_bab_config() -> None:
         alpha_iters=1,
         lr_alpha=0.5,
         alpha_per_spec=True,
+        eta_per_spec=False,
     )
     assert cfg_on.alpha_per_spec is True
 
@@ -84,5 +85,6 @@ def test_alpha_per_spec_cli_flag_threads_to_bab_config() -> None:
         alpha_iters=1,
         lr_alpha=0.5,
         alpha_per_spec=False,
+        eta_per_spec=False,
     )
     assert cfg_off.alpha_per_spec is False

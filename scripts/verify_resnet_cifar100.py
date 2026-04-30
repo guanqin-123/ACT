@@ -100,6 +100,7 @@ class CliArgs:
     alpha_iters: int
     lr_alpha: float
     alpha_per_spec: bool
+    eta_per_spec: bool
 
 
 @dataclass
@@ -214,6 +215,7 @@ def _build_config(
     alpha_iters: int,
     lr_alpha: float,
     alpha_per_spec: bool,
+    eta_per_spec: bool,
 ) -> BaBConfig:
     return BaBConfig(
         branching_method="babsr",
@@ -222,6 +224,7 @@ def _build_config(
         eta_iters=eta_iters,
         alpha_split_objective=alpha_split,
         alpha_per_spec=alpha_per_spec,
+        eta_per_spec=eta_per_spec,
         alpha_iters=alpha_iters,
         lr_alpha=lr_alpha,
         lr_eta=0.05,
@@ -270,6 +273,7 @@ def verify_instance(
     alpha_iters: int = 10,
     lr_alpha: float = 0.5,
     alpha_per_spec: bool = False,
+    eta_per_spec: bool = False,
 ) -> VerifyResult:
     if instance_key not in INSTANCE_REGISTRY:
         raise ValueError(f"unknown instance {instance_key!r}; expected one of {list(INSTANCE_REGISTRY)}")
@@ -295,6 +299,7 @@ def verify_instance(
         alpha_iters=alpha_iters,
         lr_alpha=lr_alpha,
         alpha_per_spec=alpha_per_spec,
+        eta_per_spec=eta_per_spec,
     )
     trace = None
     out_bounds_dict: dict[int, dict[str, torch.Tensor]] = {}
@@ -533,6 +538,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Memory cost: M× α params + Adam state at FINAL_SID."
         ),
     )
+    parser.add_argument(
+        "--eta-per-spec",
+        action="store_true",
+        help=(
+            "BaBConfig.eta_per_spec: enable Tier 6 per-spec η/β "
+            "(EtaState val [B, M, *D]; sign and point stay [B, *D] shared). "
+            "Each of M specs gets its own multiplier on each split-induced "
+            "constraint, matching αβ-CROWN's per_neuron_beta. Tier 4 alone "
+            "was empirically inert on 3995 because shared η forces every "
+            "spec to compromise at every split (see "
+            "HANDOFF_tier4_session4_followup.md). Pair with --alpha-per-spec "
+            "for the full per-spec joint Adam path. Default OFF preserves "
+            "Tier-4-final bit-identical behaviour."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -558,6 +578,7 @@ def _to_cli_args(args: argparse.Namespace) -> CliArgs:
         alpha_iters=args.alpha_iters,
         lr_alpha=args.lr_alpha,
         alpha_per_spec=args.alpha_per_spec,
+        eta_per_spec=args.eta_per_spec,
     )
 
 
@@ -607,6 +628,7 @@ def main(argv: list[str] | None = None) -> int:
             alpha_iters=args.alpha_iters,
             lr_alpha=args.lr_alpha,
             alpha_per_spec=args.alpha_per_spec,
+            eta_per_spec=args.eta_per_spec,
         )
         results.append(r)
         print(_format_row(r))
