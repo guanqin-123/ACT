@@ -528,7 +528,7 @@ def _concat_subproblem_batches(*batches: SubproblemBatch) -> SubproblemBatch:
             for s in alpha_states_present[1:]
         )
         if keys_match and first_keys:
-            alphas = AlphaState()
+            alphas = AlphaState(per_spec=alpha_states_present[0].per_spec)
             for lid, sid, _ in alpha_states_present[0].iter_entries():
                 tensors_to_cat: list[torch.Tensor] = []
                 for s in alpha_states_present:

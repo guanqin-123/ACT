@@ -324,3 +324,43 @@ def test_concat_subproblem_batches_drops_alphas_when_one_missing():
 
     merged = _concat_subproblem_batches(b1, b2)
     assert merged.alphas is None
+
+
+def test_concat_subproblem_batches_preserves_per_spec_flag_and_3d_final_sid():
+    """Tier 4 regression: per_spec=True must survive sibling-batch concat.
+
+    Previously, ``_concat_subproblem_batches`` rebuilt the merged AlphaState
+    via ``AlphaState()`` (per_spec=False default), silently downgrading the
+    contract. The next ``evaluate_spec`` then routed the still-3-D FINAL_SID
+    tensor through the legacy expand path, producing 4-D garbage and tripping
+    the warm-alpha-width check. See HANDOFF_tier4_session4 fix-up notes.
+    """
+    M, D = 3, 5
+    lb1 = torch.tensor([[0.0, 0.0]])
+    ub1 = lb1 + 1.0
+    d1 = torch.tensor([0], dtype=torch.long)
+    a1 = AlphaState(per_spec=True)
+    a1.set(3, AlphaState.FINAL_SID, torch.full((1, M, D), 0.1))
+    a1.set(3, 4, torch.full((1, D), 0.5))
+    b1 = SubproblemBatch(lb=lb1, ub=ub1, depths=d1, alphas=a1)
+
+    lb2 = torch.tensor([[2.0, 2.0]])
+    ub2 = lb2 + 1.0
+    d2 = torch.tensor([1], dtype=torch.long)
+    a2 = AlphaState(per_spec=True)
+    a2.set(3, AlphaState.FINAL_SID, torch.full((1, M, D), 0.7))
+    a2.set(3, 4, torch.full((1, D), 0.9))
+    b2 = SubproblemBatch(lb=lb2, ub=ub2, depths=d2, alphas=a2)
+
+    merged = _concat_subproblem_batches(b1, b2)
+
+    assert merged.alphas is not None
+    assert merged.alphas.per_spec is True, (
+        "regression: per_spec flag was dropped during concat; downstream "
+        "evaluate_spec will mis-route per-spec FINAL_SID through legacy expansion"
+    )
+    final_t = merged.alphas.get(3, AlphaState.FINAL_SID)
+    inter_t = merged.alphas.get(3, 4)
+    assert final_t is not None and inter_t is not None
+    assert final_t.shape == (2, M, D), f"FINAL_SID shape regression: {final_t.shape}"
+    assert inter_t.shape == (2, D), f"intermediate shape regression: {inter_t.shape}"
