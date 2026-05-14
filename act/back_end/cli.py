@@ -45,23 +45,51 @@ def _make_solver(solver_name: str):
         return TorchLPSolver()
 
 
-def run_verification(args, backend_cfg):
-    """Run verification on a network using *backend_cfg*."""
+def _verify_one_net(net_path: str, backend_cfg) -> tuple[list, Optional[str], Optional[int]]:
+    """Verify *net_path*; returns (results, error_or_None, n_layers_or_None).
+
+    Runs verify_once first; only invokes BaB on lanes that returned UNKNOWN.
+    """
     from act.back_end.serialization.serialization import load_net_from_file
     from act.back_end.verifier import verify_once
     from act.back_end.bab import verify_bab_batched
     from act.util.stats import VerifyStatus
 
-    net = load_net_from_file(args.network)
-    print(f"Loaded {len(net.layers)}-layer net; solver={backend_cfg.solver}")
+    try:
+        net = load_net_from_file(net_path)
+        once_results = list(verify_once(net=net))
+        needs_bab = backend_cfg.bab_enabled and any(
+            r.status == VerifyStatus.UNKNOWN for r in once_results
+        )
+        if not needs_bab:
+            return once_results, None, len(net.layers)
 
-    if backend_cfg.bab_enabled:
-        results = verify_bab_batched(
+        bab_results = verify_bab_batched(
             net,
             solver_factory=lambda: _make_solver(backend_cfg.solver),
             config=backend_cfg.bab,
             time_budget_s=backend_cfg.timeout,
         )
+        merged = [
+            bab_results[i] if once_results[i].status == VerifyStatus.UNKNOWN else once_results[i]
+            for i in range(len(once_results))
+        ]
+        return merged, None, len(net.layers)
+    except Exception as e:  # noqa: BLE001 — surface per-net error, keep iterating
+        return [], str(e), None
+
+
+def run_verification(args, backend_cfg):
+    """Run verification on a network using *backend_cfg*."""
+    from act.util.stats import VerifyStatus
+
+    results, err, n_layers = _verify_one_net(args.network, backend_cfg)
+    if err is not None:
+        print(f"❌ {args.network}: {err}")
+        return 1
+    print(f"Loaded {n_layers}-layer net; solver={backend_cfg.solver}")
+
+    if backend_cfg.bab_enabled:
         all_certified = True
         multi = len(results) > 1
         for i, result in enumerate(results):
@@ -74,7 +102,7 @@ def run_verification(args, backend_cfg):
                 all_certified = False
         return 0 if all_certified else 1
 
-    for i, lane in enumerate(verify_once(net=net)):
+    for i, lane in enumerate(results):
         print(f"Lane {i}: {lane.status}")
         if backend_cfg.verbose and lane.metadata:
             for k, v in lane.metadata.items():
@@ -84,11 +112,6 @@ def run_verification(args, backend_cfg):
 
 def run_verify_all(args, backend_cfg):
     """Verify every .json net under a directory in one Python process."""
-    import glob
-    import os
-    from act.back_end.serialization.serialization import load_net_from_file
-    from act.back_end.verifier import verify_once
-    from act.back_end.bab import verify_bab_batched
     from act.util.stats import VerifyStatus
 
     nets_dir = args.verify_all
@@ -115,26 +138,17 @@ def run_verify_all(args, backend_cfg):
 
     for idx, net_path in enumerate(paths, 1):
         name = os.path.basename(net_path)
-        try:
-            net = load_net_from_file(net_path)
-            if backend_cfg.bab_enabled:
-                results = verify_bab_batched(
-                    net,
-                    solver_factory=lambda: _make_solver(backend_cfg.solver),
-                    config=backend_cfg.bab,
-                    time_budget_s=backend_cfg.timeout,
-                )
-            else:
-                results = list(verify_once(net=net))
-            statuses = [r.status for r in results]
-            tag = "  ".join(s.name for s in statuses)
-            print(f"[{idx:>3}/{total}] {name}: {tag}")
-            for r in results:
-                if r.status not in (VerifyStatus.CERTIFIED, VerifyStatus.UNKNOWN):
-                    failures.append((name, r.status))
-        except Exception as e:  # noqa: BLE001 — surface per-net error, keep iterating
-            print(f"[{idx:>3}/{total}] {name}: ❌ ERROR — {e}")
-            errors.append((name, str(e)))
+        results, err, _ = _verify_one_net(net_path, backend_cfg)
+        if err is not None:
+            print(f"[{idx:>3}/{total}] {name}: ❌ ERROR — {err}")
+            errors.append((name, err))
+            continue
+        statuses = [r.status for r in results]
+        tag = "  ".join(s.name for s in statuses)
+        print(f"[{idx:>3}/{total}] {name}: {tag}")
+        for r in results:
+            if r.status not in (VerifyStatus.CERTIFIED, VerifyStatus.UNKNOWN):
+                failures.append((name, r.status))
 
     print(f"\n{'=' * 80}")
     print(f"verify-all summary:  total={total}  failures={len(failures)}  errors={len(errors)}")
@@ -902,86 +916,44 @@ Examples:
         return 1
 
 
+# (override_key, args_attr, env_var, env_cast, cli_check)
+# cli_check="user_set" for flags with non-None defaults (--device/--dtype/--registry-mode)
+_BACKEND_OVERRIDE_SPEC: List[tuple] = [
+    ("solver",               "solver",              "ACT_SOLVER",     None, "not_none"),
+    ("device",               "device",              "ACT_DEVICE",     None, "user_set"),
+    ("dtype",                "dtype",               "ACT_DTYPE",      None, "user_set"),
+    ("timeout",              "timeout",             None,             None, "not_none"),
+    ("bab_enabled",          "bab",                 None,             None, "not_none"),
+    ("bab_max_depth",        "bab_max_depth",       None,             None, "not_none"),
+    ("bab_max_nodes",        "bab_max_subproblems", None,             None, "not_none"),
+    ("bab_branching_method", "bab_branching",       None,             None, "not_none"),
+    ("bab_bounding_method",  "bab_bounding",        None,             None, "not_none"),
+    ("gen_gen_config_path",  "config",              None,             None, "not_none"),
+    ("gen_output_dir",       "output",              "ACT_GEN_OUTPUT", None, "not_none"),
+    ("gen_num_instances",    "num",                 "ACT_GEN_NUM",    int,  "not_none"),
+    ("gen_base_seed",        "base_seed",           "ACT_GEN_SEED",   int,  "not_none"),
+    ("gen_name_prefix",      "name_prefix",         None,             None, "not_none"),
+    ("gen_tf_targets",       "tf_targets",          None,             None, "not_none"),
+    ("gen_registry_mode",    "registry_mode",       None,             None, "user_set"),
+]
+
+
 def _collect_backend_overrides(args, _user_set) -> dict:
-    """Build overrides dict from CLI flags + env vars.
-
-    Only includes keys the user explicitly provided (CLI flag) or that are
-    set in the environment.  Everything else falls through to config.yaml.
-
-    Prefix conventions: ``bab_<field>`` → BaBConfig, ``gen_<field>`` → GenerationConfig.
-    """
+    """Build overrides dict from CLI flags + env vars (precedence: CLI > env > yaml)."""
     overrides: dict = {}
-
-    # ── Runtime selectors: CLI > env > config.yaml ──
-    if args.solver is not None:
-        overrides["solver"] = args.solver
-    elif os.environ.get("ACT_SOLVER"):
-        overrides["solver"] = os.environ["ACT_SOLVER"]
-
-    if _user_set("--device"):
-        overrides["device"] = args.device
-    elif os.environ.get("ACT_DEVICE"):
-        overrides["device"] = os.environ["ACT_DEVICE"]
-
-    if _user_set("--dtype"):
-        overrides["dtype"] = args.dtype
-    elif os.environ.get("ACT_DTYPE"):
-        overrides["dtype"] = os.environ["ACT_DTYPE"]
+    for key, attr, env, cast, check in _BACKEND_OVERRIDE_SPEC:
+        cli_val = getattr(args, attr, None)
+        if check == "user_set":
+            cli_provided = _user_set(f"--{attr.replace('_', '-')}")
+        else:
+            cli_provided = cli_val is not None
+        if cli_provided:
+            overrides[key] = cli_val
+        elif env is not None and os.environ.get(env):
+            overrides[key] = cast(os.environ[env]) if cast else os.environ[env]
 
     if args.verbose:
         overrides["verbose"] = True
-
-    # ── Verification ──
-    if args.timeout is not None:
-        overrides["timeout"] = args.timeout
-
-    # bab enabled: --bab / --no-bab (None = defer to config.yaml)
-    if args.bab is not None:
-        overrides["bab_enabled"] = args.bab
-
-    if args.bab_max_depth is not None:
-        overrides["bab_max_depth"] = args.bab_max_depth
-    if args.bab_max_subproblems is not None:
-        overrides["bab_max_nodes"] = args.bab_max_subproblems
-    if args.bab_branching is not None:
-        overrides["bab_branching_method"] = args.bab_branching
-    if args.bab_bounding is not None:
-        overrides["bab_bounding_method"] = args.bab_bounding
-
-    # ── Generation: CLI > env > config.yaml ──
-    config_flag = getattr(args, "config", None)
-    if config_flag is not None:
-        overrides["gen_gen_config_path"] = config_flag
-
-    output_flag = getattr(args, "output", None)
-    if output_flag is not None:
-        overrides["gen_output_dir"] = output_flag
-    elif os.environ.get("ACT_GEN_OUTPUT"):
-        overrides["gen_output_dir"] = os.environ["ACT_GEN_OUTPUT"]
-
-    num_flag = getattr(args, "num", None)
-    if num_flag is not None:
-        overrides["gen_num_instances"] = num_flag
-    elif os.environ.get("ACT_GEN_NUM"):
-        overrides["gen_num_instances"] = int(os.environ["ACT_GEN_NUM"])
-
-    seed_flag = getattr(args, "base_seed", None)
-    if seed_flag is not None:
-        overrides["gen_base_seed"] = seed_flag
-    elif os.environ.get("ACT_GEN_SEED"):
-        overrides["gen_base_seed"] = int(os.environ["ACT_GEN_SEED"])
-
-    prefix_flag = getattr(args, "name_prefix", None)
-    if prefix_flag is not None:
-        overrides["gen_name_prefix"] = prefix_flag
-
-    tf_flag = getattr(args, "tf_targets", None)
-    if tf_flag is not None:
-        overrides["gen_tf_targets"] = tf_flag
-
-    reg_flag = getattr(args, "registry_mode", None)
-    if reg_flag is not None and _user_set("--registry-mode"):
-        overrides["gen_registry_mode"] = reg_flag
 
     return overrides
 

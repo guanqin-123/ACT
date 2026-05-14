@@ -401,11 +401,7 @@ def add_negated_assert_to_solver(solver: Solver, out_ids: List[int], assert_laye
 
         v = solver.n
         solver.add_vars(1)
-        v_max_terms: List[float] = []
-
-        v_max = max(v_max_terms) if v_max_terms else 1e6
-        if (not np.isfinite(v_max)) or v_max < 1e-3:
-            v_max = 1e6
+        v_max = 1e6
 
         solver.add_lin_ge([v], [1.0], 0.0)
         solver.add_lin_ge([v], [-1.0], -v_max)

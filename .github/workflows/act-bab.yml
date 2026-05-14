@@ -42,14 +42,24 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install coverage torch torchvision onnx onnx2torch tensorflow pandas numpy pyyaml tqdm psutil transformers scikit-learn
+          pip install coverage torch onnx onnx2torch pandas numpy pyyaml tqdm psutil
 
       - name: Run BaB module tests
         run: |
           cd ${{ github.workspace }}
           coverage run -p --source=act -m act.back_end.bab.bab
 
+      - name: Cache generated networks
+        id: nets-cache
+        uses: actions/cache@v4
+        with:
+          path: act/back_end/examples/nets
+          key: act-nets-${{ hashFiles('act/back_end/examples/config_gen_act_net.yaml', 'act/back_end/net_factory.py', 'act/back_end/config.yaml') }}
+          restore-keys: |
+            act-nets-
+
       - name: Generate example networks
+        if: steps.nets-cache.outputs.cache-hit != 'true'
         run: |
           cd ${{ github.workspace }}
           coverage run -p --source=act -m act.back_end --generate
