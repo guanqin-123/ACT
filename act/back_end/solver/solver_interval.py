@@ -102,16 +102,30 @@ class TorchLPSolver(Solver):
         self._ub[idxs] = ub_t
 
     def add_lin_eq(self, vids: List[int], coeffs: List[float], rhs: float) -> None:
+        if len(vids) != len(coeffs):
+            raise ValueError(
+                f"add_lin_eq: vids/coeffs length mismatch "
+                f"({len(vids)} vs {len(coeffs)}); rhs={rhs}"
+            )
         self._eq.append((vids, coeffs, rhs))
 
     def add_lin_le(self, vids: List[int], coeffs: List[float], rhs: float) -> None:
+        if len(vids) != len(coeffs):
+            raise ValueError(
+                f"add_lin_le: vids/coeffs length mismatch "
+                f"({len(vids)} vs {len(coeffs)}); rhs={rhs}"
+            )
         self._le.append((vids, coeffs, rhs))
 
     def add_lin_ge(self, vids: List[int], coeffs: List[float], rhs: float) -> None:
-        vids2 = vids
+        if len(vids) != len(coeffs):
+            raise ValueError(
+                f"add_lin_ge: vids/coeffs length mismatch "
+                f"({len(vids)} vs {len(coeffs)}); rhs={rhs}"
+            )
         coeffs2 = [-float(a) for a in coeffs]
         rhs2 = -float(rhs)
-        self._le.append((vids2, coeffs2, rhs2))
+        self._le.append((vids, coeffs2, rhs2))
 
     def add_sum_eq(self, vids: List[int], rhs: float) -> None:
         coeffs = [1.0] * len(vids)

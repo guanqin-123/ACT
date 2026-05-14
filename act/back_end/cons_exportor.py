@@ -12,6 +12,8 @@
 #
 #===---------------------------------------------------------------------===#
 
+import logging
+
 import numpy as np
 import torch
 from typing import Optional, Tuple
@@ -19,6 +21,10 @@ from act.back_end.core import ConSet
 from act.back_end.solver.solver_base import Solver
 from act.back_end.layer_util import validate_conset_ops
 from act.util.device_manager import get_default_device, get_default_dtype
+from act.util.options import PerformanceOptions
+
+# Module logger
+logger = logging.getLogger(__name__)
 
 TANH_EPS = 1e-9
 TANH_IDENTITY_WINDOW = 0.25  # treat tanh(x) ≈ x within this window
@@ -113,8 +119,9 @@ def to_numpy(x) -> np.ndarray:
             # Use current default dtype and ensure proper device handling
             current_dtype = get_default_dtype()
             return x.detach().to("cpu", dtype=current_dtype).numpy()
-    except Exception:
-        pass
+    except Exception as e:
+        # Intentional: tensor conversion may fail for exotic dtypes/devices; fall back to np.asarray below.
+        logger.debug("suppressed: %s", e)
     # Use the global dtype for numpy conversion too
     current_dtype = get_default_dtype()
     if current_dtype == torch.float16:
@@ -134,10 +141,12 @@ def export_to_solver(globalC: ConSet, solver: Solver,
     
     # Only initialize solver if it hasn't been pre-configured
     if hasattr(solver, 'n') and solver.n == 0:
-        print(f"🔧 export_to_solver: Initializing solver (current vars: {solver.n})")
+        if PerformanceOptions.debug_tf:
+            logger.debug("export_to_solver: Initializing solver (current vars: %d)", solver.n)
         solver.begin("verify", device=dev_hint)
     else:
-        print(f"🔧 export_to_solver: Solver already initialized (current vars: {getattr(solver, 'n', 'unknown')})")
+        if PerformanceOptions.debug_tf:
+            logger.debug("export_to_solver: Solver already initialized (current vars: %s)", getattr(solver, 'n', 'unknown'))
 
     # 1) global var set and merged boxes
     all_ids=set(); boxes={}
@@ -257,11 +266,12 @@ def export_to_solver(globalC: ConSet, solver: Solver,
             meta=con.meta; n=len(con.var_ids)//3
             z=list(con.var_ids[:n]); x=list(con.var_ids[n:2*n]); y=list(con.var_ids[2*n:])
             lx,ux,ly,uy = map(to_numpy, (meta["lx"], meta["ux"], meta["ly"], meta["uy"]))
+            lx_list, ux_list, ly_list, uy_list = lx.tolist(), ux.tolist(), ly.tolist(), uy.tolist()
             for i in range(n):
-                solver.add_lin_ge([z[i],y[i],x[i]],[1.0, -float(lx[i]), -float(ly[i])], -float(lx[i]*ly[i]))
-                solver.add_lin_ge([z[i],y[i],x[i]],[1.0, -float(ux[i]), -float(uy[i])], -float(ux[i]*uy[i]))
-                solver.add_lin_le([z[i],y[i],x[i]],[1.0, -float(lx[i]), -float(uy[i])], -float(lx[i]*uy[i]))
-                solver.add_lin_le([z[i],y[i],x[i]],[1.0, -float(ux[i]), -float(ly[i])], -float(ux[i]*ly[i]))
+                solver.add_lin_ge([z[i],y[i],x[i]],[1.0, -lx_list[i], -ly_list[i]], -lx_list[i]*ly_list[i])
+                solver.add_lin_ge([z[i],y[i],x[i]],[1.0, -ux_list[i], -uy_list[i]], -ux_list[i]*uy_list[i])
+                solver.add_lin_le([z[i],y[i],x[i]],[1.0, -lx_list[i], -uy_list[i]], -lx_list[i]*uy_list[i])
+                solver.add_lin_le([z[i],y[i],x[i]],[1.0, -ux_list[i], -ly_list[i]], -ux_list[i]*ly_list[i])
 
         elif tag.startswith(("max:", "min:")):
             k=int(con.meta["k"]); n_out=len(con.var_ids)//(1+k)
@@ -287,8 +297,44 @@ def export_to_solver(globalC: ConSet, solver: Solver,
             vids = list(con.var_ids)
             for i in range(A.shape[0]):
                 solver.add_lin_le(vids, list(A[i, :]), float(b[i]))
-        
-        else:
+
+        elif tag.startswith("sub:"):
+            n = len(con.var_ids) // 3
+            z = list(con.var_ids[:n]); x = list(con.var_ids[n:2*n]); y = list(con.var_ids[2*n:])
+            for i, zi in enumerate(z): solver.add_lin_eq([zi, x[i], y[i]], [1.0, -1.0, 1.0], 0.0)
+
+        elif tag.startswith("div:"):  # pragma: no cover
+            pass
+
+        elif tag.startswith("slice:"):
+            starts = con.meta["starts"]; ends = con.meta["ends"]
+            axes = con.meta["axes"]; steps = con.meta["steps"]
+            inp_shape = tuple(int(v) for v in con.meta["input_shape"])
+            n_in = int(np.prod(inp_shape))
+            n_out = len(con.var_ids) - n_in
+            out_vids = list(con.var_ids[:n_out]); in_vids = list(con.var_ids[n_out:])
+            idx = np.arange(n_in).reshape(inp_shape)
+            slc = [slice(None)] * len(inp_shape)
+            for i, ax in enumerate(axes):
+                s = int(starts[i]); e = min(int(ends[i]), inp_shape[int(ax)]); st = int(steps[i])
+                slc[int(ax)] = slice(s, e, st)
+            mapped = idx[tuple(slc)].ravel()
+            for k, ov in enumerate(out_vids):
+                solver.add_lin_eq([ov, in_vids[int(mapped[k])]], [1.0, -1.0], 0.0)
+
+        elif tag.startswith("gather:"):
+            axis = int(con.meta["axis"])
+            indices = [int(i) for i in con.meta["indices"]]
+            inp_shape = tuple(int(v) for v in con.meta["input_shape"])
+            n_in = int(np.prod(inp_shape))
+            n_out = len(con.var_ids) - n_in
+            out_vids = list(con.var_ids[:n_out]); in_vids = list(con.var_ids[n_out:])
+            idx = np.arange(n_in).reshape(inp_shape)
+            mapped = np.take(idx, indices, axis=axis).ravel()
+            for k, ov in enumerate(out_vids):
+                solver.add_lin_eq([ov, in_vids[int(mapped[k])]], [1.0, -1.0], 0.0)
+
+        else:  # pragma: no cover
             pass
 
     # 3) objective (optional)

@@ -9,6 +9,7 @@ on:
 
 env:
   PYTHONPATH: ${{ github.workspace }}
+  ACT_NETS_DIR: act/back_end/examples/nets
   ACT_CI_MODE: "true"
   ACT_SOLVER: "torch"
   ACT_DEVICE: "cpu"
@@ -36,12 +37,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.9"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install coverage torch torchvision onnx onnx2torch tensorflow pandas numpy pyyaml tqdm pytest psutil transformers scikit-learn
+          pip install coverage torch torchvision onnx onnx2torch tensorflow pandas numpy pyyaml tqdm psutil transformers scikit-learn
 
       - name: Run BaB module tests
         run: |
@@ -56,18 +57,10 @@ jobs:
       - name: Run BaB verification (float64) over all generated nets
         run: |
           cd ${{ github.workspace }}
-          NETS_DIR=act/back_end/examples/nets
-          # Iterate every *.json under nets/ (skip _meta/manifest.json).
-          # All settings from act/back_end/config.yaml + ACT_* env vars above.
-          # '|| true' on each invocation: BaB / MILP export may not yet
-          # support every layer kind (e.g. CONVTRANSPOSE2D / CONV1D
-          # cons_exportor entries are not yet wired); we still want the
-          # successful nets' coverage signal uploaded.
-          for net in "$NETS_DIR"/*.json; do
-            [ -f "$net" ] || continue
-            echo "=== BaB verify: $(basename "$net") ==="
-            coverage run -p --source=act -m act.back_end --verify --network "$net" || true
-          done
+          # Single Python process iterates every *.json under nets/ (skip
+          # _meta/manifest.json). Saves ~5s of import-startup per net
+          # vs. the prior per-net shell loop.
+          coverage run -p --source=act -m act.back_end --verify-all "$ACT_NETS_DIR"
 
       - name: Combine coverage data
         if: always()
@@ -79,7 +72,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: always()
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: ./coverage.xml
           flags: bab

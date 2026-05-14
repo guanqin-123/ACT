@@ -52,6 +52,7 @@
 from __future__ import annotations
 from typing import Optional, List, Callable, Dict, Any
 
+import copy
 import numpy as np
 import torch
 
@@ -66,6 +67,193 @@ from act.front_end.specs import InKind, OutKind
 
 # Verification types (canonical location: act/util/stats.py)
 from act.util.stats import VerifyStatus, VerifyResult
+
+# -----------------------------------------------------------------------------
+# Single-instance (B=1) ASSERT parameter extractors
+# -----------------------------------------------------------------------------
+#
+# Two verification paths share the same ACT Net and ASSERT layer:
+#
+#   (1) BATCH-NATIVE  -  verify_once() bounds certification (analyze() +
+#       interval margin check). Operates on Bounds([B, *shape]) end-to-end.
+#       Does NOT call b1_*. GPU-friendly. Exercised by:
+#       --validate-verifier --mode bounds [--tf-modes interval|hybridz|dual]
+#
+#   (2) SINGLE-INSTANCE (B=1)  -  MILP encoding for counter-example search:
+#       add_negated_assert_to_solver() and bab.check_violation_at_point()
+#       encode "find x in this input box such that ASSERT fails". The MILP
+#       / concrete check is per-sample because every ASSERT param is
+#       per-sample. Each OutKind below pins B=1 for a specific reason:
+#
+#         OutKind         B=1-bound param        Reason
+#         --------------  ---------------------  -------------------------------
+#         LINEAR_LE       c (vec), d (scalar)    one half-plane per sample
+#         UNSAFE_LINEAR   c (matrix), d (vec)    M hyperplanes for ONE sample
+#         TOP1_ROBUST     y_true (int)           per-sample target class label
+#         MARGIN_ROBUST   y_true, margin         per-sample target + threshold
+#         RANGE           lb (vec), ub (vec)     per-sample hyperrectangle
+#
+#       b1_* slice the leading B dim to scalar / 1-D / 2-D and raise
+#       ValueError on B>1. Callers (act/back_end/cli.py::run_verification)
+#       pre-check input batch size and skip BaB for B>1 nets cleanly.
+#
+# Batching architecture:
+#   BaB always operates on ONE instance at a time. Within that instance, the
+#   branching tree produces K sub-problems (different input sub-regions, same
+#   ASSERT spec). These K sub-problems are the natural batch unit for the
+#   solver: solver.solve_batch(K subproblems) is what BaB drives.
+#
+#   Multi-instance entry (B > 1) is handled one level up, in
+#   cli.run_verification, by slice_net_to_sample() + a per-sample loop that
+#   calls verify_bab() B times. Each verify_bab call then internally batches
+#   its own K sub-problems through the solver.
+#
+#   The solver is general over "K MILPs sharing structure"; it does not care
+#   whether K comes from multi-instance or from one instance's branching.
+#   BaB itself only uses the sub-problem source.
+# -----------------------------------------------------------------------------
+
+def _b1_require(condition: bool, name: str, hint: str) -> None:  # pragma: no cover
+    if not condition:
+        raise ValueError(f"single-instance ASSERT requires B=1; param '{name}' {hint}")
+
+
+def b1_scalar(val: Any, name: str) -> float:
+    """Extract a Python float scalar from a B=1 ASSERT param."""
+    if isinstance(val, torch.Tensor):
+        _b1_require(
+            val.numel() == 1, name,
+            f"has numel={val.numel()}, shape={tuple(val.shape)}",
+        )
+        return float(val.item())
+    return float(val)
+
+
+def b1_int(val: Any, name: str) -> int:
+    """Extract a Python int scalar from a B=1 ASSERT param."""
+    if isinstance(val, torch.Tensor):
+        _b1_require(
+            val.numel() == 1, name,
+            f"has numel={val.numel()}, shape={tuple(val.shape)}",
+        )
+        return int(val.item())
+    return int(val)
+
+
+def b1_vec(val: Any, name: str, expected_len: int) -> torch.Tensor:
+    """Extract a [expected_len] 1-D tensor from a B=1 ASSERT param.
+
+    Accepts 1-D ``[M]`` or 2-D ``[1, M]``.
+    """
+    t = val if isinstance(val, torch.Tensor) else torch.as_tensor(val)
+    if t.dim() == 2:
+        _b1_require(t.shape[0] == 1, name, f"has shape={tuple(t.shape)}")
+        t = t[0]
+    _b1_require(
+        t.dim() == 1 and t.shape[0] == expected_len, name,
+        f"expected length {expected_len} but got shape={tuple(t.shape)}",
+    )
+    return t
+
+
+def b1_matrix(
+    val: Any, name: str, expected_rows: int, expected_cols: int
+) -> torch.Tensor:
+    """Extract a [expected_rows, expected_cols] 2-D tensor from a B=1 ASSERT param.
+
+    Accepts 1-D ``[expected_cols]`` (broadcast row when ``expected_rows == 1``),
+    2-D ``[expected_rows, expected_cols]``, or 3-D ``[1, expected_rows, expected_cols]``.
+    """
+    t = val if isinstance(val, torch.Tensor) else torch.as_tensor(val)
+    if t.dim() == 3:
+        _b1_require(t.shape[0] == 1, name, f"has shape={tuple(t.shape)}")
+        t = t[0]
+    if t.dim() == 1:
+        _b1_require(
+            expected_rows == 1, name,
+            f"cannot broadcast 1-D to multiple rows, got shape={tuple(t.shape)}",
+        )
+        t = t.unsqueeze(0)
+    _b1_require(
+        t.dim() == 2 and t.shape == (expected_rows, expected_cols), name,
+        f"expected shape ({expected_rows}, {expected_cols}) but got shape={tuple(t.shape)}",
+    )
+    return t
+
+
+def b1_threshold_vec(val: Any, name: str, expected_len: int) -> torch.Tensor:
+    """Extract a [expected_len] 1-D tensor from a B=1 ASSERT param.
+
+    Accepts 0-D scalar (broadcast when ``expected_len == 1``), 1-D
+    ``[expected_len]``, or 2-D ``[1, expected_len]``.
+    """
+    t = val if isinstance(val, torch.Tensor) else torch.as_tensor(val)
+    if t.dim() == 0:
+        _b1_require(
+            expected_len == 1, name,
+            f"cannot broadcast 0-D to multiple items, got shape={tuple(t.shape)}",
+        )
+        t = t.unsqueeze(0)
+    elif t.dim() == 2:
+        _b1_require(t.shape[0] == 1, name, f"has shape={tuple(t.shape)}")
+        t = t[0]
+
+    _b1_require(
+        t.dim() == 1 and t.shape[0] == expected_len, name,
+        f"expected length {expected_len} but got shape={tuple(t.shape)}",
+    )
+    return t
+
+
+# -----------------------------------------------------------------------------
+# Sequential per-sample slicing (for B>1 BaB)
+# -----------------------------------------------------------------------------
+
+def _slice_first_dim(value: Any, sample_idx: int, expected_b: int) -> Any:
+    if isinstance(value, torch.Tensor) and value.dim() >= 1 and value.shape[0] == expected_b:
+        return value[sample_idx:sample_idx + 1]
+    return value
+
+
+def slice_net_to_sample(net, sample_idx: int):
+    from act.front_end.spec_creator_base import LabeledInputTensor
+
+    net2 = copy.deepcopy(net)
+
+    entry_id = find_entry_layer_id(net2)
+    input_layer = net2.by_id[entry_id]
+    shape = input_layer.params.get("shape") or []
+    B = int(shape[0]) if shape else 1
+    if shape and int(shape[0]) == B:
+        input_layer.params["shape"] = (1,) + tuple(shape[1:])
+    li = input_layer.params.get("labeled_input")
+    if li is not None:
+        new_tensor = _slice_first_dim(li.tensor, sample_idx, B)
+        new_label = _slice_first_dim(li.label, sample_idx, B) if li.label is not None else None
+        input_layer.params["labeled_input"] = LabeledInputTensor(tensor=new_tensor, label=new_label)
+
+    for spec_layer in gather_input_spec_layers(net2):
+        for key in ("center", "eps", "lb", "ub", "A", "b"):
+            val = spec_layer.params.get(key)
+            if val is not None:
+                spec_layer.params[key] = _slice_first_dim(val, sample_idx, B)
+
+    assert_layer = get_assert_layer(net2)
+    M = int(assert_layer.params.get("M", 1))
+    for key in ("y_true", "margin", "c", "d", "lb", "ub"):
+        val = assert_layer.params.get(key)
+        if val is not None:
+            assert_layer.params[key] = _slice_first_dim(val, sample_idx, B)
+    # C is [B*M, n_out] — first dim is B*M not B, so slice rows manually
+    c_big = assert_layer.params.get("C")
+    if isinstance(c_big, torch.Tensor) and c_big.shape[0] == B * M:
+        assert_layer.params["C"] = c_big[sample_idx * M:(sample_idx + 1) * M]
+    thresholds = assert_layer.params.get("thresholds")
+    if isinstance(thresholds, torch.Tensor) and thresholds.shape[0] == B:
+        assert_layer.params["thresholds"] = thresholds[sample_idx:sample_idx + 1]
+
+    return net2
+
 
 # -----------------------------------------------------------------------------
 # ACT Net extraction helpers
@@ -165,57 +353,6 @@ def add_all_input_specs(globalC: ConSet, input_ids: List[int], spec_layers) -> N
         else:
             raise NotImplementedError(f"Unsupported INPUT_SPEC kind: {k}")
 
-def _b1_scalar(val: Any, name: str) -> float:
-    """Extract a Python scalar from a BaB-path ASSERT param.
-
-    BaB MILP encoding is single-instance by contract: every high-level
-    field is either a Python scalar or a ``torch.Tensor[B=1]`` produced by
-    ``OutputSpec.encode_linear``. Tensors with ``B > 1`` are rejected
-    because the existential encoding for TOP1 / MARGIN intrinsically
-    requires a single ``y_true`` / ``margin``.
-    """
-    if isinstance(val, torch.Tensor):
-        if val.numel() != 1:
-            raise ValueError(
-                f"BaB MILP requires B=1; param '{name}' has "
-                f"numel={val.numel()}, shape={tuple(val.shape)}"
-            )
-        return float(val.item())
-    return float(val)
-
-
-def _b1_int(val: Any, name: str) -> int:
-    """Same as ``_b1_scalar`` but returns int (for ``y_true``)."""
-    if isinstance(val, torch.Tensor):
-        if val.numel() != 1:
-            raise ValueError(
-                f"BaB MILP requires B=1; param '{name}' has "
-                f"numel={val.numel()}, shape={tuple(val.shape)}"
-            )
-        return int(val.item())
-    return int(val)
-
-
-def _b1_vec(val: Any, name: str, expected_len: int) -> torch.Tensor:
-    """Extract a ``[expected_len]`` 1-D tensor from a BaB-path ASSERT param.
-
-    Accepts a 1-D ``Tensor[expected_len]`` or a 2-D ``Tensor[B=1, expected_len]``
-    (as produced by ``encode_linear``); rejects ``B > 1``.
-    """
-    t = val if isinstance(val, torch.Tensor) else torch.as_tensor(val)
-    if t.dim() == 2:
-        if t.shape[0] != 1:
-            raise ValueError(
-                f"BaB MILP requires B=1; param '{name}' has "
-                f"shape={tuple(t.shape)}"
-            )
-        t = t[0]
-    if t.dim() != 1 or t.shape[0] != expected_len:
-        raise ValueError(
-            f"BaB MILP: param '{name}' must reduce to [{expected_len}]; "
-            f"got shape={tuple(t.shape)}"
-        )
-    return t
 
 
 def add_negated_assert_to_solver(solver: Solver, out_ids: List[int], assert_layer) -> None:
@@ -225,40 +362,23 @@ def add_negated_assert_to_solver(solver: Solver, out_ids: List[int], assert_laye
     n_out = len(out_ids)
 
     if k == OutKind.LINEAR_LE:
-        c_vec = _b1_vec(assert_layer.params["c"], "c", n_out)
-        d = _b1_scalar(assert_layer.params["d"], "d")
+        c_vec = b1_vec(assert_layer.params["c"], "c", n_out)
+        d = b1_scalar(assert_layer.params["d"], "d")
         coeffs = list(to_numpy(c_vec))
         solver.add_lin_ge(out_ids, coeffs, d + 1e-6)
 
     elif k == OutKind.UNSAFE_LINEAR:
-        c_raw = assert_layer.params["c"]
-        c_t = c_raw if isinstance(c_raw, torch.Tensor) else torch.as_tensor(c_raw)
-        if c_t.dim() == 3:
-            if c_t.shape[0] != 1:
-                raise ValueError(
-                    f"BaB MILP requires B=1; UNSAFE_LINEAR c has "
-                    f"shape={tuple(c_t.shape)}"
-                )
-            c_t = c_t[0]
-        if c_t.dim() == 1:
-            c_t = c_t.unsqueeze(0)
-        d_raw = assert_layer.params["d"]
-        d_t = d_raw if isinstance(d_raw, torch.Tensor) else torch.as_tensor(d_raw)
-        if d_t.dim() == 2:
-            if d_t.shape[0] != 1:
-                raise ValueError(
-                    f"BaB MILP requires B=1; UNSAFE_LINEAR d has "
-                    f"shape={tuple(d_t.shape)}"
-                )
-            d_t = d_t[0]
+        M = assert_layer.params.get("M", 1)  # Fallback to 1 if not explicitly given
+        c_t = b1_matrix(assert_layer.params["c"], "c", M, n_out)
+        d_t = b1_threshold_vec(assert_layer.params["d"], "d", M)
         C = to_numpy(c_t)
-        d_vec = to_numpy(d_t).reshape(-1)
+        d_vec = to_numpy(d_t)
         for i in range(C.shape[0]):
             row = list(C[i])
             solver.add_lin_le(out_ids, row, float(d_vec[i]) + 1e-6)
 
     elif k == OutKind.TOP1_ROBUST:
-        t = _b1_int(assert_layer.params["y_true"], "y_true")
+        t = b1_int(assert_layer.params["y_true"], "y_true")
         v = solver.n
         solver.add_vars(1)
         for j, oj in enumerate(out_ids):
@@ -267,23 +387,17 @@ def add_negated_assert_to_solver(solver: Solver, out_ids: List[int], assert_laye
         solver.add_lin_ge([v], [1.0], 0.0)
 
     elif k == OutKind.MARGIN_ROBUST:
-        t = _b1_int(assert_layer.params["y_true"], "y_true")
-        margin = _b1_scalar(assert_layer.params["margin"], "margin")
-        v = solver.n
-        solver.add_vars(1)
-        for j, oj in enumerate(out_ids):
-            if j != t:
-                solver.add_lin_ge([v, oj, out_ids[t]], [1.0, -1.0, 1.0], -margin)
-        solver.add_lin_ge([v], [1.0], 0.0)
+        t = b1_int(assert_layer.params["y_true"], "y_true")
+        margin = b1_scalar(assert_layer.params["margin"], "margin")
+        for i in range(n_out):
+            if i != t:
+                solver.add_lin_le([out_ids[t], out_ids[i]], [-1.0, 1.0], -margin + 1e-6)
 
     elif k == OutKind.RANGE:
-        lb_raw = assert_layer.params.get("lb", None)
-        ub_raw = assert_layer.params.get("ub", None)
-        if lb_raw is None and ub_raw is None:
-            raise ValueError("RANGE assert requires lb and/or ub.")
-
-        lb = to_numpy(_b1_vec(lb_raw, "lb", n_out)) if lb_raw is not None else None
-        ub = to_numpy(_b1_vec(ub_raw, "ub", n_out)) if ub_raw is not None else None
+        lb_raw = assert_layer.params.get("lb")
+        ub_raw = assert_layer.params.get("ub")
+        lb = to_numpy(b1_vec(lb_raw, "lb", n_out)) if lb_raw is not None else None
+        ub = to_numpy(b1_vec(ub_raw, "ub", n_out)) if ub_raw is not None else None
 
         v = solver.n
         solver.add_vars(1)
@@ -573,9 +687,10 @@ def verify_once(
             )
         if falsified.any():
             x_center_cpu = x_center.detach().cpu()
-            for i in range(B):
-                if bool(falsified[i].item()):
-                    counterexamples[i] = x_center_cpu[i].clone()
+            # B1 (oracle-verified): single sync via .tolist() replaces B per-element .item() syncs.
+            # torch.where returns ascending indices; lane order is preserved.
+            for i in torch.where(falsified)[0].tolist():
+                counterexamples[i] = x_center_cpu[i].clone()
 
     # 6. Assemble per-lane results.
     results: List[VerifyResult] = []

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Optional
 from act.back_end.core import Bounds
 from act.back_end.solver.solver_base import Solver, SolverCaps
+
+logger = logging.getLogger(__name__)
 
 try:
     from act.back_end.solver.solver_gurobi import GurobiSolver, is_gurobi_available
@@ -229,13 +233,15 @@ def hz_compute_bounds(hz: HZono, *, exact: bool = False) -> Bounds:
     if _HAS_GUROBI:
         try:
             return _hz_compute_bounds_gurobi(hz)
-        except Exception:
-            pass
+        except Exception as e:
+            # Intentional: Gurobi failures (license/timeout/numerical) fall back to scipy/unconstrained.
+            logger.debug("suppressed: %s", e)
     if _HAS_SCIPY:
         try:
             return _hz_compute_bounds_scipy(hz)
-        except Exception:
-            pass
+        except Exception as e:
+            # Intentional: scipy linprog failures fall back to the unconstrained bounds estimate.
+            logger.debug("suppressed: %s", e)
     return _hz_bounds_unconstrained(hz)
 
 

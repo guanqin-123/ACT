@@ -11,11 +11,14 @@ License: AGPLv3+
 """
 
 import argparse
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 import sys
 
 from act.util.cli_utils import add_device_args, initialize_from_args
+
+logger = logging.getLogger(__name__)
 from act.front_end.spec_creator_base import LabeledInputTensor
 from act.front_end.vnnlib_loader.create_specs import VNNLibSpecCreator
 from act.front_end.vnnlib_loader import data_model_loader as vnnlib_loader
@@ -660,8 +663,9 @@ def _resolve_batch_sizes(cli_value):
             yaml_val = (cfg.get("validate") or {}).get("batch_sizes")
             if yaml_val:
                 return yaml_val
-    except Exception:
-        pass
+    except Exception as e:
+        # Intentional: optional YAML override; missing/malformed files fall through to default [None].
+        logger.debug("suppressed: %s", e)
     return [None]
 
 
