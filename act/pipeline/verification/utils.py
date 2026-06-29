@@ -832,10 +832,22 @@ def _convert_OnnxMatMul(self, mod: nn.Module, node: fx.Node) -> None:
         )
     output_shape = tuple(self.shape[:-1]) + (out_features,)
     out_vars = self._alloc_ids(_prod(output_shape) or out_features)
+    # DENSE concretizes against the FLAT var vector, so a batched
+    # (..., M, K) @ (K, N) that shares W across M tokens must become a
+    # block-diagonal weight (token_count copies of W.T) — exact, not relaxed.
+    weight_t = W.t().contiguous().detach().clone().to(self.dtype)
+    n_in_vars = len(self.prev_out)
+    if n_in_vars % in_features != 0:
+        raise ValueError(
+            f"OnnxMatMul at {node.name}: flat input var count {n_in_vars} "
+            f"is not a multiple of weight in_features {in_features}"
+        )
+    token_count = n_in_vars // in_features
+    weight_mat = torch.block_diag(*([weight_t] * token_count)) if token_count > 1 else weight_t
     layer_id = self._add_layer(
         LayerKind.DENSE.value,
-        {"weight": W.t().contiguous().detach().clone().to(self.dtype),
-         "in_features": in_features, "out_features": out_features,
+        {"weight": weight_mat,
+         "in_features": int(weight_mat.shape[1]), "out_features": int(weight_mat.shape[0]),
          "input_shape": self.shape, "output_shape": output_shape},
         self.prev_out, out_vars,
     )
@@ -984,6 +996,10 @@ def _convert_OnnxSplit13(self, mod: nn.Module, node: fx.Node) -> None:
 
     var_vars = list(self.prev_out)
     var_shape = self.shape
+    # All chunk SLICEs read the split's data input; pin their predecessor to
+    # that producing layer so graph-edge resolution can't mis-wire siblings to
+    # the split node (which maps only to the last chunk).
+    input_layer_id = self.node_to_layer_id.get(args[0].name)
     last_chunk_vars: List[int] = var_vars
     last_chunk_shape: Tuple[int, ...] = var_shape
     last_layer_id = -1
@@ -999,6 +1015,8 @@ def _convert_OnnxSplit13(self, mod: nn.Module, node: fx.Node) -> None:
              "input_shape": var_shape, "output_shape": chunk_shape_t},
             var_vars, chunk_vars,
         )
+        if input_layer_id is not None and input_layer_id >= 0:
+            self._fx_pred_override[layer_id] = [input_layer_id]
         if i in getitem_children:
             git_node = getitem_children[i]
             self.node_outputs[git_node.name] = chunk_vars

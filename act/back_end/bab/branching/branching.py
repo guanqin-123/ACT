@@ -53,6 +53,7 @@ import torch
 
 from act.back_end.bab.node import SubproblemBatch
 from act.back_end.core import Bounds, Net
+from act.front_end.specs import InKind
 
 
 # ---------------------------------------------------------------------------
@@ -169,18 +170,21 @@ class RandomBranching(BranchingStrategy):
         N, D = batch.batch_size, batch.input_dim
         device = batch.lb.device
 
-        scores = torch.rand(N, D)
-
         if unstable_mask is not None:
             # Neuron-split mode: zero-out stable neurons
+            scores = torch.rand(N, D, device=device)
             mask = unstable_mask.float()
             if mask.dim() == 1:
                 mask = mask.unsqueeze(0).expand(N, -1)  # (D,) → (N, D)
             scores = scores * mask
         else:
-            # Input-split mode: weight by width (zero-width → score 0)
+            embedding_mask = _perturbed_embedding_input_mask(net, batch)
             widths = batch.widths()  # (N, D)
-            scores = scores * (widths > 0).float()
+            if embedding_mask is None:
+                scores = torch.rand(N, D, device=device) * (widths > 0).float()
+            else:
+                mask = embedding_mask.unsqueeze(0).expand(N, -1)
+                scores = widths.masked_fill(~mask, float("-inf"))
 
         return scores
 
@@ -223,7 +227,7 @@ class BaBSRBranching(BranchingStrategy):
         nu_per_layer: Optional[Dict[int, torch.Tensor]] = None,
     ) -> BranchingScores:
         if bounds_dict is None or nu_per_layer is None:
-            return BranchingScores(flat=self._baseline_scores(batch, unstable_mask))
+            return BranchingScores(flat=self._baseline_scores(batch, unstable_mask, net))
 
         per_layer: Dict[int, torch.Tensor] = {}
         intercept_per_layer: Dict[int, torch.Tensor] = {}
@@ -268,7 +272,7 @@ class BaBSRBranching(BranchingStrategy):
             intercept_per_layer[lid] = intercept
 
         if not per_layer:
-            return BranchingScores(flat=self._baseline_scores(batch, unstable_mask))
+            return BranchingScores(flat=self._baseline_scores(batch, unstable_mask, net))
         return BranchingScores(
             flat=None,
             per_layer=per_layer,
@@ -279,10 +283,14 @@ class BaBSRBranching(BranchingStrategy):
         self,
         batch: SubproblemBatch,
         unstable_mask: Optional[torch.Tensor] = None,
+        net: Optional[Net] = None,
     ) -> torch.Tensor:
         widths = batch.ub - batch.lb
 
-        if batch.incremental_alpha is None:
+        embedding_mask = _perturbed_embedding_input_mask(net=net, batch=batch)
+        if embedding_mask is not None:
+            scores = widths.masked_fill(~embedding_mask.unsqueeze(0), float("-inf"))
+        elif batch.incremental_alpha is None:
             scores = widths * torch.rand_like(widths)
         else:
             scores = widths
@@ -384,6 +392,62 @@ def _preact_bias_of(net: Net, lid: int) -> torch.Tensor:
             device = value.device
             break
     return torch.zeros(n_neurons, dtype=dtype, device=device)
+
+
+def _perturbed_embedding_input_mask(net: Optional[Net], batch: SubproblemBatch) -> Optional[torch.Tensor]:
+    """Flat input mask for EMBEDDING_LP perturbed token coordinates.
+
+    The mask is stored on the batch after first discovery so fallback input
+    branching can still reuse it when a strategy helper lacks the net handle.
+    """
+    cached = getattr(batch, "_perturbed_embedding_mask", None)
+    if isinstance(cached, torch.Tensor):
+        return cached.to(device=batch.lb.device, dtype=torch.bool)
+    if net is None:
+        return None
+    for layer in net.layers:
+        if layer.kind != "INPUT_SPEC" or layer.params.get("kind") != InKind.EMBEDDING_LP:
+            continue
+        center = layer.params.get("center")
+        if not isinstance(center, torch.Tensor) or center.dim() < 2:
+            continue
+        token_count = int(center.shape[-2])
+        embed_dim = int(center.shape[-1])
+        positions = layer.params.get("perturbed_positions")
+        if positions is None:
+            token_mask = torch.ones(token_count, device=batch.lb.device, dtype=torch.bool)
+        else:
+            pos = positions.to(device=batch.lb.device) if isinstance(positions, torch.Tensor) else torch.as_tensor(positions, device=batch.lb.device)
+            if pos.dtype == torch.bool:
+                token_mask = pos.reshape(-1)[-token_count:].to(dtype=torch.bool)
+            else:
+                token_mask = torch.zeros(token_count, device=batch.lb.device, dtype=torch.bool)
+                if pos.numel() > 0:
+                    token_mask.index_fill_(0, pos.to(dtype=torch.long).flatten(), True)
+        flat = token_mask.unsqueeze(-1).expand(token_count, embed_dim).reshape(-1)
+        if flat.numel() < batch.input_dim:
+            pad = torch.zeros(batch.input_dim - flat.numel(), device=batch.lb.device, dtype=torch.bool)
+            flat = torch.cat([flat, pad], dim=0)
+        elif flat.numel() > batch.input_dim:
+            flat = flat[:batch.input_dim]
+        setattr(batch, "_perturbed_embedding_mask", flat)
+        return flat
+    return None
+
+
+def attention_nu_exposure_candidates(
+    bounds_dict: Optional[Dict[int, Bounds]],
+    nu_per_layer: Optional[Dict[int, torch.Tensor]],
+) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Deferred hook for future attention-neuron splitting.
+
+    Attention BaBSR needs a stable exposure of catalytic attention ν and
+    pre-activation intervals.  Phase P4 intentionally ships input splitting
+    only, so this hook documents the integration point and returns no
+    candidates until that exposure contract exists.
+    """
+    del bounds_dict, nu_per_layer
+    return None
 
 
 class FSBBranching(BaBSRBranching):

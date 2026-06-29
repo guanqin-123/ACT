@@ -2,7 +2,7 @@
 """
 Creator Registry for ACT Specification Creators.
 
-Provides factory pattern for managing multiple spec creators (TorchVision, VNNLIB)
+Provides factory pattern for managing multiple spec creators (TorchVision, VNNLIB, text)
 with automatic detection and routing.
 
 Copyright (C) 2025 SVF-tools/ACT
@@ -59,6 +59,10 @@ class CreatorRegistry:
             elif name == 'vnnlib':
                 from act.front_end.vnnlib_loader.create_specs import VNNLibSpecCreator
                 cls._creators[name] = VNNLibSpecCreator()
+            elif name in {'text', 'sst'}:
+                from act.front_end.text_loader.create_specs import TextSpecCreator
+                cls._creators['text'] = TextSpecCreator()
+                cls._creators['sst'] = cls._creators['text']
             else:
                 raise ValueError(
                     f"Unknown creator '{name}'. "
@@ -75,7 +79,7 @@ class CreatorRegistry:
         Returns:
             List of creator names
         """
-        return ['torchvision', 'vnnlib']
+        return ['torchvision', 'vnnlib', 'text', 'sst']
     
     @classmethod
     def detect_creator(cls, name: str, explicit_creator: Optional[str] = None) -> Tuple[str, str]:
@@ -125,7 +129,7 @@ class CreatorRegistry:
                     raise ValueError(
                         f"Dataset '{name}' not found in TorchVision creator.\n{str(e)}"
                     )
-            else:  # vnnlib
+            elif explicit_creator == 'vnnlib':
                 from act.front_end.vnnlib_loader.category_mapping import find_category_name
                 try:
                     normalized = find_category_name(name)
@@ -134,12 +138,23 @@ class CreatorRegistry:
                     raise ValueError(
                         f"Category '{name}' not found in VNNLIB creator.\n{str(e)}"
                     )
+            else:
+                from act.front_end.text_loader.data_loader import find_text_dataset_name
+                try:
+                    normalized = find_text_dataset_name(name)
+                    return ('text', normalized)
+                except ValueError as e:
+                    raise ValueError(
+                        f"Dataset '{name}' not found in text creator.\n{str(e)}"
+                    )
         
         # Auto-detection: try both creators
         torchvision_match = False
         vnnlib_match = False
+        text_match = False
         tv_name = None
         vnnlib_name = None
+        text_name = None
         
         # Try TorchVision
         try:
@@ -158,20 +173,33 @@ class CreatorRegistry:
         except ValueError as e:
             # Intentional: auto-detection probe; absence in VNNLIB is reported via the match flags below.
             logger.debug("suppressed: %s", e)
+
+        try:
+            from act.front_end.text_loader.data_loader import find_text_dataset_name
+            text_name = find_text_dataset_name(name)
+            text_match = True
+        except ValueError as e:
+            logger.debug("suppressed: %s", e)
         
         # Handle results
-        if torchvision_match and vnnlib_match:
+        if sum([torchvision_match, vnnlib_match, text_match]) > 1:
             raise ValueError(
-                f"Ambiguous name '{name}' matches both creators:\n"
+                f"Ambiguous name '{name}' matches multiple creators:\n"
                 f"  TorchVision: {tv_name}\n"
                 f"  VNNLIB: {vnnlib_name}\n"
+                f"  Text: {text_name}\n"
                 f"Use --creator to specify explicitly:\n"
-                f"  --creator torchvision  OR  --creator vnnlib"
+                f"  --creator torchvision  OR  --creator vnnlib  OR  --creator text"
             )
         elif torchvision_match:
+            assert tv_name is not None
             return ('torchvision', tv_name)
         elif vnnlib_match:
+            assert vnnlib_name is not None
             return ('vnnlib', vnnlib_name)
+        elif text_match:
+            assert text_name is not None
+            return ('text', text_name)
         else:
             raise ValueError(
                 f"Dataset/category '{name}' not found in any creator.\n"

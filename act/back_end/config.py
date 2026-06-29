@@ -22,6 +22,52 @@ _VALID_DTYPES = {"float32", "float64"}
 _VALID_REGISTRY_MODES = {"intersection", "union"}
 _VALID_COVERAGE_MODES = {"basic", "full"}
 VALID_SOLVER_TIERS: Final[tuple[str, ...]] = ("lp", "dual", "dual_alpha", "dual_alpha_eta")
+VALID_TEXT_METHODS: Final[tuple[str, ...]] = (
+    "planar",
+    "rule",
+    "alpha",
+    "ibp",
+    "discrete",
+)
+
+
+@dataclass(frozen=True)
+class TextMethodSelection:
+    """Resolved attention-relaxation text verification method."""
+
+    method: str
+    internal_method: str
+    baf: bool
+    alpha_mode: str
+    solver_tier: str
+    use_bab: bool = True
+
+
+_TEXT_METHOD_SELECTIONS: Final[dict[str, TextMethodSelection]] = {
+    "planar": TextMethodSelection("planar", "planar", True, "fixed", "dual"),
+    "rule": TextMethodSelection("rule", "rule", True, "rule", "dual"),
+    "alpha": TextMethodSelection("alpha", "alpha", True, "optimized", "dual_alpha"),
+    "ibp": TextMethodSelection("ibp", "ibp", False, "none", "dual"),
+    "discrete": TextMethodSelection("discrete", "discrete", False, "none", "dual"),
+}
+
+TEXT_METHOD_TIERS: Final[dict[str, str]] = {
+    key: value.solver_tier for key, value in _TEXT_METHOD_SELECTIONS.items()
+}
+
+
+def normalize_text_method(method: str) -> str:
+    """Normalize a public text method name."""
+    key = method.strip().lower().replace("-", "_")
+    if key not in _TEXT_METHOD_SELECTIONS:
+        valid = ", ".join(name.replace("_", "-") for name in VALID_TEXT_METHODS)
+        raise ValueError(f"Invalid text method {method!r}; expected one of: {valid}")
+    return key
+
+
+def select_text_method(method: str) -> TextMethodSelection:
+    """Resolve a user-facing SST/Yelp method into ACT back-end settings."""
+    return _TEXT_METHOD_SELECTIONS[normalize_text_method(method)]
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +193,36 @@ class BaBConfig:
     against all constraints. 1 = single-split behavior."""
 
     verbose: bool = False
+
+    method: Optional[str] = None
+    baf: bool = True
+    alpha_mode: str = "fixed"
+    p: float = 2.0
+    perturbed_words: int = 1
+    eps: float = 1e-5
+    max_eps: float = 0.01
+    num_verify_iters: int = 5
+    k: int = 1
+    alpha_opt_steps: int = 1000
+
+    def __post_init__(self) -> None:
+        if self.solver_tier not in VALID_SOLVER_TIERS:
+            raise ValueError(
+                f"Invalid solver_tier {self.solver_tier!r}; expected {VALID_SOLVER_TIERS}"
+            )
+        if self.method is not None:
+            selection = select_text_method(self.method)
+            self.method = selection.method
+            self.baf = selection.baf
+            self.alpha_mode = selection.alpha_mode
+            if self.solver_tier == "lp":
+                self.solver_tier = selection.solver_tier
+        if self.perturbed_words not in (1, 2):
+            raise ValueError("perturbed_words must be 1 or 2")
+        if self.num_verify_iters < 0:
+            raise ValueError("num_verify_iters must be non-negative")
+        if self.max_eps < 0 or self.eps < 0:
+            raise ValueError("eps and max_eps must be non-negative")
 
     @classmethod
     def from_yaml(
@@ -283,6 +359,15 @@ class BackendConfig:
 
     generation: GenerationConfig = field(default_factory=GenerationConfig)
 
+    method: Optional[str] = None
+    p: float = 2.0
+    perturbed_words: int = 1
+    eps: float = 1e-5
+    max_eps: float = 0.01
+    num_verify_iters: int = 5
+    k: int = 1
+    alpha_opt_steps: int = 1000
+
     # -- validation ---------------------------------------------------------
 
     def __post_init__(self) -> None:
@@ -298,6 +383,20 @@ class BackendConfig:
             raise ValueError(
                 f"Invalid dtype {self.dtype!r}; expected one of {_VALID_DTYPES}"
             )
+        if self.method is not None:
+            selection = select_text_method(self.method)
+            self.method = selection.method
+            self.bab.method = selection.method
+            self.bab.baf = selection.baf
+            self.bab.alpha_mode = selection.alpha_mode
+            self.bab.solver_tier = selection.solver_tier
+            self.bab.p = float(self.p)
+            self.bab.perturbed_words = int(self.perturbed_words)
+            self.bab.eps = float(self.eps)
+            self.bab.max_eps = float(self.max_eps)
+            self.bab.num_verify_iters = int(self.num_verify_iters)
+            self.bab.k = int(self.k)
+            self.bab.alpha_opt_steps = int(self.alpha_opt_steps)
         # Gurobi solve_batch is restricted to N=1 (commit af797ff / C6).
         # Fail loud at config-load time rather than at the first batched call.
         if self.solver == "gurobi":

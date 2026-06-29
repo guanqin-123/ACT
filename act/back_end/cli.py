@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Union, cast
 
-from act.back_end.config import _VALID_SOLVERS
+from act.back_end.config import VALID_TEXT_METHODS, _VALID_SOLVERS
 from act.back_end.layer_schema import LayerKind
 from act.front_end.specs import OutKind
 from act.util.cli_utils import add_device_args, initialize_from_args
@@ -887,6 +887,60 @@ Examples:
             "(dual is a solver, not a TF — see --solver help)."
         ),
     )
+    verify_group.add_argument(
+        "--method",
+        type=str,
+        choices=[name.replace("_", "-") for name in VALID_TEXT_METHODS],
+        default=None,
+        help="SST/Yelp method: planar, rule, alpha, ibp, or discrete.",
+    )
+    verify_group.add_argument(
+        "--p",
+        type=float,
+        default=None,
+        help="Text embedding perturbation norm metadata (2 or inf).",
+    )
+    verify_group.add_argument(
+        "--perturbed-words",
+        type=int,
+        choices=[1, 2],
+        default=None,
+        dest="perturbed_words",
+        help="Number of SST/Yelp token positions perturbed together.",
+    )
+    verify_group.add_argument(
+        "--eps",
+        type=float,
+        default=None,
+        help="Initial SST/Yelp verification radius.",
+    )
+    verify_group.add_argument(
+        "--max-eps",
+        type=float,
+        default=None,
+        dest="max_eps",
+        help="Maximum radius for SST/Yelp certified-radius search.",
+    )
+    verify_group.add_argument(
+        "--num-verify-iters",
+        type=int,
+        default=None,
+        dest="num_verify_iters",
+        help="Binary-search iterations for SST/Yelp certified radius.",
+    )
+    verify_group.add_argument(
+        "--k",
+        type=int,
+        default=None,
+        help="Rule threshold for rule-slope attention alpha.",
+    )
+    verify_group.add_argument(
+        "--alpha-opt-steps",
+        type=int,
+        default=None,
+        dest="alpha_opt_steps",
+        help="Optimization steps for optimized-alpha refinement.",
+    )
 
     # BaB mode: --bab enables, --no-bab disables, absent = from config.yaml
     bab_toggle = verify_group.add_mutually_exclusive_group()
@@ -1060,6 +1114,14 @@ _BACKEND_OVERRIDE_SPEC: list[tuple[str, str, Optional[str], Any, str]] = [
     ("device",               "device",              "ACT_DEVICE",     None, "user_set"),
     ("dtype",                "dtype",               "ACT_DTYPE",      None, "user_set"),
     ("timeout",              "timeout",             None,             None, "not_none"),
+    ("method",               "method",              None,             None, "not_none"),
+    ("p",                    "p",                   None,             None, "not_none"),
+    ("perturbed_words",      "perturbed_words",     None,             None, "not_none"),
+    ("eps",                  "eps",                 None,             None, "not_none"),
+    ("max_eps",              "max_eps",             None,             None, "not_none"),
+    ("num_verify_iters",     "num_verify_iters",    None,             None, "not_none"),
+    ("k",                    "k",                   None,             None, "not_none"),
+    ("alpha_opt_steps",      "alpha_opt_steps",     None,             None, "not_none"),
     ("bab_enabled",          "bab",                 None,             None, "not_none"),
     ("bab_max_depth",        "bab_max_depth",       None,             None, "not_none"),
     ("bab_max_nodes",        "bab_max_subproblems", None,             None, "not_none"),

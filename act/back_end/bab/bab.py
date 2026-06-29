@@ -22,7 +22,7 @@ import tempfile
 import time
 import inspect
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union, cast
 
 import torch
 
@@ -31,6 +31,7 @@ from act.back_end.bab.node import (
     BabNode,
     SubproblemBatch,
     concat_children,
+    rederive_embedding_block_eps,
     split_input,
     split_input_nary,
     split_neuron_subproblems,
@@ -63,8 +64,12 @@ from act.back_end.verifier import (
     setup_and_solve_batch,
 )
 from act.front_end.specs import OutKind, OutputSpec
+from act.front_end.specs import InKind
 from act.util.model_inference import infer_single_model
 from act.util.stats import VerifyStatus, VerifyResult
+
+if TYPE_CHECKING:
+    from act.back_end.interval_tf.tf_attention import LinearBounds
 
 log = logging.getLogger(__name__)
 
@@ -195,11 +200,13 @@ def _interval_refresh_bounds(
             elif k == "DENSE":
                 w = layer.params["weight"]
                 bias = layer.params.get("bias")
+                if not isinstance(w, torch.Tensor):
+                    return None
                 plb, pub = vals[preds[0]]
                 w_pos, w_neg = w.clamp(min=0), w.clamp(max=0)
                 lb = plb @ w_pos.T + pub @ w_neg.T
                 ub = pub @ w_pos.T + plb @ w_neg.T
-                if bias is not None:
+                if isinstance(bias, torch.Tensor):
                     lb, ub = lb + bias, ub + bias
             elif k == "ADD":
                 (alb, aub), (blb, bub) = vals[preds[0]], vals[preds[1]]
@@ -253,7 +260,7 @@ def _gain_tested_decision(
     root_bounds_dict: Optional[Dict[int, Bounds]],
     bounds_dict: Optional[Dict[int, Bounds]],
     nu_per_layer: Optional[Dict[int, torch.Tensor]],
-    input_shape: tuple,
+    input_shape: tuple[int, ...],
     n_candidates: int = 3,
 ) -> Optional[SplitDecision]:
     """Pick each lane's split by measured child bounds, not by score proxy.
@@ -718,6 +725,84 @@ def check_violations_batched(net: object, x_batch: torch.Tensor, assert_layer: L
     raise NotImplementedError(f"ASSERT kind not supported: {kind}")
 
 
+def _check_input_specs_batched(x_batch: torch.Tensor, spec_layers: List[Layer]) -> torch.Tensor:
+    result = torch.ones(x_batch.shape[0], device=x_batch.device, dtype=torch.bool)
+    tol = 1e-7
+    for layer in spec_layers:
+        kind = layer.params.get("kind")
+        if kind not in (InKind.BOX, InKind.LINF_BALL, InKind.EMBEDDING_LP):
+            continue
+        lb = layer.params.get("lb")
+        ub = layer.params.get("ub")
+        if isinstance(lb, torch.Tensor) and isinstance(ub, torch.Tensor):
+            lb_t = lb.to(device=x_batch.device, dtype=x_batch.dtype)
+            ub_t = ub.to(device=x_batch.device, dtype=x_batch.dtype)
+            result &= ((x_batch >= lb_t - tol) & (x_batch <= ub_t + tol)).flatten(start_dim=1).all(dim=1)
+        if kind != InKind.EMBEDDING_LP:
+            continue
+        center = layer.params.get("center")
+        eps = layer.params.get("eps")
+        p_norm = layer.params.get("p_norm")
+        if not isinstance(center, torch.Tensor) or eps is None or p_norm is None:
+            result &= torch.zeros_like(result)
+            continue
+        center_t = center.to(device=x_batch.device, dtype=x_batch.dtype)
+        if isinstance(eps, torch.Tensor):
+            eps_t = eps.to(device=x_batch.device, dtype=x_batch.dtype)
+        elif isinstance(eps, (int, float, bool)):
+            eps_t = center_t.new_tensor(float(eps))
+        else:
+            result &= torch.zeros_like(result)
+            continue
+        if isinstance(p_norm, torch.Tensor):
+            p_value = float(p_norm.reshape(-1)[0].item())
+        elif isinstance(p_norm, (int, float, bool)):
+            p_value = float(p_norm)
+        else:
+            result &= torch.zeros_like(result)
+            continue
+        positions = layer.params.get("perturbed_positions")
+        if positions is None:
+            mask = torch.ones(center_t.shape[:-1], device=x_batch.device, dtype=torch.bool)
+        else:
+            pos = positions.to(device=x_batch.device) if isinstance(positions, torch.Tensor) else torch.as_tensor(positions, device=x_batch.device)
+            if pos.dtype == torch.bool:
+                if tuple(pos.shape) == tuple(center_t.shape[:-1]):
+                    mask = pos.to(dtype=torch.bool)
+                else:
+                    view_shape = [1] * (center_t.dim() - 1)
+                    view_shape[-1] = center_t.shape[-2]
+                    mask = pos.reshape(view_shape).expand(center_t.shape[:-1]).to(dtype=torch.bool)
+            else:
+                mask = torch.zeros(center_t.shape[:-1], device=x_batch.device, dtype=torch.bool)
+                if pos.numel() > 0:
+                    _ = mask.index_fill_(-1, pos.to(dtype=torch.long).flatten(), True)
+        if mask.shape[0] == 1 and x_batch.shape[0] != 1:
+            mask_b = mask.expand(x_batch.shape[0], *mask.shape[1:])
+            center_b = center_t.expand_as(x_batch)
+        else:
+            mask_b = mask
+            center_b = center_t.expand_as(x_batch)
+        delta = x_batch - center_b
+        clean = (~mask_b).unsqueeze(-1).expand_as(delta)
+        if bool(clean.any().item()):
+            clean_ok = torch.where(clean, delta.abs(), torch.zeros_like(delta)).flatten(start_dim=1).amax(dim=1) <= tol
+            result &= clean_ok
+        perturbed_delta = delta[mask_b.unsqueeze(-1).expand_as(delta)].reshape(x_batch.shape[0], -1, center_t.shape[-1])
+        if perturbed_delta.numel() == 0:
+            continue
+        if p_value == float("inf"):
+            norms = perturbed_delta.abs().amax(dim=-1)
+        elif p_value == 1.0:
+            norms = perturbed_delta.abs().sum(dim=-1)
+        elif p_value == 2.0:
+            norms = torch.linalg.vector_norm(perturbed_delta, ord=2, dim=-1)
+        else:
+            norms = torch.linalg.vector_norm(perturbed_delta, ord=p_value, dim=-1)
+        result &= (norms <= eps_t.reshape(-1)[0] + tol).all(dim=1)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Strategy factories
 # ---------------------------------------------------------------------------
@@ -775,6 +860,7 @@ def _dispatch_dual_solve(
     from act.back_end.solver.solver_dual import DualSolver, expand_bounds_dict
 
     solver_tier = getattr(config, "solver_tier", "lp")
+    block_eps_updates = _install_embedding_child_block_eps(net, batched_bounds, batch)
     if root_bounds_dict is not None:
         bounds_dict_dual = expand_bounds_dict(root_bounds_dict, k_actual)
         lane_box = Bounds(batched_bounds.lb, batched_bounds.ub)
@@ -986,12 +1072,72 @@ def _dispatch_dual_solve(
             ),
             per_class_alpha=config.per_class_alpha,
         )
-    return DualSolveResult(
-        solution=solution,
-        bounds_dict=branch_bounds,
-        nu_per_layer=branch_nu,
-        row_slack=slack.detach(),
+    try:
+        return DualSolveResult(
+            solution=solution,
+            bounds_dict=branch_bounds,
+            nu_per_layer=branch_nu,
+            row_slack=slack.detach(),
+        )
+    finally:
+        _restore_embedding_child_block_eps(block_eps_updates)
+
+
+def _finite_embedding_spec(net: Net) -> Optional[Layer]:
+    for layer in net.layers:
+        if layer.kind == "INPUT_SPEC" and layer.params.get("kind") == InKind.EMBEDDING_LP:
+            p_norm = layer.params.get("p_norm", float("inf"))
+            if isinstance(p_norm, torch.Tensor):
+                p_value = float(p_norm.reshape(-1)[0].item())
+            elif isinstance(p_norm, (int, float, bool)):
+                p_value = float(p_norm)
+            else:
+                continue
+            if p_value != float("inf"):
+                return layer
+    return None
+
+
+def _install_embedding_child_block_eps(
+    net: Net,
+    batched_bounds: Bounds,
+    batch: SubproblemBatch,
+) -> list[tuple[Layer, ParamValue]]:
+    spec = _finite_embedding_spec(net)
+    if spec is None or batch.depths.numel() == 0 or int(batch.depths.max().item()) == 0:
+        return []
+    p_raw = spec.params.get("p_norm", float("inf"))
+    if isinstance(p_raw, torch.Tensor):
+        p_norm = float(p_raw.reshape(-1)[0].item())
+    elif isinstance(p_raw, (int, float, bool)):
+        p_norm = float(p_raw)
+    else:
+        return []
+    input_shape = tuple(batched_bounds.lb.shape[1:])
+    positions_raw = spec.params.get("perturbed_positions")
+    positions = positions_raw if isinstance(positions_raw, torch.Tensor) else None
+    block_eps = rederive_embedding_block_eps(
+        batched_bounds.lb.flatten(start_dim=1),
+        batched_bounds.ub.flatten(start_dim=1),
+        input_shape,
+        positions,
+        p_norm,
     )
+    old_values: list[tuple[Layer, ParamValue]] = []
+    for layer in net.layers:
+        kind_up = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
+        if kind_up in ("INPUT", "INPUT_SPEC"):
+            old_values.append((layer, layer.params.get("bab_block_eps", None)))
+            layer.params["bab_block_eps"] = block_eps
+    return old_values
+
+
+def _restore_embedding_child_block_eps(updates: list[tuple[Layer, ParamValue]]) -> None:
+    for layer, old in updates:
+        if old is None:
+            layer.params.pop("bab_block_eps", None)
+        else:
+            layer.params["bab_block_eps"] = old
 
 
 # ---------------------------------------------------------------------------
@@ -1334,7 +1480,8 @@ def verify_bab_batched(
                 if input_shape
                 else x_input_flat
             )
-            violations = check_violations_batched(net, x_input_shaped, assert_layer)
+            in_region = _check_input_specs_batched(x_input_shaped, spec_layers)
+            violations = check_violations_batched(net, x_input_shaped, assert_layer) & in_region
             for j, lane in enumerate(sat_lane_idx):
                 if bool(violations[j].item()):
                     return VerifyResult(

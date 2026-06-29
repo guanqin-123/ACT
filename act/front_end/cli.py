@@ -11,7 +11,7 @@ License: AGPLv3+
 
 import argparse
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, cast
 
 from act.front_end.creator_registry import detect_creator, list_creators, get_creator
 from act.util.cli_utils import add_device_args, initialize_from_args
@@ -20,6 +20,8 @@ from act.util.cli_utils import add_device_args, initialize_from_args
 from act.front_end.torchvision_loader import data_model_mapping as tv_mapping
 from act.front_end.torchvision_loader import data_model_loader as tv_loader
 from act.front_end.vnnlib_loader import category_mapping as vnnlib_mapping
+from act.front_end.text_loader import data_loader as text_loader
+from act.back_end.config import VALID_TEXT_METHODS
 
 
 def print_unified_list(creator: Optional[str] = None):
@@ -52,6 +54,13 @@ def print_unified_list(creator: Optional[str] = None):
         for cat_name in sorted(categories):
             info = vnnlib_mapping.get_category_info(cat_name)
             print(f"  {cat_name:30s} ({info['type']}) - {info['description']}")
+    
+    if creator is None or creator in {'text', 'sst'}:
+        datasets = text_loader.list_text_datasets()
+        print(f"\nText Datasets ({len(datasets)}):")
+        print('-' * 100)
+        for ds_name in datasets:
+            print(f"  {ds_name:30s} [sentiment] - {text_loader.TEXT_DATASETS[ds_name]}")
     
     print(f"\n{'='*100}\n")
 
@@ -90,6 +99,18 @@ def print_unified_search(query: str, creator: Optional[str] = None):
             for cat_name in sorted(vnnlib_matches):
                 info = vnnlib_mapping.get_category_info(cat_name)
                 print(f"  {cat_name:30s} ({info['type']}) - {info['description']}")
+    
+    if creator is None or creator in {'text', 'sst'}:
+        text_matches = [
+            name for name in text_loader.list_text_datasets()
+            if query.lower() in name.lower()
+        ]
+        if text_matches:
+            found_any = True
+            print(f"\nText Datasets ({len(text_matches)}):")
+            print('-' * 100)
+            for ds_name in sorted(text_matches):
+                print(f"  {ds_name:30s} [sentiment] - {text_loader.TEXT_DATASETS[ds_name]}")
     
     if not found_any:
         print(f"\nNo results found for '{query}'")
@@ -138,6 +159,12 @@ def print_unified_info(name: str, explicit_creator: Optional[str] = None):
             print(f"  • Properties: {info['properties']}")
             print(f"  • Input Dim: {info['input_dim']}")
             print(f"  • Output Dim: {info['output_dim']}")
+        elif creator_name == 'text':
+            print(f"\nDataset: {normalized_name}")
+            print("Type: binary sentiment text")
+            print("Models: embedding_classifier")
+            print("Input: clean embeddings [B, L, D]")
+            print("Specs: EMBEDDING_LP + MARGIN_ROBUST")
         
         print(f"\n{'='*100}\n")
         
@@ -228,6 +255,10 @@ def handle_unified_download(name: str, explicit_creator: Optional[str] = None):
                 print(f"\nNote: VNNLIB benchmarks must be downloaded manually from VNN-COMP.")
                 print(f"Expected location: data/vnnlib/{normalized_name}/")
                 print(f"{'='*100}\n")
+        elif creator_name == 'text':
+            print("Text datasets are file-based.")
+            print(f"Expected raw files under data/{normalized_name}/")
+            print("SST accepts test/dev .txt and train-nodes.tsv; fixture mode is deterministic.")
         
     except ValueError as e:
         print(f"Error: {e}")
@@ -276,6 +307,11 @@ def print_list_downloads(creator: Optional[str] = None):
         else:
             print(f"\nNo VNNLIB downloads found")
     
+    if creator is None or creator in {'text', 'sst'}:
+        print(f"\nText Downloads:")
+        print('-' * 100)
+        print("  File-based loader; place SST/Yelp raw files under data/sst or data/yelp")
+    
     print(f"\n{'='*100}\n")
 
 
@@ -305,6 +341,12 @@ def print_creators():
             print(f"  Module:      act.front_end.vnnlib_loader")
             print(f"  Items:       {len(categories)} VNN-COMP categories")
             print(f"  Kinds:       robustness, safety, reachability")
+        elif creator_name in {'text', 'sst'}:
+            datasets = text_loader.list_text_datasets()
+            print(f"  Description: Text datasets for embedding-space verification")
+            print(f"  Module:      act.front_end.text_loader")
+            print(f"  Items:       {len(datasets)} dataset names/aliases")
+            print(f"  Kinds:       binary sentiment robustness")
 
     print(f"\n{'='*100}\n")
 
@@ -341,6 +383,11 @@ def print_creator_info(name: str) -> None:
         print(f"  Categories ({len(categories)}): {sample} ...")
         print(f"  Kinds:        robustness, safety, reachability")
         print(f"  Spec types:   VNNLIB SMT-LIB format")
+    elif name in {'text', 'sst'}:
+        datasets = sorted(text_loader.list_text_datasets())
+        print(f"  Datasets ({len(datasets)}):  {datasets}")
+        print(f"  Kinds:        binary sentiment robustness")
+        print(f"  Spec types:   EMBEDDING_LP, MARGIN_ROBUST")
 
     print(f"\n{'='*100}\n")
 
@@ -525,7 +572,7 @@ Examples:
     parser.add_argument(
         "--creator", "-c",
         type=str,
-        choices=['torchvision', 'vnnlib'],
+        choices=['torchvision', 'vnnlib', 'text', 'sst'],
         help="Override auto-detection and use specific creator"
     )
     parser.add_argument(
@@ -552,6 +599,39 @@ Examples:
         "--inference",
         action="store_true",
         help="Run inference on synthesized models to validate correctness (defaults to TorchVision, use --creator to specify)"
+    )
+    parser.add_argument(
+        "--method",
+        type=str,
+        choices=[name.replace("_", "-") for name in VALID_TEXT_METHODS],
+        default=None,
+        help="Text verifier method selector for SST/Yelp workflows.",
+    )
+    parser.add_argument("--p", type=float, default=None, help="Text embedding perturbation norm.")
+    parser.add_argument(
+        "--perturbed-words",
+        type=int,
+        choices=[1, 2],
+        default=None,
+        dest="perturbed_words",
+        help="Number of text token positions perturbed together.",
+    )
+    parser.add_argument("--eps", type=float, default=None, help="Text verification radius.")
+    parser.add_argument("--max-eps", type=float, default=None, dest="max_eps", help="Text certified-radius upper bound.")
+    parser.add_argument(
+        "--num-verify-iters",
+        type=int,
+        default=None,
+        dest="num_verify_iters",
+        help="Certified-radius binary-search iterations.",
+    )
+    parser.add_argument("--k", type=int, default=None, help="Rule-slope alpha rule threshold.")
+    parser.add_argument(
+        "--alpha-opt-steps",
+        type=int,
+        default=None,
+        dest="alpha_opt_steps",
+        help="Optimized-alpha optimization steps.",
     )
     
     # Add standard device/dtype arguments
@@ -603,7 +683,7 @@ Examples:
             print(f"{'='*100}\n")
             
             # model_inference extracts input from InputLayer 
-            successful_models = model_inference(wrapped_models)
+            successful_models = model_inference(cast(Any, wrapped_models))
             print(f"\n✓ Successfully ran inference on {len(successful_models)}/{len(wrapped_models)} models")
             print(f"  Models are ready for verification")
         except Exception as e:

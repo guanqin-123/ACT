@@ -73,14 +73,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data/vnnlib
-          key: vnnlib-acasxu-distshift-safenlp-v1
+          key: vnnlib-acasxu-distshift-safenlp-vit-v1
           restore-keys: |
             vnnlib-
 
       - name: VNNLIB — download benchmarks
         run: |
           cd ${{ github.workspace }}
-          for cat in acasxu_2023 dist_shift_2023 safenlp_2024; do
+          for cat in acasxu_2023 dist_shift_2023 safenlp_2024 vit_2023; do
             coverage run -p -m act.front_end --download $cat
           done
 
@@ -132,6 +132,13 @@ jobs:
         run: |
           cd ${{ github.workspace }}
           coverage run -p -m act.pipeline --verify vnnlib --category safenlp_2024 --max-instances 2 \
+            --solvers dual --bab --bab-solver-tier dual_alpha_eta --bab-max-depth 3 --bab-max-nodes 10 \
+            --device cpu --dtype float64
+
+      - name: BaB on VNNLIB — vit (dual_alpha_eta)
+        run: |
+          cd ${{ github.workspace }}
+          coverage run -p -m act.pipeline --verify vnnlib --category vit_2023 --max-instances 1 \
             --solvers dual --bab --bab-solver-tier dual_alpha_eta --bab-max-depth 3 --bab-max-nodes 10 \
             --device cpu --dtype float64
 
