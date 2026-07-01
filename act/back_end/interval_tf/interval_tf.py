@@ -80,6 +80,11 @@ class IntervalTF(TransferFunction):
         # Activation functions
         LayerKind.SIGMOID.value: lambda L, bounds, tf: tf_sigmoid(L, bounds),
         LayerKind.TANH.value: lambda L, bounds, tf: tf_tanh(L, bounds),
+        LayerKind.ERF.value: lambda L, bounds, tf: tf_erf(L, bounds),
+        LayerKind.SQRT.value: lambda L, bounds, tf: tf_sqrt(L, bounds),
+        LayerKind.SIN.value: lambda L, bounds, tf: tf_sin(L, bounds),
+        LayerKind.COS.value: lambda L, bounds, tf: tf_cos(L, bounds),
+        LayerKind.QUANTIZE.value: lambda L, bounds, tf: tf_quantize(L, bounds),
         LayerKind.SOFTPLUS.value: lambda L, bounds, tf: tf_softplus(L, bounds),
         LayerKind.SILU.value: lambda L, bounds, tf: tf_silu(L, bounds),
         LayerKind.RELU6.value: lambda L, bounds, tf: tf_relu6(L, bounds),

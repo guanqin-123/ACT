@@ -744,41 +744,54 @@ def _collect_neuron_candidates(
     )
 
 
-def _multi_split_from_decision(
-    batch: SubproblemBatch,
-    net: Net,
+def enumerate_unstable_candidates(
+    branch_batch: SubproblemBatch,
     bounds_dict: Optional[Dict[int, Bounds]],
     nu_per_layer: Optional[Dict[int, torch.Tensor]],
-    k_levels: int,
-) -> Optional[Tuple[SubproblemBatch, torch.Tensor]]:
-    """Joint top-k neuron split: each lane emits all 2^k sign combinations.
-
-    Verdict-boundary multi-neuron splitting — "Mining Verdict Boundaries for
-    Neural Network Verification", Jiawei Ren, Guanqin Zhang, Zhenya Zhang,
-    Yulei Sui, FM 2026. Candidates are scored by the BaBSR heuristic
-    (``_collect_neuron_candidates``).
-
-    The 2^k children exactly partition each lane's region (every selected
-    neuron is constrained to >=0 or <=0 in both directions across the
-    combination set), so replacing the lane by its children is sound. Joint
-    splits are super-additive in bound gain versus greedy single splits.
-    Returns None when fewer than ``k_levels`` finite candidates exist in some
-    lane (caller falls back to single-split).
-    """
+    *,
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     if bounds_dict is None or nu_per_layer is None:
-        return None
-    cand = _collect_neuron_candidates(batch, bounds_dict, nu_per_layer)
+        return []
+    cand = _collect_neuron_candidates(branch_batch, bounds_dict, nu_per_layer)
     if cand is None:
-        return None
-    all_scores, all_layers, all_neurons = cand
-    finite_per_lane = torch.isfinite(all_scores).sum(dim=1)
-    k_eff = min(k_levels, int(finite_per_lane.min().item()))
-    if k_eff < 2:
-        return None
-    top = torch.topk(all_scores, k=k_eff, dim=1).indices
-    top_layers = all_layers.gather(1, top)
-    top_neurons = all_neurons.gather(1, top)
+        return []
+    scores, layers, neurons = cand
+    finite_mask = torch.isfinite(scores)
+    total = int(finite_mask.sum().item())
+    if total == 0 or (limit is not None and total > int(limit)):
+        return []
+    out: List[Dict[str, Any]] = []
+    for lane in range(scores.shape[0]):
+        flat_cache: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+        for col in torch.where(finite_mask[lane])[0].tolist():
+            lid = int(layers[lane, col].item())
+            nidx = int(neurons[lane, col].item())
+            b = bounds_dict.get(lid)
+            if b is not None and lid not in flat_cache:
+                flat_cache[lid] = (b.lb.flatten(start_dim=1), b.ub.flatten(start_dim=1))
+            lb = float(flat_cache[lid][0][lane, nidx].item()) if lid in flat_cache else 0.0
+            ub = float(flat_cache[lid][1][lane, nidx].item()) if lid in flat_cache else 0.0
+            denom = ub - lb
+            area = float(max(0.0, (-lb * ub) / denom)) if denom > 1e-12 else 0.0
+            score = float(scores[lane, col].item())
+            out.append({
+                "lane": lane, "layer_id": lid, "neuron_idx": nidx,
+                "score": score, "lb": lb, "ub": ub,
+                "nu": (score / area) if area > 1e-12 else None, "area": area,
+            })
+    return out
 
+
+def _multi_split_from_groups(
+    batch: SubproblemBatch,
+    net: Net,
+    top_layers: torch.Tensor,
+    top_neurons: torch.Tensor,
+    k_eff: int,
+) -> Tuple[SubproblemBatch, torch.Tensor]:
+    # Soundness: the 2^k_eff sign-combination children exactly partition each
+    # lane's region for ANY (top_layers, top_neurons) — BaBSR- or LLM-chosen.
     n_lanes = batch.batch_size
     n_children = 2 ** k_eff
     device = batch.lb.device
@@ -838,3 +851,40 @@ def _multi_split_from_decision(
         ),
     )
     return children, parent_index
+
+
+def _multi_split_from_decision(
+    batch: SubproblemBatch,
+    net: Net,
+    bounds_dict: Optional[Dict[int, Bounds]],
+    nu_per_layer: Optional[Dict[int, torch.Tensor]],
+    k_levels: int,
+) -> Optional[Tuple[SubproblemBatch, torch.Tensor]]:
+    """Joint top-k neuron split: each lane emits all 2^k sign combinations.
+
+    Verdict-boundary multi-neuron splitting — "Mining Verdict Boundaries for
+    Neural Network Verification", Jiawei Ren, Guanqin Zhang, Zhenya Zhang,
+    Yulei Sui, FM 2026. Candidates are scored by the BaBSR heuristic
+    (``_collect_neuron_candidates``).
+
+    The 2^k children exactly partition each lane's region (every selected
+    neuron is constrained to >=0 or <=0 in both directions across the
+    combination set), so replacing the lane by its children is sound. Joint
+    splits are super-additive in bound gain versus greedy single splits.
+    Returns None when fewer than ``k_levels`` finite candidates exist in some
+    lane (caller falls back to single-split).
+    """
+    if bounds_dict is None or nu_per_layer is None:
+        return None
+    cand = _collect_neuron_candidates(batch, bounds_dict, nu_per_layer)
+    if cand is None:
+        return None
+    all_scores, all_layers, all_neurons = cand
+    finite_per_lane = torch.isfinite(all_scores).sum(dim=1)
+    k_eff = min(k_levels, int(finite_per_lane.min().item()))
+    if k_eff < 2:
+        return None
+    top = torch.topk(all_scores, k=k_eff, dim=1).indices
+    top_layers = all_layers.gather(1, top)
+    top_neurons = all_neurons.gather(1, top)
+    return _multi_split_from_groups(batch, net, top_layers, top_neurons, k_eff)

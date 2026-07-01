@@ -50,6 +50,10 @@ from typing import Any, ClassVar, Dict, List, Optional, Set, Tuple, Union, cast
 import torch
 import torch.nn as nn
 import torch.fx as fx
+try:
+    from onnx2torch.utils.common import OnnxToTorchModule
+except Exception:  # pragma: no cover
+    OnnxToTorchModule = ()
 from torch.nn.modules.batchnorm import _BatchNorm
 
 logger = logging.getLogger(__name__)
@@ -266,7 +270,8 @@ class _LayerGraphBuilder:
         patch_seq_vars = self._alloc_ids(len(flat_vars))
         patch_seq_shape = (flat_shape[0], flat_shape[2], flat_shape[1])
         transpose_id = self._add_manual_layer(
-            LayerKind.TRANSPOSE.value, {"perm": (0, 2, 1)}, flat_vars, patch_seq_vars, [flat_id],
+            LayerKind.TRANSPOSE.value, {"perm": (0, 2, 1), "input_shape": tuple(flat_shape)},
+            flat_vars, patch_seq_vars, [flat_id],
         )
 
         cls_shape = tuple(int(d) for d in cls_token.shape)
@@ -935,13 +940,23 @@ class _LayerGraphBuilder:
             raise RuntimeError(f"Failed to trace model with torch.fx: {e}")
     
     def _build_fx_graph_edges(self) -> None:
-        """Build graph edge dictionary from torch.fx graph."""
+        """Build graph edge dictionary from torch.fx graph.
+
+        Args may hold fx.Nodes directly OR inside a list/tuple (e.g. torch.cat /
+        torch.stack take a list of tensors). Both must be recorded so merge
+        layers (CONCAT/STACK) connect to ALL of their branch producers, not just
+        the sequential fallback predecessor.
+        """
         if self.fx_graph is None:
             return
         for node in self.fx_graph.nodes:
-            self.graph_edges[node.name] = [
-                arg.name for arg in node.args if isinstance(arg, fx.Node)
-            ]
+            edge_preds: List[str] = []
+            for arg in node.args:
+                if isinstance(arg, fx.Node):
+                    edge_preds.append(arg.name)
+                elif isinstance(arg, (list, tuple)):
+                    edge_preds.extend(a.name for a in arg if isinstance(a, fx.Node))
+            self.graph_edges[node.name] = edge_preds
     
     # -------------------------------------------------------------------------
     # FX Graph Processing
@@ -971,7 +986,7 @@ class _LayerGraphBuilder:
         if module is None:
             raise ValueError(f"Module '{node.target}' not found in traced model")
 
-        if 'onnx2torch' in type(module).__module__:
+        if 'onnx2torch' in type(module).__module__ or (OnnxToTorchModule and isinstance(module, OnnxToTorchModule)):
             cls_name = type(module).__name__
             handler = getattr(self, f'_convert_{cls_name}', None)
             if handler is None:
@@ -991,6 +1006,7 @@ class _LayerGraphBuilder:
         
         handlers = {
             'add': self._process_add_operation,
+            'sub': self._process_sub_operation,
             'cat': self._process_concat_operation,
             'concat': self._process_concat_operation,
             'flatten': self._process_flatten_function,
@@ -1267,6 +1283,7 @@ class _LayerGraphBuilder:
     def _create_transpose_method_layer(self, node: fx.Node) -> List[int]:
         """Create a TRANSPOSE layer for tensor transpose/permute methods."""
         rank = len(self.shape)
+        input_shape_t = tuple(self.shape)
         if node.target == 'transpose':
             if len(node.args) < 3:
                 raise ValueError(f"transpose at {node.name} requires two dimensions.")
@@ -1289,7 +1306,7 @@ class _LayerGraphBuilder:
         out_vars = self._same_size_forward()
         layer_id = self._add_layer(
             LayerKind.TRANSPOSE.value,
-            {"perm": tuple(perm)},
+            {"perm": tuple(perm), "input_shape": input_shape_t},
             self.prev_out, out_vars,
         )
         self.prev_out = out_vars
@@ -1646,7 +1663,100 @@ class _LayerGraphBuilder:
         self.prev_out = out_vars
         self.shape = x_shape
         self._register_node(node.name, layer_id)
-    
+
+    def _resolve_const_tensor(self, val: Any) -> torch.Tensor:
+        """Resolve a non-variable operand (literal / get_attr buffer) to a tensor."""
+        if isinstance(val, torch.Tensor):
+            return val
+        if isinstance(val, (int, float)):
+            return torch.tensor(float(val), dtype=torch.get_default_dtype())
+        if isinstance(val, fx.Node) and val.op == 'get_attr':
+            obj: Any = self.traced_model
+            for part in str(val.target).split('.'):
+                obj = getattr(obj, part)
+            if isinstance(obj, torch.Tensor):
+                return obj
+        raise NotImplementedError(f"Cannot resolve constant operand: {val}")
+
+    def _emit_const_bias(self, node: fx.Node, var_node: fx.Node,
+                         const: torch.Tensor, negate: bool) -> None:
+        """Emit a BIAS layer (y = x + c). For x - c pass negate=True (c -> -c)."""
+        in_vars = self.node_outputs[var_node.name]
+        shape = self.node_shapes[var_node.name]
+        c = const.flatten().to(dtype=torch.get_default_dtype())
+        if negate:
+            c = -c
+        if c.numel() == 1:
+            c = c.expand(len(in_vars)).clone()
+        if c.numel() != len(in_vars):
+            raise NotImplementedError(
+                f"sub/bias const numel {c.numel()} != vars {len(in_vars)} at {node.name}"
+            )
+        out_vars = self._alloc_ids(len(in_vars))
+        layer_id = self._add_layer(
+            LayerKind.BIAS.value,
+            {"c": c, "input_shape": shape, "output_shape": shape},
+            in_vars, out_vars,
+        )
+        self.prev_out = out_vars
+        self.shape = shape
+        self._register_node(node.name, layer_id)
+
+    def _process_sub_operation(self, node: fx.Node) -> None:
+        """SUB: var-var -> SUB layer; var-const -> BIAS(-c); const-var -> SCALE(-1)+BIAS(c)."""
+        if len(node.args) < 2:
+            raise NotImplementedError(f"sub at {node.name} expects 2 operands")
+        a, b = node.args[0], node.args[1]
+        a_node = a if isinstance(a, fx.Node) else None
+        b_node = b if isinstance(b, fx.Node) else None
+        a_var = a_node is not None and a_node.name in self.node_outputs
+        b_var = b_node is not None and b_node.name in self.node_outputs
+        if a_var and b_var and a_node is not None and b_node is not None:
+            x_vars = self.node_outputs[a_node.name]
+            y_vars = self.node_outputs[b_node.name]
+            x_shape = self.node_shapes[a_node.name]
+            if len(y_vars) != len(x_vars):
+                raise NotImplementedError(f"sub var-var size mismatch at {node.name}")
+            out_vars = self._alloc_ids(len(x_vars))
+            layer_id = self._add_layer(
+                LayerKind.SUB.value,
+                {"x_vars": x_vars, "y_vars": y_vars, "input_shape": x_shape, "output_shape": x_shape},
+                x_vars + y_vars, out_vars,
+            )
+            self.prev_out = out_vars
+            self.shape = x_shape
+            self._register_node(node.name, layer_id)
+            return
+        if a_var and not b_var and a_node is not None:
+            self._emit_const_bias(node, a_node, self._resolve_const_tensor(b), negate=True)
+            return
+        if b_var and not a_var and b_node is not None:
+            in_vars = self.node_outputs[b_node.name]
+            shape = self.node_shapes[b_node.name]
+            scale_vars = self._alloc_ids(len(in_vars))
+            neg = torch.full((len(in_vars),), -1.0, dtype=torch.get_default_dtype())
+            self._add_layer(
+                LayerKind.SCALE.value,
+                {"a": neg, "input_shape": shape, "output_shape": shape},
+                in_vars, scale_vars,
+            )
+            c = self._resolve_const_tensor(a).flatten().to(dtype=torch.get_default_dtype())
+            if c.numel() == 1:
+                c = c.expand(len(in_vars)).clone()
+            if c.numel() != len(in_vars):
+                raise NotImplementedError(f"sub const-var numel {c.numel()} != vars {len(in_vars)} at {node.name}")
+            out_vars = self._alloc_ids(len(in_vars))
+            layer_id = self._add_layer(
+                LayerKind.BIAS.value,
+                {"c": c, "input_shape": shape, "output_shape": shape},
+                scale_vars, out_vars,
+            )
+            self.prev_out = out_vars
+            self.shape = shape
+            self._register_node(node.name, layer_id)
+            return
+        raise NotImplementedError(f"sub with no variable operand at {node.name}")
+
     def _process_concat_operation(self, node: fx.Node) -> None:
         """Process CONCAT operation."""
         if node.args and isinstance(node.args[0], (list, tuple)):
@@ -1672,11 +1782,7 @@ class _LayerGraphBuilder:
         dim = node.kwargs.get('dim', 1) if hasattr(node, 'kwargs') else 1
         
         
-        params = {
-            "concat_dim": dim,
-            "input_shapes": [self.node_shapes.get(n.name) for n in inputs],
-            "output_shape": (1, total_size)
-        }
+        params = {"concat_dim": dim}
         layer_id = self._add_layer(
             LayerKind.CONCAT.value, params,
             all_vars, out_vars
@@ -1702,8 +1808,9 @@ class _LayerGraphBuilder:
                 x_shape = self.node_shapes[x_name]
                 
                 out_vars = self._alloc_ids(len(x_vars))
-                
-                params = {"input_shape": x_shape, "output_shape": x_shape}
+
+                params = {"x_vars": x_vars, "y_vars": y_vars,
+                          "input_shape": x_shape, "output_shape": x_shape}
                 layer_id = self._add_layer(
                     LayerKind.MUL.value, params,
                     x_vars + y_vars, out_vars
@@ -1986,7 +2093,48 @@ class TorchToACT:
                 preds[model_id] = [last_wrapper]
                 if model_id not in succs[last_wrapper]:
                     succs[last_wrapper].append(model_id)
-        
+
+        # Multi-operand ops need BOTH operands as ordered preds
+        # [producer(x_vars), producer(y_vars)]; an input-sourced operand's edge
+        # is dropped upstream and the loop above only fills EMPTY pred lists, so
+        # a partially-wired MUL/ADD/SUB/MATMUL is left short one operand. Rewire
+        # from a var->producer map. Soundness-critical: an input operand resolves
+        # to INPUT_SPEC (latest-id producer), never INPUT id 0 -- the dual
+        # backward harvests ν only at _find_input_layer_id==INPUT_SPEC, so
+        # routing to INPUT would silently drop the term and yield an unsound bound.
+        producer: Dict[int, int] = {}
+        for layer in self.layers:
+            for v in layer.out_vars:
+                if v not in producer or layer.id > producer[v]:
+                    producer[v] = layer.id
+        multi_operand_kinds = {
+            LayerKind.MUL.value, LayerKind.ADD.value,
+            LayerKind.SUB.value, LayerKind.MATMUL.value,
+        }
+        for layer in self.layers:
+            if layer.kind not in multi_operand_kinds:
+                continue
+            x_vars = layer.params.get("x_vars")
+            y_vars = layer.params.get("y_vars")
+            if not isinstance(x_vars, (list, tuple)) or not isinstance(y_vars, (list, tuple)):
+                continue
+            if not x_vars or not y_vars:
+                continue
+            px = producer.get(int(x_vars[0]))
+            py = producer.get(int(y_vars[0]))
+            if px is None or py is None:
+                continue
+            want = [px, py]
+            if preds.get(layer.id) == want:
+                continue
+            for old_pred in preds.get(layer.id, []):
+                if layer.id in succs.get(old_pred, []):
+                    succs[old_pred].remove(layer.id)
+            preds[layer.id] = want
+            for p in want:
+                if layer.id not in succs.setdefault(p, []):
+                    succs[p].append(layer.id)
+
         # Connect last model layer to ASSERT
         assert_id = n - 1
         if self._model_succs:

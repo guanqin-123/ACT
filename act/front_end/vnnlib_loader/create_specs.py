@@ -26,7 +26,10 @@ from act.front_end.vnnlib_loader.data_model_loader import (
     load_vnnlib_pair,
     list_local_categories
 )
-from act.front_end.vnnlib_loader.vnnlib_parser import parse_vnnlib_queries
+from act.front_end.vnnlib_loader.vnnlib_parser import (
+    UnsupportedSpecError,
+    parse_vnnlib_queries,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +158,12 @@ class VNNLibSpecCreator(BaseSpecCreator):
             category = instance_info['category']
             onnx_model = instance_info['onnx_model']
             vnnlib_spec = instance_info['vnnlib_spec']
-            
+
+            # Dual-model (isomorphic) instances carry a second ONNX model (g).
+            onnx_model_g = None
+            if instance_info.get('is_dual_model') and len(instance_info.get('onnx_models', [])) > 1:
+                onnx_model_g = instance_info['onnx_models'][1][1]
+
             # Create instance identifier
             instance_id = f"{Path(onnx_model).stem}_{Path(vnnlib_spec).stem}"
             
@@ -166,11 +174,12 @@ class VNNLibSpecCreator(BaseSpecCreator):
                     category=category,
                     onnx_model=onnx_model,
                     vnnlib_spec=vnnlib_spec,
+                    onnx_model_g=onnx_model_g,
                     auto_download=False  # Already filtered to downloaded
                 )
                 
                 # Reuse cached model if same ONNX file was already converted
-                cache_key = (category, onnx_model)
+                cache_key = (category, onnx_model, onnx_model_g)
                 if cache_key in _model_cache:
                     instance_data['model'] = _model_cache[cache_key]
                 else:
@@ -235,6 +244,9 @@ class VNNLibSpecCreator(BaseSpecCreator):
                 f"Parsed VNNLIB specs: {len(queries)} queries, "
                 f"first kind=({queries[0][0].kind}, {queries[0][1].kind})"
             )
+        except UnsupportedSpecError as e:
+            logger.warning("UNSUPPORTED spec %s: %s", instance_id, e)
+            return None
         except Exception as e:
             logger.error(f"Failed to parse VNNLIB specs: {e}")
             return None

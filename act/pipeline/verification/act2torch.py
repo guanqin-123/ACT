@@ -34,6 +34,40 @@ from act.util.device_manager import get_default_dtype, get_default_device
 
 logger = logging.getLogger(__name__)
 
+class _ErfModule(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.erf(x)
+
+
+class _SqrtModule(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.sqrt(torch.clamp(x, min=0.0))
+
+
+class _QuantizeModule(nn.Module):
+    def __init__(self, scale=None, zero_point=None, qmin=0, qmax=255):
+        super().__init__()
+        self.register_buffer("scale", torch.as_tensor(1.0 if scale is None else scale))
+        self.register_buffer("zero_point", torch.as_tensor(0 if zero_point is None else zero_point))
+        self.qmin = float(qmin)
+        self.qmax = float(qmax)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        scale = self.scale.to(device=x.device, dtype=x.dtype)
+        zp = self.zero_point.to(device=x.device, dtype=x.dtype)
+        return scale * torch.clamp(torch.round(x / scale), min=self.qmin - zp, max=self.qmax - zp)
+
+
+class _SinModule(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.sin(x)
+
+
+class _CosModule(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cos(x)
+
+
 # ACT LayerKind → PyTorch nn.Module path.
 # Layers not listed are skipped during restoration (wrapper, graph ops, functional-only).
 _ACT_TO_TORCH = {
@@ -54,6 +88,11 @@ _ACT_TO_TORCH = {
     LayerKind.PRELU.value: nn.PReLU,
     LayerKind.SIGMOID.value: nn.Sigmoid,
     LayerKind.TANH.value: nn.Tanh,
+    LayerKind.ERF.value: _ErfModule,
+    LayerKind.SQRT.value: _SqrtModule,
+    LayerKind.SIN.value: _SinModule,
+    LayerKind.COS.value: _CosModule,
+    LayerKind.QUANTIZE.value: _QuantizeModule,
     LayerKind.SOFTPLUS.value: nn.Softplus,
     LayerKind.SILU.value: nn.SiLU,
     LayerKind.GELU.value: nn.GELU,

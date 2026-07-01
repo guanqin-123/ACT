@@ -190,7 +190,23 @@ class BaBConfig:
     combinations. Joint splits are super-additive: the bound gain of
     constraining k neurons together exceeds the sum of the k individual
     split gains, because the split multipliers are optimized jointly
-    against all constraints. 1 = single-split behavior."""
+    against all constraints.     1 = single-split behavior."""
+
+    llm_probe_enabled: bool = False
+    llm_probe_backend: str = "mock"
+    llm_probe_model: str = ""
+    llm_probe_base_url: str = ""
+    llm_probe_api_key_env: str = ""
+    llm_probe_temperature: float = 0.0
+    llm_probe_timeout: float = 30.0
+    llm_probe_max_candidates: int = 8
+    llm_probe_max_candidates_total: int = 1024
+    llm_probe_neuron_topk: int = 512
+    llm_probe_cadence: int = 1
+    llm_probe_history: int = 8
+    llm_probe_max_failures: int = 3
+    llm_probe_decisions: str = "split,frontier,refine"
+    llm_probe_log: bool = False
 
     verbose: bool = False
 

@@ -22,7 +22,7 @@ act/pipeline/
 │   ├── validate_verifier.py # Verifier correctness validation
 │   ├── model_factory.py  # ACT Net factory for test networks
 │   ├── utils.py          # Shared utilities and profiling
-│   ├── llm_probe.py      # LLM-based probing
+│   ├── llm_probe.py      # LLM-guided closed-loop BaB branching/scheduling controller
 │   └── per_neuron_bounds.py # Per-neuron activation checking
 ├── fuzzing/              # Whitebox fuzzing framework
 │   ├── actfuzzer.py      # Main fuzzing engine
@@ -103,6 +103,54 @@ A fast, GPU-accelerated fuzzer that uses:
 - **Gradient Mutations**: FGSM/PGD-style perturbations.
 - **Coverage Tracking**: DeepXplore-style neuron coverage.
 - **Property Checking**: Automated detection of `OutputSpec` violations.
+
+### LLM-Guided Branching Controller (`verification/llm_probe.py`)
+Closed-loop LLM controller for the dual-batched BaB verifier (paper: *LEAPS — LLM-Guided
+Branch-and-Bound for Scalable Neural Network Verification*). **Soundness boundary**: the LLM only
+*proposes* search-scheduling decisions (split depth/group, wave width, refinement effort) — the BaB
+verifier alone computes bounds and certifies/falsifies counterexamples. Invalid, missing, or
+unavailable guidance always falls back to the verifier's own baseline behavior (disabled probe ==
+baseline, bit-identical).
+
+**Usage** — enable via `python -m act.back_end --verify ... --bab-llm-probe-enabled`:
+```bash
+--bab-llm-probe-enabled
+--bab-llm-probe-backend {mock,openrouter,openai,glm,minimax}   # default: mock (offline, no network)
+--bab-llm-probe-model <model-string>                            # e.g. "openai/gpt-4o" via openrouter
+--bab-llm-probe-decisions split,frontier,refine,neuron          # "neuron" enables joint group selection
+--multi-split-levels <k>                                        # k>1 required for neuron-group splitting
+```
+Remaining tunables: `--bab-llm-probe-{base-url,cadence,api-key-env,temperature,max-candidates,
+max-candidates-total,history,max-failures,log}`.
+
+**Providers** (`_PROVIDER_PRESETS`; one OpenAI-compatible HTTP backend, stdlib `urllib` only, no
+hard dependency on `openai`/`litellm`):
+| backend | base_url | API key env var |
+|---|---|---|
+| `mock` | — (offline, deterministic, no network) | — |
+| `openrouter` | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
+| `openai` | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
+| `glm` | `https://open.bigmodel.cn/api/paas/v4` | `ZHIPUAI_API_KEY` |
+| `minimax` | `https://api.minimaxi.com/v1` | `MINIMAX_API_KEY` |
+`--bab-llm-probe-base-url` / `--bab-llm-probe-api-key-env` override the preset.
+
+**Neuron-group selection** requires `solver_tier ∈ {dual_alpha, dual_alpha_eta}` and
+`branching_method ∈ {gain, babsr, fsb}`. The LLM proposes a per-lane neuron group; the verifier turns
+it into the existing sound `2^k` sign-combination cube (`_multi_split_from_groups` in
+`back_end/bab/branching/branching.py`) — the identical soundness argument as the static BaBSR
+multi-split path. Any illegal, empty, or oversized group falls back to FSB/gain.
+
+**Benchmark harness** (`scripts/bench_llm_branching.py`, offline by default via the `mock` backend —
+no API key required):
+```bash
+# Compare all four configs (fsb / babsr / gain / gain+llm) on the factory example nets
+python scripts/bench_llm_branching.py --configs fsb babsr gain gain+llm --out results.csv
+
+# Paper-time run with a real provider for the gain+llm config
+python scripts/bench_llm_branching.py --configs gain+llm --llm-backend openrouter
+```
+Metrics per (net, config): status, wall-time, #waves, #subproblems, #LLM calls, #fallbacks. Offline
+plumbing smoke test: `tests/test_bench_llm_smoke.py` (MockBackend only, no network).
 
 ## Logging and Diagnostics
 

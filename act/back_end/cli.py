@@ -1010,6 +1010,121 @@ Examples:
         help="Maximum pending BaB frontier leaves to retain; 0 disables eviction (default: from config.yaml)",
     )
     verify_group.add_argument(
+        "--bab-llm-probe-enabled",
+        action="store_true",
+        default=False,
+        dest="bab_llm_probe_enabled",
+        help="Enable the LLM-probe BaB controller (default: from config.yaml)",
+    )
+    verify_group.add_argument(
+        "--bab-llm-probe-backend",
+        type=str,
+        default=None,
+        choices=["mock", "openrouter", "openai", "glm", "minimax", "claude_cli"],
+        dest="bab_llm_probe_backend",
+        help="LLM-probe backend (default: from config.yaml)",
+    )
+    verify_group.add_argument(
+        "--bab-llm-probe-model",
+        type=str,
+        default=None,
+        dest="bab_llm_probe_model",
+        help="LLM-probe model name (default: from config.yaml)",
+    )
+    verify_group.add_argument(
+        "--bab-llm-probe-base-url",
+        type=str,
+        default=None,
+        dest="bab_llm_probe_base_url",
+        help="LLM-probe OpenAI-compatible base URL (default: from config.yaml)",
+    )
+    verify_group.add_argument(
+        "--bab-llm-probe-cadence",
+        type=int,
+        default=None,
+        dest="bab_llm_probe_cadence",
+        help="LLM-probe consult cadence in waves (default: from config.yaml)",
+    )
+    verify_group.add_argument(
+        "--bab-llm-probe-api-key-env",
+        type=str,
+        default=None,
+        dest="bab_llm_probe_api_key_env",
+        help="LLM-probe environment variable name holding the API key (default: from config.yaml)",
+    )
+    verify_group.add_argument(
+        "--bab-llm-probe-temperature",
+        type=float,
+        default=None,
+        dest="bab_llm_probe_temperature",
+        help="LLM-probe sampling temperature (default: from config.yaml)",
+    )
+    verify_group.add_argument(
+        "--bab-llm-probe-timeout",
+        type=float,
+        default=None,
+        dest="bab_llm_probe_timeout",
+        help="LLM-probe per-call wall-clock timeout in seconds; a slower response raises and "
+             "falls back to baseline for that wave (default: from config.yaml)",
+    )
+    verify_group.add_argument(
+        "--bab-llm-probe-max-candidates",
+        type=int,
+        default=None,
+        dest="bab_llm_probe_max_candidates",
+        help="LLM-probe maximum unstable neuron candidates per domain (default: from config.yaml)",
+    )
+    verify_group.add_argument(
+        "--bab-llm-probe-max-candidates-total",
+        type=int,
+        default=None,
+        dest="bab_llm_probe_max_candidates_total",
+        help="LLM-probe total candidate budget across all domains; exceeding falls back to FSB (default: from config.yaml)",
+    )
+    verify_group.add_argument(
+        "--bab-llm-probe-neuron-topk",
+        type=int,
+        default=None,
+        dest="bab_llm_probe_neuron_topk",
+        help="If >0, truncate the neuron-selection candidate set to the top-K by score before "
+             "sending to the LLM (0=full set up to max-candidates-total) (default: from config.yaml)",
+    )
+    verify_group.add_argument(
+        "--bab-llm-probe-history",
+        type=int,
+        default=None,
+        dest="bab_llm_probe_history",
+        help="LLM-probe number of past wave outcomes to include in context (default: from config.yaml)",
+    )
+    verify_group.add_argument(
+        "--bab-llm-probe-max-failures",
+        type=int,
+        default=None,
+        dest="bab_llm_probe_max_failures",
+        help="LLM-probe consecutive failure threshold before circuit-breaker disables the controller (default: from config.yaml)",
+    )
+    verify_group.add_argument(
+        "--bab-llm-probe-decisions",
+        type=str,
+        default=None,
+        dest="bab_llm_probe_decisions",
+        help="LLM-probe comma-separated decision types to enable; tokens: split,frontier,refine,neuron (default: from config.yaml)",
+    )
+    verify_group.add_argument(
+        "--bab-llm-probe-log",
+        action="store_true",
+        default=False,
+        dest="bab_llm_probe_log",
+        help="Enable per-wave LLM-probe decision logging (default: from config.yaml)",
+    )
+    verify_group.add_argument(
+        "--multi-split-levels",
+        type=int,
+        default=None,
+        dest="bab_multi_split_levels",
+        help="Simultaneous neuron splits per branching step for gain branching (default: from config.yaml)",
+    )
+    verify_group.add_argument(
         "--bab-input-split-fanout",
         type=int,
         default=None,
@@ -1131,6 +1246,22 @@ _BACKEND_OVERRIDE_SPEC: list[tuple[str, str, Optional[str], Any, str]] = [
     ("bab_sa_cooling_rate",  "bab_sa_cooling_rate", None,             None, "not_none"),
     ("bab_frontier_cap",     "bab_frontier_cap",    None,             None, "not_none"),
     ("bab_input_split_fanout", "bab_input_split_fanout", None,          None, "not_none"),
+    ("bab_llm_probe_enabled", "bab_llm_probe_enabled",  None,             None, "user_set"),
+    ("bab_llm_probe_backend", "bab_llm_probe_backend",  None,             None, "not_none"),
+    ("bab_llm_probe_model",   "bab_llm_probe_model",    None,             None, "not_none"),
+    ("bab_llm_probe_base_url", "bab_llm_probe_base_url", None,            None, "not_none"),
+    ("bab_llm_probe_cadence", "bab_llm_probe_cadence",  None,             int,  "not_none"),
+    ("bab_llm_probe_api_key_env",        "bab_llm_probe_api_key_env",        None, None,  "not_none"),
+    ("bab_llm_probe_temperature",        "bab_llm_probe_temperature",        None, float, "not_none"),
+    ("bab_llm_probe_timeout",            "bab_llm_probe_timeout",            None, float, "not_none"),
+    ("bab_llm_probe_max_candidates",     "bab_llm_probe_max_candidates",     None, int,   "not_none"),
+    ("bab_llm_probe_max_candidates_total", "bab_llm_probe_max_candidates_total", None, int, "not_none"),
+    ("bab_llm_probe_neuron_topk",         "bab_llm_probe_neuron_topk",         None, int,   "not_none"),
+    ("bab_llm_probe_history",            "bab_llm_probe_history",            None, int,   "not_none"),
+    ("bab_llm_probe_max_failures",       "bab_llm_probe_max_failures",       None, int,   "not_none"),
+    ("bab_llm_probe_decisions",          "bab_llm_probe_decisions",          None, None,  "not_none"),
+    ("bab_llm_probe_log",                "bab_llm_probe_log",                None, None,  "user_set"),
+    ("bab_multi_split_levels",           "bab_multi_split_levels",           None, int,   "not_none"),
     ("gen_gen_config_path",  "config",              None,             None, "not_none"),
     ("gen_output_dir",       "output",              "ACT_GEN_OUTPUT", None, "not_none"),
     ("gen_num_instances",    "num",                 "ACT_GEN_NUM",    int,  "not_none"),

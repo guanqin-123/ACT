@@ -104,7 +104,7 @@ act/
 │   │   ├── validate_verifier.py    # Verifier correctness validation with concrete tests
 │   │   ├── model_factory.py        # ACT Net factory for test networks
 │   │   ├── utils.py                # Shared utilities and performance profiling
-│   │   └── llm_probe.py            # LLM-based verification probing and analysis
+│   │   └── llm_probe.py            # LLM-guided closed-loop BaB branching/scheduling controller
 │   ├── fuzzing/                    # Fuzzing utilities
 │   ├── log/                        # Test execution logs (includes act_debug_tf.log)
 │   └── README.md                   # Pipeline documentation
@@ -264,7 +264,7 @@ All ACT modules now have unified CLI architecture with consistent device/dtype h
   - Integration with VerifiableModel wrapper layers
 
 - **`cli.py`**: Main pipeline CLI (`python -m act.pipeline`)
-- **`verification/`**: Conversion + validation utilities — `torch2act.py`, `act2torch.py`, `validate_verifier.py`, `model_factory.py`, `per_neuron_bounds.py`, `utils.py` (performance profiling), `llm_probe.py`
+- **`verification/`**: Conversion + validation utilities — `torch2act.py`, `act2torch.py`, `validate_verifier.py`, `model_factory.py`, `per_neuron_bounds.py`, `utils.py` (performance profiling), `llm_probe.py` (LLM-guided closed-loop BaB controller, wired into `act/back_end/bab/bab.py`)
 - **`fuzzing/`**: Whitebox fuzzing framework — `actfuzzer.py`, `tracer.py`, `trace_storage.py`, `trace_reader.py`, `coverage.py`, `mutations.py`, `checker.py`, `corpus.py`
 - **`log/`**: Centralized execution logs (`act_debug_tf.log`, validation/test output)
 

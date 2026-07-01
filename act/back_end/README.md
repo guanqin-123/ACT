@@ -242,6 +242,70 @@ act/back_end/
 
 ---
 
+## LLM-Probe BaB Controller (experimental)
+
+`verify_bab_batched` can consult an LLM as a **closed-loop search controller**. It is disabled by
+default and, when disabled, the verifier is byte-identical to baseline.
+
+Each BaB wave the controller observes the frontier (pool size, budget, depth/bound spread, recent
+progress) and proposes, depending on `llm_probe_decisions`: how many sub-problems to advance
+(`frontier` → `k_requested`), how deep to split (`split` → `split_k`), how much per-sub-problem
+refinement to spend (`refine`), and — under `solver_tier` `dual_alpha`/`dual_alpha_eta` — **which
+neurons to split jointly** (`neuron`). For neuron selection the controller is fed the **full** unstable
+candidate set for each dequeued domain; the LLM returns a neuron *group* per lane and the verifier
+forms the joint **2^k sign-combination cube** and solves it in one batched pass (super-additive joint
+splitting). It records each wave outcome to condition the next decision.
+
+**Soundness boundary:** the LLM only schedules work; every proposal is clipped to a sound legal range
+(neuron groups are filtered to currently-unstable, not-already-split neurons, and the 2^k cube exactly
+partitions the region for any choice), and bounding/certification/falsification stay entirely in the
+verifier. Invalid/unavailable output (parse error, timeout, illegal value) falls back to FSB/BaBSR/gain;
+a circuit breaker disables the controller after repeated failures.
+
+**Candidate sizing:** by default (`llm_probe_neuron_topk=512`) a domain's unstable neurons are ranked
+by score and only the top-K are sent to the LLM for group selection — the LLM always decides (with a
+bounded view), never bailing to FSB purely on candidate count. Truncation only bounds what the LLM
+*sees*; the verifier still bounds and certifies **every** subproblem the chosen group produces, so it is
+a search-efficiency knob, not a soundness one. Setting `llm_probe_neuron_topk=0` restores the legacy
+"send the full set, but bail to FSB when it exceeds `llm_probe_max_candidates_total`" behavior.
+
+**Providers** are swappable by config with no verifier code change. `mock` is offline/deterministic.
+The recommended online path is **OpenRouter** — one OpenAI-compatible gateway that reaches OpenAI,
+Claude, GLM, and MiniMax via the **model string** (`anthropic/claude-sonnet-4`, `openai/gpt-4o`,
+`z-ai/glm-4.6`, `minimax/minimax-m1`). Direct presets `openai|glm|minimax` are also available. All use
+stdlib HTTP (no extra dependencies) and a tolerant JSON parser, so models without strict json-mode
+still work. Each preset supplies a default `base_url` and API-key env var (overridable):
+
+| backend | base_url default | key env default |
+|---|---|---|
+| `openrouter` | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
+| `openai` | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
+| `glm` | `https://open.bigmodel.cn/api/paas/v4` | `ZHIPUAI_API_KEY` |
+| `minimax` | `https://api.minimaxi.com/v1` | `MINIMAX_API_KEY` |
+
+Config (`BaBConfig`) / CLI flags:
+
+| Config field | CLI flag | Default |
+|---|---|---|
+| `llm_probe_enabled` | `--bab-llm-probe-enabled` | `False` |
+| `llm_probe_backend` | `--bab-llm-probe-backend {mock,openrouter,openai,glm,minimax}` | `mock` |
+| `llm_probe_model` | `--bab-llm-probe-model` | `""` |
+| `llm_probe_base_url` | `--bab-llm-probe-base-url` | `""` |
+| `llm_probe_cadence` | `--bab-llm-probe-cadence` | `1` |
+| `llm_probe_api_key_env` | `--bab-llm-probe-api-key-env` | `""` |
+| `llm_probe_temperature` | `--bab-llm-probe-temperature` | `0.0` |
+| `llm_probe_max_candidates` | `--bab-llm-probe-max-candidates` | `8` |
+| `llm_probe_max_candidates_total` | `--bab-llm-probe-max-candidates-total` | `1024` |
+| `llm_probe_neuron_topk` | `--bab-llm-probe-neuron-topk` | `512` |
+| `llm_probe_history` | `--bab-llm-probe-history` | `8` |
+| `llm_probe_max_failures` | `--bab-llm-probe-max-failures` | `3` |
+| `llm_probe_decisions` (e.g. `split,frontier,refine,neuron`) | `--bab-llm-probe-decisions` | `"split,frontier,refine"` |
+| `llm_probe_log` | `--bab-llm-probe-log` | `False` |
+| `multi_split_levels` | `--multi-split-levels` | `1` |
+
+Implementation lives in `act/pipeline/verification/llm_probe.py` — a single closed-loop BaB
+controller module (no other sections).
+
 ## License & Notes
 
 - This blueprint focuses on clarity, extensibility, and solver portability.

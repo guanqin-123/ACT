@@ -112,6 +112,11 @@ class LayerKind(str, enum.Enum):
     PRELU = "PRELU"
     SIGMOID = "SIGMOID"
     TANH = "TANH"
+    ERF = "ERF"
+    SQRT = "SQRT"
+    SIN = "SIN"
+    COS = "COS"
+    QUANTIZE = "QUANTIZE"
     SOFTPLUS = "SOFTPLUS"
     SILU = "SILU"
     GELU = "GELU"
@@ -436,6 +441,26 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         "params_required": [],
         "params_optional": ["input_shape", "output_shape"],
     },
+    LayerKind.ERF.value: {
+        "params_required": [],
+        "params_optional": ["input_shape", "output_shape"],
+    },
+    LayerKind.SQRT.value: {
+        "params_required": [],
+        "params_optional": ["input_shape", "output_shape"],
+    },
+    LayerKind.SIN.value: {
+        "params_required": [],
+        "params_optional": ["input_shape", "output_shape"],
+    },
+    LayerKind.COS.value: {
+        "params_required": [],
+        "params_optional": ["input_shape", "output_shape"],
+    },
+    LayerKind.QUANTIZE.value: {
+        "params_required": ["scale", "zero_point", "qmin", "qmax"],
+        "params_optional": ["axis", "input_shape", "output_shape", "dtype"],
+    },
     LayerKind.SOFTPLUS.value: {
         "params_required": [],
         "params_optional": ["input_shape", "output_shape"],
@@ -646,7 +671,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     LayerKind.TRANSPOSE.value: {
         "params_required": [],
-        "params_optional": ["perm"],
+        "params_optional": ["perm", "input_shape"],
     },
     LayerKind.SQUEEZE.value: {
         "params_required": [],
@@ -888,6 +913,11 @@ SUPPORTED_EXPORT_OPS = {
     "div",
     "embedding",
     "embedding_tf",
+    "erf",
+    "sqrt",
+    "sin",
+    "cos",
+    "quantize",
     "expand",
     "flatten",
     "gather",
