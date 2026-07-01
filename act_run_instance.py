@@ -182,6 +182,9 @@ def main() -> None:
     ap.add_argument("--llm-model", default="google/gemini-2.5-flash-lite")
     ap.add_argument("--llm-timeout", type=float, default=30.0,
                     help="per-call LLM wall-clock cap; a slower reply falls back to baseline")
+    ap.add_argument("--solver-tier", default="auto",
+                    choices=["auto", "lp", "dual", "dual_alpha", "dual_alpha_eta"],
+                    help="'auto' = cheap one-shot 'dual' bound, then escalate to 'dual_alpha_eta'")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -230,13 +233,22 @@ def main() -> None:
         return
     try:
         net = TorchToACT(wrapped).run()
-        cfg = build_fast_config(args.config, llm_backend=args.llm_backend,
-                                llm_model=args.llm_model, llm_timeout=args.llm_timeout)
-        clear_violation_check_module_cache()
-        result = verify_bab_batched(
-            net, solver_factory=TorchLPSolver, config=cfg,
-            max_batch_size=args.max_batch_size, time_budget_s=max(1.0, remaining()),
-        )
+
+        def _verify(tier, budget):
+            cfg = build_fast_config(args.config, llm_backend=args.llm_backend, llm_model=args.llm_model,
+                                    llm_timeout=args.llm_timeout, solver_tier=tier)
+            clear_violation_check_module_cache()
+            return verify_bab_batched(net, solver_factory=TorchLPSolver, config=cfg,
+                                      max_batch_size=args.max_batch_size, time_budget_s=max(1.0, budget))
+
+        if args.solver_tier == "auto":
+            # The one-shot 'dual' bound certifies tight nets (e.g. ViT attention) at the root in
+            # ~0.2s; escalate to the slower iterative alpha+eta tier + BaB only if still UNKNOWN.
+            result = _verify("dual", min(remaining(), 15.0))
+            if result.status not in (VerifyStatus.CERTIFIED, VerifyStatus.FALSIFIED) and remaining() > 1.0:
+                result = _verify("dual_alpha_eta", remaining())
+        else:
+            result = _verify(args.solver_tier, remaining())
     except Exception as exc:
         print(f"[verify error] {exc}", file=sys.stderr)
         _write_result(args.output, "unknown")

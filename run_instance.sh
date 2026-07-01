@@ -38,4 +38,4 @@ fi
 
 conda run --no-capture-output -n act-py312 python "$SCRIPT_DIR/act_run_instance.py" \
     "$ONNX" "$VNNLIB" "$RESULTS" "$TIMEOUT" \
-    "${CONFIG_ARGS[@]}" --max-batch-size auto --attack-seconds 10
+    "${CONFIG_ARGS[@]}" --max-batch-size auto --attack-seconds 5
