@@ -26,6 +26,15 @@ if ! command -v conda >/dev/null 2>&1; then
 fi
 source "$(conda info --base)/etc/profile.d/conda.sh"
 
+# Recent Miniconda gates channel use behind Anaconda Terms-of-Service acceptance, so
+# 'conda env create' aborts non-interactively (CondaToSNonInteractiveError) and, under
+# 'set -e', fails the whole install. Auto-accept it: the env var is the primary,
+# network-free mechanism honoured by the conda-anaconda-tos plugin; the explicit
+# accepts persist it to ~/.conda/tos and are best-effort.
+export CONDA_PLUGINS_AUTO_ACCEPT_TOS=yes
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>/dev/null || true
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r 2>/dev/null || true
+
 if ! conda env list | grep -qE '/act-py312$'; then
     echo "creating act-py312 environment from environment.yml..."
     conda env create -f "$REPO_DIR/environment.yml"
