@@ -189,6 +189,29 @@ class RandomBranching(BranchingStrategy):
         return scores
 
 
+class InputBranching(BranchingStrategy):
+    """Deterministic widest-dimension input branching.
+
+    Scores each input dimension by its current domain width, so ``select``
+    bisects the widest side of the box - the classic input-split rule for
+    low-dimensional domains (e.g. ACAS Xu), where halving the dominant side
+    maximizes the worst-case per-child bound tightening.
+    """
+
+    def compute_scores(
+        self,
+        batch: SubproblemBatch,
+        net: Net,
+        unstable_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        widths = batch.widths()
+        embedding_mask = _perturbed_embedding_input_mask(net, batch)
+        if embedding_mask is not None:
+            mask = embedding_mask.unsqueeze(0).expand_as(widths)
+            return widths.masked_fill(~mask, float("-inf"))
+        return widths
+
+
 # ---------------------------------------------------------------------------
 # Score-based branching (width-weighted, optional slope-gradient scoring)
 # ---------------------------------------------------------------------------
@@ -685,6 +708,8 @@ def _build_branching_strategy(
 ) -> BranchingStrategy:
     if method == "random":
         return RandomBranching()
+    if method == "width":
+        return InputBranching()
     if method == "babsr":
         return BaBSRBranching()
     if method == "fsb":

@@ -46,6 +46,9 @@ _SYSTEM_PROMPT = (
     "phase='neuron_selection': return split_groups, a list of {lane, layer_id, neuron_idx} choosing "
     "which unstable neurons to split jointly per lane; the per-lane group size IS the split depth k and "
     "produces 2^k child subproblems. "
+    "When the payload contains input_widths (input-domain-splitting mode, one mean width per input "
+    "dimension), you may return optional integer fields input_dim (which dimension to bisect next; "
+    "prefer dimensions with large width and high sensitivity) and input_fanout (2-8 equal segments). "
     "SPLIT-DEPTH (k) RULE — you MUST apply this deterministic rule, k capped at multi_split_levels; "
     "each 2^k split multiplies the pending pool, so throttle k only once a backlog builds. Let "
     "r = pool_size / max(1, effective_batch) (how many waves' worth of work is already queued; treat a "
@@ -108,6 +111,8 @@ class RoundAdvice:
     horizon_hint: Optional[int] = None
     rationale: Optional[str] = None
     split_groups: Optional[List[Dict[str, int]]] = None
+    input_dim: Optional[int] = None
+    input_fanout: Optional[int] = None
 
     @classmethod
     def from_dict(cls, data: Any) -> "RoundAdvice":
@@ -122,6 +127,8 @@ class RoundAdvice:
             horizon_hint=_coerce_int(data.get("horizon_hint")),
             rationale=_coerce_str(data.get("rationale")),
             split_groups=_coerce_groups(data.get("split_groups")),
+            input_dim=_coerce_int(data.get("input_dim")),
+            input_fanout=_coerce_int(data.get("input_fanout")),
         )
 
 
@@ -139,6 +146,7 @@ class FrontierStats:
     lower_bound_min: Optional[float] = None
     lower_bound_max: Optional[float] = None
     candidates: List[CandidateSummary] = field(default_factory=list)
+    input_widths: Optional[List[float]] = None
 
 
 @dataclass
@@ -174,6 +182,18 @@ class RoundPolicy:
     refine_iters: Optional[int] = None
     refine_rows_cap: Optional[int] = None
     split_groups: Optional[Dict[int, List[Tuple[int, int]]]] = None
+    input_split_dim: Optional[int] = None
+    input_split_fanout: Optional[int] = None
+
+
+def clip_input_split(dim: Any, fanout: Any, *, n_dims: int) -> Tuple[Optional[int], Optional[int]]:
+    out_dim = _coerce_int(dim)
+    if out_dim is not None and not (0 <= out_dim < max(1, int(n_dims))):
+        out_dim = None
+    out_fanout = _coerce_int(fanout)
+    if out_fanout is not None:
+        out_fanout = max(2, min(8, out_fanout))
+    return out_dim, out_fanout
 
 
 def clip_split_k(value: Any, *, branch_batch_size: int, effective_batch: int,
@@ -499,6 +519,12 @@ class LLMProbe:
                 rows_cap_cap=self._refine_rows_cap_cap,
             )
             policy.refine_mode, policy.refine_iters, policy.refine_rows_cap = mode, iters, rows
+        if "input_split" in self._decisions and stats.input_widths:
+            policy.input_split_dim, policy.input_split_fanout = clip_input_split(
+                advice.input_dim,
+                advice.input_fanout,
+                n_dims=len(stats.input_widths),
+            )
         return policy
 
     def _recent_aggregates(self) -> Dict[str, Any]:
@@ -547,6 +573,7 @@ class LLMProbe:
             "pool_growth_rate_recent": aggregates["pool_growth"],
             "fallback_rate_recent": aggregates["fallback_rate"],
             "candidates": [asdict(c) for c in stats.candidates[: self._max_candidates]],
+            "input_widths": stats.input_widths,
             "limits": {
                 "multi_split_levels": self._multi_split_levels,
                 "refine_iters_cap": self._refine_iters_cap,
@@ -617,7 +644,8 @@ def build_frontier_stats(*, wave_index: int, pool_size: int, effective_batch: in
                          depth_min: Optional[int] = None, depth_max: Optional[int] = None,
                          lower_bound_min: Optional[float] = None,
                          lower_bound_max: Optional[float] = None,
-                         candidates: Optional[List[CandidateSummary]] = None) -> FrontierStats:
+                         candidates: Optional[List[CandidateSummary]] = None,
+                         input_widths: Optional[List[float]] = None) -> FrontierStats:
     return FrontierStats(
         wave_index=wave_index,
         pool_size=pool_size,
@@ -631,6 +659,7 @@ def build_frontier_stats(*, wave_index: int, pool_size: int, effective_batch: in
         lower_bound_min=lower_bound_min,
         lower_bound_max=lower_bound_max,
         candidates=list(candidates) if candidates else [],
+        input_widths=input_widths,
     )
 
 

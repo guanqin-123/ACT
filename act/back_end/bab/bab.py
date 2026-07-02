@@ -1398,6 +1398,14 @@ def verify_bab_batched(
                 mode=refine_mode,
                 blowup_ratio=getattr(config, "intermediate_refine_ratio", 10.0),
             )
+    # Per-node bound reuse is governed solely by reuse_root_bounds: root_fwd may
+    # exist just for the root presolve/refine above, and passing it to descendant
+    # solves would freeze every child's intermediate bounds at root tightness
+    # (fatal for input-split BaB, where the whole gain comes from recomputing
+    # intermediates on the smaller box).
+    node_root_fwd: Optional[Dict[int, Bounds]] = (
+        root_fwd if getattr(config, "reuse_root_bounds", False) else None
+    )
     if (
         presolve_tier in ("dual", "dual_alpha", "dual_alpha_eta")
         and assert_layer.params.get("kind") != OutKind.UNSAFE_LINEAR
@@ -1461,6 +1469,7 @@ def verify_bab_batched(
     start = time.time()
     processed = 0
     any_dropped_max_depth = False
+    _last_input_widths: Optional[list[float]] = None
 
     while not pool.empty:
         elapsed = time.time() - start
@@ -1484,6 +1493,7 @@ def verify_bab_batched(
                 remaining_nodes=remaining_nodes,
                 elapsed_s=elapsed,
                 remaining_s=max(0.0, budget_s - elapsed),
+                input_widths=_last_input_widths,
             ))
             if _wave_policy.k_requested is not None:
                 k_requested = max(1, min(_wave_policy.k_requested, len(pool), effective_batch, remaining_nodes))
@@ -1520,7 +1530,7 @@ def verify_bab_batched(
                 config=config,
                 optimize=False,
                 keep_rows=spec_keep_rows,
-                root_bounds_dict=root_fwd,
+                root_bounds_dict=node_root_fwd,
                 round_policy=_wave_policy,
             )
             solution = dual_solve_result.solution
@@ -1534,7 +1544,7 @@ def verify_bab_batched(
                 config=config,
                 optimize=True,
                 keep_rows=spec_keep_rows,
-                root_bounds_dict=root_fwd,
+                root_bounds_dict=node_root_fwd,
                 round_policy=_wave_policy,
             )
             solution = dual_solve_result.solution
@@ -1739,7 +1749,7 @@ def verify_bab_batched(
                                 assert_layer,
                                 config,
                                 spec_keep_rows,
-                                root_fwd,
+                                node_root_fwd,
                                 bd_branch,
                                 nu_branch,
                                 input_shape,
@@ -1779,6 +1789,19 @@ def verify_bab_batched(
                             device=branch_batch.lb.device,
                             dtype=torch.long,
                         ).reshape(-1)
+                    widths = branch_batch.widths()
+                    _last_input_widths = (
+                        widths.mean(dim=0).tolist() if widths.shape[1] <= 32 else None
+                    )
+                    if _wave_policy is not None and getattr(_wave_policy, "input_split_dim", None) is not None:
+                        # LLM-advised input dimension (already range-clipped). Lanes where
+                        # the advised dim has zero width keep the brancher's choice:
+                        # splitting a zero-width dim yields identical children (livelock).
+                        advised = torch.full_like(split_dims, int(_wave_policy.input_split_dim))
+                        has_width = widths.gather(1, advised.unsqueeze(1)).squeeze(1) > 0
+                        split_dims = torch.where(has_width, advised, split_dims)
+                    if _wave_policy is not None and getattr(_wave_policy, "input_split_fanout", None) is not None:
+                        split_fanout = int(_wave_policy.input_split_fanout)
                     if split_fanout == 2:
                         children, parent_index = split_input(branch_batch, split_dims)
                     else:

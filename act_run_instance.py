@@ -23,6 +23,7 @@ We use llm_probe for LLM-guided BaB.
 from __future__ import annotations
 
 import argparse
+import copy
 import sys
 import time
 from pathlib import Path
@@ -32,6 +33,8 @@ _REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(_REPO))
 
 import torch
+import torch.fx as fx  # noqa: E402
+import torch.nn as nn  # noqa: E402
 
 from act.util.device_manager import initialize_device
 
@@ -46,7 +49,7 @@ def _write_result(out_path: str, token: str, *, x=None, y=None) -> None:
             return
         xf = x.detach().cpu().flatten().tolist()
         yf = y.detach().cpu().flatten().tolist()
-        f.write("sat\n(")
+        f.write("sat\n(\n")
         for i, v in enumerate(xf):
             f.write(f"(X_{i} {v:.16g})\n")
         for j, v in enumerate(yf):
@@ -81,7 +84,8 @@ def fuzz_precheck(wrapped_model, seeds, budget, scale=0.5):
     return ce, report.total_time
 
 
-def build_fast_config(config_label, *, llm_backend="mock", llm_decisions="split,frontier,refine",
+def build_fast_config(config_label, *, llm_backend="mock",
+                      llm_decisions="split,frontier,refine,input_split",
                       llm_timeout=30.0, llm_model="", llm_cadence=1, llm_neuron_topk=0,
                       llm_log=False, multi_split_levels=4, max_depth=1_000_000,
                       max_nodes=1_000_000_000, solver_tier="dual_alpha_eta", dual_n_iters=100):
@@ -162,6 +166,163 @@ def _sr_from_paths(onnx_path, vnnlib_path, category="custom"):
     return sr
 
 
+# -----------------------------------------------------------------------------
+# Merge split-ReLUs: invert the ReluSplitter benchmark transformation.
+#
+# ReluSplitter rewrites a linear pre-activation  z = W_orig x + b_orig  into a
+# DENSE -> ReLU -> DENSE "sandwich" that computes the SAME affine map by
+# exploiting  a = ReLU(a) - ReLU(-a): each base row (w,b) is emitted as an
+# anti-parallel pair (+(w,b), -(w,b)) in the first DENSE, and the second DENSE
+# recombines the pair with opposite-sign weights so its output is again the
+# linear z. The spurious (always-unstable) ReLUs only loosen the dual
+# relaxation, leaving pct>=0.4 instances "unknown". This pass detects any
+# DENSE -> ReLU -> DENSE sandwich that is PROVABLY a global affine map and
+# collapses it back to a single DENSE -- exactly semantics-preserving. It is a
+# strict no-op unless global affinity is certified, so genuine ReLU layers
+# (e.g. ACAS Xu) are left untouched.
+#
+# Exact soundness certificate (over R^d): group the first DENSE's rows by their
+# AUGMENTED direction (w_i | b_i); rows n in a group satisfy a_n = t_n * a_rep.
+# With ReLU(t*a)=t*ReLU(a) (t>0) and ReLU(t*a)=|t|*(ReLU(a)-a) (t<0), output k
+# receives  R_g[k]*ReLU(a_rep) + L_g[k]*a_rep, where R_g[k]=sum_n W2[k,n]|t_n|.
+# The sandwich is affine  <=>  R_g[k]==0 for every group g and output k. The
+# collapsed map is  M[k]=sum_g L_g[k]*w_rep_g,  m[k]=b2[k]+sum_g L_g[k]*b_rep_g
+# with  L_g[k] = -sum_{n: t_n<0} W2[k,n]|t_n|  (closed form, exact).
+# -----------------------------------------------------------------------------
+
+# grouping tolerance on |cos| between augmented rows (exact copies give |cos|==1)
+_MERGE_RTOL = 1e-6
+# affinity certificate threshold: R is exactly 0 for a true split, O(0.1..1) for
+# a genuine ReLU layer, so this cleanly separates them while tolerating ULP.
+_MERGE_AFFINE_TOL = 1e-8
+
+
+def _iter_dense_relu_dense(gm: fx.GraphModule):
+    """Yield (l1_node, relu_node, l2_node) for sole-consumer Linear->ReLU->Linear chains.
+
+    Only fires when the ReLU output feeds nothing but the next Linear (and the
+    first Linear feeds nothing but the ReLU), so merging cannot affect any other
+    consumer of the intermediate activations.
+    """
+    modules = dict(gm.named_modules())
+    for node in gm.graph.nodes:
+        if node.op != "call_module" or not isinstance(modules.get(node.target), nn.Linear):
+            continue
+        if len(node.users) != 1:
+            continue
+        relu = next(iter(node.users))
+        if relu.op != "call_module" or not isinstance(modules.get(relu.target), nn.ReLU):
+            continue
+        if len(relu.users) != 1 or len(relu.args) != 1 or relu.args[0] is not node:
+            continue
+        l2 = next(iter(relu.users))
+        if l2.op != "call_module" or not isinstance(modules.get(l2.target), nn.Linear):
+            continue
+        if not l2.args or l2.args[0] is not relu:
+            continue
+        yield node, relu, l2
+
+
+def _certify_affine_collapse(l1: nn.Linear, l2: nn.Linear):
+    """Return (M, m, n_merged) in float64 if l1->ReLU->l2 is a global affine map, else None.
+
+    n_merged = number of rows removed = sum over augmented-direction groups of
+    (group_size - 1). Computation is in float64; the caller casts to model dtype.
+    """
+    dev = l1.weight.device
+    W1 = l1.weight.detach().double()
+    out1, in1 = W1.shape
+    b1 = l1.bias.detach().double() if l1.bias is not None else torch.zeros(out1, dtype=torch.float64, device=dev)
+    W2 = l2.weight.detach().double()
+    out2 = W2.shape[0]
+    b2 = l2.bias.detach().double() if l2.bias is not None else torch.zeros(out2, dtype=torch.float64, device=dev)
+
+    aug = torch.cat([W1, b1.unsqueeze(1)], dim=1)
+    norms = aug.norm(dim=1)
+    unit = aug / norms.clamp_min(1e-30).unsqueeze(1)
+
+    visited = [False] * out1
+    groups: list[list[tuple[int, float]]] = []
+    for i in range(out1):
+        if visited[i]:
+            continue
+        visited[i] = True
+        grp = [(i, 1.0)]
+        if norms[i] > 1e-30:
+            ui = unit[i]
+            for j in range(i + 1, out1):
+                if visited[j] or norms[j] <= 1e-30:
+                    continue
+                if abs(abs(float(ui @ unit[j])) - 1.0) <= _MERGE_RTOL:
+                    t = float(aug[j] @ aug[i] / (aug[i] @ aug[i]))
+                    grp.append((j, t))
+                    visited[j] = True
+        groups.append(grp)
+
+    thr = _MERGE_AFFINE_TOL * max(1.0, float(W2.abs().max()) if W2.numel() else 1.0)
+    M = torch.zeros(out2, in1, dtype=torch.float64, device=dev)
+    m = b2.clone()
+    n_merged = 0
+    for grp in groups:
+        idx = [n for n, _ in grp]
+        ts = torch.tensor([t for _, t in grp], dtype=torch.float64, device=dev)
+        cols = W2[:, idx]
+        relu_coeff = (cols * ts.abs().unsqueeze(0)).sum(dim=1)
+        if float(relu_coeff.abs().max()) > thr:
+            return None
+        neg = ts < 0
+        if bool(neg.any()):
+            lin_coeff = -(cols[:, neg] * ts[neg].abs().unsqueeze(0)).sum(dim=1)
+            rep = grp[0][0]
+            M += torch.outer(lin_coeff, W1[rep])
+            m += lin_coeff * b1[rep]
+        n_merged += len(grp) - 1
+
+    return None if n_merged == 0 else (M, m, n_merged)
+
+
+def _splice_affine(gm: fx.GraphModule, l1_node, relu_node, l2_node, M, m) -> None:
+    """Replace the sandwich with a single Linear: reuse l1's node (rewrite its
+    weights), rewire l2's consumers to l1, and erase the dead ReLU + l2 nodes."""
+    l1 = dict(gm.named_modules())[l1_node.target]
+    dtype, dev = l1.weight.dtype, l1.weight.device
+    l1.weight = nn.Parameter(M.to(dtype=dtype, device=dev), requires_grad=False)
+    l1.bias = nn.Parameter(m.to(dtype=dtype, device=dev), requires_grad=False)
+    l1.out_features, l1.in_features = int(M.shape[0]), int(M.shape[1])
+    for consumer in list(l2_node.users):
+        consumer.replace_input_with(l2_node, l1_node)
+    gm.graph.erase_node(l2_node)
+    gm.graph.erase_node(relu_node)
+    gm.graph.lint()
+    gm.recompile()
+
+
+def merge_split_relus(model: nn.Module):
+    """Collapse every provably-affine DENSE->ReLU->DENSE sandwich into one DENSE.
+
+    Returns (merged_model, n_merged). The input ``model`` is never mutated (work
+    happens on a deepcopy); when nothing is merged the ORIGINAL object is
+    returned so callers can keep using it unchanged.
+    """
+    if not isinstance(model, fx.GraphModule):
+        return model, 0
+    gm = copy.deepcopy(model)
+    total = 0
+    while True:
+        for l1_node, relu_node, l2_node in _iter_dense_relu_dense(gm):
+            mods = dict(gm.named_modules())
+            certified = _certify_affine_collapse(mods[l1_node.target], mods[l2_node.target])
+            if certified is None:
+                continue
+            M, m, n = certified
+            _splice_affine(gm, l1_node, relu_node, l2_node, M, m)
+            total += n
+            break
+        else:
+            break
+    return (gm, total) if total else (model, 0)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="ACT VNN-COMP 2026 single-instance runner")
     ap.add_argument("onnx")
@@ -172,8 +333,8 @@ def main() -> None:
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",
                     choices=["cpu", "cuda"])
     ap.add_argument("--dtype", default="float32", choices=["float32", "float64"])
-    ap.add_argument("--attack-seconds", type=float, default=10.0)
-    ap.add_argument("--attack-scale", type=float, default=0.5)
+    ap.add_argument("--fuzzing-seconds", type=float, default=10.0)
+    ap.add_argument("--fuzzing-scale", type=float, default=0.5)
     ap.add_argument("--max-batch-size", default="auto",
                     help="int or 'auto' (net/GPU-aware, avoids OOM)")
     ap.add_argument("--margin", type=float, default=5.0,
@@ -185,12 +346,21 @@ def main() -> None:
     ap.add_argument("--solver-tier", default="auto",
                     choices=["auto", "lp", "dual", "dual_alpha", "dual_alpha_eta"],
                     help="'auto' = cheap one-shot 'dual' bound, then escalate to 'dual_alpha_eta'")
+    ap.add_argument("--input-split-dims", type=int, default=10,
+                    help="input dimension threshold at or below which BaB switches to "
+                         "input-domain splitting with full per-node bound recomputation "
+                         "(the ACAS Xu regime); 0 disables the profile")
     args = ap.parse_args()
 
+    cuda_ok = torch.cuda.is_available()
     print(f"[env] torch={torch.__version__} cuda_build={torch.version.cuda} "
-          f"cuda_available={torch.cuda.is_available()} "
+          f"cuda_available={cuda_ok} "
           f"device_count={torch.cuda.device_count()} resolved_device={args.device}",
           file=sys.stderr, flush=True)
+    if not cuda_ok:
+        print("[env] WARNING: running on CPU - expect timeouts. torch cannot see a GPU; "
+              "check the NVIDIA driver (nvidia-smi must work).",
+              file=sys.stderr, flush=True)
 
     t0 = time.time()
     initialize_device(args.device, args.dtype)
@@ -214,17 +384,28 @@ def main() -> None:
     raw_model = sr[2]
     param = next(raw_model.parameters(), None)
 
+    input_dim = int(sr[3][0].tensor.numel()) if sr[3] else 0
+    low_dim = 0 < input_dim <= args.input_split_dims
+    if low_dim:
+        print(f"[profile] input_dim={input_dim} <= {args.input_split_dims}: "
+              f"input-split BaB with per-node bound recompute", file=sys.stderr, flush=True)
+
     def raw_forward(x):
         if param is not None:
             x = x.to(device=param.device, dtype=param.dtype)
         with torch.no_grad():
             return raw_model(x)
 
+    verify_model, n_merged = merge_split_relus(raw_model)
+    if n_merged:
+        print(f"[merge] fused {n_merged} split-ReLU neurons", file=sys.stderr, flush=True)
+        sr = tuple(verify_model if i == 2 else v for i, v in enumerate(sr))
+
     wrapped = next(iter(synthesize_models_from_specs([sr]).values()))
 
-    if args.attack_seconds > 0 and remaining() > 1.0:
+    if args.fuzzing_seconds > 0 and remaining() > 1.0:
         try:
-            ce, _ = fuzz_precheck(wrapped, sr[3], min(args.attack_seconds, remaining()), args.attack_scale)
+            ce, _ = fuzz_precheck(wrapped, sr[3], min(args.fuzzing_seconds, remaining()), args.fuzzing_scale)
         except Exception as exc:
             ce = None
             print(f"[attack skipped] {exc}", file=sys.stderr)
@@ -242,16 +423,37 @@ def main() -> None:
         def _verify(tier, budget):
             cfg = build_fast_config(args.config, llm_backend=args.llm_backend, llm_model=args.llm_model,
                                     llm_timeout=args.llm_timeout, solver_tier=tier)
+            if low_dim:
+                # Low-dim regime (ACAS Xu-style): bisect the input domain and recompute
+                # every child's intermediate bounds on its own sub-box. Neuron splits and
+                # frozen root bounds - the large-net defaults - certify nothing here: the
+                # branching gain of an input split lives entirely in the recomputed
+                # intermediate relaxations. Uncapped frontier, since any eviction makes
+                # certification permanently impossible for the run.
+                cfg.branching_method = "width"
+                cfg.multi_split_levels = 1
+                cfg.reuse_root_bounds = False
+                cfg.intermediate_refine = "none"
+                cfg.frontier_cap = 0
             clear_violation_check_module_cache()
             return verify_bab_batched(net, solver_factory=TorchLPSolver, config=cfg,
                                       max_batch_size=args.max_batch_size, time_budget_s=max(1.0, budget))
 
         if args.solver_tier == "auto":
-            # The one-shot 'dual' bound certifies tight nets (e.g. ViT attention) at the root in
-            # ~0.2s; escalate to the slower iterative alpha+eta tier + BaB only if still UNKNOWN.
-            result = _verify("dual", min(remaining(), 15.0))
-            if result.status not in (VerifyStatus.CERTIFIED, VerifyStatus.FALSIFIED) and remaining() > 1.0:
-                result = _verify("dual_alpha_eta", remaining())
+            if low_dim:
+                # With input splits + per-node recompute, the cheap one-shot 'dual'
+                # bound is the workhorse (ACAS Xu prop_1 certifies in ~0.1s / 500
+                # nodes vs 17s with alpha+eta); escalate only if it can't close.
+                result = _verify("dual", remaining())
+                if result.status not in (VerifyStatus.CERTIFIED, VerifyStatus.FALSIFIED) and remaining() > 1.0:
+                    result = _verify("dual_alpha_eta", remaining())
+            else:
+                # The one-shot 'dual' bound certifies tight nets (e.g. ViT attention) at the
+                # root in ~0.2s; escalate to the iterative alpha+eta tier + BaB only if
+                # still UNKNOWN.
+                result = _verify("dual", min(remaining(), 15.0))
+                if result.status not in (VerifyStatus.CERTIFIED, VerifyStatus.FALSIFIED) and remaining() > 1.0:
+                    result = _verify("dual_alpha_eta", remaining())
         else:
             result = _verify(args.solver_tier, remaining())
     except Exception as exc:
