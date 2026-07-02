@@ -21,7 +21,31 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 
 echo "ACT run: benchmark='$BENCHMARK' onnx='$ONNX' vnnlib='$VNNLIB' results='$RESULTS' timeout=$TIMEOUT"
 nvidia-smi || true
-source "$(conda info --base)/etc/profile.d/conda.sh" 2>/dev/null || true
+
+# Locate and initialise conda. The VNN-COMP harness runs this in a non-interactive,
+# non-login shell where ~/.bashrc (and thus conda's PATH hook) is NOT sourced, so
+# 'conda' is usually absent from PATH even though install_tool.sh already created the
+# act-py312 env. Discover the base the same way install_tool.sh installs it
+# ($HOME/miniconda3) and source conda.sh; without this the 'conda run' below fails
+# with exit code 127 (conda: command not found).
+CONDA_BASE=""
+if command -v conda >/dev/null 2>&1; then
+    CONDA_BASE="$(conda info --base)"
+else
+    for base in "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/miniconda" "$HOME/anaconda" \
+                /opt/conda /opt/miniconda3 /usr/local/miniconda3 \
+                /home/ubuntu/miniconda3 /root/miniconda3; do
+        if [ -x "$base/bin/conda" ]; then
+            CONDA_BASE="$base"
+            break
+        fi
+    done
+fi
+if [ -z "$CONDA_BASE" ] || [ ! -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
+    echo "run_instance.sh: could not locate a conda installation (looked for \$HOME/miniconda3, /opt/conda, ...); run install_tool.sh first" >&2
+    exit 1
+fi
+source "$CONDA_BASE/etc/profile.d/conda.sh"
 
 # Optional post-install secrets (e.g. the LLM API key) kept out of this public repo;
 # create it on the run machine, it is gitignored (see act_llm_secrets.sh.example).

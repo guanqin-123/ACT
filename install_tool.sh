@@ -40,5 +40,5 @@ if ! conda env list | grep -qE '/act-py312$'; then
     conda env create -f "$REPO_DIR/environment.yml"
 fi
 
-conda run -n act-py312 python -c "import torch, act; print('ACT import OK; torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+conda run -n act-py312 python -c "import torch, act; print('ACT import OK; torch', torch.__version__, 'cuda-build', torch.version.cuda, 'avail', torch.cuda.is_available())"
 echo "install_tool.sh: done"

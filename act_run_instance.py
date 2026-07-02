@@ -187,6 +187,11 @@ def main() -> None:
                     help="'auto' = cheap one-shot 'dual' bound, then escalate to 'dual_alpha_eta'")
     args = ap.parse_args()
 
+    print(f"[env] torch={torch.__version__} cuda_build={torch.version.cuda} "
+          f"cuda_available={torch.cuda.is_available()} "
+          f"device_count={torch.cuda.device_count()} resolved_device={args.device}",
+          file=sys.stderr, flush=True)
+
     t0 = time.time()
     initialize_device(args.device, args.dtype)
 
