@@ -37,7 +37,19 @@ conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r 
 
 if ! conda env list | grep -qE '/act-py312$'; then
     echo "creating act-py312 environment from environment.yml..."
-    conda env create -f "$REPO_DIR/environment.yml"
+    # Recent Miniconda can fail in conda-libmamba's sharded-repodata metadata
+    # path before solving starts. Disable shards first (keeps libmamba's normal
+    # fast solver path), then fall back to the classic solver after clearing the
+    # index cache if metadata retrieval still fails.
+    conda config --set repodata_use_shards false 2>/dev/null \
+        || conda config --set plugins.use_sharded_repodata false 2>/dev/null \
+        || true
+    if ! conda env create -f "$REPO_DIR/environment.yml"; then
+        echo "conda env create failed; cleaning index cache and retrying with classic solver..."
+        conda clean --index-cache -y || true
+        CONDA_REPODATA_USE_SHARDS=false CONDA_SOLVER=classic \
+            conda env create --solver classic -f "$REPO_DIR/environment.yml"
+    fi
 fi
 
 conda run -n act-py312 python -c "import torch, act; print('ACT import OK; torch', torch.__version__, 'cuda-build', torch.version.cuda, 'avail', torch.cuda.is_available())"

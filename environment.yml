@@ -2,6 +2,7 @@ name: act-py312
 channels:
   - gurobi
   - conda-forge
+  - nodefaults
 dependencies:
   - python=3.12
   - onnx
