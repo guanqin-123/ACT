@@ -398,24 +398,42 @@ def main() -> None:
         print(f"[merge] fused {n_merged} split-ReLU neurons", file=sys.stderr, flush=True)
         sr = tuple(verify_model if i == 2 else v for i, v in enumerate(sr))
 
-    wrapped = next(iter(synthesize_models_from_specs([sr]).values()))
+    # A VNNLIB 2.0 top-1 OR that did NOT pattern-merge (front-end Layer 1) yields
+    # N disjunct models here; the instance is unsat only if EVERY disjunct is
+    # infeasible and sat if ANY single disjunct is reachable. Verifying just the
+    # first (the old next(iter(...))) was unsound. N == 1 reproduces the original
+    # single-model path exactly (per-model budgets collapse to remaining()).
+    wrapped_models = list(synthesize_models_from_specs([sr]).values())
+    n_models = len(wrapped_models)
 
     if args.fuzzing_seconds > 0 and remaining() > 1.0:
-        try:
-            ce, _ = fuzz_precheck(wrapped, sr[3], min(args.fuzzing_seconds, remaining()), args.fuzzing_scale)
-        except Exception as exc:
-            ce = None
-            print(f"[attack skipped] {exc}", file=sys.stderr)
-        if ce is not None:
-            x = ce.input if hasattr(ce, "input") else ce
-            _write_result(args.output, "sat", x=x, y=raw_forward(x))
-            return
+        per_model_fuzz = min(args.fuzzing_seconds, remaining() / n_models)
+        for wm in wrapped_models:
+            if remaining() <= 1.0:
+                break
+            try:
+                ce, _ = fuzz_precheck(wm, sr[3], min(per_model_fuzz, remaining()), args.fuzzing_scale)
+            except Exception as exc:
+                ce = None
+                print(f"[attack skipped] {exc}", file=sys.stderr)
+            if ce is not None:
+                x = ce.input if hasattr(ce, "input") else ce
+                _write_result(args.output, "sat", x=x, y=raw_forward(x))
+                return
 
     if remaining() <= 1.0:
         _write_result(args.output, "timeout")
         return
-    try:
+
+    def _verify_wrapped(wrapped, deadline):
+        """Auto/escalation BaB flow on ONE disjunct model, capped at ``deadline``
+        (wall-clock). When n_models == 1, deadline is set just past the global
+        margin deadline so budget_left() == remaining() and this path is
+        byte-identical to the original single-model logic."""
         net = TorchToACT(wrapped).run()
+
+        def budget_left():
+            return min(remaining(), deadline - time.time())
 
         def _verify(tier, budget):
             cfg = build_fast_config(args.config, llm_backend=args.llm_backend, llm_model=args.llm_model,
@@ -441,32 +459,51 @@ def main() -> None:
                 # With input splits + per-node recompute, the cheap one-shot 'dual'
                 # bound is the workhorse (ACAS Xu prop_1 certifies in ~0.1s / 500
                 # nodes vs 17s with alpha+eta); escalate only if it can't close.
-                result = _verify("dual", remaining())
-                if result.status not in (VerifyStatus.CERTIFIED, VerifyStatus.FALSIFIED) and remaining() > 1.0:
-                    result = _verify("dual_alpha_eta", remaining())
+                res = _verify("dual", budget_left())
+                if res.status not in (VerifyStatus.CERTIFIED, VerifyStatus.FALSIFIED) and budget_left() > 1.0:
+                    res = _verify("dual_alpha_eta", budget_left())
             else:
                 # The one-shot 'dual' bound certifies tight nets (e.g. ViT attention) at the
                 # root in ~0.2s; escalate to the iterative alpha+eta tier + BaB only if
                 # still UNKNOWN.
-                result = _verify("dual", min(remaining(), 15.0))
-                if result.status not in (VerifyStatus.CERTIFIED, VerifyStatus.FALSIFIED) and remaining() > 1.0:
-                    result = _verify("dual_alpha_eta", remaining())
+                res = _verify("dual", min(budget_left(), 15.0))
+                if res.status not in (VerifyStatus.CERTIFIED, VerifyStatus.FALSIFIED) and budget_left() > 1.0:
+                    res = _verify("dual_alpha_eta", budget_left())
         else:
-            result = _verify(args.solver_tier, remaining())
+            res = _verify(args.solver_tier, budget_left())
+        return res
+
+    # Aggregate across disjuncts. Soundness (N > 1): 'unsat' requires EVERY
+    # disjunct CERTIFIED; one FALSIFIED disjunct with a CE gives 'sat'; a
+    # genuinely inconclusive verdict gives 'unknown'; otherwise the shortfall is
+    # the clock -> 'timeout'.
+    statuses = []
+    falsified_ce = None
+    try:
+        unfinished = n_models
+        for wm in wrapped_models:
+            if remaining() <= 1.0:
+                break
+            deadline = time.time() + remaining() / max(1, unfinished)
+            res = _verify_wrapped(wm, deadline)
+            unfinished -= 1
+            statuses.append(res.status)
+            if res.status == VerifyStatus.FALSIFIED and res.counterexample is not None:
+                falsified_ce = res.counterexample
+                break
     except Exception as exc:
         print(f"[verify error] {exc}", file=sys.stderr)
         _write_result(args.output, "unknown")
         return
 
-    if result.status == VerifyStatus.CERTIFIED:
+    if falsified_ce is not None:
+        _write_result(args.output, "sat", x=falsified_ce, y=raw_forward(falsified_ce))
+    elif len(statuses) == n_models and all(s == VerifyStatus.CERTIFIED for s in statuses):
         _write_result(args.output, "unsat")
-    elif result.status == VerifyStatus.FALSIFIED and result.counterexample is not None:
-        x = result.counterexample
-        _write_result(args.output, "sat", x=x, y=raw_forward(x))
-    elif result.status == VerifyStatus.TIMEOUT:
-        _write_result(args.output, "timeout")
-    else:
+    elif any(s not in (VerifyStatus.CERTIFIED, VerifyStatus.TIMEOUT) for s in statuses):
         _write_result(args.output, "unknown")
+    else:
+        _write_result(args.output, "timeout")
 
 
 if __name__ == "__main__":

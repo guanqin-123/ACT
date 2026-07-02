@@ -15,5 +15,12 @@ ONNX="$3"
 VNNLIB="$4"
 
 echo "ACT prepare: benchmark='$BENCHMARK' onnx='$ONNX' vnnlib='$VNNLIB'"
+
+# Kill any ACT runner left over from a previous instance: the harness kills
+# 'conda run' on timeout but the signal does not reliably reach the python
+# child, and a leaked process pins the GPU at 100% and starves this instance.
+pkill -f act_run_instance.py 2>/dev/null || true
+sleep 1
+
 nvidia-smi || true
 exit 0

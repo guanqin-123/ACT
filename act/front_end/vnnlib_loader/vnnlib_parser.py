@@ -466,6 +466,11 @@ def _queries_from_rewritten(
         if promoted is not None:
             results = [promoted]
 
+    if len(results) > 1:
+        promoted = _try_promote_to_top1_unlabeled(results, num_outputs)
+        if promoted is not None:
+            results = [promoted]
+
     logger.info(f"Parsed {name}: {len(results)} query(ies) [vnnlib 2.0]")
     return results
 
@@ -1112,3 +1117,35 @@ def _try_promote_to_top1(
         return None
     y_true = _coerce_label_to_tensor(true_label)
     return queries[0][0], OutputSpec(kind=OutKind.TOP1_ROBUST, y_true=y_true)
+
+
+def _try_promote_to_top1_unlabeled(
+    queries: List[Tuple[InputSpec, OutputSpec]],
+    num_outputs: int,
+) -> Optional[Tuple[InputSpec, OutputSpec]]:
+    """Label-agnostic TOP1 recognition for 2.0 files that omit the label comment.
+
+    Soundness invariant: the shared class ``t`` must be one of the two nonzero
+    indices of the first canonicalised row ``e_t - e_j``, so only those two are
+    trialled; the full structural + full-coverage check is delegated to
+    :func:`_try_promote_to_top1`, which rejects any non-top-1 OR (mixed labels,
+    extra conjuncts, nonzero RHS) — so no unsound collapse is possible.
+    """
+    if len(queries) < 2:
+        return None
+    first_out = queries[0][1]
+    if first_out.kind != OutKind.UNSAFE_LINEAR or first_out.c is None:
+        return None
+    c0 = first_out.c
+    if c0.dim() == 1:
+        c0 = c0.unsqueeze(0)
+    if c0.shape[0] != 1:
+        return None
+    candidates = [i for i, v in enumerate(c0[0].tolist()) if abs(v) > 1e-9]
+    if len(candidates) != 2:
+        return None
+    for cand in candidates:
+        promoted = _try_promote_to_top1(queries, num_outputs, cand)
+        if promoted is not None:
+            return promoted
+    return None
