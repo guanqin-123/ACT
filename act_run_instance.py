@@ -49,12 +49,9 @@ def _write_result(out_path: str, token: str, *, x=None, y=None) -> None:
             return
         xf = x.detach().cpu().flatten().tolist()
         yf = y.detach().cpu().flatten().tolist()
-        f.write("sat\n(\n")
-        for i, v in enumerate(xf):
-            f.write(f"(X_{i} {v:.16g})\n")
-        for j, v in enumerate(yf):
-            f.write(f"(Y_{j} {v:.16g})\n")
-        f.write(")\n")
+        pairs = [f"(X_{i} {v:.16g})" for i, v in enumerate(xf)]
+        pairs += [f"(Y_{j} {v:.16g})" for j, v in enumerate(yf)]
+        f.write("sat\n(" + "\n".join(pairs) + ")\n")
 
 
 def fuzz_precheck(wrapped_model, seeds, budget, scale=0.5):
