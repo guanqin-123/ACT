@@ -222,36 +222,41 @@ def append_pool_nd(
 # ============================================================================
 
 
+def _append_layer(layers, kind: str, *, params: Optional[Dict[str, Any]] = None, **extra) -> None:
+    # params key order is preserved verbatim (flows into Layer.params via
+    # dict(ls["params"]) in create_network) -> generated JSON stays byte-identical.
+    layer: Dict[str, Any] = {"kind": kind, "params": params if params is not None else {}}
+    layer.update(extra)
+    layers.append(layer)
+
+
 def append_dense(
     layers, *, in_features: int, out_features: int, use_bias: bool
 ) -> None:
-    layers.append(
-        {
-            "kind": LayerKind.DENSE.value,
-            "params": {
-                "in_features": int(in_features),
-                "out_features": int(out_features),
-                "use_bias": bool(use_bias),
-            },
-        }
+    _append_layer(
+        layers,
+        LayerKind.DENSE.value,
+        params={
+            "in_features": int(in_features),
+            "out_features": int(out_features),
+            "use_bias": bool(use_bias),
+        },
     )
 
 
 def append_bias(layers, **meta_kw) -> None:
-    layers.append(
-        {
-            "kind": LayerKind.BIAS.value,
-            "params": {k: v for k, v in meta_kw.items() if v is not None},
-        }
+    _append_layer(
+        layers,
+        LayerKind.BIAS.value,
+        params={k: v for k, v in meta_kw.items() if v is not None},
     )
 
 
 def append_scale(layers, **meta_kw) -> None:
-    layers.append(
-        {
-            "kind": LayerKind.SCALE.value,
-            "params": {k: v for k, v in meta_kw.items() if v is not None},
-        }
+    _append_layer(
+        layers,
+        LayerKind.SCALE.value,
+        params={k: v for k, v in meta_kw.items() if v is not None},
     )
 
 
@@ -270,7 +275,7 @@ def append_act(
             params["negative_slope"] = float(act_params["lrelu_alpha"])
         elif act_kind == LayerKind.POW.value and "power_exponent" in act_params:
             params["exponent"] = float(act_params["power_exponent"])
-    layers.append({"kind": act_kind, "params": params})
+    _append_layer(layers, act_kind, params=params)
 
 
 def append_add(layers, *, skip_idx: int, main_idx: int) -> None:
@@ -280,28 +285,26 @@ def append_add(layers, *, skip_idx: int, main_idx: int) -> None:
 
 
 def append_binary_op(layers, *, op_kind: str, x_idx: int, y_idx: int) -> None:
-    layers.append(
-        {
-            "kind": op_kind,
-            "params": {},
-            "inputs": {"x": x_idx, "y": y_idx},
-            "preds": [x_idx, y_idx],
-        }
+    _append_layer(
+        layers,
+        op_kind,
+        params={},
+        inputs={"x": x_idx, "y": y_idx},
+        preds=[x_idx, y_idx],
     )
 
 
 def append_concat(layers, *, input_indices: List[int], concat_dim: int = 0) -> None:
-    layers.append(
-        {
-            "kind": LayerKind.CONCAT.value,
-            "params": {"concat_dim": concat_dim},
-            "preds": input_indices,
-        }
+    _append_layer(
+        layers,
+        LayerKind.CONCAT.value,
+        params={"concat_dim": concat_dim},
+        preds=input_indices,
     )
 
 
 def append_flatten(layers) -> None:
-    layers.append({"kind": LayerKind.FLATTEN.value, "params": {"start_dim": 1}})
+    _append_layer(layers, LayerKind.FLATTEN.value, params={"start_dim": 1})
 
 
 def append_rnn_family(
@@ -417,6 +420,26 @@ def _inject_extra_ops(
 # ============================================================================
 
 
+def _build_residual_block(
+    layers: List[Dict[str, Any]],
+    *,
+    num_blocks: int,
+    main_op,
+    act_kind: str,
+    cfg: Dict[str, Any],
+) -> None:
+    # main_op: zero-arg callable appending one main-path layer (Dense/Conv),
+    # may mutate enclosing H, W via closure. Append order matches the prior
+    # inline loops verbatim -> byte-identical generated JSON.
+    for _ in range(num_blocks):
+        skip_idx = len(layers) - 1
+        main_op()
+        append_act(layers, act_kind, act_params=cfg)
+        main_op()
+        append_add(layers, skip_idx=skip_idx, main_idx=len(layers) - 1)
+        append_act(layers, act_kind, act_params=cfg)
+
+
 def build_mlp_layers(layers: List[Dict[str, Any]], *, cfg: Dict[str, Any]) -> None:
     shape = tuple(cfg["input_shape"])
     in_feat = int(shape[1]) if len(shape) == 2 else math.prod(shape[1:])
@@ -460,18 +483,19 @@ def build_mlp_layers(layers: List[Dict[str, Any]], *, cfg: Dict[str, Any]) -> No
             )
             append_act(layers, act_kind, act_params=cfg)
             in_feat = width
-        for _ in range(int(cfg["num_residual_blocks"])):
-            skip_idx = len(layers) - 1
+
+        def _dense_main():
             append_dense(
                 layers, in_features=in_feat, out_features=in_feat, use_bias=use_bias
             )
-            append_act(layers, act_kind, act_params=cfg)
-            append_dense(
-                layers, in_features=in_feat, out_features=in_feat, use_bias=use_bias
-            )
-            main_idx = len(layers) - 1
-            append_add(layers, skip_idx=skip_idx, main_idx=main_idx)
-            append_act(layers, act_kind, act_params=cfg)
+
+        _build_residual_block(
+            layers,
+            num_blocks=int(cfg["num_residual_blocks"]),
+            main_op=_dense_main,
+            act_kind=act_kind,
+            cfg=cfg,
+        )
     else:
         raise ValueError(f"Unsupported MLP variant '{variant}'")
 
@@ -659,13 +683,18 @@ def build_cnn_layers(
         ch = int(cfg["residual_channels"])
         H, W = _conv2d(layers, in_ch=in_ch, out_ch=ch, H=H, W=W)
         append_act(layers, act_kind, act_params=cfg)
-        for _ in range(int(cfg["num_residual_blocks"])):
-            skip_idx = len(layers) - 1
+
+        def _conv_main():
+            nonlocal H, W
             H, W = _conv2d(layers, in_ch=ch, out_ch=ch, H=H, W=W)
-            append_act(layers, act_kind, act_params=cfg)
-            H, W = _conv2d(layers, in_ch=ch, out_ch=ch, H=H, W=W)
-            append_add(layers, skip_idx=skip_idx, main_idx=len(layers) - 1)
-            append_act(layers, act_kind, act_params=cfg)
+
+        _build_residual_block(
+            layers,
+            num_blocks=int(cfg["num_residual_blocks"]),
+            main_op=_conv_main,
+            act_kind=act_kind,
+            cfg=cfg,
+        )
         while H > 1 or W > 1:
             H, W = _pool2d(layers, kind=LayerKind.AVGPOOL2D.value, in_ch=ch, H=H, W=W)
             if H <= 0 or W <= 0:

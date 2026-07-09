@@ -19,6 +19,10 @@ from act.util.options import PerformanceOptions
 
 EPS = 1e-12
 
+# Single-source default LRELU/LeakyReLU negative slope, shared by dual and
+# hybridz transfer functions when a layer omits the alpha/negative_slope param.
+LRELU_ALPHA_DEFAULT = 0.01
+
 def split_weight(W):
     return W.clamp(min=0), W.clamp(max=0)
 
