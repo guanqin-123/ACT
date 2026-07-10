@@ -126,7 +126,7 @@ backend:
 
     # ── Dual-tier knobs (α/η optimization for DualSolver BaB) ────────────
     # Solver tier for BaB bound computation:
-    # Source of truth: act.back_end.config.VALID_SOLVER_TIERS
+    # Source of truth: act.config.config.VALID_SOLVER_TIERS
     #   "lp"               – LP/MILP backend
     #   "dual"             – DualSolver (linear-relaxation dual, no iterative optimization)
     #   "dual_alpha"       – DualSolver with Lagrange-relaxed lower-slope optimization (Adam on α ∈ [0,1])

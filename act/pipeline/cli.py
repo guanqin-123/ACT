@@ -20,7 +20,7 @@ import sys
 import torch
 
 from act.util.cli_utils import add_device_args, initialize_from_args
-from act.back_end.config import VALID_SOLVER_TIERS
+from act.config.config import VALID_SOLVER_TIERS
 
 logger = logging.getLogger(__name__)
 from act.front_end.specs import OutputSpec
@@ -33,7 +33,7 @@ from act.front_end.torchvision_loader import data_model_mapping as tv_mapping
 from act.front_end.model_synthesis import synthesize_models_from_specs
 from act.pipeline.fuzzing.actfuzzer import ACTFuzzer, FuzzingConfig
 from act.pipeline.verification.per_neuron_bounds import PerNeuronCheckConfig
-from act.pipeline.config import PipelineConfig
+from act.config.config import PipelineConfig
 
 
 _FUZZ_MUTATION_WEIGHT_KEYS = frozenset(

@@ -1,20 +1,16 @@
-# ===- act/back_end/config.py - Backend Configuration ---------------------====#
-# ACT: Abstract Constraint Transformer
-# Copyright (C) 2025– ACT Team
-#
-# Licensed under the GNU Affero General Public License v3.0 or later (AGPLv3+).
-# Distributed without any warranty; see <http://www.gnu.org/licenses/>.
-# ===---------------------------------------------------------------------====#
-
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Final, List, Optional, Union
 
 import yaml
 
-_DEFAULT_YAML = Path(__file__).parent / "config.yaml"
+_BACKEND_YAML = Path(__file__).parent / "backend_config.yaml"
+_PIPELINE_YAML = Path(__file__).parent / "pipeline_config.yaml"
+_FRONTEND_YAML = Path(__file__).parent / "frontend_config.yaml"
 
 _VALID_SOLVERS = {"auto", "gurobi", "torchlp", "dual", "hybridz"}
 _VALID_DEVICES = {"cpu", "cuda", "gpu"}
@@ -82,7 +78,7 @@ class BaBConfig:
     Construction::
 
         BaBConfig()                     # programmatic defaults
-        BaBConfig.from_yaml()           # load from act/back_end/config.yaml
+        BaBConfig.from_yaml()           # load from act/config/backend_config.yaml
         BaBConfig.from_yaml(path, **kw) # custom YAML + overrides
     """
 
@@ -255,11 +251,11 @@ class BaBConfig:
         Reads from ``backend.bab`` in the unified backend config, falling
         back to a top-level ``bab`` key for standalone BaB YAML files.
         """
-        path = Path(config_path) if config_path else _DEFAULT_YAML
+        path = Path(config_path) if config_path else _BACKEND_YAML
 
         if not path.exists():
             raise FileNotFoundError(
-                f"Backend config not found: {path}\nExpected: act/back_end/config.yaml"
+                f"Backend config not found: {path}\nExpected: act/config/backend_config.yaml"
             )
 
         with open(path) as f:
@@ -293,7 +289,7 @@ class BaBConfig:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_GEN_CONFIG = str(
-    Path(__file__).parent / "examples" / "config_gen_act_net.yaml"
+    Path(__file__).parent.parent / "back_end" / "examples" / "config_gen_act_net.yaml"
 )
 
 
@@ -368,7 +364,7 @@ class BackendConfig:
     """Unified configuration for the ACT back-end.
 
     Covers runtime selectors (solver / device / dtype), verification timeout,
-    and nested BaB settings.  The canonical source is ``act/back_end/config.yaml``;
+    and nested BaB settings.  The canonical source is ``act/config/backend_config.yaml``;
     CLI flags and environment variables override it at load time.
 
     Construction::
@@ -496,7 +492,7 @@ class BackendConfig:
           - ``tf_<field>`` → ``TFConfig.<field>``
           - ``bab_enabled`` → top-level ``bab_enabled``
         """
-        path = Path(config_path) if config_path else _DEFAULT_YAML
+        path = Path(config_path) if config_path else _BACKEND_YAML
         if not path.exists():
             raise FileNotFoundError(f"Backend config not found: {path}")
 
@@ -729,3 +725,115 @@ def build_vnncomp_bab_config(
     if llm_model:
         cfg.llm_probe_model = llm_model
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# Pipeline configuration
+# ---------------------------------------------------------------------------
+
+
+FuzzingConfig = Any
+
+
+@dataclass
+class ValidationConfig:
+    solvers: list[str]
+    tf_modes: list[str]
+    samples: int
+    per_neuron_topk: int
+    bounds_tolerance: str
+    batch_sizes: Optional[list[Optional[int]]]
+
+
+@dataclass
+class PipelineConfig:
+    fuzzing: FuzzingConfig
+    bab: BaBConfig
+    validation: ValidationConfig
+
+    @classmethod
+    def from_yaml(
+        cls,
+        config_path: Optional[str | Path] = None,
+        **overrides: Any,
+    ) -> "PipelineConfig":
+        path = Path(config_path) if config_path else _PIPELINE_YAML
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Pipeline config not found: {path}\nExpected: act/config/pipeline_config.yaml"
+            )
+
+        FuzzingConfig = import_module("act.pipeline.fuzzing.actfuzzer").FuzzingConfig
+
+        with open(path) as f:
+            yaml_data = yaml.safe_load(f) or {}
+
+        fuzz_overrides = _strip_prefixed_overrides(overrides, "fuzz_")
+        bab_overrides = _strip_prefixed_overrides(overrides, "bab_")
+        val_overrides = _strip_prefixed_overrides(overrides, "val_")
+
+        fuzzing = FuzzingConfig.from_yaml(path, **fuzz_overrides)
+        bab_data = ((yaml_data.get("verification") or {}).get("bab") or {})
+        validation_data = yaml_data.get("validation") or {}
+
+        bab = BaBConfig(**_merge_dataclass_fields(BaBConfig, bab_data, bab_overrides))
+        validation = ValidationConfig(
+            **_merge_dataclass_fields(ValidationConfig, validation_data, val_overrides)
+        )
+        return cls(fuzzing=fuzzing, bab=bab, validation=validation)
+
+
+def _strip_prefixed_overrides(overrides: dict[str, Any], prefix: str) -> dict[str, Any]:
+    return {
+        key[len(prefix) :]: value
+        for key, value in overrides.items()
+        if key.startswith(prefix) and value is not None
+    }
+
+
+def _merge_dataclass_fields(
+    dataclass_type: type,
+    yaml_values: dict[str, Any],
+    overrides: dict[str, Any],
+) -> dict[str, Any]:
+    valid_keys = {field.name for field in fields(dataclass_type)}
+    merged = {key: value for key, value in yaml_values.items() if key in valid_keys}
+    merged.update({key: value for key, value in overrides.items() if key in valid_keys})
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Front-end configuration loading
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class FrontEndConfig:
+    specs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    text_verification: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_yaml(
+        cls,
+        config_path: Optional[Union[str, Path]] = None,
+        **overrides: Any,
+    ) -> "FrontEndConfig":
+        path = Path(config_path) if config_path else _FRONTEND_YAML
+        if not path.exists():
+            raise FileNotFoundError(f"Front-end config not found: {path}")
+
+        with open(path) as f:
+            raw = yaml.safe_load(f) or {}
+
+        specs = deepcopy(raw.get("specs", {}))
+        text_verification = deepcopy(raw.get("text_verification", {}))
+        text_verification.update(
+            {k: v for k, v in overrides.items() if k in text_verification and v is not None}
+        )
+        return cls(specs=specs, text_verification=text_verification)
+
+    def spec_config(self, name: Optional[str]) -> dict[str, Any]:
+        key = name or "default"
+        if key not in self.specs:
+            raise KeyError(f"Unknown front-end spec config: {key}")
+        return deepcopy(self.specs[key])

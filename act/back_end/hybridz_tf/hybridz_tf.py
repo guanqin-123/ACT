@@ -20,7 +20,7 @@
 
 import torch
 from typing import Dict, Optional
-from act.back_end.config import TFConfig
+from act.config.config import TFConfig
 from act.back_end.core import Bounds, Fact, Layer, Net, ConSet
 from act.back_end.transfer_functions import TransferFunction
 from act.back_end.layer_schema import LayerKind

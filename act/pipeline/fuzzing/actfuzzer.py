@@ -116,7 +116,7 @@ class FuzzingConfig:
         Load FuzzingConfig from YAML file with optional overrides.
 
         Args:
-            config_path: Path to config YAML file (default: act/pipeline/config.yaml)
+            config_path: Path to config YAML file (default: act/config/pipeline_config.yaml)
             **overrides: Keyword arguments to override YAML values
 
         Returns:
@@ -134,7 +134,7 @@ class FuzzingConfig:
         """
         # Default config path
         if config_path is None:
-            config_path = Path(get_project_root()) / "act/pipeline/config.yaml"
+            config_path = Path(get_project_root()) / "act/config/pipeline_config.yaml"
         else:
             config_path = Path(config_path)
 
@@ -142,7 +142,7 @@ class FuzzingConfig:
         if not config_path.exists():
             raise FileNotFoundError(
                 f"Configuration file not found: {config_path}\n"
-                f"Expected location: act/pipeline/config.yaml"
+                f"Expected location: act/config/pipeline_config.yaml"
             )
 
         # Load YAML

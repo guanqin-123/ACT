@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Union, cast, get_args, get_origin, get_type_hints
 
-from act.back_end.config import VALID_BERT_METHODS, _VALID_SOLVERS
+from act.config.config import VALID_BERT_METHODS, _VALID_SOLVERS
 from act.back_end.layer_schema import LayerKind
 from act.front_end.specs import OutKind
 from act.util.cli_utils import add_device_args, initialize_from_args
@@ -62,7 +62,7 @@ def _parse_config_value(tp: Any):
 
 def _add_dataclass_config_args(parser: argparse.ArgumentParser) -> None:
     """Expose all BackendConfig dataclass fields without hand-maintained drift."""
-    from act.back_end.config import BackendConfig, BaBConfig, GenerationConfig, HybridZConfig, SolverConfig, TFConfig
+    from act.config.config import BackendConfig, BaBConfig, GenerationConfig, HybridZConfig, SolverConfig, TFConfig
 
     existing_options = {
         option
@@ -128,7 +128,7 @@ def _add_dataclass_config_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _backend_override_keys_from_dataclasses() -> set[str]:
-    from act.back_end.config import BackendConfig, BaBConfig, GenerationConfig, HybridZConfig, SolverConfig, TFConfig
+    from act.config.config import BackendConfig, BaBConfig, GenerationConfig, HybridZConfig, SolverConfig, TFConfig
 
     keys = {
         fld.name
@@ -1248,7 +1248,7 @@ Examples:
         type=str,
         default=None,
         dest="backend_config",
-        help="Path to backend YAML config (default: act/back_end/config.yaml)",
+        help="Path to backend YAML config (default: act/config/backend_config.yaml)",
     )
 
     # Common options
@@ -1281,7 +1281,7 @@ Examples:
     # ── Build BackendConfig ──────────────────────────────────────────────
     # Load YAML as baseline, then overlay env vars and CLI flags on top.
     # Precedence: CLI flag > env var > config.yaml > dataclass default
-    from act.back_end.config import BackendConfig
+    from act.config.config import BackendConfig
 
     backend_cfg = BackendConfig.from_yaml(
         config_path=args.backend_config,
@@ -1424,7 +1424,7 @@ def _run_cli_cascade_smoke() -> int:
     from act.back_end.core import Layer, Net, Bounds, Fact, ConSet
     from act.back_end.layer_schema import LayerKind
     from act.front_end.specs import OutputSpec
-    from act.back_end.config import BackendConfig
+    from act.config.config import BackendConfig
     from act.util.stats import VerifyStatus
 
     passed = 0

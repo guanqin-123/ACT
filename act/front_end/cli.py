@@ -20,7 +20,7 @@ from act.front_end.torchvision_loader import data_model_mapping as tv_mapping
 from act.front_end.torchvision_loader import data_model_loader as tv_loader
 from act.front_end.vnnlib_loader import category_mapping as vnnlib_mapping
 from act.front_end.bert_loader import data_loader as bert_loader
-from act.back_end.config import VALID_BERT_METHODS
+from act.config.config import VALID_BERT_METHODS
 
 
 def _parse_list_arg(value: Optional[str], item_type: type = str) -> Optional[list[Any]]:

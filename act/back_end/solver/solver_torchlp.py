@@ -3,7 +3,7 @@ import math, time
 from typing import Optional
 import torch
 
-from act.back_end.config import SolverConfig
+from act.config.config import SolverConfig
 from act.back_end.solver.solver_base import (
     Solver,
     SolveStatus,

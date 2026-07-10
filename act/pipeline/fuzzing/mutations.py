@@ -60,7 +60,7 @@ consistent exploration across different problem scales.
 
 ### Configuration
 
-Set in `act/pipeline/config.yaml`:
+Set in `act/config/pipeline_config.yaml`:
 ```yaml
 perturb_mode: "adaptive_scalar"  # Options: "adaptive_scalar", "adaptive_perdim", "fixed"
 perturb_scale: 0.1               # Fraction of range per step (default: 0.1 = 10 steps)

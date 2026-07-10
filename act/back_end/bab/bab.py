@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union, ca
 
 import torch
 
-from act.back_end.config import BaBConfig, VALID_SOLVER_TIERS
+from act.config.config import BaBConfig, VALID_SOLVER_TIERS
 from act.back_end.bab.node import (
     BabNode,
     SubproblemBatch,

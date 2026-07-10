@@ -14,7 +14,7 @@ import logging
 import torch
 
 from act.front_end.specs import InputSpec, OutputSpec, InKind, OutKind
-from act.front_end.config import FrontEndConfig
+from act.config.config import FrontEndConfig
 
 
 logger = logging.getLogger(__name__)

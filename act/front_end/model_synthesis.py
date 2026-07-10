@@ -432,7 +432,7 @@ def model_synthesis(
     
     elif creator == 'bert':
         from act.front_end.bert_loader.create_specs import BertSpecCreator
-        from act.front_end.config import FrontEndConfig
+        from act.config.config import FrontEndConfig
 
         print(f"\n📊 Attempting to use BertSpecCreator...")
         front_end_config = FrontEndConfig.from_yaml(**(text_verification_overrides or {}))
