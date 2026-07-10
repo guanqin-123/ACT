@@ -10,7 +10,7 @@ License: AGPLv3+
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Tuple, Any, cast
 import os
 import time
 import json
@@ -116,7 +116,7 @@ class FuzzingConfig:
         Load FuzzingConfig from YAML file with optional overrides.
 
         Args:
-            config_path: Path to config YAML file (default: act/pipeline/fuzzing/config.yaml)
+            config_path: Path to config YAML file (default: act/pipeline/config.yaml)
             **overrides: Keyword arguments to override YAML values
 
         Returns:
@@ -134,7 +134,7 @@ class FuzzingConfig:
         """
         # Default config path
         if config_path is None:
-            config_path = Path(get_project_root()) / "act/pipeline/fuzzing/config.yaml"
+            config_path = Path(get_project_root()) / "act/pipeline/config.yaml"
         else:
             config_path = Path(config_path)
 
@@ -142,7 +142,7 @@ class FuzzingConfig:
         if not config_path.exists():
             raise FileNotFoundError(
                 f"Configuration file not found: {config_path}\n"
-                f"Expected location: act/pipeline/fuzzing/config.yaml"
+                f"Expected location: act/pipeline/config.yaml"
             )
 
         # Load YAML
@@ -277,8 +277,8 @@ class ACTFuzzer:
         self.model = wrapped_model.to(self.device)
 
         # Extract specs for MutationEngine (projection) and PropertyChecker (violation detection).
-        self.input_spec = self._extract_spec(InputSpecLayer)
-        self.output_spec = self._extract_spec(OutputSpecLayer)
+        self.input_spec = cast(Optional[InputSpec], self._extract_spec(InputSpecLayer))
+        self.output_spec = cast(Optional[OutputSpec], self._extract_spec(OutputSpecLayer))
 
         # Batch size is determined by model synthesis (number of VNNLib instances).
         self.batch_size = (
@@ -354,7 +354,7 @@ class ACTFuzzer:
         """Extract spec from wrapper layer by type."""
         for layer in self.model.children():
             if isinstance(layer, layer_type):
-                return layer.spec
+                return cast(InputSpec | OutputSpec, cast(object, layer.spec))
         return None
 
     def fuzz(self) -> FuzzingReport:
@@ -494,10 +494,10 @@ class ACTFuzzer:
                         coverage=coverage,
                         coverage_delta=global_delta / batch_size,
                         energy=float(energies[i]),
-                        seed_id=int(seeds.id[i].item()),
+                        seed_id=str(int(seeds.id[i].item())),
                         input_before=seeds.tensor[i : i + 1],
                         input_after=inputs[i : i + 1],
-                        parent_id=int(seeds.parent_id[i].item()),
+                        parent_id=str(int(seeds.parent_id[i].item())),
                         depth=int(seeds.depth[i].item()),
                         activations=activations,
                         gradients=gradients,

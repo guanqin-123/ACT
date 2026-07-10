@@ -1,0 +1,48 @@
+# ACT Pipeline Configuration
+
+fuzzing:
+  max_iterations: 10000
+  timeout_seconds: 3600.0
+  coverage_strategy: "GlobalCov"
+  activation_threshold: 0.0001
+  mutation_weights:
+    gradient: 0
+    pgd: 0.4
+    activation: 0.3
+    boundary: 0.2
+    random: 0.1
+  perturb_mode: "adaptive_scalar"
+  perturb_scale: 0.1
+  seed_selection_strategy: "energy"
+  save_counterexamples: true
+  output_dir: "fuzzing_results"
+  report_interval: 500
+  verbose: 1
+  trace_level: 0
+  trace_sample_rate: 1
+  trace_storage: "json"
+  trace_output: null
+  stop_on_first_violation: false
+
+verification:
+  bab:
+    solver_tier: "dual_alpha_eta"
+    max_depth: 8
+    max_nodes: 100
+    branching_method: "random"
+    bounding_method: "random"
+    bounding_order: "depth_lb"
+    sa_cooling_rate: 0.99
+    frontier_cap: 0
+    input_split_fanout: 2
+    per_class_alpha: true
+    incremental_start_enabled: true
+    provenance_enabled: false
+
+validation:
+  solvers: ["gurobi", "torchlp"]
+  tf_modes: ["interval"]
+  samples: 10
+  per_neuron_topk: 10
+  bounds_tolerance: "auto"
+  batch_sizes: null

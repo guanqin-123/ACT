@@ -23,6 +23,43 @@ from act.front_end.bert_loader import data_loader as bert_loader
 from act.back_end.config import VALID_BERT_METHODS
 
 
+def _parse_list_arg(value: Optional[str], item_type: type = str) -> Optional[list[Any]]:
+    if value is None:
+        return None
+    parts = value.replace(',', ' ').split()
+    return [item_type(part) for part in parts]
+
+
+def _build_spec_overrides(args: argparse.Namespace) -> dict[str, Any] | None:
+    overrides: dict[str, Any] = {}
+    parsed = {
+        'epsilons': _parse_list_arg(args.epsilons, float),
+        'margins': _parse_list_arg(args.margins, float),
+        'input_kinds': _parse_list_arg(args.input_kinds, str),
+        'output_kinds': _parse_list_arg(args.output_kinds, str),
+    }
+    overrides.update({key: value for key, value in parsed.items() if value is not None})
+    if args.combination_strategy is not None:
+        overrides['combination_strategy'] = args.combination_strategy
+    return overrides or None
+
+
+def _build_text_verification_overrides(args: argparse.Namespace) -> dict[str, Any] | None:
+    keys = (
+        'method',
+        'p',
+        'perturbed_words',
+        'eps',
+        'max_eps',
+        'num_verify_iters',
+        'k',
+        'alpha_opt_steps',
+    )
+    overrides = {key: getattr(args, key) for key in keys if getattr(args, key) is not None}
+    if 'method' in overrides:
+        overrides['method'] = overrides['method'].replace('-', '_')
+    return overrides or None
+
 def print_unified_list(creator: Optional[str] = None):
     """
     Print unified list of all available datasets/categories.
@@ -600,6 +637,40 @@ Examples:
         help="Run inference on synthesized models to validate correctness (defaults to TorchVision, use --creator to specify)"
     )
     parser.add_argument(
+        "--epsilons",
+        type=str,
+        default=None,
+        help="Override spec epsilon values as a comma or space separated list."
+    )
+    parser.add_argument(
+        "--margins",
+        type=str,
+        default=None,
+        help="Override spec margin values as a comma or space separated list."
+    )
+    parser.add_argument(
+        "--combination-strategy",
+        type=str,
+        choices=["full", "minimal", "balanced"],
+        default=None,
+        dest="combination_strategy",
+        help="Override spec input/output combination strategy."
+    )
+    parser.add_argument(
+        "--input-kinds",
+        type=str,
+        default=None,
+        dest="input_kinds",
+        help="Override input spec kinds as a comma or space separated list."
+    )
+    parser.add_argument(
+        "--output-kinds",
+        type=str,
+        default=None,
+        dest="output_kinds",
+        help="Override output spec kinds as a comma or space separated list."
+    )
+    parser.add_argument(
         "--method",
         type=str,
         choices=[name.replace("_", "-") for name in VALID_BERT_METHODS],
@@ -673,7 +744,11 @@ Examples:
             from act.front_end.model_synthesis import model_synthesis
             from act.util.model_inference import model_inference
             
-            wrapped_models = model_synthesis(creator=creator_name)
+            wrapped_models = model_synthesis(
+                creator=creator_name,
+                spec_overrides=_build_spec_overrides(args),
+                text_verification_overrides=_build_text_verification_overrides(args),
+            )
             print(f"\n✓ Successfully synthesized {len(wrapped_models)} models")
             
             # Automatically run inference after synthesis

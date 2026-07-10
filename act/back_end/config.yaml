@@ -40,6 +40,46 @@ backend:
   # Wall-clock budget in seconds for both single execution and BaB verification.
   timeout: 60.0
 
+  # Enable the batched LP cascade tier before BaB.
+  lp_enabled: true
+
+  # Maximum BaB subproblems solved in one batch.
+  bab_max_batch_size: 8
+
+  solver_config:
+    # TorchLP equality penalty weight.
+    rho_eq: 10.0
+    # TorchLP inequality penalty weight.
+    rho_ineq: 10.0
+    # TorchLP Adam iteration cap.
+    max_iter: 2000
+    # Feasibility tolerance for SAT reporting.
+    tol_feas: 0.0001
+    # TorchLP Adam learning rate.
+    lr: 0.01
+    # TorchLP Adam beta1.
+    beta1: 0.9
+    # TorchLP Adam beta2.
+    beta2: 0.999
+    # TorchLP Adam weight decay.
+    weight_decay: 0.0
+    # Variable-count threshold for large-N overrides.
+    large_n_threshold: 20000
+    # Large-N iteration cap.
+    large_n_max_iter: 800
+    # Large-N feasibility tolerance.
+    large_n_tol: 0.001
+    # Stop after this many stagnant feasibility checks.
+    stagnation_patience: 300
+    # Minimum feasibility improvement to reset stagnation.
+    stagnation_tol: 0.00001
+    # Iteration stride between feasibility checks.
+    feas_check_stride: 5
+
+  tf:
+    # HybridZ generator/input dimension fallback limit.
+    hz_max_input_dim: 1024
+
   bab:
     # Enable Branch-and-Bound refinement (true) or single execution (false).
     enabled: true
@@ -114,6 +154,120 @@ backend:
 
     # Track logical BaB node ids and parent ids in TopKBounding.
     provenance_enabled: false
+
+    # Refine only eta in child dual subproblems.
+    eta_only_children: false
+
+    # Number of root pre-split levels before the main loop.
+    presplit_levels: 0
+
+    # Root intermediate-bound refinement mode.
+    intermediate_refine: "none"
+
+    # Width ratio threshold for auto intermediate refinement.
+    intermediate_refine_ratio: 10.0
+
+    # Reuse root intermediate bounds in descendant subproblems.
+    reuse_root_bounds: false
+
+    # Per-subproblem intermediate refinement mode.
+    per_subproblem_refine: "none"
+
+    # Adam iterations for per-subproblem refinement rows.
+    per_subproblem_refine_iters: 0
+
+    # Row cap for per-subproblem refinement.
+    per_subproblem_refine_rows_cap: 64
+
+    # Fraction of available GPU memory targeted by auto batch sizing.
+    auto_batch_safety: 0.55
+
+    # Hard cap for auto-sized BaB batches.
+    auto_batch_cap: 2048
+
+    # Floor for auto-sized BaB batches.
+    auto_batch_floor: 8
+
+    # Number of simultaneous neuron split levels.
+    multi_split_levels: 1
+
+    # Enable the LLM-probe controller.
+    llm_probe_enabled: false
+
+    # LLM-probe provider backend.
+    llm_probe_backend: "mock"
+
+    # LLM-probe model name.
+    llm_probe_model: ""
+
+    # LLM-probe API base URL override.
+    llm_probe_base_url: ""
+
+    # Environment variable containing the LLM API key.
+    llm_probe_api_key_env: ""
+
+    # LLM-probe sampling temperature.
+    llm_probe_temperature: 0.0
+
+    # LLM-probe per-request timeout in seconds.
+    llm_probe_timeout: 30.0
+
+    # Maximum candidates sent per LLM-probe domain.
+    llm_probe_max_candidates: 8
+
+    # Maximum candidates sent across all LLM-probe domains.
+    llm_probe_max_candidates_total: 1024
+
+    # Top-K neuron candidates retained before probing.
+    llm_probe_neuron_topk: 512
+
+    # LLM-probe consult cadence in waves.
+    llm_probe_cadence: 1
+
+    # Number of prior wave outcomes included in prompts.
+    llm_probe_history: 8
+
+    # Consecutive probe failures before disabling the controller.
+    llm_probe_max_failures: 3
+
+    # Decision types the LLM may steer.
+    llm_probe_decisions: "split,frontier,refine"
+
+    # Log LLM-probe decisions.
+    llm_probe_log: false
+
+    # Print verbose BaB diagnostics.
+    verbose: false
+
+    # Public BERT verification method selector.
+    method: null
+
+    # Enable backward attention form for BERT methods.
+    baf: true
+
+    # BERT alpha handling mode.
+    alpha_mode: "fixed"
+
+    # Norm p for perturbation semantics.
+    p: 2.0
+
+    # Number of perturbed words for text verification.
+    perturbed_words: 1
+
+    # Initial epsilon for text verification.
+    eps: 0.00001
+
+    # Maximum epsilon for text verification.
+    max_eps: 0.01
+
+    # Number of verification iterations for text methods.
+    num_verify_iters: 5
+
+    # Top-k value for text verification.
+    k: 1
+
+    # Alpha optimization steps for text methods.
+    alpha_opt_steps: 1000
 
   # ── Network Generation (net_factory) ────────────────────────────────────
   # Controls how many networks to generate, where, and TF filtering.

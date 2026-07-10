@@ -20,6 +20,7 @@
 
 import torch
 from typing import Dict, Optional
+from act.back_end.config import TFConfig
 from act.back_end.core import Bounds, Fact, Layer, Net, ConSet
 from act.back_end.transfer_functions import TransferFunction
 from act.back_end.layer_schema import LayerKind
@@ -37,12 +38,14 @@ import act.back_end.interval_tf.tf_cnn as interval_cnn
 
 
 class HybridzTF(TransferFunction):
-    def __init__(self):
+    def __init__(self, config: Optional[TFConfig] = None):
+        cfg = config or TFConfig()
         self._hz_cache: Dict[int, HZono] = {}
         self._cache_net_id: Optional[int] = None
         self._tanh_K: int = 2
         self._sigmoid_K: int = 2
         self._var_id_stride: int = 1
+        setattr(self, "_HZ_MAX_INPUT_DIM", cfg.hz_max_input_dim)
 
     @staticmethod
     def _net_var_id_stride(net: Net) -> int:

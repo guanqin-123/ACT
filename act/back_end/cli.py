@@ -62,7 +62,7 @@ def _parse_config_value(tp: Any):
 
 def _add_dataclass_config_args(parser: argparse.ArgumentParser) -> None:
     """Expose all BackendConfig dataclass fields without hand-maintained drift."""
-    from act.back_end.config import BackendConfig, BaBConfig, GenerationConfig, HybridZConfig
+    from act.back_end.config import BackendConfig, BaBConfig, GenerationConfig, HybridZConfig, SolverConfig, TFConfig
 
     existing_options = {
         option
@@ -118,24 +118,28 @@ def _add_dataclass_config_args(parser: argparse.ArgumentParser) -> None:
         "Backend Config Overrides (generated)",
         "",
         "",
-        {"bab", "generation", "hybridz"},
+        {"bab", "generation", "hybridz", "solver_config", "tf"},
     )
     add_group(BaBConfig, "BaB Config Overrides (generated)", "bab-", "bab_", set())
     add_group(GenerationConfig, "Generation Config Overrides (generated)", "gen-", "gen_", set())
     add_group(HybridZConfig, "HybridZ Config Overrides (generated)", "hz-", "hybridz_", set())
+    add_group(SolverConfig, "Solver Config Overrides (generated)", "solver-", "solver_", set())
+    add_group(TFConfig, "TF Config Overrides (generated)", "tf-", "tf_", set())
 
 
 def _backend_override_keys_from_dataclasses() -> set[str]:
-    from act.back_end.config import BackendConfig, BaBConfig, GenerationConfig, HybridZConfig
+    from act.back_end.config import BackendConfig, BaBConfig, GenerationConfig, HybridZConfig, SolverConfig, TFConfig
 
     keys = {
         fld.name
         for fld in fields(BackendConfig)
-        if fld.name not in {"bab", "generation", "hybridz"}
+        if fld.name not in {"bab", "generation", "hybridz", "solver_config", "tf"}
     }
     keys.update(f"bab_{fld.name}" for fld in fields(BaBConfig))
     keys.update(f"gen_{fld.name}" for fld in fields(GenerationConfig))
     keys.update(f"hybridz_{fld.name}" for fld in fields(HybridZConfig))
+    keys.update(f"solver_{fld.name}" for fld in fields(SolverConfig))
+    keys.update(f"tf_{fld.name}" for fld in fields(TFConfig))
     return keys
 
 
@@ -151,7 +155,7 @@ class _SkipUnsupported(NamedTuple):
     kinds: tuple[str, ...]
 
 
-def _make_solver(solver_name: str):
+def _make_solver(solver_name: str, solver_config=None):
     """LP-cascade solver factory (gurobi / torchlp / auto). Dual is routed
     separately via ``is_dual_solver_active`` since it implements
     ``compute_certified_bound``, not ``solve_batch``.
@@ -163,14 +167,14 @@ def _make_solver(solver_name: str):
 
         return GurobiSolver()
     if solver_name == "torchlp":
-        return TorchLPSolver()
+        return TorchLPSolver(config=solver_config)
     # "auto": try Gurobi, fall back to TorchLP
     try:
         from act.back_end.solver.solver_gurobi import GurobiSolver
 
         return GurobiSolver()
     except Exception:
-        return TorchLPSolver()
+        return TorchLPSolver(config=solver_config)
 
 
 def _verify_one_net(
@@ -256,7 +260,7 @@ def _verify_one_net(
             try:
                 lp_results = verify_lp_batched(
                     net,
-                    solver_factory=lambda: _make_solver(backend_cfg.solver),
+                    solver_factory=lambda: _make_solver(backend_cfg.solver, backend_cfg.solver_config),
                     timelimit=backend_cfg.timeout,
                 )
                 results = [
@@ -301,7 +305,7 @@ def _verify_one_net(
                 results = [
                     _vbb(
                         slice_net_to_sample(net, i),
-                        solver_factory=lambda: _make_solver(backend_cfg.solver),
+                        solver_factory=lambda: _make_solver(backend_cfg.solver, backend_cfg.solver_config),
                         config=bab_cfg,
                         max_batch_size=backend_cfg.bab_max_batch_size,
                         time_budget_s=backend_cfg.timeout,
@@ -1294,7 +1298,7 @@ Examples:
     if args.tf_mode is not None:
         from act.back_end.analyze import initialize_tf_mode
 
-        initialize_tf_mode(args.tf_mode)
+        initialize_tf_mode(args.tf_mode, backend_cfg.tf)
 
     # Set the solver-mode global so verify_once / _verify_one_net can dispatch
     # dual ↔ LP-cascade without consulting the TF mode (refactor decoupled
@@ -1492,7 +1496,7 @@ def _run_cli_cascade_smoke() -> int:
         if results[0].status == VerifyStatus.UNKNOWN and cfg.lp_enabled:
             lp_results = verify_lp_batched(
                 net,
-                solver_factory=lambda: _make_solver(cfg.solver),
+                solver_factory=lambda: _make_solver(cfg.solver, cfg.solver_config),
                 timelimit=cfg.timeout,
             )
             assert len(lp_results) == 1

@@ -75,7 +75,7 @@ class TransferFunction(ABC):
         return None
 
 # Global transfer function management
-_current_tf: TransferFunction = None
+_current_tf: Optional[TransferFunction] = None
 
 
 def set_transfer_function(tf_impl: TransferFunction) -> None:
@@ -106,7 +106,7 @@ def ensure_active_tf(default_mode: str = "interval") -> TransferFunction:
         return get_transfer_function()
 
 
-def set_transfer_function_mode(mode: str = "interval") -> None:
+def set_transfer_function_mode(mode: str = "interval", tf_config: Any = None) -> None:
     """Set transfer function implementation by mode name.
 
     Args:
@@ -120,7 +120,7 @@ def set_transfer_function_mode(mode: str = "interval") -> None:
         set_transfer_function(IntervalTF())
     elif mode == "hybridz":
         from act.back_end.hybridz_tf import HybridzTF
-        set_transfer_function(HybridzTF())
+        set_transfer_function(HybridzTF(config=tf_config))
     else:
         raise ValueError(
             f"Unknown transfer function mode: {mode!r}. Use 'interval' or "
@@ -188,10 +188,12 @@ def dispatch_tf(L: Layer, before: Dict[int, Fact], after: Dict[int, Fact], net: 
             if L.kind == 'DENSE' and 'W' in L.params:
                 W = L.params['W']
                 b = L.params['b']
-                f.write(f"Parameters: W.shape={W.shape}, b.shape={b.shape}\n")
+                if isinstance(W, torch.Tensor) and isinstance(b, torch.Tensor):
+                    f.write(f"Parameters: W.shape={W.shape}, b.shape={b.shape}\n")
             elif L.kind == 'CONV2D' and 'weight' in L.params:
                 weight = L.params['weight']
-                f.write(f"Parameters: weight.shape={weight.shape}\n")
+                if isinstance(weight, torch.Tensor):
+                    f.write(f"Parameters: weight.shape={weight.shape}\n")
             
             # Constraint info
             cons = result.cons

@@ -1,3 +1,4 @@
+# pyright: reportCallIssue=false, reportArgumentType=false, reportOptionalMemberAccess=false, reportMissingTypeArgument=false, reportIndexIssue=false, reportAttributeAccessIssue=false, reportConstantRedefinition=false
 #===- act/front_end/model_synthesis.py - Model Synthesis Framework -----====#
 # ACT: Abstract Constraint Transformer
 # Copyright (C) 2025– ACT Team
@@ -27,7 +28,7 @@ import copy
 import torch
 import torch.fx as fx
 import torch.nn as nn
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 
 # Import ACT components
 from act.front_end.specs import InputSpec, OutputSpec, InKind, OutKind
@@ -369,7 +370,11 @@ def synthesize_models_from_specs(
 # -----------------------------------------------------------------------------
 # 4) Model synthesis main function
 # -----------------------------------------------------------------------------
-def model_synthesis(creator: str = 'torchvision') -> Dict[Tuple[str, str, str, str], nn.Module]:
+def model_synthesis(
+    creator: str = 'torchvision',
+    spec_overrides: Optional[Dict[str, Any]] = None,
+    text_verification_overrides: Optional[Dict[str, Any]] = None,
+) -> Dict[Tuple[str, str, str, str], nn.Module]:
     """
     Main model synthesis function using new spec creators.
     
@@ -377,7 +382,9 @@ def model_synthesis(creator: str = 'torchvision') -> Dict[Tuple[str, str, str, s
     or VNNLibSpecCreator, then synthesizes wrapped models directly.
     
     Args:
-        creator: Creator to use ('torchvision' or 'vnnlib'). Defaults to 'torchvision'.
+        creator: Creator to use ('torchvision', 'vnnlib', or 'bert'). Defaults to 'torchvision'.
+        spec_overrides: Runtime spec configuration overrides.
+        text_verification_overrides: Runtime text verification overrides for BERT.
     
     Returns:
         wrapped_models: Dict[(dataset, model, in_kind, out_kind), VerifiableModel]
@@ -395,7 +402,10 @@ def model_synthesis(creator: str = 'torchvision') -> Dict[Tuple[str, str, str, s
         from act.front_end.vnnlib_loader.create_specs import VNNLibSpecCreator
         
         print(f"\n📊 Attempting to use VNNLibSpecCreator...")
-        spec_creator = VNNLibSpecCreator(config_name="vnnlib_default")
+        spec_creator = VNNLibSpecCreator(
+            config_name="vnnlib_default",
+            config_dict=spec_overrides,
+        )
         
         # Create specs for all downloaded VNNLIB instances
         # Use max_instances=3 to limit for testing (185 total instances available)
@@ -409,7 +419,10 @@ def model_synthesis(creator: str = 'torchvision') -> Dict[Tuple[str, str, str, s
         from act.front_end.torchvision_loader.create_specs import TorchVisionSpecCreator
         
         print(f"\n📊 Attempting to use TorchVisionSpecCreator...")
-        spec_creator = TorchVisionSpecCreator(config_name="torchvision_classification")
+        spec_creator = TorchVisionSpecCreator(
+            config_name="torchvision_classification",
+            config_dict=spec_overrides,
+        )
         
         # Create specs for all downloaded dataset-model pairs
         spec_results = spec_creator.create_specs_for_data_model_pairs(
@@ -417,8 +430,28 @@ def model_synthesis(creator: str = 'torchvision') -> Dict[Tuple[str, str, str, s
             validate_shapes=True
         )
     
+    elif creator == 'bert':
+        from act.front_end.bert_loader.create_specs import BertSpecCreator
+        from act.front_end.config import FrontEndConfig
+
+        print(f"\n📊 Attempting to use BertSpecCreator...")
+        front_end_config = FrontEndConfig.from_yaml(**(text_verification_overrides or {}))
+        text_config = front_end_config.text_verification
+        creator_overrides: Dict[str, Any] = {}
+        if spec_overrides:
+            creator_overrides.update(spec_overrides)
+        creator_overrides.update(text_config)
+        spec_creator = BertSpecCreator(config_dict=creator_overrides)
+        spec_results = spec_creator.create_specs_for_data_model_pairs(
+            num_samples=1,
+            validate_shapes=True,
+            epsilon=float(text_config['eps']),
+            p_norm=float(text_config['p']),
+            perturbed_words=int(text_config['perturbed_words']),
+        )
+
     else:
-        raise ValueError(f"Unknown creator: {creator}. Use 'torchvision' or 'vnnlib'.")
+        raise ValueError(f"Unknown creator: {creator}. Use 'torchvision', 'vnnlib', or 'bert'.")
     
     # Validate results
     if not spec_results:

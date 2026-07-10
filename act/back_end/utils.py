@@ -19,8 +19,7 @@ from act.util.options import PerformanceOptions
 
 EPS = 1e-12
 
-# Single-source default LRELU/LeakyReLU negative slope, shared by dual and
-# hybridz transfer functions when a layer omits the alpha/negative_slope param.
+# Default LRELU/LeakyReLU negative slope when a layer omits negative_slope.
 LRELU_ALPHA_DEFAULT = 0.01
 
 def split_weight(W):
@@ -122,7 +121,7 @@ def scale_interval(cx_lo, cx_hi, inv_lo, inv_hi):
     return four_corner_envelope(cx_lo, cx_hi, inv_lo, inv_hi)
 
 
-def validate_constraints(globalC, after: Dict, net) -> bool:
+def validate_constraints(globalC, after: Dict[int, Any], net) -> bool:
     """Validate constraint set for common errors (targeted validation).
     
     This function performs targeted validation by:

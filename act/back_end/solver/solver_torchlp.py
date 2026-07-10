@@ -3,6 +3,7 @@ import math, time
 from typing import Optional
 import torch
 
+from act.back_end.config import SolverConfig
 from act.back_end.solver.solver_base import (
     Solver,
     SolveStatus,
@@ -19,25 +20,26 @@ class TorchLPSolver(Solver):
     - Supports GPU via device hint in begin(...).
     - LP-only: no integrality constraints (no binary vars, no SOS2).
     """
-    def __init__(self):
+    def __init__(self, config: Optional[SolverConfig] = None):
+        cfg = config or SolverConfig()
         self._device = get_default_device()
         self._dtype = get_default_dtype()
         # parameters
-        self.rho_eq = 10.0
-        self.rho_ineq = 10.0
-        self.max_iter = 2000  # lighter default; see large-n overrides below
-        self.tol_feas = 1e-4
-        self.lr = 1e-2
-        self.beta1 = 0.9
-        self.beta2 = 0.999
-        self.weight_decay = 0.0
-        self._large_n_threshold = 20000
-        self._large_n_max_iter = 800
-        self._large_n_tol = 1e-3
+        self.rho_eq = cfg.rho_eq
+        self.rho_ineq = cfg.rho_ineq
+        self.max_iter = cfg.max_iter  # lighter default; see large-n overrides below
+        self.tol_feas = cfg.tol_feas
+        self.lr = cfg.lr
+        self.beta1 = cfg.beta1
+        self.beta2 = cfg.beta2
+        self.weight_decay = cfg.weight_decay
+        self._large_n_threshold = cfg.large_n_threshold
+        self._large_n_max_iter = cfg.large_n_max_iter
+        self._large_n_tol = cfg.large_n_tol
         self._log_every = 200
-        self._stagnation_patience = 300
-        self._stagnation_tol = 1e-5
-        self._feas_check_stride = 5
+        self._stagnation_patience = cfg.stagnation_patience
+        self._stagnation_tol = cfg.stagnation_tol
+        self._feas_check_stride = cfg.feas_check_stride
 
     def capabilities(self) -> SolverCaps:
         return SolverCaps(supports_gpu=True)

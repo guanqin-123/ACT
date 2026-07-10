@@ -33,6 +33,7 @@ from act.front_end.torchvision_loader import data_model_mapping as tv_mapping
 from act.front_end.model_synthesis import synthesize_models_from_specs
 from act.pipeline.fuzzing.actfuzzer import ACTFuzzer, FuzzingConfig
 from act.pipeline.verification.per_neuron_bounds import PerNeuronCheckConfig
+from act.pipeline.config import PipelineConfig
 
 
 _FUZZ_MUTATION_WEIGHT_KEYS = frozenset(
@@ -167,6 +168,77 @@ def _collect_fuzzing_overrides(args: Any) -> dict[str, Any]:
             value = float(str(value))
         overrides[key] = value
     return overrides
+
+
+def _collect_pipeline_config_overrides(args: Any) -> dict[str, Any]:
+    overrides: dict[str, Any] = {}
+    for key, _flag, attr, _cast_fn in _FUZZ_OVERRIDE_SPEC:
+        value = getattr(args, attr, None)
+        if value is None:
+            continue
+        if key == "save_counterexamples":
+            value = False
+        elif key == "mutation_weights":
+            value = _parse_mutation_weights(value)
+        overrides[f"fuzz_{key}"] = value
+
+    bab_attr_map = {
+        "solver_tier": "bab_solver_tier",
+        "max_depth": "bab_max_depth",
+        "max_nodes": "bab_max_nodes",
+        "branching_method": "bab_branching_method",
+        "bounding_method": "bab_bounding_method",
+        "bounding_order": "bab_bounding_order",
+        "sa_cooling_rate": "bab_sa_cooling_rate",
+        "frontier_cap": "bab_frontier_cap",
+        "input_split_fanout": "bab_input_split_fanout",
+        "provenance_enabled": "bab_provenance",
+    }
+    for key, attr in bab_attr_map.items():
+        value = getattr(args, attr, None)
+        if value is not None:
+            overrides[f"bab_{key}"] = value
+    if getattr(args, "bab_per_class_alpha", None) is not None:
+        overrides["bab_per_class_alpha"] = str(args.bab_per_class_alpha).lower() == "true"
+    if getattr(args, "bab_no_incremental_start", None) is not None:
+        overrides["bab_incremental_start_enabled"] = not args.bab_no_incremental_start
+
+    val_attr_map = {
+        "solvers": "solvers",
+        "tf_modes": "tf_modes",
+        "samples": "samples",
+        "per_neuron_topk": "per_neuron_topk",
+        "bounds_tolerance": "bounds_tolerance",
+        "batch_sizes": "batch_sizes",
+    }
+    for key, attr in val_attr_map.items():
+        value = getattr(args, attr, None)
+        if value is not None:
+            overrides[f"val_{key}"] = value
+    return overrides
+
+
+def _apply_pipeline_config_defaults(args: Any) -> PipelineConfig:
+    config = PipelineConfig.from_yaml(**_collect_pipeline_config_overrides(args))
+    args.bab_solver_tier = config.bab.solver_tier
+    args.bab_max_depth = config.bab.max_depth
+    args.bab_max_nodes = config.bab.max_nodes
+    args.bab_branching_method = config.bab.branching_method
+    args.bab_bounding_method = config.bab.bounding_method
+    args.bab_bounding_order = config.bab.bounding_order
+    args.bab_sa_cooling_rate = config.bab.sa_cooling_rate
+    args.bab_frontier_cap = config.bab.frontier_cap
+    args.bab_input_split_fanout = config.bab.input_split_fanout
+    args.bab_per_class_alpha = "true" if config.bab.per_class_alpha else "false"
+    args.bab_no_incremental_start = not config.bab.incremental_start_enabled
+    args.bab_provenance = config.bab.provenance_enabled
+    args.solvers = config.validation.solvers
+    args.tf_modes = config.validation.tf_modes
+    args.samples = config.validation.samples
+    args.per_neuron_topk = config.validation.per_neuron_topk
+    args.bounds_tolerance = config.validation.bounds_tolerance
+    args.batch_sizes = config.validation.batch_sizes
+    return config
 
 
 
@@ -442,7 +514,8 @@ def cmd_fuzz(args):
     # Load configuration from YAML with CLI overrides. Unset CLI options remain
     # None sentinels and therefore do not clobber config.yaml values.
     overrides = _collect_fuzzing_overrides(args)
-    config = FuzzingConfig.from_yaml(**overrides)
+    pipeline_overrides = {f"fuzz_{key}": value for key, value in overrides.items()}
+    config = PipelineConfig.from_yaml(**pipeline_overrides).fuzzing
 
     # Create spec creator and load data-model pairs
     print(f"{'=' * 80}")
@@ -878,29 +951,13 @@ def _run_bab_on_net(net, args, bab_first_sample_only: bool = False):
                 returning a list of status strings.
     """
     from act.back_end.bab.bab import verify_bab_batched
-    from act.back_end.config import BaBConfig
     from act.back_end.solver.solver_torchlp import TorchLPSolver
     from act.back_end.verifier import (
         gather_input_spec_layers,
         seed_from_input_specs,
     )
 
-    config = BaBConfig(
-        solver_tier=args.bab_solver_tier,
-        max_depth=args.bab_max_depth,
-        max_nodes=args.bab_max_nodes,
-        branching_method=getattr(args, "bab_branching_method", "random"),
-        bounding_method=getattr(args, "bab_bounding_method", "random"),
-        bounding_order=getattr(args, "bab_bounding_order", "depth_lb"),
-        sa_cooling_rate=getattr(args, "bab_sa_cooling_rate", 0.99),
-        frontier_cap=getattr(args, "bab_frontier_cap", 0),
-        input_split_fanout=getattr(args, "bab_input_split_fanout", 2),
-        per_class_alpha=(
-            str(getattr(args, "bab_per_class_alpha", "true")).lower() == "true"
-        ),
-        incremental_start_enabled=not getattr(args, "bab_no_incremental_start", False),
-        provenance_enabled=getattr(args, "bab_provenance", False),
-    )
+    config = PipelineConfig.from_yaml(**_collect_pipeline_config_overrides(args)).bab
     budget = float(getattr(args, "timeout", 60.0) or 60.0)
 
     spec_layers = gather_input_spec_layers(net)
@@ -1360,10 +1417,10 @@ Examples:
     bab_group.add_argument(
         "--bab-solver-tier",
         type=str,
-        default="dual_alpha_eta",
+        default=None,
         choices=list(VALID_SOLVER_TIERS),
         help=(
-            "BaB solver tier when --bab is set (default: dual_alpha_eta). "
+            "BaB solver tier when --bab is set (default: from config.yaml). "
             "'lp' uses the existing LP/MILP backend; 'dual' uses DualSolver "
             "single-pass; 'dual_alpha' adds Lagrange-relaxed lower-slope "
             "optimization; 'dual_alpha_eta' adds joint slope + split-constraint "
@@ -1373,75 +1430,77 @@ Examples:
     bab_group.add_argument(
         "--bab-max-depth",
         type=int,
-        default=8,
-        help="Maximum BaB tree depth (default: 8)",
+        default=None,
+        help="Maximum BaB tree depth (default: from config.yaml)",
     )
     bab_group.add_argument(
         "--bab-max-nodes",
         type=int,
-        default=100,
-        help="Maximum BaB nodes to expand (default: 100)",
+        default=None,
+        help="Maximum BaB nodes to expand (default: from config.yaml)",
     )
     bab_group.add_argument(
         "--bab-branching-method",
         type=str,
-        default="random",
+        default=None,
         choices=["random", "babsr", "fsb", "gain", "width"],
-        help="BaB branching strategy when --bab is set (default: random)",
+        help="BaB branching strategy when --bab is set (default: from config.yaml)",
     )
     bab_group.add_argument(
         "--bab-bounding-method",
         type=str,
-        default="random",
+        default=None,
         choices=["random", "topk"],
         help=(
             "Pool selection when subproblems exceed the batch size: 'random' or "
-            "'topk' (keep the top-k by depth + lower-bound). Default: random."
+            "'topk' (keep the top-k by depth + lower-bound). Default: from config.yaml."
         ),
     )
     bab_group.add_argument(
         "--bab-bounding-order",
         type=str,
-        default="depth_lb",
+        default=None,
         choices=["depth_lb", "greedy", "sa"],
-        help="TopKBounding order policy (default: depth_lb)",
+        help="TopKBounding order policy (default: from config.yaml)",
     )
     bab_group.add_argument(
         "--bab-sa-cooling-rate",
         type=float,
-        default=0.99,
-        help="Cooling rate for --bab-bounding-order sa (default: 0.99)",
+        default=None,
+        help="Cooling rate for --bab-bounding-order sa (default: from config.yaml)",
     )
     bab_group.add_argument(
         "--bab-per-class-alpha",
         type=str,
-        default="true",
+        default=None,
         choices=["true", "false"],
         help=(
             "Per-spec α tensor (True; tighter bounds, M× memory) vs shared α "
-            "across specs (False; looser, 1× memory). Default: true."
+            "across specs (False; looser, 1× memory). Default: from config.yaml."
         ),
     )
     bab_group.add_argument(
         "--bab-no-incremental-start",
         action="store_true",
+        default=None,
         help="Disable parent→child α/η incremental-start propagation (debugging / ablation).",
     )
     bab_group.add_argument(
         "--bab-frontier-cap",
         type=int,
-        default=0,
-        help="Maximum pending BaB frontier leaves to retain; 0 disables eviction (default: 0)",
+        default=None,
+        help="Maximum pending BaB frontier leaves to retain; 0 disables eviction (default: from config.yaml)",
     )
     bab_group.add_argument(
         "--bab-input-split-fanout",
         type=int,
-        default=2,
-        help="Uniform fanout for input splits; 2 preserves binary splitting (default: 2)",
+        default=None,
+        help="Uniform fanout for input splits; 2 preserves binary splitting (default: from config.yaml)",
     )
     bab_group.add_argument(
         "--bab-provenance",
         action="store_true",
+        default=None,
         help="Enable node_id/parent_id provenance sidecar (requires --bab-bounding-method topk).",
     )
 
@@ -1530,26 +1589,26 @@ Examples:
     validation_group.add_argument(
         "--solvers",
         nargs="+",
-        default=["gurobi", "torchlp"],
-        help="Solvers for Level 1 validation (default: gurobi torchlp)",
+        default=None,
+        help="Solvers for Level 1 validation (default: from config.yaml)",
     )
     validation_group.add_argument(
         "--tf-modes",
         nargs="+",
-        default=["interval"],
-        help="Transfer function modes for Level 2 bounds validation: interval, hybridz, dual (default: interval)",
+        default=None,
+        help="Transfer function modes for Level 2 bounds validation: interval, hybridz, dual (default: from config.yaml)",
     )
     validation_group.add_argument(
         "--input-samples",
         type=int,
-        default=10,
+        default=None,
         dest="samples",
-        help="Number of input samples for Level 2 bounds validation (default: 10)",
+        help="Number of input samples for Level 2 bounds validation (default: from config.yaml)",
     )
     validation_group.add_argument(
         "--per-neuron-topk",
         type=int,
-        default=10,
+        default=None,
         metavar="K",
         help="Number of worst per-neuron violations to report (default: 10). "
         "The bounds check itself is zero-tolerance by default — any deviation "
@@ -1558,7 +1617,7 @@ Examples:
     validation_group.add_argument(
         "--bounds-tolerance",
         type=str,
-        default="auto",
+        default=None,
         metavar="ABS[,REL]|auto",
         help="FP-noise floor for the per-neuron bounds check: violation iff "
         "gap > ABS + REL*max(|lb|,|ub|). Default 'auto' = 100 ulp of --dtype "
@@ -1598,6 +1657,8 @@ Examples:
     _add_fuzz_config_args(parser)
 
     args = parser.parse_args()
+
+    _apply_pipeline_config_defaults(args)
 
     # Initialize device manager from CLI arguments
     initialize_from_args(args)

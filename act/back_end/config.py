@@ -335,6 +335,29 @@ class HybridZConfig:
     timeout: Optional[float] = None
     engine: str = "dense_hz_objbound"
 
+
+@dataclass
+class SolverConfig:
+    rho_eq: float = 10.0
+    rho_ineq: float = 10.0
+    max_iter: int = 2000
+    tol_feas: float = 1e-4
+    lr: float = 1e-2
+    beta1: float = 0.9
+    beta2: float = 0.999
+    weight_decay: float = 0.0
+    large_n_threshold: int = 20000
+    large_n_max_iter: int = 800
+    large_n_tol: float = 1e-3
+    stagnation_patience: int = 300
+    stagnation_tol: float = 1e-5
+    feas_check_stride: int = 5
+
+
+@dataclass
+class TFConfig:
+    hz_max_input_dim: int = 1024
+
 # ---------------------------------------------------------------------------
 # BackendConfig — unified back-end configuration
 # ---------------------------------------------------------------------------
@@ -383,6 +406,8 @@ class BackendConfig:
 
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     hybridz: HybridZConfig = field(default_factory=HybridZConfig)
+    solver_config: SolverConfig = field(default_factory=SolverConfig)
+    tf: TFConfig = field(default_factory=TFConfig)
 
     method: Optional[str] = None
     p: float = 2.0
@@ -467,6 +492,8 @@ class BackendConfig:
           - ``bab_<field>`` → ``BaBConfig.<field>``
           - ``gen_<field>`` → ``GenerationConfig.<field>``
           - ``hybridz_<field>`` → ``HybridZConfig.<field>``
+          - ``solver_<field>`` → ``SolverConfig.<field>``
+          - ``tf_<field>`` → ``TFConfig.<field>``
           - ``bab_enabled`` → top-level ``bab_enabled``
         """
         path = Path(config_path) if config_path else _DEFAULT_YAML
@@ -480,6 +507,10 @@ class BackendConfig:
         bab_raw: dict[str, Any] = backend_raw.pop("bab", {})
         gen_raw: dict[str, Any] = backend_raw.pop("generation", {})
         hz_raw: dict[str, Any] = backend_raw.pop("hybridz", {})
+        solver_raw: dict[str, Any] = backend_raw.pop("solver_config", {})
+        if isinstance(backend_raw.get("solver"), dict):
+            solver_raw = backend_raw.pop("solver")
+        tf_raw: dict[str, Any] = backend_raw.pop("tf", {})
 
         # Extract "enabled" from bab section → top-level bab_enabled
         bab_enabled = bab_raw.pop("enabled", None)
@@ -488,9 +519,13 @@ class BackendConfig:
         bab_fields = {fld.name for fld in fields(BaBConfig)}
         gen_fields = {fld.name for fld in fields(GenerationConfig)}
         hz_fields = {fld.name for fld in fields(HybridZConfig)}
+        solver_fields = {fld.name for fld in fields(SolverConfig)}
+        tf_fields = {fld.name for fld in fields(TFConfig)}
         bab_overrides: dict[str, Any] = {}
         gen_overrides: dict[str, Any] = {}
         hz_overrides: dict[str, Any] = {}
+        solver_overrides: dict[str, Any] = {}
+        tf_overrides: dict[str, Any] = {}
         top_overrides: dict[str, Any] = {}
         for k, v in overrides.items():
             if k.startswith("bab_") and k[4:] in bab_fields:
@@ -499,6 +534,10 @@ class BackendConfig:
                 gen_overrides[k[4:]] = v
             elif k.startswith("hybridz_") and k[8:] in hz_fields:
                 hz_overrides[k[8:]] = v
+            elif k.startswith("solver_") and k[7:] in solver_fields:
+                solver_overrides[k[7:]] = v
+            elif k.startswith("tf_") and k[3:] in tf_fields:
+                tf_overrides[k[3:]] = v
             else:
                 top_overrides[k] = v
 
@@ -516,8 +555,22 @@ class BackendConfig:
         hz_merged.update(hz_overrides)
         hz_config = HybridZConfig(**hz_merged)
 
+        solver_merged = {k: v for k, v in solver_raw.items() if k in solver_fields}
+        solver_merged.update(solver_overrides)
+        solver_config = SolverConfig(**solver_merged)
+
+        tf_merged = {k: v for k, v in tf_raw.items() if k in tf_fields}
+        tf_merged.update(tf_overrides)
+        tf_config = TFConfig(**tf_merged)
+
         # Build top-level config
-        top_fields = {fld.name for fld in fields(cls)} - {"bab", "generation", "hybridz"}
+        top_fields = {fld.name for fld in fields(cls)} - {
+            "bab",
+            "generation",
+            "hybridz",
+            "solver_config",
+            "tf",
+        }
         top_merged: dict[str, Any] = {}
         for k, v in backend_raw.items():
             if k in top_fields:
@@ -528,7 +581,14 @@ class BackendConfig:
 
         top_merged.update({k: v for k, v in top_overrides.items() if k in top_fields})
 
-        return cls(bab=bab_config, generation=gen_config, hybridz=hz_config, **top_merged)
+        return cls(
+            bab=bab_config,
+            generation=gen_config,
+            hybridz=hz_config,
+            solver_config=solver_config,
+            tf=tf_config,
+            **top_merged,
+        )
 
     def to_yaml(self, path: Union[str, Path]) -> Path:
         path = Path(path)
@@ -538,12 +598,23 @@ class BackendConfig:
         bab_d = d.pop("bab")
         gen_d = d.pop("generation")
         hz_d = d.pop("hybridz")
+        solver_d = d.pop("solver_config")
+        tf_d = d.pop("tf")
         bab_enabled = d.pop("bab_enabled")
         bab_d["enabled"] = bab_enabled
 
         with open(path, "w") as f:
             yaml.dump(
-                {"backend": {**d, "bab": bab_d, "generation": gen_d, "hybridz": hz_d}},
+                {
+                    "backend": {
+                        **d,
+                        "bab": bab_d,
+                        "generation": gen_d,
+                        "hybridz": hz_d,
+                        "solver_config": solver_d,
+                        "tf": tf_d,
+                    }
+                },
                 f,
                 default_flow_style=False,
                 sort_keys=False,
