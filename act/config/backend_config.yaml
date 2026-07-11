@@ -1,20 +1,29 @@
+# ═══════════════════════════════════════════════════════════════════════════
 # ACT Back-End Configuration
-#
+# ═══════════════════════════════════════════════════════════════════════════
 # Canonical source for ALL back-end settings (runtime, verification, generation).
 # CI (.github/workflows/act-bab.yml) relies on these defaults.
 #
 # Precedence:  CLI flag  >  environment variable  >  this file  >  code default
 # Env vars:    ACT_SOLVER / ACT_DEVICE / ACT_DTYPE
+#
+# Layout (all under the single top-level `backend:` mapping):
+#   runtime selectors → verification cascade → solver_config → tf → hybridz
+#   → bab (branch-and-bound) → generation (net_factory)
 
 backend:
 
-  # ── Verification Runtime (global) ────────────────────────────────────────────────────
+  # ─────────────────────────────────────────────────────────────────────────
+  # Runtime selectors  (apply to every back-end command)
+  # ─────────────────────────────────────────────────────────────────────────
 
   # Solver backend for LP/MILP verification.
-  #   "auto"   – try Gurobi first, fall back to TorchLP
+  #   "auto"    – try Gurobi first, fall back to TorchLP
   #   "gurobi"  – exact MILP/LP via Gurobi (requires license)
   #   "torchlp" – PyTorch-tensor LP (Adam + penalty + box projection,
   #               GPU-capable, no license)
+  #   "dual"    – linear-relaxation dual certified bounds
+  #   "hybridz" – HybridZ zonotope solver
   solver: "torchlp"
 
   # Compute device.
@@ -31,55 +40,65 @@ backend:
   # Print extra diagnostic output across all commands.
   verbose: false
 
-  hybridz:
-    timeout: null
-
-  # ── BaBVerification ────────────────────────────────────────────────────────
+  # ─────────────────────────────────────────────────────────────────────────
+  # Verification cascade  (single-shot → LP-batched → BaB)
+  # ─────────────────────────────────────────────────────────────────────────
 
   # Wall-clock budget in seconds for both single execution and BaB verification.
   timeout: 60.0
 
-  # Enable the batched LP cascade tier before BaB.
+  # Enable the batched LP cascade tier (tier 2) before BaB.
+  # Must be false when solver = "gurobi" (Gurobi solve_batch is N=1 only).
   lp_enabled: true
 
-  # Maximum BaB subproblems solved in one batch.
+  # Maximum BaB subproblems solved in one batch (tier 3).
+  # Must be 1 when solver = "gurobi" (same N=1 restriction as lp_enabled).
   bab_max_batch_size: 8
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # TorchLP solver tuning  (solver_config)
+  # ─────────────────────────────────────────────────────────────────────────
   solver_config:
-    # TorchLP equality penalty weight.
-    rho_eq: 10.0
-    # TorchLP inequality penalty weight.
-    rho_ineq: 10.0
-    # TorchLP Adam iteration cap.
-    max_iter: 2000
-    # Feasibility tolerance for SAT reporting.
-    tol_feas: 0.0001
-    # TorchLP Adam learning rate.
-    lr: 0.01
-    # TorchLP Adam beta1.
-    beta1: 0.9
-    # TorchLP Adam beta2.
-    beta2: 0.999
-    # TorchLP Adam weight decay.
-    weight_decay: 0.0
-    # Variable-count threshold for large-N overrides.
-    large_n_threshold: 20000
-    # Large-N iteration cap.
-    large_n_max_iter: 800
-    # Large-N feasibility tolerance.
-    large_n_tol: 0.001
-    # Stop after this many stagnant feasibility checks.
-    stagnation_patience: 300
-    # Minimum feasibility improvement to reset stagnation.
-    stagnation_tol: 0.00001
-    # Iteration stride between feasibility checks.
-    feas_check_stride: 5
+    # -- Penalty weights --
+    rho_eq: 10.0              # equality-constraint penalty weight
+    rho_ineq: 10.0            # inequality-constraint penalty weight
+    # -- Adam optimizer --
+    max_iter: 2000            # Adam iteration cap
+    lr: 0.01                  # Adam learning rate
+    beta1: 0.9                # Adam beta1
+    beta2: 0.999              # Adam beta2
+    weight_decay: 0.0         # Adam weight decay
+    tol_feas: 0.0001          # feasibility tolerance for SAT reporting
+    # -- Large-N overrides (kick in above large_n_threshold variables) --
+    large_n_threshold: 20000  # variable-count threshold for large-N mode
+    large_n_max_iter: 800     # large-N iteration cap
+    large_n_tol: 0.001        # large-N feasibility tolerance
+    # -- Stagnation early-stop --
+    stagnation_patience: 300  # stop after this many stagnant feasibility checks
+    stagnation_tol: 0.00001   # min feasibility improvement to reset stagnation
+    feas_check_stride: 5      # iteration stride between feasibility checks
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # Transfer-function limits  (tf)
+  # ─────────────────────────────────────────────────────────────────────────
   tf:
     # HybridZ generator/input dimension fallback limit.
     hz_max_input_dim: 1024
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # HybridZ solver  (hybridz)
+  # ─────────────────────────────────────────────────────────────────────────
+  hybridz:
+    # Per-call wall-clock budget in seconds; null = no HybridZ-specific limit.
+    timeout: null
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # Branch-and-Bound refinement  (bab)
+  # ═════════════════════════════════════════════════════════════════════════
   bab:
+
+    # -- Enable + search-tree limits --------------------------------------
+
     # Enable Branch-and-Bound refinement (true) or single execution (false).
     enabled: true
 
@@ -95,13 +114,17 @@ backend:
     # Uniform fanout for input-domain splits; 2 preserves binary splitting.
     input_split_fanout: 2
 
+    # -- Branching & bounding strategy ------------------------------------
+
     # Branching strategy.
     #   "random" – uniform random input-dimension split (baseline)
     #   "babsr"  – ReLU neuron-split scored by dual ν + bound slope/intercept
     #   "fsb"    – filtered smart branching (babsr top-k + bound re-evaluation)
-    # NOTE: "babsr"/"fsb" perform real neuron-split only on a dual tier
-    #       (solver_tier "dual_alpha" or "dual_alpha_eta"); on "lp" they use the
-    #       width-based baseline.
+    #   "gain"   – joint multi-neuron split by optimized bound gain
+    #   "width"  – width-based baseline
+    # NOTE: "babsr"/"fsb"/"gain" perform real neuron-split only on a dual tier
+    #       (solver_tier "dual_alpha" or "dual_alpha_eta"); on "lp" they fall
+    #       back to the width-based baseline.
     branching_method: "random"
 
     # How to select the next wave of subproblems when the pool exceeds the
@@ -111,7 +134,8 @@ backend:
     #              and smaller lower-bound (closer to a counterexample) rank higher
     bounding_method: "random"
 
-    # TopKBounding order policy: depth_lb (default), greedy, or sa.
+    # TopKBounding order policy (only used when bounding_method = "topk").
+    #   "depth_lb" (default) | "greedy" | "sa" (simulated annealing)
     bounding_order: "depth_lb"
 
     # Simulated-annealing cooling rate for bounding_order = "sa".
@@ -123,17 +147,17 @@ backend:
     bounding_depth_weight: 0.5
     bounding_bound_weight: 0.5
 
-    # ── Dual-tier knobs (α/η optimization for DualSolver BaB) ────────────
-    # Solver tier for BaB bound computation:
+    # -- Dual-tier α/η optimization (DualSolver BaB) ----------------------
+
+    # Solver tier for BaB bound computation.
     # Source of truth: act.config.config.VALID_SOLVER_TIERS
-    #   "lp"               – LP/MILP backend
-    #   "dual"             – DualSolver (linear-relaxation dual, no iterative optimization)
-    #   "dual_alpha"       – DualSolver with Lagrange-relaxed lower-slope optimization (Adam on α ∈ [0,1])
-    #   "dual_alpha_eta"   – DualSolver with joint α + η (split-constraint KKT multipliers)
+    #   "lp"             – LP/MILP backend
+    #   "dual"           – DualSolver (linear-relaxation dual, no iterative opt)
+    #   "dual_alpha"     – DualSolver + Lagrange-relaxed lower-slope opt (Adam on α ∈ [0,1])
+    #   "dual_alpha_eta" – DualSolver + joint α + η (split-constraint KKT multipliers)
     solver_tier: "lp"
 
-    # Number of Adam iterations for α/η optimization (only used in
-    # dual_alpha / dual_alpha_eta tiers).
+    # Number of Adam iterations for α/η optimization (dual_alpha / dual_alpha_eta only).
     dual_n_iters: 50
 
     # Learning rate for α (ReLU lower-bound slope, clamped to [0, 1]).
@@ -151,49 +175,53 @@ backend:
     # Per-spec α (tighter bounds, M× memory) vs shared α (looser, 1× memory).
     per_class_alpha: true
 
-    # Track logical BaB node ids and parent ids in TopKBounding.
-    provenance_enabled: false
-
-    # Refine only eta in child dual subproblems.
+    # Refine only η in child dual subproblems (freeze α inherited from parent).
     eta_only_children: false
+
+    # -- Intermediate-bound refinement ------------------------------------
 
     # Number of root pre-split levels before the main loop.
     presplit_levels: 0
 
-    # Root intermediate-bound refinement mode.
+    # Root intermediate-bound refinement mode: "none" | "auto" | "all".
     intermediate_refine: "none"
 
-    # Width ratio threshold for auto intermediate refinement.
+    # Width ratio threshold for intermediate_refine = "auto".
     intermediate_refine_ratio: 10.0
 
-    # Reuse root intermediate bounds in descendant subproblems.
+    # Reuse root intermediate bounds in descendant subproblems (dual tiers).
     reuse_root_bounds: false
 
-    # Per-subproblem intermediate refinement mode.
+    # Per-subproblem intermediate refinement mode: "none" | "tail" | "all"
+    # (requires reuse_root_bounds).
     per_subproblem_refine: "none"
 
-    # Adam iterations for per-subproblem refinement rows.
+    # Adam iterations for per-subproblem refinement rows (0 = single fixed-slope pass).
     per_subproblem_refine_iters: 0
 
-    # Row cap for per-subproblem refinement.
+    # Row cap for per-subproblem refinement (top-cap by interval width).
     per_subproblem_refine_rows_cap: 64
+
+    # Number of simultaneous neuron split levels (gain branching only); 1 = single split.
+    multi_split_levels: 1
+
+    # -- Auto batch sizing (max_batch_size = "auto") ----------------------
 
     # Fraction of available GPU memory targeted by auto batch sizing.
     auto_batch_safety: 0.55
 
-    # Hard cap for auto-sized BaB batches.
+    # Hard cap for auto-sized BaB batches (also the CPU fallback).
     auto_batch_cap: 2048
 
     # Floor for auto-sized BaB batches.
     auto_batch_floor: 8
 
-    # Number of simultaneous neuron split levels.
-    multi_split_levels: 1
+    # -- LLM-probe controller (optional experimental branching aid) -------
 
     # Enable the LLM-probe controller.
     llm_probe_enabled: false
 
-    # LLM-probe provider backend.
+    # Provider backend: "mock" | "openrouter" | "openai" | "glm" | "minimax" | "claude_cli".
     llm_probe_backend: "mock"
 
     # LLM-probe model name.
@@ -229,28 +257,30 @@ backend:
     # Consecutive probe failures before disabling the controller.
     llm_probe_max_failures: 3
 
-    # Decision types the LLM may steer.
+    # Comma-separated decision types the LLM may steer:
+    # "split" | "frontier" | "refine" | "neuron" | "input_split".
     llm_probe_decisions: "split,frontier,refine"
 
     # Log LLM-probe decisions.
     llm_probe_log: false
 
-    # Print verbose BaB diagnostics.
-    verbose: false
+    # -- BERT / text verification -----------------------------------------
 
-    # Public BERT verification method selector.
+    # Public BERT verification method selector: null (off) or one of
+    # "planar" | "rule" | "alpha" | "ibp" | "discrete". When set, it overrides
+    # baf / alpha_mode / solver_tier per the method's preset.
     method: null
 
     # Enable backward attention form for BERT methods.
     baf: true
 
-    # BERT alpha handling mode.
+    # BERT alpha handling mode: "fixed" | "rule" | "optimized" | "none".
     alpha_mode: "fixed"
 
     # Norm p for perturbation semantics.
     p: 2.0
 
-    # Number of perturbed words for text verification.
+    # Number of perturbed words for text verification (1 or 2).
     perturbed_words: 1
 
     # Initial epsilon for text verification.
@@ -268,11 +298,20 @@ backend:
     # Alpha optimization steps for text methods.
     alpha_opt_steps: 1000
 
-  # ── Network Generation (net_factory) ────────────────────────────────────
-  # Controls how many networks to generate, where, and TF filtering.
-  # Architecture sampling DSL (family definitions, input/output specs)
-  # lives in gen_config_path — a separate file with its own schema.
+    # -- Diagnostics ------------------------------------------------------
 
+    # Track logical BaB node ids and parent ids in TopKBounding.
+    provenance_enabled: false
+
+    # Print verbose BaB diagnostics.
+    verbose: false
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # Network generation  (net_factory)
+  # ═════════════════════════════════════════════════════════════════════════
+  # Controls how many networks to generate, where, and TF filtering.
+  # The architecture sampling DSL (family definitions, input/output specs)
+  # lives in gen_config_path — a separate file with its own schema.
   generation:
     # Path to the architecture sampling config (families, specs, etc.).
     gen_config_path: "act/back_end/examples/config_gen_act_net.yaml"
@@ -290,8 +329,8 @@ backend:
     name_prefix: "cfg_seed"
 
     # Transfer-function targets for layer filtering.
-    #   null            – no filtering, all layer types allowed
-    #   ["interval"]    – only layers supported by interval TF
+    #   null                    – no filtering, all layer types allowed
+    #   ["interval"]            – only layers supported by interval TF
     #   ["interval", "hybridz"] – layers supported by both TFs
     tf_targets: null
 

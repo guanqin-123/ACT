@@ -1,4 +1,28 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# ACT Front-End Configuration
+# ═══════════════════════════════════════════════════════════════════════════
+# Data/model/spec-creation settings for the front-end tier.
+#
+# Precedence:  CLI flag  >  this file  >  code default
+#
+# Sections:
+#   specs             – named presets that drive InputSpec/OutputSpec synthesis
+#   text_verification – BERT/text robustness-verification defaults
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Specification presets
+# ─────────────────────────────────────────────────────────────────────────────
+# Select a preset by name (falls back to "default"). Fields shared by presets:
+#   epsilons             – list of L∞ perturbation radii to sweep
+#   margins              – list of robustness margins
+#   input_kinds          – BOX | LINF_BALL | LIN_POLY
+#   output_kinds         – MARGIN_ROBUST | TOP1_ROBUST | LINEAR_LE | RANGE | UNSAFE_LINEAR
+#   combination_strategy – full | minimal | balanced (how many input×output pairs)
+#   balanced_params      – caps used when combination_strategy = balanced
+# Each preset's `notes:` block (below) documents its intended usage.
 specs:
+
+  # -- TorchVision image classifiers (MNIST / CIFAR10 / ImageNet) --
   torchvision_classification:
     epsilons:
     - 0.01
@@ -55,6 +79,7 @@ specs:
       - Full combination strategy creates many spec pairs for thorough testing
 
       '
+  # -- VNN-COMP benchmark instances (ONNX + VNNLIB, minimal specs per instance) --
   vnnlib_default:
     epsilons:
     - 0.01
@@ -118,6 +143,7 @@ specs:
       mnist_fc\")\n  2. Create specs: creator = VNNLibSpecCreator(); results = creator.create_specs_for_data_model_pairs()\n\
       \  3. Each result contains: (category, instance_id, pytorch_model, [input_tensor],\
       \ [(input_spec, output_spec)])\n"
+  # -- Generic fallback preset (used when no named preset is requested) --
   default:
     epsilons:
     - 0.01
@@ -148,12 +174,16 @@ specs:
     logging:
       level: INFO
       show_progress: true
+# ─────────────────────────────────────────────────────────────────────────────
+# Text verification  (BERT / NLP robustness defaults)
+# ─────────────────────────────────────────────────────────────────────────────
 text_verification:
+  # method: null (off) or "planar" | "rule" | "alpha" | "ibp" | "discrete"
   method: null
-  p: 2.0
-  perturbed_words: 1
-  eps: 1.0e-05
-  max_eps: 0.01
-  num_verify_iters: 5
-  k: 1
-  alpha_opt_steps: 1000
+  p: 2.0                 # perturbation norm p
+  perturbed_words: 1     # number of perturbed words (1 or 2)
+  eps: 1.0e-05           # initial epsilon
+  max_eps: 0.01          # maximum epsilon
+  num_verify_iters: 5    # verification iterations
+  k: 1                   # top-k value
+  alpha_opt_steps: 1000  # alpha optimization steps
