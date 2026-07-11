@@ -725,6 +725,11 @@ def cmd_fuzz(args):
 # ============================================================================
 
 
+def _effective_tf_modes(solver: str, requested_modes) -> list[str]:
+    modes = list(requested_modes or ["interval"])
+    return ["hybridz"] if solver == "hybridz" else modes
+
+
 def _build_validator(args):
     from act.pipeline.verification.validate_verifier import VerificationValidator
 
@@ -775,10 +780,15 @@ def _verify_and_validate_cell(
     """
     from act.back_end.verifier import verify_once
 
+    verify_kwargs = (
+        {"timelimit": getattr(args, "timeout", None)}
+        if solver == "hybridz"
+        else {}
+    )
     if args.validate_soundness:
-        results, facts = verify_once(net, collect_facts=True)
+        results, facts = verify_once(net, collect_facts=True, **verify_kwargs)
     else:
-        results = verify_once(net)
+        results = verify_once(net, **verify_kwargs)
         facts = None
     statuses = [r.status.name for r in results]
     print(f"  {cell_label if cell_label is not None else tag}: {statuses}")
@@ -806,10 +816,8 @@ def _run_vnnlib_verify(args) -> bool:
     ``synthesize_models_from_specs`` → ``TorchToACT`` → ``verify_once``.
 
     Single-mode per invocation, matching the ``act.back_end --verify`` CLI
-    contract: uses the first element of ``--tf-modes`` (default
-    ``"interval"``) and ``--solvers`` (default ``"torchlp"``).  Multi-mode
-    sweeps are the caller's job — invoke once per (tf-mode, solver) cell.
-    Dual ignores ``--tf-modes`` because it's a backward Solver.
+    contract. Multi-mode sweeps are the caller's job. Dual ignores
+    ``--tf-modes``; the standalone HybridZ solver selects HybridzTF.
     """
     from act.front_end.vnnlib_loader.create_specs import VNNLibSpecCreator
     from act.front_end.model_synthesis import synthesize_models_from_specs
@@ -822,8 +830,8 @@ def _run_vnnlib_verify(args) -> bool:
     if not args.category:
         raise ValueError("--verify vnnlib requires --category (e.g. --category acasxu_2023)")
 
-    tf_mode = (args.tf_modes or ["interval"])[0]
     solver = (args.solvers or ["torchlp"])[0]
+    tf_mode = _effective_tf_modes(solver, args.tf_modes)[0]
 
     set_solver_mode(solver)
     if solver != "dual":
@@ -1016,8 +1024,8 @@ def _run_torchvision_verify(args) -> bool:
     if not args.dataset:
         raise ValueError("--verify torchvision requires --dataset (e.g. --dataset MNIST)")
 
-    tf_mode = (args.tf_modes or ["interval"])[0]
     solver = (args.solvers or ["torchlp"])[0]
+    tf_mode = _effective_tf_modes(solver, args.tf_modes)[0]
 
     set_solver_mode(solver)
     if solver != "dual":
@@ -1093,14 +1101,13 @@ def _run_netfactory_verify(args) -> bool:
     if "gurobi" in solvers and not is_gurobi_available():
         logger.warning("Skipping gurobi solver: gurobipy is not available.")
         solvers = [s for s in solvers if s != "gurobi"]
-    tf_modes = args.tf_modes or ["interval"]
     batch_sizes = _resolve_batch_sizes(getattr(args, "batch_sizes", None))
     per_neuron_config = _per_neuron_config(args)
     errors_seen = False
 
     for name in networks:
         for solver in solvers:
-            for tf_mode in tf_modes:
+            for tf_mode in _effective_tf_modes(solver, args.tf_modes):
                 for batch_size in batch_sizes:
                     try:
                         set_solver_mode(solver)
@@ -1318,11 +1325,13 @@ Examples:
   # Single (tf, solver) per invocation; matrix sweeps by repeated calls.
   python -m act.pipeline --verify vnnlib --category acasxu_2023 --max-instances 3 --tf-modes interval --solvers torchlp
   python -m act.pipeline --verify vnnlib --category acasxu_2023 --max-instances 3 --tf-modes hybridz --solvers torchlp
+  python -m act.pipeline --verify vnnlib --category acasxu_2023 --max-instances 3                          --solvers hybridz
   python -m act.pipeline --verify vnnlib --category acasxu_2023 --max-instances 3                          --solvers dual
 
   # Run verifier on a TorchVision dataset-model pair end-to-end.
   python -m act.pipeline --verify torchvision --dataset MNIST --model simple_cnn --num-samples 2 --tf-modes interval --solvers torchlp
   python -m act.pipeline --verify torchvision --dataset MNIST --model simple_cnn --num-samples 2 --tf-modes hybridz  --solvers torchlp
+  python -m act.pipeline --verify torchvision --dataset MNIST --model simple_cnn --num-samples 2                     --solvers hybridz
   python -m act.pipeline --verify torchvision --dataset MNIST --model simple_cnn --num-samples 2                     --solvers dual
 
   # Run unified two-level verifier validation after verification.
@@ -1516,7 +1525,10 @@ Examples:
         "--timeout",
         type=float,
         default=None,
-        help="Timeout in seconds (default: from config.yaml)",
+        help=(
+            "Time budget in seconds for fuzzing, BaB, or standalone HybridZ "
+            "verification (default: component configuration)"
+        ),
     )
     fuzz_group.add_argument(
         "--output",
@@ -1590,13 +1602,20 @@ Examples:
         "--solvers",
         nargs="+",
         default=None,
-        help="Solvers for Level 1 validation (default: from config.yaml)",
+        help=(
+            "Verification solvers: gurobi, torchlp, hybridz, or dual "
+            "(default: from config.yaml)"
+        ),
     )
     validation_group.add_argument(
         "--tf-modes",
         nargs="+",
         default=None,
-        help="Transfer function modes for Level 2 bounds validation: interval, hybridz, dual (default: from config.yaml)",
+        help=(
+            "Transfer function modes for bounds propagation: interval or "
+            "hybridz (default: from config.yaml); standalone hybridz selects "
+            "HybridzTF and dual ignores this option"
+        ),
     )
     validation_group.add_argument(
         "--input-samples",
@@ -1657,8 +1676,19 @@ Examples:
     _add_fuzz_config_args(parser)
 
     args = parser.parse_args()
+    requested_tf_modes = args.tf_modes
 
     _apply_pipeline_config_defaults(args)
+    if (
+        requested_tf_modes is not None
+        and "hybridz" in args.solvers
+        and list(requested_tf_modes) != ["hybridz"]
+    ):
+        logger.warning(
+            "--solvers hybridz requires the hybridz transformer; overriding "
+            "--tf-modes %s",
+            " ".join(requested_tf_modes),
+        )
 
     # Initialize device manager from CLI arguments
     initialize_from_args(args)
