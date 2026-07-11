@@ -33,7 +33,6 @@ backend:
 
   hybridz:
     timeout: null
-    engine: "dense_hz_objbound"
 
   # ── BaBVerification ────────────────────────────────────────────────────────
 

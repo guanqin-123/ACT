@@ -26,18 +26,11 @@ fuzzing:
 
 verification:
   bab:
+    # Sparse override: only keys that differ from BaBConfig defaults are set
+    # here; every other BaBConfig field is inherited from its dataclass default.
     solver_tier: "dual_alpha_eta"
     max_depth: 8
     max_nodes: 100
-    branching_method: "random"
-    bounding_method: "random"
-    bounding_order: "depth_lb"
-    sa_cooling_rate: 0.99
-    frontier_cap: 0
-    input_split_fanout: 2
-    per_class_alpha: true
-    incremental_start_enabled: true
-    provenance_enabled: false
 
 validation:
   solvers: ["gurobi", "torchlp"]

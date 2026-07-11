@@ -329,7 +329,6 @@ class GenerationConfig:
 @dataclass
 class HybridZConfig:
     timeout: Optional[float] = None
-    engine: str = "dense_hz_objbound"
 
 
 @dataclass
