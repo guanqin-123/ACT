@@ -6,6 +6,7 @@ import os
 from act.back_end.solver.solver_base import (
     Solver,
     SolverCaps,
+    SolveStatus,
     _empty_blockdiag,
     _problem,
     _make_problem_n1,
@@ -176,15 +177,15 @@ class GurobiSolver(Solver):
         device = problem.lb.device
 
         if m.Status in (GRB.OPTIMAL, GRB.SUBOPTIMAL):
-            status = "SAT"
+            status = SolveStatus.SAT
             x_val = torch.as_tensor(x.X, dtype=dtype, device=device).unsqueeze(0)
             max_viol = torch.zeros(1, dtype=dtype, device=device)
         elif m.Status in (GRB.INFEASIBLE, GRB.INF_OR_UNBD):
-            status = "UNSAT"
+            status = SolveStatus.UNSAT
             x_val = torch.zeros_like(problem.lb)
             max_viol = torch.full((1,), float("inf"), dtype=dtype, device=device)
         else:
-            status = "UNKNOWN"
+            status = SolveStatus.UNKNOWN
             x_val = torch.zeros_like(problem.lb)
             max_viol = torch.full((1,), float("nan"), dtype=dtype, device=device)
 
