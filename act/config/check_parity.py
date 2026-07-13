@@ -52,7 +52,7 @@ class ParityReport:
 
 
 def check_backend(report: ParityReport) -> None:
-    from act.config.config import _BACKEND_YAML, BackendConfig
+    from act.config.config import _BACKEND_YAML, BaBConfig, BackendConfig
     from act.config.backend_cli import (
         _BACKEND_OVERRIDE_SPEC,
         _BACKEND_SUBCONFIG_PREFIX,
@@ -85,6 +85,12 @@ def check_backend(report: ParityReport) -> None:
     cli_only_allowed = {
         f.name for f in fields(BackendConfig) if not f.metadata.get("in_yaml", True)
     }
+    bab_cli_only_allowed = {
+        f"bab_{f.name}"
+        for f in fields(BaBConfig)
+        if not f.metadata.get("in_yaml", True)
+    }
+    cli_only_allowed |= bab_cli_only_allowed
 
     print("[backend]")
     report.require("CLI options are backed by a dataclass field",

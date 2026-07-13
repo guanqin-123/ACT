@@ -90,8 +90,8 @@ class BaBConfig:
     branching_method: str = "random"
     bounding_method: str = "random"
     bounding_order: str = "depth_lb"
-    bounding_depth_weight: float = 0.5
-    bounding_bound_weight: float = 0.5
+    bounding_depth_weight: float = field(default=0.5, metadata={"in_yaml": False})
+    bounding_bound_weight: float = field(default=0.5, metadata={"in_yaml": False})
     sa_cooling_rate: float = 0.99
 
     # Dual-tier solver knobs — support solver_tier="dual_alpha_eta" with
@@ -105,10 +105,10 @@ class BaBConfig:
     lr_alpha: float = 0.1
     """Adam learning rate for α (slope) variables."""
 
-    lr_beta: float = 0.1
+    lr_beta: float = field(default=0.1, metadata={"in_yaml": False})
     """Adam learning rate for η (split-constraint KKT multipliers). 0.1 default; tune per network."""
 
-    lr_decay: float = 0.98
+    lr_decay: float = field(default=0.98, metadata={"in_yaml": False})
     """Multiplicative learning-rate decay applied each Adam iteration."""
 
     incremental_start_enabled: bool = True
@@ -120,13 +120,13 @@ class BaBConfig:
     provenance_enabled: bool = False
     """Track logical BaB node ids and parent ids in TopKBounding."""
 
-    eta_only_children: bool = False
+    eta_only_children: bool = field(default=False, metadata={"in_yaml": False})
     """Freeze alpha in child subproblems (depth > 0): children inherit the
     parent's optimized alpha and refine only the split multipliers (eta).
     Cuts the per-node Adam graph and, combined with reuse_root_bounds,
     removes the per-iteration forward pass entirely."""
 
-    presplit_levels: int = 0
+    presplit_levels: int = field(default=0, metadata={"in_yaml": False})
     """Pre-split the root's top-k scored unstable neurons into all 2^k sign
     combinations before the main loop (LEAPS-style leap: descendants are
     materialized directly, intermediate tree levels are never bounded). The
@@ -139,7 +139,7 @@ class BaBConfig:
     intermediate_refine_ratio x the median - targets wide fan-in
     concretization loss), 'all' (every unstable activation layer)."""
 
-    intermediate_refine_ratio: float = 10.0
+    intermediate_refine_ratio: float = field(default=10.0, metadata={"in_yaml": False})
     """Width-blowup threshold multiplier for intermediate_refine='auto'."""
 
     reuse_root_bounds: bool = False
@@ -152,7 +152,7 @@ class BaBConfig:
     the input-term concretization and the eta split multipliers. Eliminates
     the per-node forward pass (the dominant time and memory cost)."""
 
-    per_subproblem_refine: str = "none"
+    per_subproblem_refine: str = field(default="none", metadata={"in_yaml": False})
     """Per-subproblem sparse backward refinement of intermediate bounds in the
     BaB loop (requires reuse_root_bounds): 'none' (off), 'tail' (last two
     unstable activation layers), 'all' (every unstable activation layer). For
@@ -161,23 +161,23 @@ class BaBConfig:
     exact, so refining them gains nothing), so splits propagate relationally
     downstream instead of only through the interval refresh."""
 
-    per_subproblem_refine_iters: int = 0
+    per_subproblem_refine_iters: int = field(default=0, metadata={"in_yaml": False})
     """Adam iterations for per-subproblem refine rows (0 = single fixed-slope
     backward, cheapest)."""
 
-    per_subproblem_refine_rows_cap: int = 64
+    per_subproblem_refine_rows_cap: int = field(default=64, metadata={"in_yaml": False})
     """Max refined neurons per layer per batch (top-cap by interval width);
     bounds the K x 2*cap backward cost."""
 
-    auto_batch_safety: float = 0.55
+    auto_batch_safety: float = field(default=0.55, metadata={"in_yaml": False})
     """Fraction of GPU memory the auto batch sizer (max_batch_size='auto') may
     target; lowered on a shared GPU. The sizer also never exceeds 90% of the
     currently-reclaimable memory (free + this process's reserved cache)."""
 
-    auto_batch_cap: int = 2048
+    auto_batch_cap: int = field(default=2048, metadata={"in_yaml": False})
     """Hard upper bound on the auto-sized batch (also the CPU fallback)."""
 
-    auto_batch_floor: int = 8
+    auto_batch_floor: int = field(default=8, metadata={"in_yaml": False})
     """Lower bound on the auto-sized batch."""
 
     multi_split_levels: int = 1
@@ -190,17 +190,17 @@ class BaBConfig:
 
     llm_probe_enabled: bool = False
     llm_probe_backend: str = "mock"
-    llm_probe_model: str = ""
-    llm_probe_base_url: str = ""
-    llm_probe_api_key_env: str = ""
-    llm_probe_temperature: float = 0.0
-    llm_probe_timeout: float = 30.0
-    llm_probe_max_candidates: int = 8
-    llm_probe_max_candidates_total: int = 1024
-    llm_probe_neuron_topk: int = 512
+    llm_probe_model: str = field(default="", metadata={"in_yaml": False})
+    llm_probe_base_url: str = field(default="", metadata={"in_yaml": False})
+    llm_probe_api_key_env: str = field(default="", metadata={"in_yaml": False})
+    llm_probe_temperature: float = field(default=0.0, metadata={"in_yaml": False})
+    llm_probe_timeout: float = field(default=30.0, metadata={"in_yaml": False})
+    llm_probe_max_candidates: int = field(default=8, metadata={"in_yaml": False})
+    llm_probe_max_candidates_total: int = field(default=1024, metadata={"in_yaml": False})
+    llm_probe_neuron_topk: int = field(default=512, metadata={"in_yaml": False})
     llm_probe_cadence: int = 1
-    llm_probe_history: int = 8
-    llm_probe_max_failures: int = 3
+    llm_probe_history: int = field(default=8, metadata={"in_yaml": False})
+    llm_probe_max_failures: int = field(default=3, metadata={"in_yaml": False})
     llm_probe_decisions: str = "split,frontier,refine"
     """Comma-separated decision types the LLM may steer: 'split' (joint neuron
     split depth), 'frontier' (wave width), 'refine' (per-subproblem refinement),
@@ -208,18 +208,18 @@ class BaBConfig:
     dimension to bisect and its fanout, input-domain-splitting BaB only)."""
     llm_probe_log: bool = False
 
-    verbose: bool = False
+    verbose: bool = field(default=False, metadata={"in_yaml": False})
 
     method: Optional[str] = None
-    baf: bool = True
-    alpha_mode: str = "fixed"
+    baf: bool = field(default=True, metadata={"in_yaml": False})
+    alpha_mode: str = field(default="fixed", metadata={"in_yaml": False})
     p: float = 2.0
-    perturbed_words: int = 1
+    perturbed_words: int = field(default=1, metadata={"in_yaml": False})
     eps: float = 1e-5
     max_eps: float = 0.01
-    num_verify_iters: int = 5
+    num_verify_iters: int = field(default=5, metadata={"in_yaml": False})
     k: int = 1
-    alpha_opt_steps: int = 1000
+    alpha_opt_steps: int = field(default=1000, metadata={"in_yaml": False})
 
     def __post_init__(self) -> None:
         if self.solver_tier not in VALID_SOLVER_TIERS:
@@ -524,7 +524,12 @@ class BackendConfig:
                 top_overrides[k] = v
 
         # Build BaBConfig
-        bab_merged = {k: v for k, v in bab_raw.items() if k in bab_fields}
+        bab_in_yaml = {
+            fld.name for fld in fields(BaBConfig) if fld.metadata.get("in_yaml", True)
+        }
+        bab_merged = {
+            k: v for k, v in bab_raw.items() if k in bab_fields and k in bab_in_yaml
+        }
         bab_merged.update(bab_overrides)
         bab_config = BaBConfig(**bab_merged)
 
