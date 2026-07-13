@@ -66,6 +66,7 @@ except (ImportError, RuntimeError):
 
 from act.back_end.core import Net, Layer
 from act.back_end.layer_schema import LayerKind
+from act.back_end.layer_torch_map import ACT_TO_TORCH
 from act.back_end.layer_util import create_layer
 from act.pipeline.verification.utils import (
     _prod, _normalize_tuple, _assert_dag, _broadcast_const_to_size,
@@ -80,6 +81,9 @@ from act.back_end.solver.solver_torchlp import TorchLPSolver
 from act.back_end.solver.solver_gurobi import GurobiSolver
 from act.util.options import PerformanceOptions
 from act.util.format_utils import rule
+
+
+_TORCH_TO_ACT_EXACT = {module_cls: kind for kind, module_cls in ACT_TO_TORCH.items()}
 
 
 # -----------------------------------------------------------------------------
@@ -1164,38 +1168,79 @@ class _LayerGraphBuilder:
     
     def _convert_module(self, mod: nn.Module) -> None:
         """Convert a PyTorch module to ACT layer(s)."""
-        converters = {
-            nn.Flatten: self._convert_flatten,
-            nn.Linear: self._convert_linear,
-            nn.ReLU: lambda m: self._convert_activation(m, LayerKind.RELU),
-            nn.Conv2d: self._convert_conv2d,
-            nn.ConvTranspose2d: self._convert_conv_transpose2d,
-            nn.MaxPool2d: self._convert_pool2d,
-            nn.AvgPool2d: self._convert_pool2d,
-            nn.AdaptiveAvgPool2d: self._convert_adaptive_avgpool2d,
-            _BatchNorm: self._convert_batchnorm,
-            nn.SiLU: lambda m: self._convert_activation(m, LayerKind.SILU),
-            nn.Sigmoid: lambda m: self._convert_activation(m, LayerKind.SIGMOID),
-            nn.Tanh: lambda m: self._convert_activation(m, LayerKind.TANH),
-            nn.Softmax: self._convert_softmax,
-            nn.LeakyReLU: lambda m: self._convert_activation(m, LayerKind.LRELU, {"negative_slope": m.negative_slope}),
-            nn.LSTM: lambda m: self._convert_rnn_family(m, LayerKind.LSTM),
-            nn.GRU: lambda m: self._convert_rnn_family(m, LayerKind.GRU),
-            nn.RNN: lambda m: self._convert_rnn_family(m, LayerKind.RNN),
-        }
-        
         # No-op modules (identity during inference)
         if isinstance(mod, nn.Dropout) or (
             _HAS_STOCHASTIC_DEPTH and isinstance(mod, StochasticDepth)
         ):
             return
-        
-        for mod_type, converter in converters.items():
-            if isinstance(mod, mod_type):
-                converter(mod)
-                return
+
+        if isinstance(mod, _BatchNorm):
+            self._convert_batchnorm(mod)
+            return
+
+        kind = self._layer_kind_for_module(mod)
+        if kind == LayerKind.FLATTEN.value and isinstance(mod, nn.Flatten):
+            self._convert_flatten(mod)
+            return
+        if kind == LayerKind.DENSE.value and isinstance(mod, nn.Linear):
+            self._convert_linear(mod)
+            return
+        if kind == LayerKind.RELU.value:
+            self._convert_activation(mod, LayerKind.RELU)
+            return
+        if kind == LayerKind.CONV2D.value and isinstance(mod, nn.Conv2d):
+            self._convert_conv2d(mod)
+            return
+        if kind == LayerKind.CONVTRANSPOSE2D.value and isinstance(mod, nn.ConvTranspose2d):
+            self._convert_conv_transpose2d(mod)
+            return
+        if kind in (LayerKind.MAXPOOL2D.value, LayerKind.AVGPOOL2D.value) and isinstance(mod, (nn.MaxPool2d, nn.AvgPool2d)):
+            self._convert_pool2d(mod)
+            return
+        if kind == LayerKind.ADAPTIVEAVGPOOL2D.value and isinstance(mod, nn.AdaptiveAvgPool2d):
+            self._convert_adaptive_avgpool2d(mod)
+            return
+        if kind == LayerKind.SILU.value:
+            self._convert_activation(mod, LayerKind.SILU)
+            return
+        if kind == LayerKind.SIGMOID.value:
+            self._convert_activation(mod, LayerKind.SIGMOID)
+            return
+        if kind == LayerKind.TANH.value:
+            self._convert_activation(mod, LayerKind.TANH)
+            return
+        if kind == LayerKind.SOFTMAX.value:
+            self._convert_softmax(mod)
+            return
+        if kind == LayerKind.LRELU.value and isinstance(mod, nn.LeakyReLU):
+            self._convert_activation(mod, LayerKind.LRELU, {"negative_slope": mod.negative_slope})
+            return
+        if kind == LayerKind.LSTM.value and isinstance(mod, nn.LSTM):
+            self._convert_rnn_family(mod, LayerKind.LSTM)
+            return
+        if kind == LayerKind.GRU.value and isinstance(mod, nn.GRU):
+            self._convert_rnn_family(mod, LayerKind.GRU)
+            return
+        if kind == LayerKind.RNN.value and isinstance(mod, nn.RNN):
+            self._convert_rnn_family(mod, LayerKind.RNN)
+            return
         
         raise NotImplementedError(f"Unsupported module: {type(mod).__name__}")
+
+    def _layer_kind_for_module(self, mod: nn.Module) -> Optional[str]:
+        """Resolve an ACT layer kind from the canonical Torch mapping.
+
+        Exact type matching handles overlapping module hierarchies first; the
+        fallback keeps subclass support such as custom nn.Linear subclasses
+        mapping to DENSE.
+        """
+        exact = _TORCH_TO_ACT_EXACT.get(type(mod))
+        if exact is not None:
+            return exact
+        for kind, module_cls in ACT_TO_TORCH.items():
+            if isinstance(mod, module_cls):
+                return kind
+        return None
     
     # -------------------------------------------------------------------------
     # Layer Conversion - Specific Converters
