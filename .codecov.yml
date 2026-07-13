@@ -47,6 +47,7 @@ ignore:
   - "act/config/backend_cli.py"
   - "act/config/frontend_cli.py"
   - "act/config/pipeline_cli.py"
+  - "act/config/check_parity.py"
   - "act/front_end/torchvision_loader/cli.py"
   - "act/back_end/serialization/test_serialization.py"
   - "vnncomp/"

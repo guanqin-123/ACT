@@ -129,19 +129,32 @@ def _add_dataclass_config_args(parser: argparse.ArgumentParser) -> None:
     add_group(TFConfig, "TF Config Overrides (generated)", "tf-", "tf_", set())
 
 
-def _backend_override_keys_from_dataclasses() -> set[str]:
-    from act.config.config import BackendConfig, BaBConfig, GenerationConfig, HybridZConfig, SolverConfig, TFConfig
+# Backend YAML sub-section (== the BackendConfig nested-dataclass field name) ->
+# the flat prefix its fields carry in the CLI/override namespace. Single source of
+# truth, shared by the override-key derivation below AND the config-parity check
+# (act/config/check_parity.py). Adding a field to an existing sub-config needs no
+# change here; only a brand-new sub-config does.
+_BACKEND_SUBCONFIG_PREFIX: dict[str, str] = {
+    "bab": "bab_",
+    "generation": "gen_",
+    "hybridz": "hybridz_",
+    "solver_config": "solver_",
+    "tf": "tf_",
+}
 
-    keys = {
-        fld.name
-        for fld in fields(BackendConfig)
-        if fld.name not in {"bab", "generation", "hybridz", "solver_config", "tf"}
-    }
-    keys.update(f"bab_{fld.name}" for fld in fields(BaBConfig))
-    keys.update(f"gen_{fld.name}" for fld in fields(GenerationConfig))
-    keys.update(f"hybridz_{fld.name}" for fld in fields(HybridZConfig))
-    keys.update(f"solver_{fld.name}" for fld in fields(SolverConfig))
-    keys.update(f"tf_{fld.name}" for fld in fields(TFConfig))
+
+def _backend_override_keys_from_dataclasses() -> set[str]:
+    from act.config.config import BackendConfig
+
+    hints = get_type_hints(BackendConfig)
+    keys: set[str] = set()
+    for fld in fields(BackendConfig):
+        prefix = _BACKEND_SUBCONFIG_PREFIX.get(fld.name)
+        if prefix is None:
+            keys.add(fld.name)
+        else:
+            sub_type = _strip_optional(hints.get(fld.name, fld.type))
+            keys.update(f"{prefix}{sub.name}" for sub in fields(sub_type))
     return keys
 
 

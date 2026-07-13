@@ -174,41 +174,6 @@ def get_vnnlib_data_root() -> str:
     return str(vnnlib_root)
 
 
-def get_spec_config_root() -> str:
-    """Get the consolidated front-end config directory."""
-    from pathlib import Path
-    return str(Path(get_project_root()) / 'act' / 'front_end')
-
-
-def get_default_spec_config_path() -> str:
-    """Get path to the consolidated front-end configuration."""
-    from pathlib import Path
-    return str(Path(get_spec_config_root()) / 'config.yaml')
-
-
-def get_spec_config_path(name: str) -> str:
-    """Resolve a named spec config to the consolidated front-end config path."""
-    import yaml
-    from pathlib import Path
-
-    key = name[:-5] if name.endswith('.yaml') else name
-    path = Path(get_default_spec_config_path())
-    with open(path) as f:
-        specs = (yaml.safe_load(f) or {}).get('specs', {})
-    if key not in specs:
-        raise FileNotFoundError(f"Spec config '{key}' not found in {path}")
-    return str(path)
-
-
-def list_spec_configs() -> list:
-    """List available spec configuration names."""
-    import yaml
-
-    with open(get_default_spec_config_path()) as f:
-        specs = (yaml.safe_load(f) or {}).get('specs', {})
-    return sorted(specs)
-
-
 # ============================================================================
 # NetFactory Paths
 # ============================================================================

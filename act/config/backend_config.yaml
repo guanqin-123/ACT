@@ -310,8 +310,10 @@ backend:
   # Network generation  (net_factory)
   # ═════════════════════════════════════════════════════════════════════════
   # Controls how many networks to generate, where, and TF filtering.
-  # The architecture sampling DSL (family definitions, input/output specs)
-  # lives in gen_config_path — a separate file with its own schema.
+  # The architecture-sampling DSL (families, sampling rules, input/output specs)
+  # is intentionally a SEPARATE file (gen_config_path): a large declarative DSL
+  # with its own schema and no dataclass/CLI mapping, so it does not belong in
+  # this flat, dataclass-backed settings file.
   generation:
     # Path to the architecture sampling config (families, specs, etc.).
     gen_config_path: "act/back_end/examples/config_gen_act_net.yaml"

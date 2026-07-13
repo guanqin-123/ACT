@@ -170,6 +170,35 @@ def _collect_fuzzing_overrides(args: Any) -> dict[str, Any]:
     return overrides
 
 
+_PIPELINE_BAB_ATTR_MAP: dict[str, str] = {
+    "solver_tier": "bab_solver_tier",
+    "max_depth": "bab_max_depth",
+    "max_nodes": "bab_max_nodes",
+    "branching_method": "bab_branching_method",
+    "bounding_method": "bab_bounding_method",
+    "bounding_order": "bab_bounding_order",
+    "sa_cooling_rate": "bab_sa_cooling_rate",
+    "frontier_cap": "bab_frontier_cap",
+    "input_split_fanout": "bab_input_split_fanout",
+    "provenance_enabled": "bab_provenance",
+}
+_PIPELINE_VAL_ATTR_MAP: dict[str, str] = {
+    "solvers": "solvers",
+    "tf_modes": "tf_modes",
+    "samples": "samples",
+    "per_neuron_topk": "per_neuron_topk",
+    "bounds_tolerance": "bounds_tolerance",
+    "batch_sizes": "batch_sizes",
+}
+# BaBConfig fields the pipeline CLI can override: the attr-map keys plus the two
+# special-cased flags (--bab-per-class-alpha, --bab-no-incremental-start). Kept
+# module-level so the CLI<->YAML parity checker can introspect the surface.
+_PIPELINE_BAB_OVERRIDE_FIELDS: tuple[str, ...] = tuple(_PIPELINE_BAB_ATTR_MAP) + (
+    "per_class_alpha",
+    "incremental_start_enabled",
+)
+
+
 def _collect_pipeline_config_overrides(args: Any) -> dict[str, Any]:
     overrides: dict[str, Any] = {}
     for key, _flag, attr, _cast_fn in _FUZZ_OVERRIDE_SPEC:
@@ -182,19 +211,7 @@ def _collect_pipeline_config_overrides(args: Any) -> dict[str, Any]:
             value = _parse_mutation_weights(value)
         overrides[f"fuzz_{key}"] = value
 
-    bab_attr_map = {
-        "solver_tier": "bab_solver_tier",
-        "max_depth": "bab_max_depth",
-        "max_nodes": "bab_max_nodes",
-        "branching_method": "bab_branching_method",
-        "bounding_method": "bab_bounding_method",
-        "bounding_order": "bab_bounding_order",
-        "sa_cooling_rate": "bab_sa_cooling_rate",
-        "frontier_cap": "bab_frontier_cap",
-        "input_split_fanout": "bab_input_split_fanout",
-        "provenance_enabled": "bab_provenance",
-    }
-    for key, attr in bab_attr_map.items():
+    for key, attr in _PIPELINE_BAB_ATTR_MAP.items():
         value = getattr(args, attr, None)
         if value is not None:
             overrides[f"bab_{key}"] = value
@@ -203,15 +220,7 @@ def _collect_pipeline_config_overrides(args: Any) -> dict[str, Any]:
     if getattr(args, "bab_no_incremental_start", None) is not None:
         overrides["bab_incremental_start_enabled"] = not args.bab_no_incremental_start
 
-    val_attr_map = {
-        "solvers": "solvers",
-        "tf_modes": "tf_modes",
-        "samples": "samples",
-        "per_neuron_topk": "per_neuron_topk",
-        "bounds_tolerance": "bounds_tolerance",
-        "batch_sizes": "batch_sizes",
-    }
-    for key, attr in val_attr_map.items():
+    for key, attr in _PIPELINE_VAL_ATTR_MAP.items():
         value = getattr(args, attr, None)
         if value is not None:
             overrides[f"val_{key}"] = value

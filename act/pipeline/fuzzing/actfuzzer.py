@@ -112,56 +112,25 @@ class FuzzingConfig:
     def from_yaml(
         cls, config_path: Optional[str | Path] = None, **overrides
     ) -> "FuzzingConfig":
+        """Load FuzzingConfig from the pipeline YAML with optional overrides.
+
+        The YAML file is read by act.config.config (the single reader of the
+        config YAML files); this only merges overrides and constructs.
         """
-        Load FuzzingConfig from YAML file with optional overrides.
+        from act.config.config import read_fuzzing_section
 
-        Args:
-            config_path: Path to config YAML file (default: act/config/pipeline_config.yaml)
-            **overrides: Keyword arguments to override YAML values
+        return cls.from_mapping(read_fuzzing_section(config_path), **overrides)
 
-        Returns:
-            FuzzingConfig instance with merged configuration
-
-        Example:
-            >>> # Load defaults from YAML
-            >>> config = FuzzingConfig.from_yaml()
-            >>>
-            >>> # Override specific values
-            >>> config = FuzzingConfig.from_yaml(
-            ...     timeout_seconds=60.0,
-            ...     max_iterations=1000
-            ... )
-        """
-        # Default config path
-        if config_path is None:
-            config_path = Path(get_project_root()) / "act/config/pipeline_config.yaml"
-        else:
-            config_path = Path(config_path)
-
-        # Verify config file exists
-        if not config_path.exists():
-            raise FileNotFoundError(
-                f"Configuration file not found: {config_path}\n"
-                f"Expected location: act/config/pipeline_config.yaml"
-            )
-
-        # Load YAML
-        with open(config_path) as f:
-            yaml_data = yaml.safe_load(f)
-            yaml_config = yaml_data["fuzzing"]
-
-        # Merge YAML config with overrides (overrides take precedence)
-        merged_config = {**yaml_config, **overrides}
-
-        # Convert output_dir string to Path if present
+    @classmethod
+    def from_mapping(cls, section: Dict[str, Any], **overrides) -> "FuzzingConfig":
+        """Build from an already-parsed ``fuzzing`` mapping (no file I/O)."""
+        merged_config = {**section, **overrides}
         if "output_dir" in merged_config and isinstance(
             merged_config["output_dir"], str
         ):
             merged_config["output_dir"] = (
                 Path(get_pipeline_log_dir()) / merged_config["output_dir"]
             )
-
-        # Create FuzzingConfig instance
         return cls(**merged_config)
 
 

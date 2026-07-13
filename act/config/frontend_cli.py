@@ -30,6 +30,25 @@ def _parse_list_arg(value: Optional[str], item_type: type = str) -> Optional[lis
     return [item_type(part) for part in parts]
 
 
+_FRONTEND_SPEC_OVERRIDE_KEYS: tuple[str, ...] = (
+    "epsilons",
+    "margins",
+    "input_kinds",
+    "output_kinds",
+    "combination_strategy",
+)
+_FRONTEND_TEXTVERIFY_OVERRIDE_KEYS: tuple[str, ...] = (
+    "method",
+    "p",
+    "perturbed_words",
+    "eps",
+    "max_eps",
+    "num_verify_iters",
+    "k",
+    "alpha_opt_steps",
+)
+
+
 def _build_spec_overrides(args: argparse.Namespace) -> dict[str, Any] | None:
     overrides: dict[str, Any] = {}
     parsed = {
@@ -45,17 +64,11 @@ def _build_spec_overrides(args: argparse.Namespace) -> dict[str, Any] | None:
 
 
 def _build_text_verification_overrides(args: argparse.Namespace) -> dict[str, Any] | None:
-    keys = (
-        'method',
-        'p',
-        'perturbed_words',
-        'eps',
-        'max_eps',
-        'num_verify_iters',
-        'k',
-        'alpha_opt_steps',
-    )
-    overrides = {key: getattr(args, key) for key in keys if getattr(args, key) is not None}
+    overrides = {
+        key: getattr(args, key)
+        for key in _FRONTEND_TEXTVERIFY_OVERRIDE_KEYS
+        if getattr(args, key) is not None
+    }
     if 'method' in overrides:
         overrides['method'] = overrides['method'].replace('-', '_')
     return overrides or None

@@ -404,14 +404,14 @@ class BackendConfig:
     solver_config: SolverConfig = field(default_factory=SolverConfig)
     tf: TFConfig = field(default_factory=TFConfig)
 
-    method: Optional[str] = None
-    p: float = 2.0
-    perturbed_words: int = 1
-    eps: float = 1e-5
-    max_eps: float = 0.01
-    num_verify_iters: int = 5
-    k: int = 1
-    alpha_opt_steps: int = 1000
+    method: Optional[str] = field(default=None, metadata={"in_yaml": False})
+    p: float = field(default=2.0, metadata={"in_yaml": False})
+    perturbed_words: int = field(default=1, metadata={"in_yaml": False})
+    eps: float = field(default=1e-5, metadata={"in_yaml": False})
+    max_eps: float = field(default=0.01, metadata={"in_yaml": False})
+    num_verify_iters: int = field(default=5, metadata={"in_yaml": False})
+    k: int = field(default=1, metadata={"in_yaml": False})
+    alpha_opt_steps: int = field(default=1000, metadata={"in_yaml": False})
 
     # -- validation ---------------------------------------------------------
 
@@ -771,7 +771,9 @@ class PipelineConfig:
         bab_overrides = _strip_prefixed_overrides(overrides, "bab_")
         val_overrides = _strip_prefixed_overrides(overrides, "val_")
 
-        fuzzing = FuzzingConfig.from_yaml(path, **fuzz_overrides)
+        fuzzing = FuzzingConfig.from_mapping(
+            yaml_data.get("fuzzing") or {}, **fuzz_overrides
+        )
         bab_data = ((yaml_data.get("verification") or {}).get("bab") or {})
         validation_data = yaml_data.get("validation") or {}
 
@@ -799,6 +801,22 @@ def _merge_dataclass_fields(
     merged = {key: value for key, value in yaml_values.items() if key in valid_keys}
     merged.update({key: value for key, value in overrides.items() if key in valid_keys})
     return merged
+
+
+def read_fuzzing_section(config_path: Optional[str | Path] = None) -> dict[str, Any]:
+    """Read the ``fuzzing`` section of the pipeline YAML.
+
+    config.py is the single reader of the config YAML files; FuzzingConfig (in
+    act.pipeline.fuzzing.actfuzzer) routes its YAML access through here.
+    """
+    path = Path(config_path) if config_path else _PIPELINE_YAML
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Pipeline config not found: {path}\nExpected: act/config/pipeline_config.yaml"
+        )
+    with open(path) as f:
+        yaml_data = yaml.safe_load(f) or {}
+    return yaml_data.get("fuzzing") or {}
 
 
 # ---------------------------------------------------------------------------
