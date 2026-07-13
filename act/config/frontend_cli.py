@@ -14,6 +14,7 @@ from typing import Any, Optional, cast
 
 from act.front_end.creator_registry import detect_creator, list_creators, get_creator
 from act.util.cli_utils import add_device_args, initialize_from_args
+from act.util.format_utils import rule
 
 # Import domain-specific CLIs for delegation
 from act.front_end.torchvision_loader import data_model_mapping as tv_mapping
@@ -80,15 +81,15 @@ def print_unified_list(creator: Optional[str] = None):
     Args:
         creator: If provided, only show items from this creator
     """
-    print(f"\n{'='*100}")
+    print(f"\n{rule(100)}")
     print(f"ACT FRONT-END UNIFIED CATALOG")
-    print(f"{'='*100}")
+    print(f"{rule(100)}")
     
     if creator is None or creator == 'torchvision':
         # List TorchVision datasets
         datasets = sorted(tv_mapping.DATASET_MODEL_MAPPING.keys())
         print(f"\nTorchVision Datasets ({len(datasets)}):")
-        print('-' * 100)
+        print(rule(100, "-"))
         for ds_name in datasets:
             info = tv_mapping.DATASET_MODEL_MAPPING[ds_name]
             category = info.get('category', 'N/A')
@@ -99,7 +100,7 @@ def print_unified_list(creator: Optional[str] = None):
         # List VNNLIB categories
         categories = vnnlib_mapping.list_categories()
         print(f"\nVNNLIB Categories ({len(categories)}):")
-        print('-' * 100)
+        print(rule(100, "-"))
         for cat_name in sorted(categories):
             info = vnnlib_mapping.get_category_info(cat_name)
             print(f"  {cat_name:30s} ({info['type']}) - {info['description']}")
@@ -107,11 +108,11 @@ def print_unified_list(creator: Optional[str] = None):
     if creator is None or creator == 'bert':
         datasets = bert_loader.list_bert_datasets()
         print(f"\nBERT Datasets ({len(datasets)}):")
-        print('-' * 100)
+        print(rule(100, "-"))
         for ds_name in datasets:
             print(f"  {ds_name:30s} [sentiment] - {bert_loader.BERT_DATASETS[ds_name]}")
     
-    print(f"\n{'='*100}\n")
+    print(f"\n{rule(100)}\n")
 
 
 def print_unified_search(query: str, creator: Optional[str] = None):
@@ -122,9 +123,9 @@ def print_unified_search(query: str, creator: Optional[str] = None):
         query: Search query string
         creator: If provided, only search this creator
     """
-    print(f"\n{'='*100}")
+    print(f"\n{rule(100)}")
     print(f"SEARCH RESULTS: '{query}'")
-    print(f"{'='*100}")
+    print(f"{rule(100)}")
     
     found_any = False
     
@@ -133,7 +134,7 @@ def print_unified_search(query: str, creator: Optional[str] = None):
         if tv_matches:
             found_any = True
             print(f"\nTorchVision Datasets ({len(tv_matches)}):")
-            print('-' * 100)
+            print(rule(100, "-"))
             for ds_name in sorted(tv_matches):
                 info = tv_mapping.DATASET_MODEL_MAPPING[ds_name]
                 category = info.get('category', 'N/A')
@@ -144,7 +145,7 @@ def print_unified_search(query: str, creator: Optional[str] = None):
         if vnnlib_matches:
             found_any = True
             print(f"\nVNNLIB Categories ({len(vnnlib_matches)}):")
-            print('-' * 100)
+            print(rule(100, "-"))
             for cat_name in sorted(vnnlib_matches):
                 info = vnnlib_mapping.get_category_info(cat_name)
                 print(f"  {cat_name:30s} ({info['type']}) - {info['description']}")
@@ -157,14 +158,14 @@ def print_unified_search(query: str, creator: Optional[str] = None):
         if bert_matches:
             found_any = True
             print(f"\nBERT Datasets ({len(bert_matches)}):")
-            print('-' * 100)
+            print(rule(100, "-"))
             for ds_name in sorted(bert_matches):
                 print(f"  {ds_name:30s} [sentiment] - {bert_loader.BERT_DATASETS[ds_name]}")
     
     if not found_any:
         print(f"\nNo results found for '{query}'")
     
-    print(f"\n{'='*100}\n")
+    print(f"\n{rule(100)}\n")
 
 
 def print_unified_info(name: str, explicit_creator: Optional[str] = None):
@@ -178,9 +179,9 @@ def print_unified_info(name: str, explicit_creator: Optional[str] = None):
     try:
         creator_name, normalized_name = detect_creator(name, explicit_creator)
         
-        print(f"\n{'='*100}")
+        print(f"\n{rule(100)}")
         print(f"DETECTED CREATOR: {creator_name.upper()}")
-        print(f"{'='*100}")
+        print(f"{rule(100)}")
         
         if creator_name == 'torchvision':
             info = tv_mapping.get_dataset_info(normalized_name)
@@ -215,7 +216,7 @@ def print_unified_info(name: str, explicit_creator: Optional[str] = None):
             print("Input: clean embeddings [B, L, D]")
             print("Specs: LP_EMBEDDING + MARGIN_ROBUST")
         
-        print(f"\n{'='*100}\n")
+        print(f"\n{rule(100)}\n")
         
     except ValueError as e:
         print(f"Error: {e}")
@@ -233,9 +234,9 @@ def handle_unified_download(name: str, explicit_creator: Optional[str] = None):
     try:
         creator_name, normalized_name = detect_creator(name, explicit_creator)
         
-        print(f"\n{'='*100}")
+        print(f"\n{rule(100)}")
         print(f"DOWNLOADING: {normalized_name} (creator: {creator_name})")
-        print(f"{'='*100}\n")
+        print(f"{rule(100)}\n")
         
         if creator_name == 'torchvision':
             # For TorchVision, download dataset + all recommended models
@@ -260,9 +261,9 @@ def handle_unified_download(name: str, explicit_creator: Optional[str] = None):
                 except Exception as e:
                     print(f"✗ {normalized_name} + {model} - Error: {e}")
             
-            print(f"\n{'='*100}")
+            print(f"\n{rule(100)}")
             print(f"Downloaded {success_count}/{len(models)} model pairs")
-            print(f"{'='*100}\n")
+            print(f"{rule(100)}\n")
             
         elif creator_name == 'vnnlib':
             # Import VNNLIB loader
@@ -278,13 +279,13 @@ def handle_unified_download(name: str, explicit_creator: Optional[str] = None):
                 result = vnnlib_loader.download_vnnlib_category(normalized_name)
                 
                 if result['status'] == 'success':
-                    print(f"\n{'='*100}")
+                    print(f"\n{rule(100)}")
                     print(f"✓ Successfully downloaded category: {normalized_name}")
                     print(f"  Location: {result['category_path']}")
                     print(f"  Instances: {result['num_instances']}")
-                    print(f"{'='*100}\n")
+                    print(f"{rule(100)}\n")
                 else:
-                    print(f"\n{'='*100}")
+                    print(f"\n{rule(100)}")
                     print(f"✗ Download failed: {result['message']}")
                     print(f"\nNote: VNNLIB benchmarks must be downloaded manually from VNN-COMP.")
                     print(f"Expected location: data/vnnlib/{normalized_name}/")
@@ -296,14 +297,14 @@ def handle_unified_download(name: str, explicit_creator: Optional[str] = None):
                     print(f"     - onnx/         (ONNX model files)")
                     print(f"     - vnnlib/       (VNNLIB property files)")
                     print(f"     - instances.csv (benchmark instances)")
-                    print(f"{'='*100}\n")
+                    print(f"{rule(100)}\n")
                     
             except Exception as e:
-                print(f"\n{'='*100}")
+                print(f"\n{rule(100)}")
                 print(f"✗ Download error: {e}")
                 print(f"\nNote: VNNLIB benchmarks must be downloaded manually from VNN-COMP.")
                 print(f"Expected location: data/vnnlib/{normalized_name}/")
-                print(f"{'='*100}\n")
+                print(f"{rule(100)}\n")
         elif creator_name == 'bert':
             print("BERT datasets are file-based.")
             print(f"Expected raw files under data/{normalized_name}/")
@@ -320,15 +321,15 @@ def print_list_downloads(creator: Optional[str] = None):
     Args:
         creator: If provided, only show downloads from this creator
     """
-    print(f"\n{'='*100}")
+    print(f"\n{rule(100)}")
     print(f"DOWNLOADED ITEMS")
-    print(f"{'='*100}")
+    print(f"{rule(100)}")
     
     if creator is None or creator == 'torchvision':
         tv_downloads = tv_loader.list_downloaded_pairs()
         if tv_downloads:
             print(f"\nTorchVision Downloads ({len(tv_downloads)}):")
-            print('-' * 100)
+            print(rule(100, "-"))
             for item in sorted(tv_downloads, key=lambda x: (x['dataset'], x['model'])):
                 print(f"  {item['dataset']:30s} + {item['model']}")
         else:
@@ -340,7 +341,7 @@ def print_list_downloads(creator: Optional[str] = None):
         vnnlib_downloads = vnnlib_loader.list_downloaded_pairs()
         if vnnlib_downloads:
             print(f"\nVNNLIB Downloads ({len(vnnlib_downloads)} instances):")
-            print('-' * 100)
+            print(rule(100, "-"))
             
             # Group by category
             categories = {}
@@ -358,24 +359,24 @@ def print_list_downloads(creator: Optional[str] = None):
     
     if creator is None or creator == 'bert':
         print(f"\nBERT Downloads:")
-        print('-' * 100)
+        print(rule(100, "-"))
         print("  File-based loader; place SST/Yelp raw files under data/sst or data/yelp")
     
-    print(f"\n{'='*100}\n")
+    print(f"\n{rule(100)}\n")
 
 
 def print_creators():
     """Print information about all available creators."""
     creators = list_creators()
 
-    print(f"\n{'='*100}")
+    print(f"\n{rule(100)}")
     print(f"AVAILABLE CREATORS")
-    print(f"{'='*100}")
+    print(f"{rule(100)}")
 
     for creator_name in sorted(creators):
         creator = get_creator(creator_name)
         print(f"\n{creator_name.upper()}")
-        print('-' * 100)
+        print(rule(100, "-"))
         print(f"  Class:       {type(creator).__name__}")
 
         if creator_name == 'torchvision':
@@ -397,7 +398,7 @@ def print_creators():
             print(f"  Items:       {len(datasets)} dataset names/aliases")
             print(f"  Kinds:       binary sentiment robustness")
 
-    print(f"\n{'='*100}\n")
+    print(f"\n{rule(100)}\n")
 
 
 def print_creator_info(name: str) -> None:
@@ -409,9 +410,9 @@ def print_creator_info(name: str) -> None:
         print(f"Available creators: {list_creators()}")
         return
 
-    print(f"\n{'='*100}")
+    print(f"\n{rule(100)}")
     print(f"CREATOR: {name.upper()}")
-    print(f"{'='*100}")
+    print(f"{rule(100)}")
     print(f"  Class:        {type(creator).__name__}")
     print(f"  Module:       {type(creator).__module__}")
     print(f"  All creators: {creators}")
@@ -438,7 +439,7 @@ def print_creator_info(name: str) -> None:
         print(f"  Kinds:        binary sentiment robustness")
         print(f"  Spec types:   LP_EMBEDDING, MARGIN_ROBUST")
 
-    print(f"\n{'='*100}\n")
+    print(f"\n{rule(100)}\n")
 
 
 def main():
@@ -749,9 +750,9 @@ Examples:
 
     elif args.synthesis:
         creator_name = args.creator if args.creator else 'torchvision'
-        print(f"\n{'='*100}")
+        print(f"\n{rule(100)}")
         print(f"MODEL SYNTHESIS - {creator_name.upper()}")
-        print(f"{'='*100}\n")
+        print(f"{rule(100)}\n")
         
         try:
             from act.front_end.model_synthesis import model_synthesis
@@ -765,9 +766,9 @@ Examples:
             print(f"\n✓ Successfully synthesized {len(wrapped_models)} models")
             
             # Automatically run inference after synthesis
-            print(f"\n{'='*100}")
+            print(f"\n{rule(100)}")
             print(f"MODEL INFERENCE - {creator_name.upper()}")
-            print(f"{'='*100}\n")
+            print(f"{rule(100)}\n")
             
             # model_inference extracts input from InputLayer 
             successful_models = model_inference(cast(Any, wrapped_models))
@@ -778,9 +779,9 @@ Examples:
     
     elif args.inference:
         creator_name = args.creator if args.creator else 'torchvision'
-        print(f"\n{'='*100}")
+        print(f"\n{rule(100)}")
         print(f"MODEL INFERENCE - {creator_name.upper()}")
-        print(f"{'='*100}\n")
+        print(f"{rule(100)}\n")
         
         try:
             # Get downloaded pairs for the creator
@@ -849,13 +850,13 @@ Examples:
                 successful = sum(1 for r in results if r['status'] == 'success')
                 failed = len(results) - successful
                 
-                print(f"\n{'='*100}")
+                print(f"\n{rule(100)}")
                 print(f"INFERENCE SUMMARY")
-                print(f"{'='*100}")
+                print(f"{rule(100)}")
                 print(f"✓ Successful: {successful}/{len(results)}")
                 if failed > 0:
                     print(f"✗ Failed: {failed}/{len(results)}")
-                print(f"{'='*100}\n")
+                print(f"{rule(100)}\n")
                 
         except Exception as e:
             import traceback

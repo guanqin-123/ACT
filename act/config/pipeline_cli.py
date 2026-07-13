@@ -20,6 +20,7 @@ import sys
 import torch
 
 from act.util.cli_utils import add_device_args, initialize_from_args
+from act.util.format_utils import rule
 from act.config.config import VALID_SOLVER_TIERS
 
 logger = logging.getLogger(__name__)
@@ -253,10 +254,10 @@ def _apply_pipeline_config_defaults(args: Any) -> PipelineConfig:
 
 def print_header():
     """Print simple header."""
-    print(f"\n{'=' * 80}")
+    print(f"\n{rule()}")
     print(f"ACT: Abstract Constraint Transformer")
     print(f"Inference-based whitebox fuzzing for neural network verification")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
 
 # ============================================================================
@@ -266,14 +267,14 @@ def print_header():
 
 def cmd_list_available(creator: str):
     """List available datasets/categories."""
-    print(f"\n{'=' * 80}")
+    print(f"\n{rule()}")
     print(f"AVAILABLE DATA-MODEL PAIRS ({creator.upper()})")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     if creator == "vnnlib":
         categories = vnnlib_mapping.list_categories()
         print(f"VNNLIB Categories ({len(categories)}):")
-        print("-" * 80)
+        print(rule(80, "-"))
         for cat_name in sorted(categories):
             info = vnnlib_mapping.get_category_info(cat_name)
             print(f"  {cat_name:30s} ({info['type']}) - {info['description']}")
@@ -282,7 +283,7 @@ def cmd_list_available(creator: str):
     elif creator == "torchvision":
         datasets = sorted(tv_mapping.DATASET_MODEL_MAPPING.keys())
         print(f"TorchVision Datasets ({len(datasets)}):")
-        print("-" * 80)
+        print(rule(80, "-"))
         for ds_name in datasets:
             info = tv_mapping.DATASET_MODEL_MAPPING[ds_name]
             models = info.get("models", [])
@@ -292,20 +293,20 @@ def cmd_list_available(creator: str):
                     f"    └─ Models: {', '.join(models[:5])}{'...' if len(models) > 5 else ''}"
                 )
 
-    print(f"\n{'=' * 80}\n")
+    print(f"\n{rule()}\n")
 
 
 def cmd_search(query: str, creator: str):
     """Search for datasets/categories."""
-    print(f"\n{'=' * 80}")
+    print(f"\n{rule()}")
     print(f"SEARCH RESULTS: '{query}' ({creator.upper()})")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     if creator == "vnnlib":
         matches = vnnlib_mapping.search_categories(query)
         if matches:
             print(f"Found {len(matches)} VNNLIB categories:")
-            print("-" * 80)
+            print(rule(80, "-"))
             for cat_name in sorted(matches):
                 info = vnnlib_mapping.get_category_info(cat_name)
                 print(f"  {cat_name:30s} ({info['type']}) - {info['description']}")
@@ -316,21 +317,21 @@ def cmd_search(query: str, creator: str):
         matches = tv_mapping.search_datasets(query)
         if matches:
             print(f"Found {len(matches)} TorchVision datasets:")
-            print("-" * 80)
+            print(rule(80, "-"))
             for ds_name in sorted(matches):
                 info = tv_mapping.DATASET_MODEL_MAPPING[ds_name]
                 print(f"  {ds_name:30s} [{info.get('category', 'N/A')}]")
         else:
             print(f"No TorchVision datasets found for '{query}'")
 
-    print(f"\n{'=' * 80}\n")
+    print(f"\n{rule()}\n")
 
 
 def cmd_info(name: str, creator: str):
     """Show detailed information about dataset/category."""
-    print(f"\n{'=' * 80}")
+    print(f"\n{rule()}")
     print(f"INFO: {name} ({creator.upper()})")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     if creator == "vnnlib":
         try:
@@ -381,14 +382,14 @@ def cmd_info(name: str, creator: str):
         except ValueError as e:
             print(f"Error: {e}")
 
-    print(f"\n{'=' * 80}\n")
+    print(f"\n{rule()}\n")
 
 
 def cmd_download(name: str, creator: str):
     """Download dataset/category."""
-    print(f"\n{'=' * 80}")
+    print(f"\n{rule()}")
     print(f"DOWNLOADING: {name} ({creator.upper()})")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     if creator == "vnnlib":
         try:
@@ -437,9 +438,9 @@ def cmd_download(name: str, creator: str):
                 else:
                     print(f"✗ {name} + {model} - {result['message']}")
 
-            print(f"\n{'=' * 80}")
+            print(f"\n{rule()}")
             print(f"Downloaded {success_count}/{len(models)} model pairs")
-            print(f"{'=' * 80}")
+            print(f"{rule()}")
         except Exception as e:
             print(f"✗ Download error: {e}")
 
@@ -448,9 +449,9 @@ def cmd_download(name: str, creator: str):
 
 def cmd_list_downloaded(creator: str):
     """List downloaded data-model pairs."""
-    print(f"\n{'=' * 80}")
+    print(f"\n{rule()}")
     print(f"DOWNLOADED DATA-MODEL PAIRS ({creator.upper()})")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     if creator == "vnnlib":
         downloaded = vnnlib_loader.list_downloaded_pairs()
@@ -464,7 +465,7 @@ def cmd_list_downloaded(creator: str):
                 categories[cat].append(item)
 
             print(f"VNNLIB Downloads ({len(downloaded)} instances):")
-            print("-" * 80)
+            print(rule(80, "-"))
             for cat in sorted(categories.keys()):
                 instances = categories[cat]
                 print(f"  {cat:30s} ({len(instances)} instances)")
@@ -489,7 +490,7 @@ def cmd_list_downloaded(creator: str):
                 datasets[ds].append(item["model"])
 
             print(f"TorchVision Downloads ({len(downloaded)} pairs):")
-            print("-" * 80)
+            print(rule(80, "-"))
             for ds in sorted(datasets.keys()):
                 models = datasets[ds]
                 print(f"  {ds:30s} ({len(models)} models)")
@@ -501,7 +502,7 @@ def cmd_list_downloaded(creator: str):
                 "Use --download <dataset> --creator torchvision to download data-model pairs"
             )
 
-    print(f"\n{'=' * 80}\n")
+    print(f"\n{rule()}\n")
 
 
 # ============================================================================
@@ -527,9 +528,9 @@ def cmd_fuzz(args):
     config = PipelineConfig.from_yaml(**pipeline_overrides).fuzzing
 
     # Create spec creator and load data-model pairs
-    print(f"{'=' * 80}")
+    print(f"{rule()}")
     print(f"STEP 1: Loading Data-Model Pairs")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     spec_results = []
     initial_seeds = []
@@ -634,9 +635,9 @@ def cmd_fuzz(args):
     print(f"✓ Generated {len(spec_results)} spec result(s)\n")
 
     # Synthesize models
-    print(f"{'=' * 80}")
+    print(f"{rule()}")
     print(f"STEP 2: Model Synthesis")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     # Set strict mode for all VerifiableModel instances
     from act.front_end.verifiable_model import VerifiableModel
@@ -659,9 +660,9 @@ def cmd_fuzz(args):
     print(f"✓ Synthesized {len(wrapped_models)} wrapped model(s)\n")
 
     # Extract initial seeds
-    print(f"{'=' * 80}")
+    print(f"{rule()}")
     print(f"STEP 3: Seed Extraction")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     # Single model only; mixing seeds across spec_results breaks SeedCorpus(torch.cat).
     _, _, _, labeled_tensors, _ = spec_results[0]
@@ -674,9 +675,9 @@ def cmd_fuzz(args):
     print(f"✓ Extracted {len(initial_seeds)} initial seeds\n")
 
     # Run fuzzing on first model
-    print(f"{'=' * 80}")
+    print(f"{rule()}")
     print(f"STEP 4: Fuzzing")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     model_id = list(wrapped_models.keys())[0]
     wrapped_model = wrapped_models[model_id]
@@ -691,15 +692,15 @@ def cmd_fuzz(args):
         report = fuzzer.fuzz()
 
         # Print final results
-        print(f"\n{'=' * 80}")
+        print(f"\n{rule()}")
         print(f"FUZZING COMPLETE")
-        print(f"{'=' * 80}")
+        print(f"{rule()}")
         print(f"Iterations: {report.total_iterations}")
         print(f"Time: {report.total_time:.1f}s")
         print(f"Counterexamples: {len(report.counterexamples)}")
         print(f"Coverage: {report.neuron_coverage:.2%}")
         print(f"Seeds explored: {report.seeds_explored}")
-        print(f"{'=' * 80}\n")
+        print(f"{rule()}\n")
 
         if report.counterexamples and config.save_counterexamples:
             import os
@@ -1189,10 +1190,10 @@ def cmd_verify(target: str, args):
     results = {}
 
     for test_name in tests_to_run:
-        print(f"\n{'=' * 80}")
+        print(f"\n{rule()}")
         if test_name == "act2torch":
             print(f"VERIFICATION TEST: ACT→PyTorch Conversion")
-            print(f"{'=' * 80}\n")
+            print(f"{rule()}\n")
             try:
                 model_factory.main()
                 results[test_name] = "PASSED"
@@ -1205,7 +1206,7 @@ def cmd_verify(target: str, args):
 
         elif test_name == "torch2act":
             print(f"VERIFICATION TEST: PyTorch→ACT Conversion")
-            print(f"{'=' * 80}\n")
+            print(f"{rule()}\n")
             try:
                 torch2act.main()
                 results[test_name] = "PASSED"
@@ -1218,7 +1219,7 @@ def cmd_verify(target: str, args):
 
         elif test_name == "netfactory":
             print(f"VERIFICATION TEST: ModelFactory → verify_once")
-            print(f"{'=' * 80}\n")
+            print(f"{rule()}\n")
             try:
                 validation_failed = _run_netfactory_verify(args)
                 results[test_name] = "FAILED" if validation_failed else "PASSED"
@@ -1231,7 +1232,7 @@ def cmd_verify(target: str, args):
 
         elif test_name == "vnnlib":
             print(f"VERIFICATION TEST: VNNLIB → VerifiableModel → verify_once")
-            print(f"{'=' * 80}\n")
+            print(f"{rule()}\n")
             try:
                 soundness_failed = _run_vnnlib_verify(args)
                 results[test_name] = "FAILED" if soundness_failed else "PASSED"
@@ -1244,7 +1245,7 @@ def cmd_verify(target: str, args):
 
         elif test_name == "torchvision":
             print(f"VERIFICATION TEST: TorchVision → VerifiableModel → verify_once")
-            print(f"{'=' * 80}\n")
+            print(f"{rule()}\n")
             try:
                 soundness_failed = _run_torchvision_verify(args)
                 results[test_name] = "FAILED" if soundness_failed else "PASSED"
@@ -1256,13 +1257,13 @@ def cmd_verify(target: str, args):
                 results[test_name] = "FAILED"
 
     # Print summary
-    print(f"\n{'=' * 80}")
+    print(f"\n{rule()}")
     print(f"VERIFICATION TEST SUMMARY")
-    print(f"{'=' * 80}")
+    print(f"{rule()}")
     for test_name, result in results.items():
         status = "✅" if result == "PASSED" else "❌"
         print(f"  {status} {test_name:25s} {result}")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     # Exit with error if any test failed
     if any(r == "FAILED" for r in results.values()):

@@ -17,11 +17,12 @@
 # Detect if running as script (not as module) and exit with helpful message
 if __name__ == "__main__" and __package__ is None:
     import sys
-    print("\n" + "="*80)
+    from act.util.format_utils import rule
+    print("\n" + rule())
     print("⚠️  ERROR: Cannot run as script due to import conflicts!")
     print("Please run as a module instead:")
     print("  python -m act.front_end.model_synthesis")
-    print("="*80 + "\n")
+    print(rule() + "\n")
     sys.exit(1)
 
 import copy
@@ -39,6 +40,7 @@ from act.front_end.verifiable_model import (
     OutputSpecLayer,
     VerifiableModel,
 )
+from act.util.format_utils import rule
 
 
 # -----------------------------------------------------------------------------
@@ -393,9 +395,9 @@ def model_synthesis(
         RuntimeError: If no spec creator can load data-model pairs or create specs
         NotImplementedError: If VNNLIB creator is requested (not yet implemented)
     """
-    print(f"\n{'='*80}")
+    print(f"\n{rule()}")
     print(f"MODEL SYNTHESIS: Using New Spec Creators ({creator.upper()})")
-    print(f"{'='*80}")
+    print(f"{rule()}")
     
     # Select creator based on parameter
     if creator == 'vnnlib':
@@ -500,9 +502,9 @@ def model_synthesis(
         )
     
     # Print summary
-    print(f"\n{'='*80}")
+    print(f"\n{rule()}")
     print(f"SYNTHESIS COMPLETE")
-    print(f"{'='*80}")
+    print(f"{rule()}")
     print(f"  • Wrapped models: {len(wrapped_models)}")
     # Count unique dataset-model pairs from model keys
     unique_pairs = set()

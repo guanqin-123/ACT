@@ -37,6 +37,7 @@ from act.back_end.layer_schema import LayerKind, REGISTRY
 from act.back_end.serialization.serialization import NetSerializer
 from act.front_end.specs import InKind, OutKind, OutputSpec
 from act.util.device_manager import get_default_device, get_default_dtype
+from act.util.format_utils import rule
 
 logger = logging.getLogger(__name__)
 
@@ -1561,9 +1562,9 @@ class NetFactory:
         covered = sum(1 for c in self.coverage_stats.values() if c > 0)
         total = len(self.coverage_stats)
         rate = self._coverage_rate()
-        print(f"\n{'=' * 60}")
+        print(f"\n{rule(60)}")
         print("Layer Coverage Report")
-        print(f"{'=' * 60}")
+        print(f"{rule(60)}")
         if self.tf_targets:
             print(f"TF Targets: {self.tf_targets} (mode: {self.registry_mode})")
         print(f"Allowed: {len(self.allowed_layers)}  Trackable: {total}")
@@ -1577,7 +1578,7 @@ class NetFactory:
                 print(f"  - {l}")
         else:
             print("\nAll target layers covered!")
-        print(f"{'=' * 60}\n")
+        print(f"{rule(60)}\n")
 
     def _generate_one(self, idx: int, dtype: str, names: List[str]) -> None:
         inst = self._sample_instance(idx)

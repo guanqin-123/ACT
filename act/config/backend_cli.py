@@ -29,6 +29,7 @@ from act.config.config import VALID_BERT_METHODS, _VALID_SOLVERS
 from act.back_end.layer_schema import LayerKind
 from act.front_end.specs import OutKind
 from act.util.cli_utils import add_device_args, initialize_from_args
+from act.util.format_utils import rule
 
 
 _TF_MODES: tuple[str, ...] = ("interval", "hybridz")
@@ -381,9 +382,9 @@ def run_verification(args, backend_cfg):
 
 def run_network_factory(args, backend_cfg):
     """Generate example networks using TF-aware NetFactory."""
-    print(f"\n{'=' * 80}")
+    print(f"\n{rule()}")
     print(f"ACT NETWORK FACTORY")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     from act.back_end.net_factory import NetFactory
 
@@ -407,9 +408,9 @@ def run_network_factory(args, backend_cfg):
             write_manifest=gen.write_manifest,
         )
         factory.generate()
-        print(f"\n{'=' * 80}")
+        print(f"\n{rule()}")
         print(f"✓ Network generation complete")
-        print(f"{'=' * 80}\n")
+        print(f"{rule()}\n")
 
         return 0
     except Exception as e:
@@ -423,9 +424,9 @@ def run_network_factory(args, backend_cfg):
 
 def run_network_info(args):
     """Display information about a network."""
-    print(f"\n{'=' * 80}")
+    print(f"\n{rule()}")
     print(f"NETWORK INFORMATION")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     from act.back_end.serialization.serialization import load_net_from_file
     from act.back_end.layer_schema import LayerKind
@@ -451,9 +452,9 @@ def run_network_info(args):
 
     # Detailed layer info if verbose
     if args.verbose:
-        print(f"\n{'=' * 80}")
+        print(f"\n{rule()}")
         print(f"DETAILED LAYER INFORMATION")
-        print(f"{'=' * 80}\n")
+        print(f"{rule()}\n")
 
         for layer in net.layers:
             print(f"Layer {layer.id}: {layer.kind}")
@@ -473,36 +474,36 @@ def run_network_info(args):
                 print(f"  Successors: {succs}")
             print()
 
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
     return 0
 
 
 def run_serialization_test(args):
     """Test network serialization (save/load round-trip)."""
-    print(f"\n{'=' * 80}")
+    print(f"\n{rule()}")
     print(f"SERIALIZATION TEST")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     from act.back_end.serialization.test_serialization import main as test_main
 
     print("Running serialization tests...\n")
     result = test_main()
 
-    print(f"\n{'=' * 80}")
+    print(f"\n{rule()}")
     if result == 0:
         print("✓ All serialization tests passed")
     else:
         print("❌ Some serialization tests failed")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     return result
 
 
 def list_examples(args):
     """List available example networks."""
-    print(f"\n{'=' * 80}")
+    print(f"\n{rule()}")
     print(f"AVAILABLE EXAMPLE NETWORKS")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     from act.pipeline.verification.model_factory import ModelFactory
 
@@ -529,16 +530,16 @@ def list_examples(args):
 
     for cat, nets in sorted(categories.items()):
         print(f"{cat} ({len(nets)} networks):")
-        print("-" * 70)
+        print(rule(70, "-"))
         for name, info in sorted(nets):
             shape = info.get("input_shape", "?")
             layers = info.get("num_layers", "?")
             print(f"  {name:40s}  shape={shape}  layers={layers}")
         print()
 
-    print(f"{'=' * 80}")
+    print(f"{rule()}")
     print("To generate networks: python -m act.back_end --generate")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     return 0
 
@@ -694,9 +695,9 @@ def run_bench(args) -> int:
     kind = args.bench
     bench_out = getattr(args, "bench_out", None)
 
-    print(f"\n{'=' * 80}")
+    print(f"\n{rule()}")
     print(f"ACT BENCH: {kind.upper()}")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     if kind in ("cnn", "all"):
         out_path = bench_out if (bench_out and kind == "cnn") else _bench_default_path("cnn")
@@ -712,9 +713,9 @@ def run_bench(args) -> int:
         if rc != 0:
             return rc
 
-    print(f"\n{'=' * 80}")
+    print(f"\n{rule()}")
     print(f"Bench complete")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
     return 0
 
 
@@ -736,11 +737,11 @@ def run_diff_nets(args) -> int:
         print(f"Error loading {path_b}: {e}")
         return 1
 
-    print(f"\n{'=' * 80}")
+    print(f"\n{rule()}")
     print(f"NET DIFF")
     print(f"  A: {path_a}")
     print(f"  B: {path_b}")
-    print(f"{'=' * 80}\n")
+    print(f"{rule()}\n")
 
     la, lb = len(net_a.layers), len(net_b.layers)
     marker = "  " if la == lb else "!"
@@ -778,7 +779,7 @@ def run_diff_nets(args) -> int:
             lyr = extra_net.layers[i]
             print(f"+ Layer {i:2d} ({lyr.kind:20s}): only in {extra_side}")
 
-    print(f"\n{'=' * 80}\n")
+    print(f"\n{rule()}\n")
     return 0
 
 

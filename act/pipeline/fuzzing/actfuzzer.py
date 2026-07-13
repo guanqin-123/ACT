@@ -28,6 +28,7 @@ from act.pipeline.fuzzing.corpus import SeedCorpus, FuzzingSeed
 from act.pipeline.fuzzing.checker import Counterexample, PropertyChecker
 from act.util.path_config import get_pipeline_log_dir, get_project_root
 from act.util.device_manager import get_default_device
+from act.util.format_utils import rule
 
 
 @dataclass
@@ -333,10 +334,10 @@ class ACTFuzzer:
         Returns:
             FuzzingReport with counterexamples and statistics
         """
-        print(f"{'=' * 80}")
+        print(f"{rule()}")
         print(f"ACT: Abstract Constraint Transformer")
         print(f"Inference-based whitebox fuzzing for neural network verification")
-        print(f"{'=' * 80}\n")
+        print(f"{rule()}\n")
 
         batch_size = self.batch_size
 
@@ -531,7 +532,7 @@ class ACTFuzzer:
         )
 
         # Print summary
-        print(f"\n{'=' * 80}")
+        print(f"\n{rule()}")
         print(f"🎉 ACTFuzzer completed in {total_time:.1f}s")
         print(f"   Iterations: {report.total_iterations}")
         print(f"   Counterexamples: {len(report.counterexamples)}")
@@ -544,7 +545,7 @@ class ACTFuzzer:
                 [f"{ln}[{i}]" for (ln, i) in report.never_activated_neurons[:10]]
             )
             print(f"   Never-activated sample: {sample_str}")
-        print(f"{'=' * 80}\n")
+        print(f"{rule()}\n")
 
         if self.config.save_counterexamples and report.counterexamples:
             report.save(self.config.output_dir)

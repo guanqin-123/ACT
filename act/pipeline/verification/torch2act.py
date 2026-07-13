@@ -79,6 +79,7 @@ from act.front_end.model_synthesis import model_synthesis
 from act.back_end.solver.solver_torchlp import TorchLPSolver
 from act.back_end.solver.solver_gurobi import GurobiSolver
 from act.util.options import PerformanceOptions
+from act.util.format_utils import rule
 
 
 # -----------------------------------------------------------------------------
@@ -2164,7 +2165,7 @@ def main():
         debug_file = PerformanceOptions.debug_output_file
         with open(debug_file, 'w') as f:
             f.write(f"ACT Torch2ACT Conversion Debug Log\n")
-            f.write(f"{'='*80}\n\n")
+            f.write(f"{rule()}\n\n")
         print(f"Debug logging to: {debug_file}")
     
     print("Starting Spec-Free, Input-Free Torch→ACT Verification Demo")

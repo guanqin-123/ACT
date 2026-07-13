@@ -26,6 +26,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 from act.back_end.core import Bounds, Fact, Layer, Net
 from act.util.options import PerformanceOptions
+from act.util.format_utils import rule
 
 
 class TransferFunction(ABC):
@@ -165,9 +166,9 @@ def dispatch_tf(L: Layer, before: Dict[int, Fact], after: Dict[int, Fact], net: 
     # Debug logging to file (GUARDED)
     if PerformanceOptions.debug_tf:
         with open(PerformanceOptions.debug_output_file, 'a') as f:
-            f.write(f"\n{'='*80}\n")
+            f.write(f"\n{rule()}\n")
             f.write(f"Layer {L.id} ({L.kind})\n")
-            f.write(f"{'='*80}\n")
+            f.write(f"{rule()}\n")
             
             # Input bounds info (single Bounds object)
             lb_min, lb_max = input_bounds.lb.min().item(), input_bounds.lb.max().item()
