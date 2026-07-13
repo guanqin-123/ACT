@@ -288,21 +288,16 @@ class BaBConfig:
 # GenerationConfig — network generation (net_factory) parameters
 # ---------------------------------------------------------------------------
 
-_DEFAULT_GEN_CONFIG = str(
-    Path(__file__).parent.parent / "back_end" / "examples" / "config_gen_act_net.yaml"
-)
-
-
 @dataclass
 class GenerationConfig:
     """Configuration for network generation via ``NetFactory``.
 
-    Controls the simple knobs (how many, where, seed, TF filtering).
-    The architecture sampling DSL lives in a separate file referenced
-    by ``gen_config_path``.
+    Controls the simple knobs (how many, where, seed, TF filtering). The
+    architecture-sampling DSL (families, sampling rules, input/output specs) is
+    embedded in ``net_factory``, loaded from ``backend.generation.net_factory``
+    in backend_config.yaml.
     """
 
-    gen_config_path: str = _DEFAULT_GEN_CONFIG
     output_dir: str = "act/back_end/examples/nets"
     num_instances: int = 15
     base_seed: int = 42
@@ -313,6 +308,8 @@ class GenerationConfig:
     coverage_max_attempts: int = 1000
     coverage_report: bool = True
     write_manifest: bool = True
+
+    net_factory: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.registry_mode not in _VALID_REGISTRY_MODES:

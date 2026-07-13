@@ -6,7 +6,7 @@
 # Distributed without any warranty; see <http://www.gnu.org/licenses/>.
 # ===---------------------------------------------------------------------===#
 #
-# Generates ACT networks from a YAML config (config_gen_act_net.yaml).
+# Generates ACT networks from the DSL in backend_config.yaml (backend.generation.net_factory).
 #
 # Usage:
 #   python -m act.back_end --generate                   # default 15 nets
@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 import torch  # pyright: ignore[reportMissingImports]
-import yaml
 
 from act.back_end.core import Layer, Net
 from act.back_end.layer_schema import LayerKind, REGISTRY
@@ -1116,7 +1115,7 @@ class ConfigSampler:
 class NetFactory:
     def __init__(
         self,
-        gen_config_path: Optional[str] = None,
+        config: Dict[str, Any],
         *,
         output_dir: Optional[str] = None,
         base_seed: Optional[int] = None,
@@ -1126,12 +1125,8 @@ class NetFactory:
         tf_targets: Optional[List[str]] = None,
         registry_mode: str = "intersection",
     ):
-        if gen_config_path is None:
-            gen_config_path = str(
-                Path(__file__).parent / "examples" / "config_gen_act_net.yaml"
-            )
-        self.config_path = str(gen_config_path)
-        self.config = self._load_config(self.config_path)
+        self.config = config
+        self.config_path = "backend_config.yaml:backend.generation.net_factory"
         common = self.config["common"]
 
         self.tf_targets = tf_targets
@@ -1176,16 +1171,6 @@ class NetFactory:
         self.coverage_report = bool(common.get("coverage_report", True))
         self._init_coverage()
         self.total_generated = 0
-
-    @staticmethod
-    def _load_config(path: str) -> Dict[str, Any]:
-        p = Path(path)
-        if not p.exists():
-            raise FileNotFoundError(f"Config not found: {p}")
-        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-        if not isinstance(data, dict):
-            raise ValueError(f"Config must be a mapping: {p}")
-        return data
 
     def _compute_allowed_layers(self, tf_targets, mode):
         try:

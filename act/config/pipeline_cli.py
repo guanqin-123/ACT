@@ -1278,17 +1278,11 @@ def _resolve_batch_sizes(cli_value):
     if cli_value:
         return cli_value
     try:
-        import yaml
-        from act.util.path_config import get_project_root
-        cfg_path = (
-            Path(get_project_root())
-            / "act/back_end/examples/config_gen_act_net.yaml"
-        )
-        if cfg_path.exists():
-            cfg = yaml.safe_load(cfg_path.read_text()) or {}
-            yaml_val = (cfg.get("validate") or {}).get("batch_sizes")
-            if yaml_val:
-                return yaml_val
+        from act.config.config import BackendConfig
+        net_factory = BackendConfig.from_yaml().generation.net_factory
+        yaml_val = (net_factory.get("validate") or {}).get("batch_sizes")
+        if yaml_val:
+            return yaml_val
     except Exception as e:
         # Intentional: optional YAML override; missing/malformed files fall through to default [None].
         logger.debug("suppressed: %s", e)
@@ -1663,8 +1657,8 @@ Examples:
         metavar="B1,B2,...",
         help="Batch sizes to validate at, e.g. '1,4'. Use 'none' for the "
         "network's native batch (from JSON). When omitted, falls back to "
-        "the ``validate.batch_sizes`` list in config_gen_act_net.yaml, "
-        "then to ``[None]`` (native only).",
+        "the ``validate.batch_sizes`` list in backend_config.yaml "
+        "(backend.generation.net_factory), then to ``[None]`` (native only).",
     )
     validation_group.add_argument(
         "--ignore-errors",

@@ -246,8 +246,8 @@ All ACT modules now have unified CLI architecture with consistent device/dtype h
   - **`test_serialization.py`**: Serialization correctness validation
 
 - **`examples/`**: Example networks and test cases
-  - **`config_gen_act_net.yaml`**: YAML definitions for example networks
-  - **`nets/`**: Generated ACT Net JSON files (MNIST, CIFAR, control, reachability)
+- **`../config/backend_config.yaml`** (`backend.generation.net_factory`): network-generation DSL for example networks
+- **`nets/`**: Generated ACT Net JSON files (MNIST, CIFAR, control, reachability)
   - Networks include embedded INPUT_SPEC and ASSERT layers for spec-free verification
 
 ### **`pipeline/` - Testing Framework and Integration**

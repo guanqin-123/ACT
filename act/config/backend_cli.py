@@ -123,7 +123,7 @@ def _add_dataclass_config_args(parser: argparse.ArgumentParser) -> None:
         {"bab", "generation", "hybridz", "solver_config", "tf"},
     )
     add_group(BaBConfig, "BaB Config Overrides (generated)", "bab-", "bab_", set())
-    add_group(GenerationConfig, "Generation Config Overrides (generated)", "gen-", "gen_", set())
+    add_group(GenerationConfig, "Generation Config Overrides (generated)", "gen-", "gen_", {"net_factory"})
     add_group(HybridZConfig, "HybridZ Config Overrides (generated)", "hz-", "hybridz_", set())
     add_group(SolverConfig, "Solver Config Overrides (generated)", "solver-", "solver_", set())
     add_group(TFConfig, "TF Config Overrides (generated)", "tf-", "tf_", set())
@@ -391,14 +391,13 @@ def run_network_factory(args, backend_cfg):
 
     if gen.tf_targets:
         print(f"TF targets: {gen.tf_targets} (mode: {gen.registry_mode})")
-    print(f"Config: {gen.gen_config_path}")
     print(f"Output: {gen.output_dir}")
     print(f"Instances: {gen.num_instances}, Seed: {gen.base_seed}")
     print()
 
     try:
         factory = NetFactory(
-            gen_config_path=gen.gen_config_path,
+            config=gen.net_factory,
             output_dir=gen.output_dir,
             base_seed=gen.base_seed,
             num_instances=gen.num_instances,
@@ -1407,7 +1406,6 @@ _BACKEND_ALIAS_OVERRIDE_SPEC: list[tuple[str, str, Optional[str], Any, str]] = [
     ("bab_llm_probe_decisions",          "bab_llm_probe_decisions",          None, None,  "not_none"),
     ("bab_llm_probe_log",                "bab_llm_probe_log",                None, None,  "user_set"),
     ("bab_multi_split_levels",           "bab_multi_split_levels",           None, int,   "not_none"),
-    ("gen_gen_config_path",  "config",              None,             None, "not_none"),
     ("gen_output_dir",       "output",              "ACT_GEN_OUTPUT", None, "not_none"),
     ("gen_num_instances",    "num",                 "ACT_GEN_NUM",    int,  "not_none"),
     ("gen_base_seed",        "base_seed",           "ACT_GEN_SEED",   int,  "not_none"),
