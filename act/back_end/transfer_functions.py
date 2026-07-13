@@ -75,6 +75,40 @@ class TransferFunction(ABC):
     def side_state_signature(self, layer_id: int) -> Any:
         return None
 
+
+class RegistryTF(TransferFunction, ABC):
+    """Base for transfer functions dispatched through a layer registry."""
+
+    _LAYER_REGISTRY: Dict[str, Any] = {}
+
+    def __init__(self, name: str) -> None:
+        self._name: str = name
+
+    @property
+    def name(self) -> str:
+        """Implementation name for debugging and logging."""
+        return self._name
+
+    def supports_layer(self, layer_kind: str) -> bool:
+        """Check if this transfer function supports the given layer kind."""
+        return layer_kind.upper() in self._LAYER_REGISTRY
+
+    def _check_supported(self, layer_kind: str) -> str:
+        k = layer_kind.upper()
+        if k not in self._LAYER_REGISTRY:
+            raise NotImplementedError(f"{self.name}: Unsupported layer kind '{k}'")
+        return k
+
+    def _set_context(
+        self,
+        net: Net,
+        before: Dict[int, Fact],
+        after: Dict[int, Fact],
+    ) -> None:
+        self._net: Net = net
+        self._before: Dict[int, Fact] = before
+        self._after: Dict[int, Fact] = after
+
 # Global transfer function management
 _current_tf: Optional[TransferFunction] = None
 
