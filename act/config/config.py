@@ -326,6 +326,7 @@ class GenerationConfig:
 @dataclass
 class HybridZConfig:
     timeout: Optional[float] = None
+    max_input_dim: int = 1024
 
 
 @dataclass
@@ -345,10 +346,6 @@ class SolverConfig:
     stagnation_tol: float = 1e-5
     feas_check_stride: int = 5
 
-
-@dataclass
-class TFConfig:
-    hz_max_input_dim: int = 1024
 
 # ---------------------------------------------------------------------------
 # BackendConfig — unified back-end configuration
@@ -399,7 +396,6 @@ class BackendConfig:
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     hybridz: HybridZConfig = field(default_factory=HybridZConfig)
     solver_config: SolverConfig = field(default_factory=SolverConfig)
-    tf: TFConfig = field(default_factory=TFConfig)
 
     method: Optional[str] = field(default=None, metadata={"in_yaml": False})
     p: float = field(default=2.0, metadata={"in_yaml": False})
@@ -485,7 +481,6 @@ class BackendConfig:
           - ``gen_<field>`` → ``GenerationConfig.<field>``
           - ``hybridz_<field>`` → ``HybridZConfig.<field>``
           - ``solver_<field>`` → ``SolverConfig.<field>``
-          - ``tf_<field>`` → ``TFConfig.<field>``
           - ``bab_enabled`` → top-level ``bab_enabled``
         """
         path = Path(config_path) if config_path else _BACKEND_YAML
@@ -502,7 +497,6 @@ class BackendConfig:
         solver_raw: dict[str, Any] = backend_raw.pop("solver_config", {})
         if isinstance(backend_raw.get("solver"), dict):
             solver_raw = backend_raw.pop("solver")
-        tf_raw: dict[str, Any] = backend_raw.pop("tf", {})
 
         # Extract "enabled" from bab section → top-level bab_enabled
         bab_enabled = bab_raw.pop("enabled", None)
@@ -512,12 +506,10 @@ class BackendConfig:
         gen_fields = {fld.name for fld in fields(GenerationConfig)}
         hz_fields = {fld.name for fld in fields(HybridZConfig)}
         solver_fields = {fld.name for fld in fields(SolverConfig)}
-        tf_fields = {fld.name for fld in fields(TFConfig)}
         bab_overrides: dict[str, Any] = {}
         gen_overrides: dict[str, Any] = {}
         hz_overrides: dict[str, Any] = {}
         solver_overrides: dict[str, Any] = {}
-        tf_overrides: dict[str, Any] = {}
         top_overrides: dict[str, Any] = {}
         for k, v in overrides.items():
             if k.startswith("bab_") and k[4:] in bab_fields:
@@ -528,8 +520,6 @@ class BackendConfig:
                 hz_overrides[k[8:]] = v
             elif k.startswith("solver_") and k[7:] in solver_fields:
                 solver_overrides[k[7:]] = v
-            elif k.startswith("tf_") and k[3:] in tf_fields:
-                tf_overrides[k[3:]] = v
             else:
                 top_overrides[k] = v
 
@@ -551,17 +541,12 @@ class BackendConfig:
         solver_merged.update(solver_overrides)
         solver_config = SolverConfig(**solver_merged)
 
-        tf_merged = {k: v for k, v in tf_raw.items() if k in tf_fields}
-        tf_merged.update(tf_overrides)
-        tf_config = TFConfig(**tf_merged)
-
         # Build top-level config
         top_fields = {fld.name for fld in fields(cls)} - {
             "bab",
             "generation",
             "hybridz",
             "solver_config",
-            "tf",
         }
         top_merged: dict[str, Any] = {}
         for k, v in backend_raw.items():
@@ -578,7 +563,6 @@ class BackendConfig:
             generation=gen_config,
             hybridz=hz_config,
             solver_config=solver_config,
-            tf=tf_config,
             **top_merged,
         )
 
@@ -591,7 +575,6 @@ class BackendConfig:
         gen_d = d.pop("generation")
         hz_d = d.pop("hybridz")
         solver_d = d.pop("solver_config")
-        tf_d = d.pop("tf")
         bab_enabled = d.pop("bab_enabled")
         bab_d["enabled"] = bab_enabled
 
@@ -604,7 +587,6 @@ class BackendConfig:
                         "generation": gen_d,
                         "hybridz": hz_d,
                         "solver_config": solver_d,
-                        "tf": tf_d,
                     }
                 },
                 f,

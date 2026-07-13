@@ -79,18 +79,13 @@ backend:
     feas_check_stride: 5      # iteration stride between feasibility checks
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Transfer-function limits  (tf)
-  # ─────────────────────────────────────────────────────────────────────────
-  tf:
-    # HybridZ generator/input dimension fallback limit.
-    hz_max_input_dim: 1024
-
-  # ─────────────────────────────────────────────────────────────────────────
-  # HybridZ solver  (hybridz)
+  # HybridZ  (hybridz)
   # ─────────────────────────────────────────────────────────────────────────
   hybridz:
     # Per-call wall-clock budget in seconds; null = no HybridZ-specific limit.
     timeout: null
+    # HybridZ generator/input dimension fallback limit (used by the HybridZ TF).
+    max_input_dim: 1024
 
   # ═════════════════════════════════════════════════════════════════════════
   # Branch-and-Bound refinement  (bab)

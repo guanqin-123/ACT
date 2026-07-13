@@ -65,7 +65,7 @@ def _parse_config_value(tp: Any):
 
 def _add_dataclass_config_args(parser: argparse.ArgumentParser) -> None:
     """Expose all BackendConfig dataclass fields without hand-maintained drift."""
-    from act.config.config import BackendConfig, BaBConfig, GenerationConfig, HybridZConfig, SolverConfig, TFConfig
+    from act.config.config import BackendConfig, BaBConfig, GenerationConfig, HybridZConfig, SolverConfig
 
     existing_options = {
         option
@@ -121,13 +121,12 @@ def _add_dataclass_config_args(parser: argparse.ArgumentParser) -> None:
         "Backend Config Overrides (generated)",
         "",
         "",
-        {"bab", "generation", "hybridz", "solver_config", "tf"},
+        {"bab", "generation", "hybridz", "solver_config"},
     )
     add_group(BaBConfig, "BaB Config Overrides (generated)", "bab-", "bab_", set())
     add_group(GenerationConfig, "Generation Config Overrides (generated)", "gen-", "gen_", {"net_factory"})
     add_group(HybridZConfig, "HybridZ Config Overrides (generated)", "hz-", "hybridz_", set())
     add_group(SolverConfig, "Solver Config Overrides (generated)", "solver-", "solver_", set())
-    add_group(TFConfig, "TF Config Overrides (generated)", "tf-", "tf_", set())
 
 
 # Backend YAML sub-section (== the BackendConfig nested-dataclass field name) ->
@@ -140,7 +139,6 @@ _BACKEND_SUBCONFIG_PREFIX: dict[str, str] = {
     "generation": "gen_",
     "hybridz": "hybridz_",
     "solver_config": "solver_",
-    "tf": "tf_",
 }
 
 
@@ -1329,7 +1327,7 @@ Examples:
     if tf_mode is not None:
         from act.back_end.analyze import initialize_tf_mode
 
-        initialize_tf_mode(tf_mode, backend_cfg.tf)
+        initialize_tf_mode(tf_mode, backend_cfg.hybridz)
 
     # Set the solver-mode global so verify_once / _verify_one_net can dispatch
     # dual ↔ LP-cascade without consulting the TF mode (refactor decoupled

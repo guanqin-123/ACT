@@ -20,7 +20,7 @@
 
 import torch
 from typing import Dict, Optional
-from act.config.config import TFConfig
+from act.config.config import HybridZConfig
 from act.back_end.core import Bounds, Fact, Layer, Net, ConSet
 from act.back_end.transfer_functions import RegistryTF
 from act.back_end.layer_schema import LayerKind
@@ -41,9 +41,9 @@ import act.back_end.interval_tf.tf_cnn as interval_cnn
 
 
 class HybridzTF(RegistryTF):
-    def __init__(self, config: Optional[TFConfig] = None):
+    def __init__(self, config: Optional[HybridZConfig] = None):
         super().__init__("HybridzTF")
-        cfg = config or TFConfig()
+        cfg = config or HybridZConfig()
         self._hz_cache: Dict[int, HZono] = {}
         self._sparse_hz_cache: Dict[int, SparseHZono] = {}
         self._sparse_drop_reasons: Dict[int, str] = {}
@@ -51,7 +51,7 @@ class HybridzTF(RegistryTF):
         self._tanh_K: int = 2
         self._sigmoid_K: int = 2
         self._var_id_stride: int = 1
-        setattr(self, "_HZ_MAX_INPUT_DIM", cfg.hz_max_input_dim)
+        setattr(self, "_HZ_MAX_INPUT_DIM", cfg.max_input_dim)
         self._sparse_next_frame_id: int = 0
         self._sparse_frame_widths: Dict[int, tuple[int, int]] = {}
         self._sparse_relu_slots: Dict[tuple[int, int, int], tuple[int, int, int]] = {}
