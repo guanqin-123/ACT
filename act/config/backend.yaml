@@ -8,7 +8,7 @@
 # Env vars:    ACT_SOLVER / ACT_DEVICE / ACT_DTYPE
 #
 # Layout (all under the single top-level `backend:` mapping):
-#   runtime selectors → verification cascade → solver_config → tf → hybridz
+#   runtime selectors → verification cascade → torchlp → tf → hybridz
 #   → bab (branch-and-bound)
 
 backend:
@@ -56,9 +56,9 @@ backend:
   bab_max_batch_size: 8
 
   # ─────────────────────────────────────────────────────────────────────────
-  # TorchLP solver tuning  (solver_config)
+  # TorchLP solver tuning  (torchlp)
   # ─────────────────────────────────────────────────────────────────────────
-  solver_config:
+  torchlp:
     # -- Penalty weights --
     rho_eq: 10.0              # equality-constraint penalty weight
     rho_ineq: 10.0            # inequality-constraint penalty weight

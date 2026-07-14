@@ -334,7 +334,7 @@ class HybridZConfig:
 
 
 @dataclass
-class SolverConfig:
+class TorchLPConfig:
     rho_eq: float = 10.0
     rho_ineq: float = 10.0
     max_iter: int = 2000
@@ -399,7 +399,7 @@ class BackendConfig:
 
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     hybridz: HybridZConfig = field(default_factory=HybridZConfig)
-    solver_config: SolverConfig = field(default_factory=SolverConfig)
+    torchlp: TorchLPConfig = field(default_factory=TorchLPConfig)
 
     method: Optional[str] = field(default=None, metadata={"in_yaml": False})
     p: float = field(default=2.0, metadata={"in_yaml": False})
@@ -482,7 +482,7 @@ class BackendConfig:
           - ``bab_<field>`` → ``BaBConfig.<field>``
           - ``gen_<field>`` → ``GenerationConfig.<field>``
           - ``hybridz_<field>`` → ``HybridZConfig.<field>``
-          - ``solver_<field>`` → ``SolverConfig.<field>``
+          - ``torchlp_<field>`` → ``TorchLPConfig.<field>``
           - ``bab_enabled`` → top-level ``bab_enabled``
         """
         path = Path(config_path) if config_path else _BACKEND_YAML
@@ -495,9 +495,7 @@ class BackendConfig:
         bab_raw: dict[str, Any] = backend_raw.pop("bab", {})
         gen_raw: dict[str, Any] = _load_yaml(_NETGEN_YAML) if _NETGEN_YAML.exists() else {}
         hz_raw: dict[str, Any] = backend_raw.pop("hybridz", {})
-        solver_raw: dict[str, Any] = backend_raw.pop("solver_config", {})
-        if isinstance(backend_raw.get("solver"), dict):
-            solver_raw = backend_raw.pop("solver")
+        torchlp_raw: dict[str, Any] = backend_raw.pop("torchlp", {})
 
         # Extract "enabled" from bab section → top-level bab_enabled
         bab_enabled = bab_raw.pop("enabled", None)
@@ -506,11 +504,11 @@ class BackendConfig:
         bab_fields = {fld.name for fld in fields(BaBConfig)}
         gen_fields = {fld.name for fld in fields(GenerationConfig)}
         hz_fields = {fld.name for fld in fields(HybridZConfig)}
-        solver_fields = {fld.name for fld in fields(SolverConfig)}
+        torchlp_fields = {fld.name for fld in fields(TorchLPConfig)}
         bab_overrides: dict[str, Any] = {}
         gen_overrides: dict[str, Any] = {}
         hz_overrides: dict[str, Any] = {}
-        solver_overrides: dict[str, Any] = {}
+        torchlp_overrides: dict[str, Any] = {}
         top_overrides: dict[str, Any] = {}
         for k, v in overrides.items():
             if k.startswith("bab_") and k[4:] in bab_fields:
@@ -519,8 +517,8 @@ class BackendConfig:
                 gen_overrides[k[4:]] = v
             elif k.startswith("hybridz_") and k[8:] in hz_fields:
                 hz_overrides[k[8:]] = v
-            elif k.startswith("solver_") and k[7:] in solver_fields:
-                solver_overrides[k[7:]] = v
+            elif k.startswith("torchlp_") and k[8:] in torchlp_fields:
+                torchlp_overrides[k[8:]] = v
             else:
                 top_overrides[k] = v
 
@@ -543,16 +541,16 @@ class BackendConfig:
         hz_merged.update(hz_overrides)
         hz_config = HybridZConfig(**hz_merged)
 
-        solver_merged = {k: v for k, v in solver_raw.items() if k in solver_fields}
-        solver_merged.update(solver_overrides)
-        solver_config = SolverConfig(**solver_merged)
+        torchlp_merged = {k: v for k, v in torchlp_raw.items() if k in torchlp_fields}
+        torchlp_merged.update(torchlp_overrides)
+        torchlp_config = TorchLPConfig(**torchlp_merged)
 
         # Build top-level config
         top_fields = {fld.name for fld in fields(cls)} - {
             "bab",
             "generation",
             "hybridz",
-            "solver_config",
+            "torchlp",
         }
         top_merged: dict[str, Any] = {}
         for k, v in backend_raw.items():
@@ -568,7 +566,7 @@ class BackendConfig:
             bab=bab_config,
             generation=gen_config,
             hybridz=hz_config,
-            solver_config=solver_config,
+            torchlp=torchlp_config,
             **top_merged,
         )
 
@@ -580,7 +578,7 @@ class BackendConfig:
         bab_d = d.pop("bab")
         d.pop("generation")
         hz_d = d.pop("hybridz")
-        solver_d = d.pop("solver_config")
+        torchlp_d = d.pop("torchlp")
         bab_enabled = d.pop("bab_enabled")
         bab_d["enabled"] = bab_enabled
 
@@ -591,7 +589,7 @@ class BackendConfig:
                         **d,
                         "bab": bab_d,
                         "hybridz": hz_d,
-                        "solver_config": solver_d,
+                        "torchlp": torchlp_d,
                     }
                 },
                 f,

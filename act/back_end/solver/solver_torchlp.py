@@ -3,7 +3,7 @@ import math, time
 from typing import Optional
 import torch
 
-from act.config.config import SolverConfig
+from act.config.config import TorchLPConfig
 from act.back_end.solver.solver_base import (
     Solver,
     SolveStatus,
@@ -20,8 +20,8 @@ class TorchLPSolver(Solver):
     - Supports GPU via device hint in begin(...).
     - LP-only: no integrality constraints (no binary vars, no SOS2).
     """
-    def __init__(self, config: Optional[SolverConfig] = None):
-        cfg = config or SolverConfig()
+    def __init__(self, config: Optional[TorchLPConfig] = None):
+        cfg = config or TorchLPConfig()
         self._device = get_default_device()
         self._dtype = get_default_dtype()
         # parameters

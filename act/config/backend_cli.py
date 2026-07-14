@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Union, cast, get_args, get_origin, get_type_hints
 
-from act.config.config import VALID_BERT_METHODS, _VALID_SOLVERS
+from act.config.config import TorchLPConfig, VALID_BERT_METHODS, _VALID_SOLVERS
 from act.back_end.layer_schema import LayerKind
 from act.front_end.specs import OutKind
 from act.util.cli_utils import add_device_args, initialize_from_args
@@ -65,7 +65,7 @@ def _parse_config_value(tp: Any):
 
 def _add_dataclass_config_args(parser: argparse.ArgumentParser) -> None:
     """Expose all BackendConfig dataclass fields without hand-maintained drift."""
-    from act.config.config import BackendConfig, BaBConfig, GenerationConfig, HybridZConfig, SolverConfig
+    from act.config.config import BackendConfig, BaBConfig, GenerationConfig, HybridZConfig, TorchLPConfig
 
     existing_options = {
         option
@@ -121,12 +121,12 @@ def _add_dataclass_config_args(parser: argparse.ArgumentParser) -> None:
         "Backend Config Overrides (generated)",
         "",
         "",
-        {"bab", "generation", "hybridz", "solver_config"},
+        {"bab", "generation", "hybridz", "torchlp"},
     )
     add_group(BaBConfig, "BaB Config Overrides (generated)", "bab-", "bab_", set())
     add_group(GenerationConfig, "Generation Config Overrides (generated)", "gen-", "gen_", {"net_factory"})
     add_group(HybridZConfig, "HybridZ Config Overrides (generated)", "hz-", "hybridz_", set())
-    add_group(SolverConfig, "Solver Config Overrides (generated)", "solver-", "solver_", set())
+    add_group(TorchLPConfig, "TorchLP Config Overrides (generated)", "torchlp-", "torchlp_", set())
 
 
 # Backend YAML sub-section (== the BackendConfig nested-dataclass field name) ->
@@ -138,7 +138,7 @@ _BACKEND_SUBCONFIG_PREFIX: dict[str, str] = {
     "bab": "bab_",
     "generation": "gen_",
     "hybridz": "hybridz_",
-    "solver_config": "solver_",
+    "torchlp": "torchlp_",
 }
 
 
@@ -169,7 +169,7 @@ class _SkipUnsupported(NamedTuple):
     kinds: tuple[str, ...]
 
 
-def _make_solver(solver_name: str, solver_config=None):
+def _make_solver(solver_name: str, torchlp_config: Optional[TorchLPConfig] = None):
     """LP-cascade solver factory (gurobi / torchlp / auto). Dual is routed
     separately via ``is_dual_solver_active`` since it implements
     ``compute_certified_bound``, not ``solve_batch``.
@@ -181,14 +181,14 @@ def _make_solver(solver_name: str, solver_config=None):
 
         return GurobiSolver()
     if solver_name == "torchlp":
-        return TorchLPSolver(config=solver_config)
+        return TorchLPSolver(config=torchlp_config)
     # "auto": try Gurobi, fall back to TorchLP
     try:
         from act.back_end.solver.solver_gurobi import GurobiSolver
 
         return GurobiSolver()
     except Exception:
-        return TorchLPSolver(config=solver_config)
+        return TorchLPSolver(config=torchlp_config)
 
 
 def _verify_one_net(
@@ -278,7 +278,7 @@ def _verify_one_net(
             try:
                 lp_results = verify_lp_batched(
                     net,
-                    solver_factory=lambda: _make_solver(backend_cfg.solver, backend_cfg.solver_config),
+                    solver_factory=lambda: _make_solver(backend_cfg.solver, backend_cfg.torchlp),
                     timelimit=backend_cfg.timeout,
                 )
                 results = [
@@ -323,7 +323,7 @@ def _verify_one_net(
                 results = [
                     _vbb(
                         slice_net_to_sample(net, i),
-                        solver_factory=lambda: _make_solver(backend_cfg.solver, backend_cfg.solver_config),
+                        solver_factory=lambda: _make_solver(backend_cfg.solver, backend_cfg.torchlp),
                         config=bab_cfg,
                         max_batch_size=backend_cfg.bab_max_batch_size,
                         time_budget_s=backend_cfg.timeout,
@@ -1524,7 +1524,7 @@ def _run_cli_cascade_smoke() -> int:
         if results[0].status == VerifyStatus.UNKNOWN and cfg.lp_enabled:
             lp_results = verify_lp_batched(
                 net,
-                solver_factory=lambda: _make_solver(cfg.solver, cfg.solver_config),
+                solver_factory=lambda: _make_solver(cfg.solver, cfg.torchlp),
                 timelimit=cfg.timeout,
             )
             assert len(lp_results) == 1

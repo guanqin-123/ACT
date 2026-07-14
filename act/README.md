@@ -290,7 +290,7 @@ All ACT modules now have unified CLI architecture with consistent device/dtype h
 
 - **`path_config.py`**: Project path configuration and management
 - **`config/`**: Centralized configuration and CLIs
-  - **`config.py`**: PerformanceOptions, BackendConfig, SolverConfig, etc.
+  - **`config.py`**: PerformanceOptions, BackendConfig, TorchLPConfig, etc.
   - **`backend.yaml`**: Back-end runtime and generation scalar defaults
   - **`gen_act_net.yaml`**: NetFactory architecture-sampling DSL
   - **`pipeline.yaml`**: Pipeline testing and fuzzing defaults
