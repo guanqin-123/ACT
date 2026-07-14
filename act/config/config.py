@@ -330,6 +330,7 @@ class GenerationConfig:
 @dataclass
 class HybridZConfig:
     timeout: Optional[float] = None
+    tolerance: float = 1e-7
     max_input_dim: int = 1024
 
 

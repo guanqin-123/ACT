@@ -95,6 +95,8 @@ backend:
   hybridz:
     # Per-call wall-clock budget in seconds; null = no HybridZ-specific limit.
     timeout: null
+    # MILP feasibility/spec tolerance for HybridZ verdict decisions.
+    tolerance: 0.0000001
     # HybridZ generator/input dimension fallback limit (used by the HybridZ TF).
     max_input_dim: 1024
 

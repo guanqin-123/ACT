@@ -790,15 +790,25 @@ def _verify_and_validate_cell(
     """
     from act.back_end.verifier import verify_once
 
-    verify_kwargs = (
-        {"timelimit": getattr(args, "timeout", None)}
-        if solver == "hybridz"
-        else {}
-    )
     if args.validate_soundness:
-        results, facts = verify_once(net, collect_facts=True, **verify_kwargs)
+        if solver == "hybridz":
+            results, facts = verify_once(
+                net,
+                collect_facts=True,
+                timelimit=getattr(args, "timeout", None),
+                hybridz_tolerance=1e-7,
+            )
+        else:
+            results, facts = verify_once(net, collect_facts=True)
     else:
-        results = verify_once(net, **verify_kwargs)
+        if solver == "hybridz":
+            results = verify_once(
+                net,
+                timelimit=getattr(args, "timeout", None),
+                hybridz_tolerance=1e-7,
+            )
+        else:
+            results = verify_once(net)
         facts = None
     statuses = [r.status.name for r in results]
     print(f"  {cell_label if cell_label is not None else tag}: {statuses}")

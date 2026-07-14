@@ -272,9 +272,17 @@ def _verify_one_net(
             return [], _SkipUnsupported(tf_name=authority_name, kinds=blocking), n_layers
 
         hz_timeout = None
+        hz_tolerance = None
         if is_hybridz:
             hz_timeout = backend_cfg.hybridz.timeout or backend_cfg.timeout
-        results: List[Any] = list(verify_once(net=net, timelimit=hz_timeout))
+            hz_tolerance = backend_cfg.hybridz.tolerance
+        results: List[Any] = list(
+            verify_once(
+                net=net,
+                timelimit=hz_timeout,
+                hybridz_tolerance=hz_tolerance,
+            )
+        )
 
         any_unknown = any(r.status == VerifyStatus.UNKNOWN for r in results)
 

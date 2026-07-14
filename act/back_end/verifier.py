@@ -478,6 +478,7 @@ def verify_once(
     *,
     model_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
     timelimit: Optional[float] = None,
+    hybridz_tolerance: Optional[float] = None,
 ) -> List[VerifyResult]:
     ...
 
@@ -489,6 +490,7 @@ def verify_once(
     model_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
     collect_facts: Literal[False],
     timelimit: Optional[float] = None,
+    hybridz_tolerance: Optional[float] = None,
 ) -> List[VerifyResult]:
     ...
 
@@ -500,6 +502,7 @@ def verify_once(
     model_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
     collect_facts: Literal[True],
     timelimit: Optional[float] = None,
+    hybridz_tolerance: Optional[float] = None,
 ) -> Tuple[List[VerifyResult], Optional[Dict[int, Any]]]:
     ...
 
@@ -511,6 +514,7 @@ def verify_once(
     model_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
     collect_facts: bool = False,
     timelimit: Optional[float] = None,
+    hybridz_tolerance: Optional[float] = None,
 ) -> List[VerifyResult] | Tuple[List[VerifyResult], Optional[Dict[int, Any]]]:
     """Single-shot, pure-tensor batched verifier.
 
@@ -542,6 +546,7 @@ def verify_once(
             interval/hybridz path, or dual pre-activation forward bounds for the
             dual path.
         timelimit: optional HybridZ verdict-solver wall-clock limit in seconds.
+        hybridz_tolerance: optional HybridZ MILP feasibility/spec tolerance.
 
     Returns:
         ``List[VerifyResult]`` of length ``B`` (one per input lane), or
@@ -658,7 +663,11 @@ def verify_once(
                     ):
                         input_hz = candidate
                         break
-        solver = HZSolver()
+        solver = HZSolver(
+            time_limit=30.0 if timelimit is None else timelimit,
+            tolerance=1e-7 if hybridz_tolerance is None else hybridz_tolerance,
+        )
+        assert out_spec is not None
         results = solver.evaluate_spec(
             output_hz,
             out_spec,
