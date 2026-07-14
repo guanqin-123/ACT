@@ -8,9 +8,9 @@ from typing import Any, Final, List, Optional, Union
 
 import yaml
 
-_BACKEND_YAML = Path(__file__).parent / "backend_config.yaml"
-_PIPELINE_YAML = Path(__file__).parent / "pipeline_config.yaml"
-_FRONTEND_YAML = Path(__file__).parent / "frontend_config.yaml"
+_BACKEND_YAML = Path(__file__).parent / "backend.yaml"
+_PIPELINE_YAML = Path(__file__).parent / "pipeline.yaml"
+_FRONTEND_YAML = Path(__file__).parent / "frontend.yaml"
 
 _VALID_SOLVERS = {"auto", "gurobi", "torchlp", "dual", "hybridz"}
 _VALID_DEVICES = {"cpu", "cuda", "gpu"}
@@ -78,7 +78,7 @@ class BaBConfig:
     Construction::
 
         BaBConfig()                     # programmatic defaults
-        BaBConfig.from_yaml()           # load from act/config/backend_config.yaml
+        BaBConfig.from_yaml()           # load from act/config/backend.yaml
         BaBConfig.from_yaml(path, **kw) # custom YAML + overrides
     """
 
@@ -255,7 +255,7 @@ class BaBConfig:
 
         if not path.exists():
             raise FileNotFoundError(
-                f"Backend config not found: {path}\nExpected: act/config/backend_config.yaml"
+                f"Backend config not found: {path}\nExpected: act/config/backend.yaml"
             )
 
         with open(path) as f:
@@ -295,7 +295,7 @@ class GenerationConfig:
     Controls the simple knobs (how many, where, seed, TF filtering). The
     architecture-sampling DSL (families, sampling rules, input/output specs) is
     embedded in ``net_factory``, loaded from ``backend.generation.net_factory``
-    in backend_config.yaml.
+    in backend.yaml.
     """
 
     output_dir: str = "act/back_end/examples/nets"
@@ -357,7 +357,7 @@ class BackendConfig:
     """Unified configuration for the ACT back-end.
 
     Covers runtime selectors (solver / device / dtype), verification timeout,
-    and nested BaB settings.  The canonical source is ``act/config/backend_config.yaml``;
+    and nested BaB settings.  The canonical source is ``act/config/backend.yaml``;
     CLI flags and environment variables override it at load time.
 
     Construction::
@@ -743,7 +743,7 @@ class PipelineConfig:
         path = Path(config_path) if config_path else _PIPELINE_YAML
         if not path.exists():
             raise FileNotFoundError(
-                f"Pipeline config not found: {path}\nExpected: act/config/pipeline_config.yaml"
+                f"Pipeline config not found: {path}\nExpected: act/config/pipeline.yaml"
             )
 
         FuzzingConfig = import_module("act.pipeline.fuzzing.actfuzzer").FuzzingConfig
@@ -796,7 +796,7 @@ def read_fuzzing_section(config_path: Optional[str | Path] = None) -> dict[str, 
     path = Path(config_path) if config_path else _PIPELINE_YAML
     if not path.exists():
         raise FileNotFoundError(
-            f"Pipeline config not found: {path}\nExpected: act/config/pipeline_config.yaml"
+            f"Pipeline config not found: {path}\nExpected: act/config/pipeline.yaml"
         )
     with open(path) as f:
         yaml_data = yaml.safe_load(f) or {}

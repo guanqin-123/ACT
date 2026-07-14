@@ -7,7 +7,7 @@ option added to one surface can never be silently missed by the others.
 The config.py dataclasses are the single source of truth. Two documented
 asymmetries are allowed:
 
-* pipeline ``verification.bab`` is a SPARSE override of ``backend_config.yaml``
+* pipeline ``verification.bab`` is a SPARSE override of ``backend.yaml``
   (its YAML lists only non-default keys), so there the YAML keys must be a
   subset of the CLI surface rather than equal to it.
 * fields declared ``metadata={"in_yaml": False}`` (BackendConfig's text-verify
@@ -141,7 +141,7 @@ def check_pipeline(report: ParityReport) -> None:
     bab_fields = _field_names(BaBConfig)
     bab_cli = set(_PIPELINE_BAB_OVERRIDE_FIELDS)
     bab_yaml = set(((pipeline_yaml.get("verification") or {}).get("bab") or {}).keys())
-    print("[pipeline.verification.bab]  (sparse override of backend_config.yaml)")
+    print("[pipeline.verification.bab]  (sparse override of backend.yaml)")
     report.require("CLI options are backed by a dataclass field",
                    bab_cli <= bab_fields, _fmt(bab_cli - bab_fields))
     report.require("YAML keys are backed by a dataclass field",

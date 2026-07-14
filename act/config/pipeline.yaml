@@ -8,7 +8,7 @@
 #
 # Sections:
 #   fuzzing       – ACTFuzzer counterexample search
-#   verification  – Branch-and-Bound overrides (see backend_config.yaml for the
+#   verification  – Branch-and-Bound overrides (see backend.yaml for the
 #                   full BaB surface; only non-default keys are set here)
 #   validation    – soundness / numerical-precision harness
 
@@ -74,7 +74,7 @@ verification:
   bab:
     # Sparse override: only keys that differ from BaBConfig defaults are set
     # here; every other BaBConfig field is inherited from its dataclass default.
-    # The full, documented BaB surface lives in backend_config.yaml (backend.bab).
+    # The full, documented BaB surface lives in backend.yaml (backend.bab).
     solver_tier: "dual_alpha_eta"  # "lp" | "dual" | "dual_alpha" | "dual_alpha_eta"
     max_depth: 8                   # maximum BaB search-tree depth
     max_nodes: 100                 # maximum subproblems (nodes) to explore

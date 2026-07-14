@@ -35,9 +35,9 @@ act/
 │
 ├── config/                         # Centralized Configuration
 │   ├── config.py                   # Global configuration dataclasses
-│   ├── backend_config.yaml         # Back-end specific configuration
-│   ├── pipeline_config.yaml        # Pipeline specific configuration
-│   ├── frontend_config.yaml        # Front-end specific configuration
+│   ├── backend.yaml         # Back-end specific configuration
+│   ├── pipeline.yaml        # Pipeline specific configuration
+│   ├── frontend.yaml        # Front-end specific configuration
 │   ├── backend_cli.py              # Back-end CLI implementation
 │   ├── pipeline_cli.py             # Pipeline CLI implementation
 │   └── frontend_cli.py             # Front-end CLI implementation
@@ -151,7 +151,7 @@ All ACT modules now have unified CLI architecture with consistent device/dtype h
 #### **Back-End CLI**
 - **`act/config/backend_cli.py`**: Comprehensive back-end verification CLI
   - Commands:
-    - `--generate`: Generate example networks from YAML config (default: `backend_config.yaml`)
+    - `--generate`: Generate example networks from YAML config (default: `backend.yaml`)
     - `--list-examples`: List all available example networks
     - `--info`: Display network structure and details
     - `--verify`: Run verification (single-shot or branch-and-bound)
@@ -246,7 +246,7 @@ All ACT modules now have unified CLI architecture with consistent device/dtype h
   - **`test_serialization.py`**: Serialization correctness validation
 
 - **`examples/`**: Example networks and test cases
-- **`../config/backend_config.yaml`** (`backend.generation.net_factory`): network-generation DSL for example networks
+- **`../config/backend.yaml`** (`backend.generation.net_factory`): network-generation DSL for example networks
 - **`nets/`**: Generated ACT Net JSON files (MNIST, CIFAR, control, reachability)
   - Networks include embedded INPUT_SPEC and ASSERT layers for spec-free verification
 
@@ -290,9 +290,9 @@ All ACT modules now have unified CLI architecture with consistent device/dtype h
 - **`path_config.py`**: Project path configuration and management
 - **`config/`**: Centralized configuration and CLIs
   - **`config.py`**: PerformanceOptions, BackendConfig, SolverConfig, etc.
-  - **`backend_config.yaml`**: Network generation and backend defaults
-  - **`pipeline_config.yaml`**: Pipeline testing and fuzzing defaults
-  - **`frontend_config.yaml`**: Loader and spec creation defaults
+  - **`backend.yaml`**: Network generation and backend defaults
+  - **`pipeline.yaml`**: Pipeline testing and fuzzing defaults
+  - **`frontend.yaml`**: Loader and spec creation defaults
   - **`backend_cli.py`**, **`pipeline_cli.py`**, **`frontend_cli.py`**: Implementation of tier CLIs
   - `get_project_root()`, `get_data_root()`, `get_config_root()`
   - `get_pipeline_log_dir()`: Returns absolute path to `act/pipeline/log/`
@@ -437,7 +437,7 @@ python -m act.back_end --test-serialization --device cpu --dtype float64
 
 ## Examples and Network Generation
 Example ACT networks are stored as JSON under `act/back_end/examples/nets/`.
-These files are generated from the YAML configuration `act/config/backend_config.yaml`
+These files are generated from the YAML configuration `act/config/backend.yaml`
 using the YAML-driven network factory. The test suite and serializer load networks
 from the `examples/nets` directory. When authoring new example networks prefer the
 YAML configuration and the factory rather than hand-editing the JSON files.
@@ -445,7 +445,7 @@ YAML configuration and the factory rather than hand-editing the JSON files.
 ### Using the Back-End CLI for Network Generation
 The back-end CLI provides comprehensive tools for working with ACT networks:
 
-1. **Generate Networks**: `--generate` creates all networks defined in `backend_config.yaml`
+1. **Generate Networks**: `--generate` creates all networks defined in `backend.yaml`
 2. **List Networks**: `--list-examples` shows all available networks organized by category
 3. **Inspect Networks**: `--info` displays structure, use `--verbose` for detailed layer information
 4. **Verify Networks**: `--verify` runs verification with optional `--bab` for branch-and-bound

@@ -1267,7 +1267,7 @@ Examples:
         type=str,
         default=None,
         dest="backend_config",
-        help="Path to backend YAML config (default: act/config/backend_config.yaml)",
+        help="Path to backend YAML config (default: act/config/backend.yaml)",
     )
 
     # Common options
