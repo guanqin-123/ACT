@@ -6,7 +6,7 @@
 # Distributed without any warranty; see <http://www.gnu.org/licenses/>.
 # ===---------------------------------------------------------------------===#
 #
-# Generates ACT networks from the DSL in backend.yaml (backend.generation.net_factory).
+# Generates ACT networks from the DSL in act/config/networkGen.yaml.
 #
 # Usage:
 #   python -m act.back_end --generate                   # default 15 nets
@@ -1127,7 +1127,7 @@ class NetFactory:
         registry_mode: str = "intersection",
     ):
         self.config = config
-        self.config_path = "backend.yaml:backend.generation.net_factory"
+        self.config_path = "networkGen.yaml"
         common = self.config["common"]
 
         self.tf_targets = tf_targets

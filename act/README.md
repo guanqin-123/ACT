@@ -35,7 +35,8 @@ act/
 │
 ├── config/                         # Centralized Configuration
 │   ├── config.py                   # Global configuration dataclasses
-│   ├── backend.yaml         # Back-end specific configuration
+│   ├── backend.yaml         # Back-end specific scalar configuration
+│   ├── networkGen.yaml      # NetFactory architecture-sampling DSL
 │   ├── pipeline.yaml        # Pipeline specific configuration
 │   ├── frontend.yaml        # Front-end specific configuration
 │   ├── backend_cli.py              # Back-end CLI implementation
@@ -246,7 +247,7 @@ All ACT modules now have unified CLI architecture with consistent device/dtype h
   - **`test_serialization.py`**: Serialization correctness validation
 
 - **`examples/`**: Example networks and test cases
-- **`../config/backend.yaml`** (`backend.generation.net_factory`): network-generation DSL for example networks
+- **`../config/networkGen.yaml`**: network-generation DSL for example networks
 - **`nets/`**: Generated ACT Net JSON files (MNIST, CIFAR, control, reachability)
   - Networks include embedded INPUT_SPEC and ASSERT layers for spec-free verification
 
@@ -290,7 +291,8 @@ All ACT modules now have unified CLI architecture with consistent device/dtype h
 - **`path_config.py`**: Project path configuration and management
 - **`config/`**: Centralized configuration and CLIs
   - **`config.py`**: PerformanceOptions, BackendConfig, SolverConfig, etc.
-  - **`backend.yaml`**: Network generation and backend defaults
+  - **`backend.yaml`**: Back-end runtime and generation scalar defaults
+  - **`networkGen.yaml`**: NetFactory architecture-sampling DSL
   - **`pipeline.yaml`**: Pipeline testing and fuzzing defaults
   - **`frontend.yaml`**: Loader and spec creation defaults
   - **`backend_cli.py`**, **`pipeline_cli.py`**, **`frontend_cli.py`**: Implementation of tier CLIs
@@ -437,15 +439,16 @@ python -m act.back_end --test-serialization --device cpu --dtype float64
 
 ## Examples and Network Generation
 Example ACT networks are stored as JSON under `act/back_end/examples/nets/`.
-These files are generated from the YAML configuration `act/config/backend.yaml`
-using the YAML-driven network factory. The test suite and serializer load networks
-from the `examples/nets` directory. When authoring new example networks prefer the
+These files are generated from the architecture-sampling DSL in `act/config/networkGen.yaml`
+using the YAML-driven network factory; scalar generation knobs remain in
+`act/config/backend.yaml`. The test suite and serializer load networks from the
+`examples/nets` directory. When authoring new example networks prefer the
 YAML configuration and the factory rather than hand-editing the JSON files.
 
 ### Using the Back-End CLI for Network Generation
 The back-end CLI provides comprehensive tools for working with ACT networks:
 
-1. **Generate Networks**: `--generate` creates all networks defined in `backend.yaml`
+1. **Generate Networks**: `--generate` creates all networks defined in `networkGen.yaml`
 2. **List Networks**: `--list-examples` shows all available networks organized by category
 3. **Inspect Networks**: `--info` displays structure, use `--verbose` for detailed layer information
 4. **Verify Networks**: `--verify` runs verification with optional `--bab` for branch-and-bound

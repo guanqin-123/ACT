@@ -9,6 +9,7 @@ from typing import Any, Final, List, Optional, Union
 import yaml
 
 _BACKEND_YAML = Path(__file__).parent / "backend.yaml"
+_NETGEN_YAML = Path(__file__).parent / "networkGen.yaml"
 _PIPELINE_YAML = Path(__file__).parent / "pipeline.yaml"
 _FRONTEND_YAML = Path(__file__).parent / "frontend.yaml"
 
@@ -25,6 +26,11 @@ VALID_BERT_METHODS: Final[tuple[str, ...]] = (
     "ibp",
     "discrete",
 )
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    with open(path) as handle:
+        return yaml.safe_load(handle) or {}
 
 
 @dataclass(frozen=True)
@@ -292,10 +298,8 @@ class BaBConfig:
 class GenerationConfig:
     """Configuration for network generation via ``NetFactory``.
 
-    Controls the simple knobs (how many, where, seed, TF filtering). The
-    architecture-sampling DSL (families, sampling rules, input/output specs) is
-    embedded in ``net_factory``, loaded from ``backend.generation.net_factory``
-    in backend.yaml.
+    Controls network generation knobs and the architecture-sampling DSL loaded
+    from ``act/config/networkGen.yaml``.
     """
 
     output_dir: str = "act/back_end/examples/nets"
@@ -472,9 +476,7 @@ class BackendConfig:
               bab:
                 enabled: true
                 ...
-              generation:
-                num_instances: 15
-                ...
+            generation settings are loaded from act/config/networkGen.yaml
 
         Override naming:
           - ``bab_<field>`` → ``BaBConfig.<field>``
@@ -487,12 +489,11 @@ class BackendConfig:
         if not path.exists():
             raise FileNotFoundError(f"Backend config not found: {path}")
 
-        with open(path) as f:
-            raw = yaml.safe_load(f) or {}
+        raw = _load_yaml(path)
 
         backend_raw: dict[str, Any] = raw.get("backend", {})
         bab_raw: dict[str, Any] = backend_raw.pop("bab", {})
-        gen_raw: dict[str, Any] = backend_raw.pop("generation", {})
+        gen_raw: dict[str, Any] = _load_yaml(_NETGEN_YAML) if _NETGEN_YAML.exists() else {}
         hz_raw: dict[str, Any] = backend_raw.pop("hybridz", {})
         solver_raw: dict[str, Any] = backend_raw.pop("solver_config", {})
         if isinstance(backend_raw.get("solver"), dict):
@@ -537,7 +538,7 @@ class BackendConfig:
         gen_merged = {k: v for k, v in gen_raw.items() if k in gen_fields}
         gen_merged.update(gen_overrides)
         gen_config = GenerationConfig(**gen_merged)
-        
+
         hz_merged = {k: v for k, v in hz_raw.items() if k in hz_fields}
         hz_merged.update(hz_overrides)
         hz_config = HybridZConfig(**hz_merged)
@@ -577,7 +578,7 @@ class BackendConfig:
 
         d = asdict(self)
         bab_d = d.pop("bab")
-        gen_d = d.pop("generation")
+        d.pop("generation")
         hz_d = d.pop("hybridz")
         solver_d = d.pop("solver_config")
         bab_enabled = d.pop("bab_enabled")
@@ -589,7 +590,6 @@ class BackendConfig:
                     "backend": {
                         **d,
                         "bab": bab_d,
-                        "generation": gen_d,
                         "hybridz": hz_d,
                         "solver_config": solver_d,
                     }

@@ -52,7 +52,7 @@ class ParityReport:
 
 
 def check_backend(report: ParityReport) -> None:
-    from act.config.config import _BACKEND_YAML, BaBConfig, BackendConfig
+    from act.config.config import _BACKEND_YAML, _NETGEN_YAML, BaBConfig, BackendConfig
     from act.config.backend_cli import (
         _BACKEND_OVERRIDE_SPEC,
         _BACKEND_SUBCONFIG_PREFIX,
@@ -77,6 +77,10 @@ def check_backend(report: ParityReport) -> None:
                 yaml_keys.add("bab_enabled")
             else:
                 yaml_keys.add(f"{prefix}{sub_key}")
+
+    if _NETGEN_YAML.exists():
+        for key in _load_yaml(_NETGEN_YAML):
+            yaml_keys.add(f"gen_{key}")
 
     # A backend option may be CLI-only (settable but absent from the YAML) only if
     # its dataclass field is declared metadata={"in_yaml": False}. No hand-coded

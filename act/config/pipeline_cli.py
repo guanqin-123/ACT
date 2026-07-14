@@ -1658,8 +1658,8 @@ Examples:
         metavar="B1,B2,...",
         help="Batch sizes to validate at, e.g. '1,4'. Use 'none' for the "
         "network's native batch (from JSON). When omitted, falls back to "
-        "the ``validate.batch_sizes`` list in backend.yaml "
-        "(backend.generation.net_factory), then to ``[None]`` (native only).",
+        "the ``validate.batch_sizes`` list in act/config/networkGen.yaml, then "
+        "to ``[None]`` (native only).",
     )
     validation_group.add_argument(
         "--ignore-errors",
