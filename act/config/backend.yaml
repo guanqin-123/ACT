@@ -121,6 +121,9 @@ backend:
     provenance_enabled: false
 
     # -- Dual-tier (solver_tier != lp) -------------------------------------
+    # These tune the BaB-OPTIMIZED dual (solver_tier dual_alpha/dual_alpha_eta).
+    # The standalone `solver: dual` single-shot verify is parameter-free
+    # (one fixed-slope backward pass) and ignores the knobs below.
     solver_tier: "lp"
     dual_n_iters: 50
     lr_alpha: 0.1
