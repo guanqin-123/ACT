@@ -52,7 +52,7 @@ class ParityReport:
 
 
 def check_backend(report: ParityReport) -> None:
-    from act.config.config import _BACKEND_YAML, _NETGEN_YAML, BaBConfig, BackendConfig
+    from act.config.config import _BACKEND_YAML, _NETGEN_YAML, BaBConfig, BackendConfig, DualConfig
     from act.config.backend_cli import (
         _BACKEND_OVERRIDE_SPEC,
         _BACKEND_SUBCONFIG_PREFIX,
@@ -94,7 +94,12 @@ def check_backend(report: ParityReport) -> None:
         for f in fields(BaBConfig)
         if not f.metadata.get("in_yaml", True)
     }
-    cli_only_allowed |= bab_cli_only_allowed
+    dual_cli_only_allowed = {
+        f"dual_{f.name}"
+        for f in fields(DualConfig)
+        if not f.metadata.get("in_yaml", True)
+    }
+    cli_only_allowed |= bab_cli_only_allowed | dual_cli_only_allowed
 
     print("[backend]")
     report.require("CLI options are backed by a dataclass field",
@@ -111,10 +116,10 @@ def check_backend(report: ParityReport) -> None:
 
 
 def check_pipeline(report: ParityReport) -> None:
-    from act.config.config import _PIPELINE_YAML, BaBConfig, ValidationConfig
+    from act.config.config import _PIPELINE_YAML, BaBConfig, DualConfig, ValidationConfig
     from act.pipeline.fuzzing.actfuzzer import FuzzingConfig
     from act.config.pipeline_cli import (
-        _FUZZ_OVERRIDE_SPEC, _PIPELINE_BAB_OVERRIDE_FIELDS, _PIPELINE_VAL_ATTR_MAP,
+        _FUZZ_OVERRIDE_SPEC, _PIPELINE_BAB_OVERRIDE_FIELDS, _PIPELINE_DUAL_OVERRIDE_FIELDS, _PIPELINE_VAL_ATTR_MAP,
     )
     pipeline_yaml = _load_yaml(_PIPELINE_YAML)
 
@@ -144,7 +149,8 @@ def check_pipeline(report: ParityReport) -> None:
 
     bab_fields = _field_names(BaBConfig)
     bab_cli = set(_PIPELINE_BAB_OVERRIDE_FIELDS)
-    bab_yaml = set(((pipeline_yaml.get("verification") or {}).get("bab") or {}).keys())
+    verification_yaml = pipeline_yaml.get("verification") or {}
+    bab_yaml = set((verification_yaml.get("bab") or {}).keys())
     print("[pipeline.verification.bab]  (sparse override of backend.yaml)")
     report.require("CLI options are backed by a dataclass field",
                    bab_cli <= bab_fields, _fmt(bab_cli - bab_fields))
@@ -152,6 +158,17 @@ def check_pipeline(report: ParityReport) -> None:
                    bab_yaml <= bab_fields, _fmt(bab_yaml - bab_fields))
     report.require("YAML keys are a subset of the CLI surface",
                    bab_yaml <= bab_cli, _fmt(bab_yaml - bab_cli))
+
+    dual_fields = _field_names(DualConfig)
+    dual_cli = set(_PIPELINE_DUAL_OVERRIDE_FIELDS)
+    dual_yaml = set((verification_yaml.get("dual") or {}).keys())
+    print("[pipeline.verification.dual]  (sparse override of backend.yaml)")
+    report.require("CLI options are backed by a dataclass field",
+                   dual_cli <= dual_fields, _fmt(dual_cli - dual_fields))
+    report.require("YAML keys are backed by a dataclass field",
+                   dual_yaml <= dual_fields, _fmt(dual_yaml - dual_fields))
+    report.require("YAML keys are a subset of the CLI surface",
+                   dual_yaml <= dual_cli, _fmt(dual_yaml - dual_cli))
 
 
 def check_frontend(report: ParityReport) -> None:

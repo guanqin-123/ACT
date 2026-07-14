@@ -105,24 +105,6 @@ class BaBConfig:
     solver_tier: str = "lp"
     f"""Solver tier for BaB bound computation. Valid: {VALID_SOLVER_TIERS}."""
 
-    dual_n_iters: int = 50
-    """Number of Adam iterations for α/η optimization (only used in ``dual_alpha`` / ``dual_alpha_eta`` tiers)."""
-
-    lr_alpha: float = 0.1
-    """Adam learning rate for α (slope) variables."""
-
-    lr_beta: float = field(default=0.1, metadata={"in_yaml": False})
-    """Adam learning rate for η (split-constraint KKT multipliers). 0.1 default; tune per network."""
-
-    lr_decay: float = field(default=0.98, metadata={"in_yaml": False})
-    """Multiplicative learning-rate decay applied each Adam iteration."""
-
-    incremental_start_enabled: bool = True
-    """Reuse α/η tensors from the parent subproblem as the initial point for child optimization."""
-
-    per_class_alpha: bool = True
-    """Allocate separate α tensors per output class (tighter bounds) rather than sharing one α."""
-
     provenance_enabled: bool = False
     """Track logical BaB node ids and parent ids in TopKBounding."""
 
@@ -343,6 +325,27 @@ class GurobiConfig:
 
 
 @dataclass
+class DualConfig:
+    n_iters: int = 50
+    """Number of Adam iterations for α/η optimization in BaB dual tiers."""
+
+    lr_alpha: float = 0.1
+    """Adam learning rate for α (slope) variables."""
+
+    lr_beta: float = field(default=0.1, metadata={"in_yaml": False})
+    """Adam learning rate for η (split-constraint KKT multipliers)."""
+
+    lr_decay: float = field(default=0.98, metadata={"in_yaml": False})
+    """Multiplicative learning-rate decay applied each Adam iteration."""
+
+    per_class_alpha: bool = True
+    """Allocate separate α tensors per output class rather than sharing one α."""
+
+    incremental_start_enabled: bool = True
+    """Reuse α/η tensors from the parent subproblem as the child initialization."""
+
+
+@dataclass
 class TorchLPConfig:
     rho_eq: float = 10.0
     rho_ineq: float = 10.0
@@ -410,6 +413,7 @@ class BackendConfig:
     hybridz: HybridZConfig = field(default_factory=HybridZConfig)
     gurobi: GurobiConfig = field(default_factory=GurobiConfig)
     torchlp: TorchLPConfig = field(default_factory=TorchLPConfig)
+    dual: DualConfig = field(default_factory=DualConfig)
 
     method: Optional[str] = field(default=None, metadata={"in_yaml": False})
     p: float = field(default=2.0, metadata={"in_yaml": False})
@@ -494,6 +498,7 @@ class BackendConfig:
           - ``hybridz_<field>`` → ``HybridZConfig.<field>``
           - ``gurobi_<field>`` → ``GurobiConfig.<field>``
           - ``torchlp_<field>`` → ``TorchLPConfig.<field>``
+          - ``dual_<field>`` → ``DualConfig.<field>``
           - ``bab_enabled`` → top-level ``bab_enabled``
         """
         path = Path(config_path) if config_path else _BACKEND_YAML
@@ -508,6 +513,7 @@ class BackendConfig:
         hz_raw: dict[str, Any] = backend_raw.pop("hybridz", {})
         gurobi_raw: dict[str, Any] = backend_raw.pop("gurobi", {})
         torchlp_raw: dict[str, Any] = backend_raw.pop("torchlp", {})
+        dual_raw: dict[str, Any] = backend_raw.pop("dual", {})
 
         # Extract "enabled" from bab section → top-level bab_enabled
         bab_enabled = bab_raw.pop("enabled", None)
@@ -518,11 +524,13 @@ class BackendConfig:
         hz_fields = {fld.name for fld in fields(HybridZConfig)}
         gurobi_fields = {fld.name for fld in fields(GurobiConfig)}
         torchlp_fields = {fld.name for fld in fields(TorchLPConfig)}
+        dual_fields = {fld.name for fld in fields(DualConfig)}
         bab_overrides: dict[str, Any] = {}
         gen_overrides: dict[str, Any] = {}
         hz_overrides: dict[str, Any] = {}
         gurobi_overrides: dict[str, Any] = {}
         torchlp_overrides: dict[str, Any] = {}
+        dual_overrides: dict[str, Any] = {}
         top_overrides: dict[str, Any] = {}
         for k, v in overrides.items():
             if k.startswith("bab_") and k[4:] in bab_fields:
@@ -535,6 +543,8 @@ class BackendConfig:
                 gurobi_overrides[k[7:]] = v
             elif k.startswith("torchlp_") and k[8:] in torchlp_fields:
                 torchlp_overrides[k[8:]] = v
+            elif k.startswith("dual_") and k[5:] in dual_fields:
+                dual_overrides[k[5:]] = v
             else:
                 top_overrides[k] = v
 
@@ -565,6 +575,15 @@ class BackendConfig:
         torchlp_merged.update(torchlp_overrides)
         torchlp_config = TorchLPConfig(**torchlp_merged)
 
+        dual_in_yaml = {
+            fld.name for fld in fields(DualConfig) if fld.metadata.get("in_yaml", True)
+        }
+        dual_merged = {
+            k: v for k, v in dual_raw.items() if k in dual_fields and k in dual_in_yaml
+        }
+        dual_merged.update(dual_overrides)
+        dual_config = DualConfig(**dual_merged)
+
         # Build top-level config
         top_fields = {fld.name for fld in fields(cls)} - {
             "bab",
@@ -572,6 +591,7 @@ class BackendConfig:
             "hybridz",
             "gurobi",
             "torchlp",
+            "dual",
         }
         top_merged: dict[str, Any] = {}
         for k, v in backend_raw.items():
@@ -589,6 +609,7 @@ class BackendConfig:
             hybridz=hz_config,
             gurobi=gurobi_config,
             torchlp=torchlp_config,
+            dual=dual_config,
             **top_merged,
         )
 
@@ -602,6 +623,7 @@ class BackendConfig:
         hz_d = d.pop("hybridz")
         gurobi_d = d.pop("gurobi")
         torchlp_d = d.pop("torchlp")
+        dual_d = d.pop("dual")
         bab_enabled = d.pop("bab_enabled")
         bab_d["enabled"] = bab_enabled
 
@@ -614,6 +636,7 @@ class BackendConfig:
                         "hybridz": hz_d,
                         "gurobi": gurobi_d,
                         "torchlp": torchlp_d,
+                        "dual": dual_d,
                     }
                 },
                 f,
@@ -690,7 +713,7 @@ def build_vnncomp_bab_config(
     max_nodes: int = 1_000_000_000,
     solver_tier: str = "dual_alpha_eta",
     dual_n_iters: int = 100,
-) -> BaBConfig:
+) -> tuple[BaBConfig, DualConfig]:
     """BaBConfig for real VNNLIB instances (the VNN-COMP runner profile):
     ``fsb``/``babsr`` keep single-neuron splits, ``gain``/``gain+llm`` use joint-split
     depth, and only ``gain+llm`` enables the LLM probe."""
@@ -703,20 +726,22 @@ def build_vnncomp_bab_config(
         frontier_cap=25000,
         max_depth=max_depth,
         max_nodes=max_nodes,
-        dual_n_iters=dual_n_iters,
-        lr_alpha=0.25,
-        lr_beta=0.1,
-        lr_decay=0.98,
-        incremental_start_enabled=True,
-        per_class_alpha=True,
         reuse_root_bounds=True,
         intermediate_refine="all",
         presplit_levels=0,
         eta_only_children=False,
         multi_split_levels=1 if branching_method != "gain" else max(1, int(multi_split_levels)),
     )
+    dual_cfg = DualConfig(
+        n_iters=dual_n_iters,
+        lr_alpha=0.25,
+        lr_beta=0.1,
+        lr_decay=0.98,
+        incremental_start_enabled=True,
+        per_class_alpha=True,
+    )
     if config_label != "gain+llm":
-        return BaBConfig(**common)
+        return BaBConfig(**common), dual_cfg
     cfg = BaBConfig(
         llm_probe_enabled=True,
         llm_probe_backend=llm_backend,
@@ -729,7 +754,7 @@ def build_vnncomp_bab_config(
     )
     if llm_model:
         cfg.llm_probe_model = llm_model
-    return cfg
+    return cfg, dual_cfg
 
 
 # ---------------------------------------------------------------------------
@@ -754,6 +779,7 @@ class ValidationConfig:
 class PipelineConfig:
     fuzzing: FuzzingConfig
     bab: BaBConfig
+    dual: DualConfig
     validation: ValidationConfig
 
     @classmethod
@@ -775,19 +801,23 @@ class PipelineConfig:
 
         fuzz_overrides = _strip_prefixed_overrides(overrides, "fuzz_")
         bab_overrides = _strip_prefixed_overrides(overrides, "bab_")
+        dual_overrides = _strip_prefixed_overrides(overrides, "dual_")
         val_overrides = _strip_prefixed_overrides(overrides, "val_")
 
         fuzzing = FuzzingConfig.from_mapping(
             yaml_data.get("fuzzing") or {}, **fuzz_overrides
         )
-        bab_data = ((yaml_data.get("verification") or {}).get("bab") or {})
+        verification_data = yaml_data.get("verification") or {}
+        bab_data = verification_data.get("bab") or {}
+        dual_data = verification_data.get("dual") or {}
         validation_data = yaml_data.get("validation") or {}
 
         bab = BaBConfig(**_merge_dataclass_fields(BaBConfig, bab_data, bab_overrides))
+        dual = DualConfig(**_merge_dataclass_fields(DualConfig, dual_data, dual_overrides))
         validation = ValidationConfig(
             **_merge_dataclass_fields(ValidationConfig, validation_data, val_overrides)
         )
-        return cls(fuzzing=fuzzing, bab=bab, validation=validation)
+        return cls(fuzzing=fuzzing, bab=bab, dual=dual, validation=validation)
 
 
 def _strip_prefixed_overrides(overrides: dict[str, Any], prefix: str) -> dict[str, Any]:

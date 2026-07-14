@@ -194,7 +194,8 @@ _PIPELINE_VAL_ATTR_MAP: dict[str, str] = {
 # BaBConfig fields the pipeline CLI can override: the attr-map keys plus the two
 # special-cased flags (--bab-per-class-alpha, --bab-no-incremental-start). Kept
 # module-level so the CLI<->YAML parity checker can introspect the surface.
-_PIPELINE_BAB_OVERRIDE_FIELDS: tuple[str, ...] = tuple(_PIPELINE_BAB_ATTR_MAP) + (
+_PIPELINE_BAB_OVERRIDE_FIELDS: tuple[str, ...] = tuple(_PIPELINE_BAB_ATTR_MAP)
+_PIPELINE_DUAL_OVERRIDE_FIELDS: tuple[str, ...] = (
     "per_class_alpha",
     "incremental_start_enabled",
 )
@@ -217,9 +218,9 @@ def _collect_pipeline_config_overrides(args: Any) -> dict[str, Any]:
         if value is not None:
             overrides[f"bab_{key}"] = value
     if getattr(args, "bab_per_class_alpha", None) is not None:
-        overrides["bab_per_class_alpha"] = str(args.bab_per_class_alpha).lower() == "true"
+        overrides["dual_per_class_alpha"] = str(args.bab_per_class_alpha).lower() == "true"
     if getattr(args, "bab_no_incremental_start", None) is not None:
-        overrides["bab_incremental_start_enabled"] = not args.bab_no_incremental_start
+        overrides["dual_incremental_start_enabled"] = not args.bab_no_incremental_start
 
     for key, attr in _PIPELINE_VAL_ATTR_MAP.items():
         value = getattr(args, attr, None)
@@ -239,8 +240,8 @@ def _apply_pipeline_config_defaults(args: Any) -> PipelineConfig:
     args.bab_sa_cooling_rate = config.bab.sa_cooling_rate
     args.bab_frontier_cap = config.bab.frontier_cap
     args.bab_input_split_fanout = config.bab.input_split_fanout
-    args.bab_per_class_alpha = "true" if config.bab.per_class_alpha else "false"
-    args.bab_no_incremental_start = not config.bab.incremental_start_enabled
+    args.bab_per_class_alpha = "true" if config.dual.per_class_alpha else "false"
+    args.bab_no_incremental_start = not config.dual.incremental_start_enabled
     args.bab_provenance = config.bab.provenance_enabled
     args.solvers = config.validation.solvers
     args.tf_modes = config.validation.tf_modes
@@ -985,7 +986,9 @@ def _run_bab_on_net(net, args, bab_first_sample_only: bool = False):
         seed_from_input_specs,
     )
 
-    config = PipelineConfig.from_yaml(**_collect_pipeline_config_overrides(args)).bab
+    pipeline_config = PipelineConfig.from_yaml(**_collect_pipeline_config_overrides(args))
+    config = pipeline_config.bab
+    dual_config = pipeline_config.dual
     budget = float(getattr(args, "timeout", 60.0) or 60.0)
 
     spec_layers = gather_input_spec_layers(net)
@@ -999,6 +1002,7 @@ def _run_bab_on_net(net, args, bab_first_sample_only: bool = False):
             config=config,
             max_batch_size=None,
             time_budget_s=budget,
+            dual_config=dual_config,
         )
         return result.status.name
 
@@ -1013,6 +1017,7 @@ def _run_bab_on_net(net, args, bab_first_sample_only: bool = False):
                 config=config,
                 max_batch_size=None,
                 time_budget_s=budget,
+                dual_config=dual_config,
             )
             statuses.append(result.status.name)
     return statuses[0] if bab_first_sample_only and statuses else statuses

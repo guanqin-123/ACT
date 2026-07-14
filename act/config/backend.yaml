@@ -100,6 +100,15 @@ backend:
     # HybridZ generator/input dimension fallback limit (used by the HybridZ TF).
     max_input_dim: 1024
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # Dual 
+  # ─────────────────────────────────────────────────────────────────────────
+  dual:
+    n_iters: 50
+    lr_alpha: 0.1
+    per_class_alpha: true
+    incremental_start_enabled: true
+
   # ═════════════════════════════════════════════════════════════════════════
   # Branch-and-Bound refinement  (bab)
   # ═════════════════════════════════════════════════════════════════════════
@@ -120,15 +129,8 @@ backend:
     multi_split_levels: 1
     provenance_enabled: false
 
-    # -- Dual-tier (solver_tier != lp) -------------------------------------
-    # These tune the BaB-OPTIMIZED dual (solver_tier dual_alpha/dual_alpha_eta).
-    # The standalone `solver: dual` single-shot verify is parameter-free
-    # (one fixed-slope backward pass) and ignores the knobs below.
+    # -- Dual-tier selector (solver_tier != lp) ----------------------------
     solver_tier: "lp"
-    dual_n_iters: 50
-    lr_alpha: 0.1
-    incremental_start_enabled: true
-    per_class_alpha: true
 
     # -- LLM-probe controller ----------------------------------------------
     llm_probe_enabled: false

@@ -78,6 +78,7 @@ verification:
     solver_tier: "dual_alpha_eta"  # "lp" | "dual" | "dual_alpha" | "dual_alpha_eta"
     max_depth: 8                   # maximum BaB search-tree depth
     max_nodes: 100                 # maximum subproblems (nodes) to explore
+  dual: {}                         # Sparse DualConfig overrides for BaB dual tiers.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Validation  (verifier soundness + numerical-precision harness)

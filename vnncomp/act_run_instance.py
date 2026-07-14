@@ -138,8 +138,8 @@ def run_vnncomp_instance(args) -> None:
             return min(remaining(), deadline - time.time())
 
         def _verify(tier, budget):
-            cfg = build_vnncomp_bab_config(args.config, llm_backend=args.llm_backend, llm_model=args.llm_model,
-                                           llm_timeout=args.llm_timeout, solver_tier=tier)
+            cfg, dual_cfg = build_vnncomp_bab_config(args.config, llm_backend=args.llm_backend, llm_model=args.llm_model,
+                                                       llm_timeout=args.llm_timeout, solver_tier=tier)
             if low_dim:
                 # Low-dim regime (ACAS Xu-style): bisect the input domain and recompute
                 # every child's intermediate bounds on its own sub-box. Neuron splits and
@@ -154,7 +154,8 @@ def run_vnncomp_instance(args) -> None:
                 cfg.frontier_cap = 0
             clear_violation_check_module_cache()
             return verify_bab_batched(net, solver_factory=TorchLPSolver, config=cfg,
-                                      max_batch_size=args.max_batch_size, time_budget_s=max(1.0, budget))
+                                      max_batch_size=args.max_batch_size, time_budget_s=max(1.0, budget),
+                                      dual_config=dual_cfg)
 
         if args.solver_tier == "auto":
             if low_dim:

@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Union, cast, get_args, get_origin, get_type_hints
 
-from act.config.config import GurobiConfig, TorchLPConfig, VALID_BERT_METHODS, _VALID_SOLVERS
+from act.config.config import DualConfig, GurobiConfig, TorchLPConfig, VALID_BERT_METHODS, _VALID_SOLVERS
 from act.back_end.layer_schema import LayerKind
 from act.front_end.specs import OutKind
 from act.util.cli_utils import add_device_args, initialize_from_args
@@ -65,7 +65,7 @@ def _parse_config_value(tp: Any):
 
 def _add_dataclass_config_args(parser: argparse.ArgumentParser) -> None:
     """Expose all BackendConfig dataclass fields without hand-maintained drift."""
-    from act.config.config import BackendConfig, BaBConfig, GenerationConfig, GurobiConfig, HybridZConfig, TorchLPConfig
+    from act.config.config import BackendConfig, BaBConfig, DualConfig, GenerationConfig, GurobiConfig, HybridZConfig, TorchLPConfig
 
     existing_options = {
         option
@@ -121,9 +121,10 @@ def _add_dataclass_config_args(parser: argparse.ArgumentParser) -> None:
         "Backend Config Overrides (generated)",
         "",
         "",
-        {"bab", "generation", "hybridz", "gurobi", "torchlp"},
+        {"bab", "generation", "hybridz", "gurobi", "torchlp", "dual"},
     )
     add_group(BaBConfig, "BaB Config Overrides (generated)", "bab-", "bab_", set())
+    add_group(DualConfig, "Dual Config Overrides (generated)", "dual-", "dual_", set())
     add_group(GenerationConfig, "Generation Config Overrides (generated)", "gen-", "gen_", {"net_factory"})
     add_group(HybridZConfig, "HybridZ Config Overrides (generated)", "hz-", "hybridz_", set())
     add_group(GurobiConfig, "Gurobi Config Overrides (generated)", "gurobi-", "gurobi_", set())
@@ -141,6 +142,7 @@ _BACKEND_SUBCONFIG_PREFIX: dict[str, str] = {
     "hybridz": "hybridz_",
     "gurobi": "gurobi_",
     "torchlp": "torchlp_",
+    "dual": "dual_",
 }
 
 
@@ -345,6 +347,7 @@ def _verify_one_net(
                         config=bab_cfg,
                         max_batch_size=backend_cfg.bab_max_batch_size,
                         time_budget_s=backend_cfg.timeout,
+                        dual_config=backend_cfg.dual,
                     )
                     if results[i].status == VerifyStatus.UNKNOWN
                     else results[i]
