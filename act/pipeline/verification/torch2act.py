@@ -65,8 +65,7 @@ except (ImportError, RuntimeError):
     _HAS_STOCHASTIC_DEPTH = False
 
 from act.back_end.core import Net, Layer
-from act.back_end.layer_schema import LayerKind
-from act.back_end.layer_torch_map import ACT_TO_TORCH
+from act.back_end.layer_schema import ACT_TO_TORCH, LayerKind
 from act.back_end.layer_util import create_layer
 from act.pipeline.verification.utils import (
     _prod, _normalize_tuple, _assert_dag, _broadcast_const_to_size,

@@ -29,8 +29,7 @@ import torch.nn as nn  # pyright: ignore[reportMissingImports]
 import logging
 
 from act.back_end.core import Net, Layer
-from act.back_end.layer_schema import LayerKind, REGISTRY
-from act.back_end.layer_torch_map import ACT_TO_TORCH
+from act.back_end.layer_schema import ACT_TO_TORCH, LayerKind, REGISTRY
 from act.util.device_manager import get_default_dtype, get_default_device
 
 logger = logging.getLogger(__name__)
