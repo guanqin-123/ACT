@@ -334,6 +334,14 @@ class HybridZConfig:
 
 
 @dataclass
+class GurobiConfig:
+    time_limit: Optional[float] = None
+    mip_gap: float = 1e-4
+    threads: int = 0
+    output_flag: int = 0
+
+
+@dataclass
 class TorchLPConfig:
     rho_eq: float = 10.0
     rho_ineq: float = 10.0
@@ -399,6 +407,7 @@ class BackendConfig:
 
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     hybridz: HybridZConfig = field(default_factory=HybridZConfig)
+    gurobi: GurobiConfig = field(default_factory=GurobiConfig)
     torchlp: TorchLPConfig = field(default_factory=TorchLPConfig)
 
     method: Optional[str] = field(default=None, metadata={"in_yaml": False})
@@ -482,6 +491,7 @@ class BackendConfig:
           - ``bab_<field>`` → ``BaBConfig.<field>``
           - ``gen_<field>`` → ``GenerationConfig.<field>``
           - ``hybridz_<field>`` → ``HybridZConfig.<field>``
+          - ``gurobi_<field>`` → ``GurobiConfig.<field>``
           - ``torchlp_<field>`` → ``TorchLPConfig.<field>``
           - ``bab_enabled`` → top-level ``bab_enabled``
         """
@@ -495,6 +505,7 @@ class BackendConfig:
         bab_raw: dict[str, Any] = backend_raw.pop("bab", {})
         gen_raw: dict[str, Any] = _load_yaml(_NETGEN_YAML) if _NETGEN_YAML.exists() else {}
         hz_raw: dict[str, Any] = backend_raw.pop("hybridz", {})
+        gurobi_raw: dict[str, Any] = backend_raw.pop("gurobi", {})
         torchlp_raw: dict[str, Any] = backend_raw.pop("torchlp", {})
 
         # Extract "enabled" from bab section → top-level bab_enabled
@@ -504,10 +515,12 @@ class BackendConfig:
         bab_fields = {fld.name for fld in fields(BaBConfig)}
         gen_fields = {fld.name for fld in fields(GenerationConfig)}
         hz_fields = {fld.name for fld in fields(HybridZConfig)}
+        gurobi_fields = {fld.name for fld in fields(GurobiConfig)}
         torchlp_fields = {fld.name for fld in fields(TorchLPConfig)}
         bab_overrides: dict[str, Any] = {}
         gen_overrides: dict[str, Any] = {}
         hz_overrides: dict[str, Any] = {}
+        gurobi_overrides: dict[str, Any] = {}
         torchlp_overrides: dict[str, Any] = {}
         top_overrides: dict[str, Any] = {}
         for k, v in overrides.items():
@@ -517,6 +530,8 @@ class BackendConfig:
                 gen_overrides[k[4:]] = v
             elif k.startswith("hybridz_") and k[8:] in hz_fields:
                 hz_overrides[k[8:]] = v
+            elif k.startswith("gurobi_") and k[7:] in gurobi_fields:
+                gurobi_overrides[k[7:]] = v
             elif k.startswith("torchlp_") and k[8:] in torchlp_fields:
                 torchlp_overrides[k[8:]] = v
             else:
@@ -541,6 +556,10 @@ class BackendConfig:
         hz_merged.update(hz_overrides)
         hz_config = HybridZConfig(**hz_merged)
 
+        gurobi_config = GurobiConfig(
+            **{k: v for k, v in gurobi_raw.items() if k in gurobi_fields} | gurobi_overrides
+        )
+
         torchlp_merged = {k: v for k, v in torchlp_raw.items() if k in torchlp_fields}
         torchlp_merged.update(torchlp_overrides)
         torchlp_config = TorchLPConfig(**torchlp_merged)
@@ -550,6 +569,7 @@ class BackendConfig:
             "bab",
             "generation",
             "hybridz",
+            "gurobi",
             "torchlp",
         }
         top_merged: dict[str, Any] = {}
@@ -566,6 +586,7 @@ class BackendConfig:
             bab=bab_config,
             generation=gen_config,
             hybridz=hz_config,
+            gurobi=gurobi_config,
             torchlp=torchlp_config,
             **top_merged,
         )
@@ -578,6 +599,7 @@ class BackendConfig:
         bab_d = d.pop("bab")
         d.pop("generation")
         hz_d = d.pop("hybridz")
+        gurobi_d = d.pop("gurobi")
         torchlp_d = d.pop("torchlp")
         bab_enabled = d.pop("bab_enabled")
         bab_d["enabled"] = bab_enabled
@@ -589,6 +611,7 @@ class BackendConfig:
                         **d,
                         "bab": bab_d,
                         "hybridz": hz_d,
+                        "gurobi": gurobi_d,
                         "torchlp": torchlp_d,
                     }
                 },

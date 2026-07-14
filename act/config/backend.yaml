@@ -24,6 +24,8 @@ backend:
   #               GPU-capable, no license)
   #   "dual"    – linear-relaxation dual certified bounds
   #   "hybridz" – HybridZ zonotope solver
+  # This selects WHICH solver runs; each solver's own tuning lives in its block
+  # below (torchlp:/gurobi:/hybridz:/dual:).  "auto" reuses gurobi + torchlp.
   solver: "torchlp"
 
   # Compute device.
@@ -77,6 +79,15 @@ backend:
     stagnation_patience: 300  # stop after this many stagnant feasibility checks
     stagnation_tol: 0.00001   # min feasibility improvement to reset stagnation
     feas_check_stride: 5      # iteration stride between feasibility checks
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Gurobi solver tuning  (gurobi)
+  # ─────────────────────────────────────────────────────────────────────────
+  gurobi:
+    time_limit: null           # per-solve wall-clock cap; null = caller timeout
+    mip_gap: 0.0001            # relative MIP optimality gap
+    threads: 0                 # 0 = Gurobi automatic thread selection
+    output_flag: 0             # 0 = silent Gurobi output
 
   # ─────────────────────────────────────────────────────────────────────────
   # HybridZ  (hybridz)
