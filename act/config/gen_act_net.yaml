@@ -45,7 +45,7 @@ net_factory:
   # NetFactory architecture-sampling DSL ("the different networks")
   # ============================================================================
   # Consumed via GenerationConfig.net_factory and loaded by
-  # BackendConfig.from_yaml from act/config/networkGen.yaml.
+  # BackendConfig.from_yaml from act/config/gen_act_net.yaml.
 
   # ============================================================================
   # ACT Network Generation Configuration

@@ -9,7 +9,7 @@ from typing import Any, Final, List, Optional, Union
 import yaml
 
 _BACKEND_YAML = Path(__file__).parent / "backend.yaml"
-_NETGEN_YAML = Path(__file__).parent / "networkGen.yaml"
+_NETGEN_YAML = Path(__file__).parent / "gen_act_net.yaml"
 _PIPELINE_YAML = Path(__file__).parent / "pipeline.yaml"
 _FRONTEND_YAML = Path(__file__).parent / "frontend.yaml"
 
@@ -299,7 +299,7 @@ class GenerationConfig:
     """Configuration for network generation via ``NetFactory``.
 
     Controls network generation knobs and the architecture-sampling DSL loaded
-    from ``act/config/networkGen.yaml``.
+    from ``act/config/gen_act_net.yaml``.
     """
 
     output_dir: str = "act/back_end/examples/nets"
@@ -476,7 +476,7 @@ class BackendConfig:
               bab:
                 enabled: true
                 ...
-            generation settings are loaded from act/config/networkGen.yaml
+            generation settings are loaded from act/config/gen_act_net.yaml
 
         Override naming:
           - ``bab_<field>`` → ``BaBConfig.<field>``
