@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Union, cast, get_args, get_origin, get_type_hints
 
-from act.config.config import DualConfig, GurobiConfig, TorchLPConfig, VALID_BERT_METHODS, _VALID_SOLVERS
+from act.config.config import DualConfig, GurobiConfig, TorchLPConfig, VALID_BERT_METHODS, VALID_BOUNDINGS, VALID_SOLVER_TIERS, _VALID_SOLVERS
 from act.back_end.layer_schema import LayerKind
 from act.front_end.specs import OutKind
 from act.util.cli_utils import add_device_args, initialize_from_args
@@ -72,6 +72,10 @@ def _add_dataclass_config_args(parser: argparse.ArgumentParser) -> None:
         for action in parser._actions
         for option in action.option_strings
     }
+    # Dests _collect_backend_overrides reads. A key aliased to a differently
+    # spelled explicit flag (bab_max_nodes -> --bab-max-subproblems) is absent,
+    # so a generated flag for it would set a dest nothing ever reads.
+    read_dests = {attr for _, attr, *_ in _BACKEND_OVERRIDE_SPEC}
 
     def add_group(cls: type[Any], title: str, flag_prefix: str, dest_prefix: str, skip: set[str]) -> None:
         group = parser.add_argument_group(title)
@@ -81,6 +85,8 @@ def _add_dataclass_config_args(parser: argparse.ArgumentParser) -> None:
                 continue
             flag = f"--{flag_prefix}{fld.name.replace('_', '-')}"
             dest = f"{dest_prefix}{fld.name}"
+            if dest not in read_dests:
+                continue
             field_type = type_hints.get(fld.name, fld.type)
             base = _strip_optional(field_type)
             help_text = f"Override config field {cls.__name__}.{fld.name} (default: from config.yaml)"
@@ -1124,6 +1130,14 @@ Examples:
         help="Maximum number of BaB subproblems (default: from config.yaml)",
     )
     verify_group.add_argument(
+        "--bab-solver-tier",
+        type=str,
+        default=None,
+        choices=VALID_SOLVER_TIERS,
+        dest="bab_solver_tier",
+        help="Solver tier for BaB bound computation (default: from config.yaml)",
+    )
+    verify_group.add_argument(
         "--bab-branching",
         type=str,
         default=None,
@@ -1134,23 +1148,16 @@ Examples:
         "--bab-bounding",
         type=str,
         default=None,
+        choices=VALID_BOUNDINGS,
         dest="bab_bounding",
-        help="Bounding strategy (default: from config.yaml)",
-    )
-    verify_group.add_argument(
-        "--bab-bounding-order",
-        type=str,
-        default=None,
-        choices=["depth_lb", "greedy", "sa"],
-        dest="bab_bounding_order",
-        help="TopKBounding order policy (default: from config.yaml)",
+        help="Pool selection strategy (default: from config.yaml)",
     )
     verify_group.add_argument(
         "--bab-sa-cooling-rate",
         type=float,
         default=None,
         dest="bab_sa_cooling_rate",
-        help="Cooling rate for --bab-bounding-order sa (default: from config.yaml)",
+        help="Cooling rate for --bab-bounding sa (default: from config.yaml)",
     )
     verify_group.add_argument(
         "--bab-frontier-cap",
@@ -1405,8 +1412,6 @@ _BACKEND_ALIAS_OVERRIDE_SPEC: list[tuple[str, str, Optional[str], Any, str]] = [
     ("bab_max_depth",        "bab_max_depth",       None,             None, "not_none"),
     ("bab_max_nodes",        "bab_max_subproblems", None,             None, "not_none"),
     ("bab_branching_method", "bab_branching",       None,             None, "not_none"),
-    ("bab_bounding_method",  "bab_bounding",        None,             None, "not_none"),
-    ("bab_bounding_order",   "bab_bounding_order",  None,             None, "not_none"),
     ("bab_sa_cooling_rate",  "bab_sa_cooling_rate", None,             None, "not_none"),
     ("bab_frontier_cap",     "bab_frontier_cap",    None,             None, "not_none"),
     ("bab_input_split_fanout", "bab_input_split_fanout", None,          None, "not_none"),

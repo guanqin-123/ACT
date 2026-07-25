@@ -19,6 +19,14 @@ _VALID_DTYPES = {"float32", "float64"}
 _VALID_REGISTRY_MODES = {"intersection", "union"}
 _VALID_COVERAGE_MODES = {"basic", "full"}
 VALID_SOLVER_TIERS: Final[tuple[str, ...]] = ("lp", "dual", "dual_alpha", "dual_alpha_eta")
+VALID_BOUNDINGS: Final[tuple[str, ...]] = (
+    "random",
+    "depth_lb",
+    "greedy",
+    "sa",
+    "diverse",
+    "mcts",
+)
 VALID_BERT_METHODS: Final[tuple[str, ...]] = (
     "planar",
     "rule",
@@ -94,11 +102,13 @@ class BaBConfig:
     input_split_fanout: int = 2
 
     branching_method: str = "random"
-    bounding_method: str = "random"
-    bounding_order: str = "depth_lb"
+    bounding: str = "random"
     bounding_depth_weight: float = field(default=0.5, metadata={"in_yaml": False})
     bounding_bound_weight: float = field(default=0.5, metadata={"in_yaml": False})
     sa_cooling_rate: float = 0.99
+    mcts_exploration: float = 1.0
+    mcts_lambda: float = 0.5
+    mcts_virtual_loss: float = 1.0
 
     # Dual-tier solver knobs — support solver_tier="dual_alpha_eta" with
     # Iterative slope + Lagrange-multiplier optimization for the dual backward pass.
@@ -213,6 +223,10 @@ class BaBConfig:
         if self.solver_tier not in VALID_SOLVER_TIERS:
             raise ValueError(
                 f"Invalid solver_tier {self.solver_tier!r}; expected {VALID_SOLVER_TIERS}"
+            )
+        if self.bounding not in VALID_BOUNDINGS:
+            raise ValueError(
+                f"Invalid bounding {self.bounding!r}; expected {VALID_BOUNDINGS}"
             )
         if self.method is not None:
             selection = select_bert_method(self.method)
@@ -721,8 +735,7 @@ def build_vnncomp_bab_config(
     common: dict[str, Any] = dict(
         solver_tier=solver_tier,
         branching_method=branching_method,
-        bounding_method="topk",
-        bounding_order="depth_lb",
+        bounding="depth_lb",
         frontier_cap=25000,
         max_depth=max_depth,
         max_nodes=max_nodes,

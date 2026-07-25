@@ -14,8 +14,10 @@
 #     * ``TopKBounding`` — keep the top-k (bounded by the batch/tensor size) ranked
 #       by a swappable order strategy; supports frontier-cap eviction (``evict_to``),
 #       which drops worst-priority leaves and forces a sound ``UNKNOWN``.
+#     * ``MCTSBounding`` — MCTS side tables (``N``/``Q``) over the BaB tree, maintained as
+#       a pure observer; ``pop`` is plain top-k until UCB1 selection lands.
 #
-#   Order strategies (the ``OrderFunction`` Protocol; pluggable via ``ORDER_REGISTRY``):
+#   Order strategies (the ``OrderFunction`` Protocol; swapped in at pool construction):
 #     * ``DepthLowerBoundOrder`` — depth + lower-bound blend (default, 50/50).
 #     * ``GreedyOrder`` — best-first by lower bound (Oliva-Greedy, ``|lb|``).
 #     * ``SAOrder`` — simulated-annealing exploration (temperature-annealed; stochastically cools to greedy).
@@ -37,12 +39,15 @@
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
-from typing import Dict, Optional, Protocol
+from collections import Counter
+from typing import Callable, Dict, List, Literal, Optional, Protocol, Sequence, Set, Tuple
 
 import torch
 
 from act.back_end.bab.node import SubproblemBatch
+from act.back_end.solver.solver_base import SolveStatus
 
 
 # ---------------------------------------------------------------------------
@@ -298,13 +303,6 @@ class SAOrder:
         return base / temp + gumbel
 
 
-ORDER_REGISTRY: Dict[str, type] = {
-    "depth_lb": DepthLowerBoundOrder,
-    "greedy": GreedyOrder,
-    "sa": SAOrder,
-}
-
-
 class TopKBounding(BoundingStrategy):
     """Priority pool: keep the top-k subproblems chosen by an order callable.
 
@@ -319,8 +317,13 @@ class TopKBounding(BoundingStrategy):
     preserved across push/pop.
     """
 
-    def __init__(self, order: Optional[OrderFunction] = None) -> None:
+    def __init__(
+        self,
+        order: Optional[OrderFunction] = None,
+        select_probe: Optional[Callable[[SubproblemBatch], None]] = None,
+    ) -> None:
         self.order: OrderFunction = order if order is not None else DepthLowerBoundOrder()
+        self.select_probe = select_probe
         self._lb: Optional[torch.Tensor] = None
         self._ub: Optional[torch.Tensor] = None
         self._depths: Optional[torch.Tensor] = None
@@ -395,6 +398,8 @@ class TopKBounding(BoundingStrategy):
             remaining = order[n:]
 
         result = self._build(selected)
+        if self.select_probe is not None:
+            self.select_probe(result)
         if remaining is None or remaining.numel() == 0:
             self._clear()
         else:
@@ -460,3 +465,420 @@ class TopKBounding(BoundingStrategy):
 
     def __len__(self) -> int:
         return 0 if self._lb is None else self._lb.shape[0]
+
+
+class DiverseTopKBounding(TopKBounding):
+    """Top-k priority pool with optional diversity-aware scheduling.
+
+    ``diversity_mode='hash'`` preserves the original exact split-sign
+    de-duplication behaviour.  ``'soft'`` uses a value-weighted farthest-point
+    selector over split-sign vectors (neuron splitting) or box centres (input
+    splitting / no split signs).  This is scheduling-only: no node is pruned, no
+    bound is changed, and all non-selected nodes remain in the pool for later
+    waves.  ``'none'`` is an explicit off switch and is equivalent to
+    :class:`TopKBounding` selection.
+    """
+
+    def __init__(
+        self,
+        order: Optional[OrderFunction] = None,
+        select_probe: Optional[Callable[[SubproblemBatch], None]] = None,
+        *,
+        diversity_mode: Literal["hash", "soft", "none"] = "hash",
+        diversity_weight: float = 1.0,
+    ) -> None:
+        super().__init__(order, select_probe=select_probe)
+        if diversity_mode not in {"hash", "soft", "none"}:
+            raise ValueError(
+                "diversity_mode must be one of 'hash', 'soft', or 'none', "
+                f"got {diversity_mode!r}"
+            )
+        self.diversity_mode = diversity_mode
+        self.diversity_weight = float(diversity_weight)
+
+    def pop(self, batch_size: int = 1) -> SubproblemBatch:
+        lb = self._lb
+        if lb is None:
+            raise IndexError("pop from empty pool")
+        total = lb.shape[0]
+        n = min(batch_size, total)
+        if n >= total:
+            selected = torch.arange(total, device=lb.device)
+            remaining: Optional[torch.Tensor] = None
+        else:
+            order = torch.argsort(self._priority_scores(), descending=True)
+            if self.diversity_mode == "none":
+                selected = order[:n]
+            elif self.diversity_mode == "soft":
+                selected = self._soft_diverse_select(order, n)
+            else:
+                selected = self._dedup_select(order, n)
+            selected_mask = torch.zeros(total, dtype=torch.bool, device=lb.device)
+            selected_mask[selected] = True
+            remaining = order[~selected_mask.index_select(0, order)]
+
+        result = self._build(selected)
+        if self.select_probe is not None:
+            self.select_probe(result)
+        if remaining is None or remaining.numel() == 0:
+            self._clear()
+        else:
+            self._restrict(remaining)
+        return result
+
+    def _dedup_select(self, order: torch.Tensor, n: int) -> torch.Tensor:
+        signatures = self._split_sign_signatures()
+        if signatures is None:
+            return order[:n]
+
+        selected: List[int] = []
+        selected_set: Set[int] = set()
+        seen: Set[Tuple[int, ...]] = set()
+        ordered_indices = [int(i) for i in order.detach().cpu().tolist()]
+
+        for idx in ordered_indices:
+            signature = signatures[idx]
+            if signature in seen:
+                continue
+            selected.append(idx)
+            selected_set.add(idx)
+            seen.add(signature)
+            if len(selected) == n:
+                break
+
+        if len(selected) < n:
+            for idx in ordered_indices:
+                if idx in selected_set:
+                    continue
+                selected.append(idx)
+                selected_set.add(idx)
+                if len(selected) == n:
+                    break
+
+        return torch.tensor(selected, dtype=torch.long, device=order.device)
+
+    def _split_sign_signatures(self) -> Optional[List[Tuple[int, ...]]]:
+        split_signs = self._split_signs
+        if not split_signs:
+            return None
+
+        pieces: List[torch.Tensor] = []
+        for layer_id in sorted(split_signs):
+            value = split_signs[layer_id]
+            if value.shape[0] == 0:
+                continue
+            pieces.append(value.detach().reshape(value.shape[0], -1).to(device="cpu"))
+        if not pieces:
+            return None
+
+        features = torch.cat(pieces, dim=1)
+        if features.shape[1] == 0:
+            return None
+        return [tuple(int(v) for v in row.tolist()) for row in features]
+
+    def _soft_diverse_select(self, order: torch.Tensor, n: int) -> torch.Tensor:
+        features = self._diversity_features()
+        if features is None or features.shape[0] < 2:
+            return order[:n]
+
+        candidate_features = features.index_select(0, order.to(features.device))
+        distances = torch.cdist(candidate_features, candidate_features, p=2)
+        max_distance = distances.max().clamp(min=torch.finfo(distances.dtype).eps)
+        distances = distances / max_distance
+
+        lb = self._lb
+        assert lb is not None
+        priorities = self._priority_scores().index_select(0, order.to(lb.device))
+        priorities = priorities.to(device=features.device, dtype=features.dtype)
+        priority_span = (priorities.max() - priorities.min()).clamp(
+            min=torch.finfo(priorities.dtype).eps
+        )
+        priorities = (priorities - priorities.min()) / priority_span
+
+        selected_positions: List[int] = [0]
+        remaining = torch.ones(order.shape[0], dtype=torch.bool, device=features.device)
+        remaining[0] = False
+        min_dist_to_selected = distances[0].clone()
+
+        while len(selected_positions) < n and bool(remaining.any().item()):
+            scores = priorities + self.diversity_weight * min_dist_to_selected
+            scores = scores.masked_fill(~remaining, -torch.inf)
+            next_pos = int(torch.argmax(scores).item())
+            selected_positions.append(next_pos)
+            remaining[next_pos] = False
+            min_dist_to_selected = torch.minimum(
+                min_dist_to_selected, distances[next_pos]
+            )
+
+        if len(selected_positions) < n:
+            for pos in range(order.shape[0]):
+                if pos not in selected_positions:
+                    selected_positions.append(pos)
+                    if len(selected_positions) == n:
+                        break
+        return order[torch.tensor(selected_positions, dtype=torch.long, device=order.device)]
+
+    def _diversity_features(self) -> Optional[torch.Tensor]:
+        split_features = self._split_sign_features()
+        if split_features is not None:
+            return split_features
+        return self._box_center_features()
+
+    def _split_sign_features(self) -> Optional[torch.Tensor]:
+        split_signs = self._split_signs
+        if not split_signs:
+            return None
+        pieces: List[torch.Tensor] = []
+        for layer_id in sorted(split_signs):
+            value = split_signs[layer_id]
+            if value.shape[0] == 0:
+                continue
+            pieces.append(value.detach().reshape(value.shape[0], -1).to(dtype=torch.float32))
+        if not pieces:
+            return None
+        features = torch.cat(pieces, dim=1)
+        if features.shape[1] == 0:
+            return None
+        return features
+
+    def _box_center_features(self) -> Optional[torch.Tensor]:
+        if self._lb is None or self._ub is None:
+            return None
+        centers = ((self._lb + self._ub) / 2.0).detach().to(dtype=torch.float32)
+        if centers.ndim > 2:
+            centers = centers.reshape(centers.shape[0], -1)
+        if centers.shape[1] == 0:
+            return None
+        return centers
+
+
+ROOT_PARENT = -1
+
+
+class MCTSBounding(BoundingStrategy):
+    """MCTS side tables (``N``/``Q``) over the BaB tree, maintained as a pure observer.
+
+    ``order`` governs **eviction priority only**; selection is UCB1 (W2). At this
+    observer stage ``pop`` is plain top-k by ``order`` — no UCB1 term is applied
+    yet — while ``evict_to`` keeps the lb-based ``order`` priority so a frontier
+    cap always drops the least promising leaves.
+
+    Storage is lossless: bounds, depth, lower bound, parent margins, ``node_id`` /
+    ``parent_id`` provenance and every incremental-state dict (including
+    split_signs) are preserved across push/pop.
+    """
+
+    def __init__(
+        self,
+        order: Optional[OrderFunction] = None,
+        select_probe: Optional[Callable[[SubproblemBatch], None]] = None,
+        *,
+        exploration: float = 1.0,
+        lambda_: float = 0.5,
+        virtual_loss: float = 1.0,  # inert at K=1; reserved for the batched extension
+    ) -> None:
+        self.order: OrderFunction = order if order is not None else DepthLowerBoundOrder()
+        self.select_probe = select_probe
+        self.exploration: float = float(exploration)
+        self.lambda_: float = float(lambda_)
+        self.virtual_loss: float = float(virtual_loss)
+        self.parent: Dict[int, int] = {}
+        self.N: Dict[int, int] = {}
+        self.Q: Dict[int, float] = {}
+        self.n_tot: int = 0
+        self._lb: Optional[torch.Tensor] = None
+        self._ub: Optional[torch.Tensor] = None
+        self._depths: Optional[torch.Tensor] = None
+        self._lower_bound: Optional[torch.Tensor] = None
+        self._parent_margins: Optional[torch.Tensor] = None
+        self._node_id: Optional[torch.Tensor] = None
+        self._parent_id: Optional[torch.Tensor] = None
+        self._incremental_alpha: Optional[Dict[int, torch.Tensor]] = None
+        self._incremental_eta: Optional[Dict[int, torch.Tensor]] = None
+        self._split_signs: Optional[Dict[int, torch.Tensor]] = None
+
+    def push(self, batch: SubproblemBatch) -> None:
+        if batch.node_id is None or batch.parent_id is None:
+            missing = "node_id" if batch.node_id is None else "parent_id"
+            raise ValueError(
+                f"MCTSBounding.push requires provenance, but batch.{missing} is None"
+            )
+        n_new = batch.batch_size
+        device, dtype = batch.lb.device, batch.lb.dtype
+        lower = (
+            batch.lower_bound
+            if batch.lower_bound is not None
+            else torch.zeros(n_new, dtype=dtype, device=device)
+        )
+        parent = (
+            batch.parent_margins
+            if batch.parent_margins is not None
+            else torch.zeros(n_new, dtype=dtype, device=device)
+        )
+        prev_lb = self._lb
+        if prev_lb is None:
+            self._lb = batch.lb.clone()
+            self._ub = batch.ub.clone()
+            self._depths = batch.depths.clone()
+            self._lower_bound = lower.clone()
+            self._parent_margins = parent.clone()
+            self._node_id = batch.node_id.clone()
+            self._parent_id = batch.parent_id.clone()
+            self._incremental_alpha = _clone_optional_dict(batch.incremental_alpha)
+            self._incremental_eta = _clone_optional_dict(batch.incremental_eta)
+            self._split_signs = _clone_optional_dict(batch.split_signs)
+        else:
+            prev_ub, prev_depths = self._ub, self._depths
+            prev_lower, prev_parent = self._lower_bound, self._parent_margins
+            prev_node, prev_parent_id = self._node_id, self._parent_id
+            assert prev_ub is not None and prev_depths is not None
+            assert prev_lower is not None and prev_parent is not None
+            assert prev_node is not None and prev_parent_id is not None
+            n_old = prev_lb.shape[0]
+            self._incremental_alpha = _merge_optional_dict(self._incremental_alpha, n_old, batch.incremental_alpha, n_new)
+            self._incremental_eta = _merge_optional_dict(self._incremental_eta, n_old, batch.incremental_eta, n_new)
+            self._split_signs = _merge_optional_dict(self._split_signs, n_old, batch.split_signs, n_new)
+            self._lb = torch.cat([prev_lb, batch.lb], dim=0)
+            self._ub = torch.cat([prev_ub, batch.ub], dim=0)
+            self._depths = torch.cat([prev_depths, batch.depths], dim=0)
+            self._lower_bound = torch.cat([prev_lower, lower.to(prev_lower)], dim=0)
+            self._parent_margins = torch.cat([prev_parent, parent.to(prev_parent)], dim=0)
+            self._node_id = torch.cat([prev_node, batch.node_id.to(prev_node.device)], dim=0)
+            self._parent_id = torch.cat([prev_parent_id, batch.parent_id.to(prev_parent_id.device)], dim=0)
+
+        for nid, pid in zip(batch.node_id.tolist(), batch.parent_id.tolist()):
+            self.parent[int(nid)] = int(pid)
+
+    def pop(self, batch_size: int = 1) -> SubproblemBatch:
+        lb = self._lb
+        if lb is None:
+            raise IndexError("pop from empty pool")
+        total = lb.shape[0]
+        n = min(batch_size, total)
+        if n >= total:
+            selected = torch.arange(total, device=lb.device)
+            remaining: Optional[torch.Tensor] = None
+        else:
+            order = torch.argsort(self._priority_scores(), descending=True)
+            selected = order[:n]
+            remaining = order[n:]
+
+        result = self._build(selected)
+        if self.select_probe is not None:
+            self.select_probe(result)
+        if remaining is None or remaining.numel() == 0:
+            self._clear()
+        else:
+            self._restrict(remaining)
+        return result
+
+    def evict_to(self, cap: int) -> int:
+        total = len(self)
+        if total <= cap or cap <= 0:
+            return 0
+        order = torch.argsort(self._priority_scores(), descending=True)
+        self._restrict(order[:cap])
+        return total - cap
+
+    def __len__(self) -> int:
+        return 0 if self._lb is None else self._lb.shape[0]
+
+    def _priority_scores(self) -> torch.Tensor:
+        depths_t, lb = self._depths, self._lower_bound
+        assert depths_t is not None and lb is not None
+        return self.order(depths_t, lb)
+
+    def _build(self, idx: torch.Tensor) -> SubproblemBatch:
+        lb, ub, depths = self._lb, self._ub, self._depths
+        lower, parent = self._lower_bound, self._parent_margins
+        node_id, parent_id = self._node_id, self._parent_id
+        assert lb is not None and ub is not None and depths is not None
+        assert lower is not None and parent is not None
+        assert node_id is not None and parent_id is not None
+        idx = idx.to(lb.device)
+        return SubproblemBatch(
+            lb=lb.index_select(0, idx),
+            ub=ub.index_select(0, idx),
+            depths=depths.index_select(0, idx),
+            incremental_alpha=_index_optional_dict(self._incremental_alpha, idx),
+            incremental_eta=_index_optional_dict(self._incremental_eta, idx),
+            split_signs=_index_optional_dict(self._split_signs, idx),
+            parent_margins=parent.index_select(0, idx),
+            lower_bound=lower.index_select(0, idx),
+            node_id=node_id.index_select(0, idx.to(node_id.device)),
+            parent_id=parent_id.index_select(0, idx.to(parent_id.device)),
+        )
+
+    def _restrict(self, idx: torch.Tensor) -> None:
+        kept = self._build(idx)
+        self._lb, self._ub, self._depths = kept.lb, kept.ub, kept.depths
+        self._lower_bound, self._parent_margins = kept.lower_bound, kept.parent_margins
+        self._node_id, self._parent_id = kept.node_id, kept.parent_id
+        self._incremental_alpha, self._incremental_eta, self._split_signs = (
+            kept.incremental_alpha,
+            kept.incremental_eta,
+            kept.split_signs,
+        )
+
+    def _clear(self) -> None:
+        self._lb = self._ub = self._depths = None
+        self._lower_bound = self._parent_margins = None
+        self._node_id = self._parent_id = None
+        self._incremental_alpha = self._incremental_eta = self._split_signs = None
+
+    def observe(
+        self,
+        node_ids: torch.Tensor,
+        lower_bounds: torch.Tensor,
+        statuses: Sequence[str],
+        depths: torch.Tensor,
+        n_unstable: int,
+    ) -> None:
+        """Backpropagate one wave of solve results into ``N``/``Q``.
+
+        Callers must invoke this only after counterexample validation, so a
+        ``SAT`` status here always denotes a spurious, still-unresolved lane.
+        """
+        ids = node_ids.detach().cpu()
+        lb = lower_bounds.detach().to(device="cpu", dtype=torch.float64)
+        depth = depths.detach().to(device="cpu", dtype=torch.float64)
+        blended = self.lambda_ * depth / max(n_unstable, 1) + (
+            1.0 - self.lambda_
+        ) * self._rank01(ids, lb)
+        blended = torch.where(
+            torch.isnan(lb) | torch.isnan(blended),
+            torch.full_like(blended, -math.inf),
+            blended,
+        )
+
+        for i, (node, status) in enumerate(zip(ids.tolist(), statuses)):
+            reward = -math.inf if status == SolveStatus.UNSAT else float(blended[i])
+            self.n_tot += 1
+            visited = int(node)
+            while visited != ROOT_PARENT:
+                self.N[visited] = self.N.get(visited, 0) + 1
+                visited = self.parent[visited]
+            valued = int(node)
+            while valued != ROOT_PARENT and self.Q.get(valued, -math.inf) < reward:
+                self.Q[valued] = reward
+                valued = self.parent[valued]
+
+    def frontier_parent_visit_histogram(self) -> Dict[int, int]:
+        parent_ids = self._parent_id
+        if parent_ids is None:
+            return {}
+        counts = Counter(self.N.get(int(pid), 0) for pid in parent_ids.tolist())
+        return dict(sorted(counts.items()))
+
+    @staticmethod
+    def _rank01(node_ids: torch.Tensor, lower_bounds: torch.Tensor) -> torch.Tensor:
+        n = int(lower_bounds.numel())
+        if n < 2:
+            return torch.zeros_like(lower_bounds)
+        # Rank lexicographically on (lb, node_id): scale-free in [0, 1] and
+        # invariant to the order the wave's results arrive in.
+        by_id = torch.argsort(node_ids, stable=True)
+        order = by_id[torch.argsort(lower_bounds[by_id], stable=True)]
+        ranks = torch.empty_like(lower_bounds)
+        ranks[order] = torch.arange(n, dtype=lower_bounds.dtype, device=lower_bounds.device)
+        return ranks / (n - 1)

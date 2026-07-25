@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union, ca
 
 import torch
 
-from act.config.config import BaBConfig, DualConfig, VALID_SOLVER_TIERS
+from act.config.config import BaBConfig, DualConfig, VALID_BOUNDINGS, VALID_SOLVER_TIERS
 from act.back_end.bab.node import (
     BabNode,
     SubproblemBatch,
@@ -51,6 +51,9 @@ from act.back_end.bab.branching.bounding import (
     BoundingStrategy,
     RandomBounding,
     TopKBounding,
+    DiverseTopKBounding,
+    MCTSBounding,
+    OrderFunction,
     DepthLowerBoundOrder,
     GreedyOrder,
     SAOrder,
@@ -849,27 +852,44 @@ def _build_branching_strategy(method: str, *, dual_solver: Any = None) -> Branch
 
 
 def _build_bounding(
-    method: str,
+    bounding: str,
     *,
     depth_weight: float = 1.0,
     bound_weight: float = 1.0,
-    order_name: str = "depth_lb",
     cooling_rate: float = 0.99,
+    mcts_exploration: float = 1.0,
+    mcts_lambda: float = 0.5,
+    mcts_virtual_loss: float = 1.0,
 ) -> BoundingStrategy:
-    if method == "random":
+    if bounding not in VALID_BOUNDINGS:
+        raise ValueError(
+            f"Unknown bounding={bounding!r}. Valid: {VALID_BOUNDINGS}."
+        )
+    if bounding == "random":
         return RandomBounding()
-    if method == "topk":
-        if order_name == "depth_lb":
-            order = DepthLowerBoundOrder(depth_weight=depth_weight, bound_weight=bound_weight)
-        elif order_name == "greedy":
-            order = GreedyOrder()
-        elif order_name == "sa":
-            order = SAOrder(cooling_rate=cooling_rate)
-        else:
-            raise ValueError(f"unknown bounding_order {order_name!r}")
-
-        return TopKBounding(order)
-    raise ValueError(f"Unknown bounding method: {method!r}")
+    if bounding == "diverse":
+        return DiverseTopKBounding(
+            DepthLowerBoundOrder(depth_weight=depth_weight, bound_weight=bound_weight)
+        )
+    # MCTS pins depth_lb: W2 replaces its scoring with UCB1, so the order is moot.
+    order_name = "depth_lb" if bounding == "mcts" else bounding
+    order: OrderFunction
+    if order_name == "depth_lb":
+        order = DepthLowerBoundOrder(depth_weight=depth_weight, bound_weight=bound_weight)
+    elif order_name == "greedy":
+        order = GreedyOrder()
+    elif order_name == "sa":
+        order = SAOrder(cooling_rate=cooling_rate)
+    else:
+        raise ValueError(f"No order registered for bounding {bounding!r}")
+    if bounding == "mcts":
+        return MCTSBounding(
+            order,
+            exploration=mcts_exploration,
+            lambda_=mcts_lambda,
+            virtual_loss=mcts_virtual_loss,
+        )
+    return TopKBounding(order)
 
 
 def _groups_to_tensors(groups: Dict[int, Any], batch: SubproblemBatch):
@@ -1330,11 +1350,13 @@ def verify_bab_batched(
     )
     brancher = _build_branching_strategy(brancher_method, dual_solver=fsb_dual_solver)
     pool = _build_bounding(
-        config.bounding_method,
-        depth_weight=getattr(config, "bounding_depth_weight", 1.0),
-        bound_weight=getattr(config, "bounding_bound_weight", 1.0),
-        order_name=getattr(config, "bounding_order", "depth_lb"),
-        cooling_rate=getattr(config, "sa_cooling_rate", 0.99),
+        config.bounding,
+        depth_weight=config.bounding_depth_weight,
+        bound_weight=config.bounding_bound_weight,
+        cooling_rate=config.sa_cooling_rate,
+        mcts_exploration=config.mcts_exploration,
+        mcts_lambda=config.mcts_lambda,
+        mcts_virtual_loss=config.mcts_virtual_loss,
     )
     llm_probe: Any = None
     _llm: Any = None
@@ -1343,9 +1365,19 @@ def verify_bab_batched(
         from act.pipeline.verification import llm_probe as _llm
         llm_probe = _llm.build_llm_probe(config)
 
-    provenance = bool(getattr(config, "provenance_enabled", False))
-    if provenance and not isinstance(pool, TopKBounding):
-        raise ValueError("provenance_enabled requires bounding_method='topk'")
+    provenance = bool(getattr(config, "provenance_enabled", False)) or isinstance(
+        pool, MCTSBounding
+    )
+    if provenance and not isinstance(pool, (TopKBounding, MCTSBounding)):
+        raise ValueError(
+            "provenance_enabled requires a bounding that preserves node_id/parent_id, "
+            "not 'random'"
+        )
+    if isinstance(pool, MCTSBounding) and config.presplit_levels > 0:
+        raise ValueError(
+            "bounding='mcts' is incompatible with presplit_levels>0: the "
+            "pre-split root batch carries no node_id/parent_id provenance"
+        )
     node_counter = 0
     fanout = max(2, int(getattr(config, "input_split_fanout", 2)))
     frontier_cap = int(getattr(config, "frontier_cap", 0))
@@ -1604,6 +1636,27 @@ def verify_bab_batched(
                         },
                     )
 
+        # Must run post-validation: a SAT lane whose counterexample fails the
+        # concrete forward check is spurious, stays unresolved, and so must earn
+        # the ordinary lb reward instead of a terminal one.
+        if isinstance(pool, MCTSBounding):
+            assert batch.node_id is not None
+            n_unstable = 1
+            if bounds_dict_for_branching is not None:
+                # Entries are batched over the K lanes; divide to recover the
+                # per-lane unstable count the depth reward normalises by.
+                n_unstable = max(1, sum(
+                    int(((b.lb < 0) & (b.ub > 0)).sum().item())
+                    for b in bounds_dict_for_branching.values()
+                ) // k_actual)
+            pool.observe(
+                batch.node_id,
+                node_lower_bound,
+                solution.statuses,
+                batch.depths,
+                n_unstable,
+            )
+
         unresolved_idx = torch.tensor(
             [i for i, status in enumerate(solution.statuses) if status != SolveStatus.UNSAT],
             device=batch.lb.device,
@@ -1831,6 +1884,14 @@ def verify_bab_batched(
                         any_dropped_frontier_cap = True
 
         processed += k_actual
+
+        if isinstance(pool, MCTSBounding):
+            log.info(
+                "mcts: nodes=%d n_tot=%d frontier N[parent] histogram=%s",
+                processed,
+                pool.n_tot,
+                pool.frontier_parent_visit_histogram(),
+            )
 
         if auto_batch and torch.cuda.is_available():
             max_k_seen = max(max_k_seen, k_actual)

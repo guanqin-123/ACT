@@ -121,9 +121,11 @@ backend:
     frontier_cap: 0
     input_split_fanout: 2
     branching_method: "random"
-    bounding_method: "random"
-    bounding_order: "depth_lb"
+    bounding: "random"
     sa_cooling_rate: 0.99
+    mcts_exploration: 1.0
+    mcts_lambda: 0.5
+    mcts_virtual_loss: 1.0
     intermediate_refine: "none"
     reuse_root_bounds: false
     multi_split_levels: 1

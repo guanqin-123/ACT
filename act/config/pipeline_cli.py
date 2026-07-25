@@ -21,7 +21,7 @@ import torch
 
 from act.util.cli_utils import add_device_args, initialize_from_args
 from act.util.format_utils import rule
-from act.config.config import VALID_SOLVER_TIERS
+from act.config.config import VALID_BOUNDINGS, VALID_SOLVER_TIERS
 
 logger = logging.getLogger(__name__)
 from act.front_end.specs import OutputSpec
@@ -176,8 +176,7 @@ _PIPELINE_BAB_ATTR_MAP: dict[str, str] = {
     "max_depth": "bab_max_depth",
     "max_nodes": "bab_max_nodes",
     "branching_method": "bab_branching_method",
-    "bounding_method": "bab_bounding_method",
-    "bounding_order": "bab_bounding_order",
+    "bounding": "bab_bounding",
     "sa_cooling_rate": "bab_sa_cooling_rate",
     "frontier_cap": "bab_frontier_cap",
     "input_split_fanout": "bab_input_split_fanout",
@@ -235,8 +234,7 @@ def _apply_pipeline_config_defaults(args: Any) -> PipelineConfig:
     args.bab_max_depth = config.bab.max_depth
     args.bab_max_nodes = config.bab.max_nodes
     args.bab_branching_method = config.bab.branching_method
-    args.bab_bounding_method = config.bab.bounding_method
-    args.bab_bounding_order = config.bab.bounding_order
+    args.bab_bounding = config.bab.bounding
     args.bab_sa_cooling_rate = config.bab.sa_cooling_rate
     args.bab_frontier_cap = config.bab.frontier_cap
     args.bab_input_split_fanout = config.bab.input_split_fanout
@@ -1475,27 +1473,21 @@ Examples:
         help="BaB branching strategy when --bab is set (default: from config.yaml)",
     )
     bab_group.add_argument(
-        "--bab-bounding-method",
+        "--bab-bounding",
         type=str,
         default=None,
-        choices=["random", "topk"],
+        choices=list(VALID_BOUNDINGS),
         help=(
-            "Pool selection when subproblems exceed the batch size: 'random' or "
-            "'topk' (keep the top-k by depth + lower-bound). Default: from config.yaml."
+            "Pool selection when subproblems exceed the batch size: 'random', a "
+            "top-k order ('depth_lb'/'greedy'/'sa'), the diversity-aware pool "
+            "('diverse'), or 'mcts'. Default: from config.yaml."
         ),
-    )
-    bab_group.add_argument(
-        "--bab-bounding-order",
-        type=str,
-        default=None,
-        choices=["depth_lb", "greedy", "sa"],
-        help="TopKBounding order policy (default: from config.yaml)",
     )
     bab_group.add_argument(
         "--bab-sa-cooling-rate",
         type=float,
         default=None,
-        help="Cooling rate for --bab-bounding-order sa (default: from config.yaml)",
+        help="Cooling rate for --bab-bounding sa (default: from config.yaml)",
     )
     bab_group.add_argument(
         "--bab-per-class-alpha",
@@ -1529,7 +1521,7 @@ Examples:
         "--bab-provenance",
         action="store_true",
         default=None,
-        help="Enable node_id/parent_id provenance sidecar (requires --bab-bounding-method topk).",
+        help="Enable node_id/parent_id provenance sidecar (requires --bab-bounding other than random).",
     )
 
     # Fuzzing configuration
