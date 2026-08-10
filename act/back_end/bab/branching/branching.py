@@ -17,8 +17,8 @@
 #   Joint multi-neuron splitting (``_multi_split_from_decision``): split each lane's
 #   top-k BaBSR-scored neurons together into all 2^k sign combinations (one "skip"
 #   instead of k greedy single splits); gains are super-additive.
-#     * ``MultiNeuronSplitBranching`` — "Mining Verdict Boundaries for Neural Network
-#       Verification", Jiawei Ren, Guanqin Zhang, Zhenya Zhang, Yulei Sui, FM 2026.
+#     * "Mining Verdict Boundaries for Neural Network Verification",
+#       Jiawei Ren, Guanqin Zhang, Zhenya Zhang, Yulei Sui, FM 2026.
 #
 #   Strategies (subclasses of ``BranchingStrategy``):
 #     * ``RandomBranching`` — uniform-random over eligible dims (width-weighted for
@@ -879,6 +879,10 @@ def _build_branching_strategy(
 
 # ---------------------------------------------------------------------------
 # Joint multi-neuron splitting (verdict-boundary)
+#
+#   "Mining Verdict Boundaries for Neural Network Verification"
+#   Jiawei Ren, Guanqin Zhang, Zhenya Zhang, Yulei Sui
+#   FM 2026
 # ---------------------------------------------------------------------------
 
 
