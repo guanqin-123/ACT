@@ -121,13 +121,42 @@ backend:
     frontier_cap: 0
     input_split_fanout: 2
     branching_method: "random"
+
+    # -- Pool selection: which pending subproblems the next wave expands -----
+    #
+    #   bounding             | pool class          | order function                 | top_k
+    #   ---------------------|---------------------|--------------------------------|------------
+    #   depth_bound_blend    | TopKBounding        | 0.5*norm(depth)+0.5*urgency    | honoured
+    #   greedy               | TopKBounding        | best-first on |lb|             | honoured
+    #   annealed             | TopKBounding        | Gumbel, cooling_rate**step     | honoured
+    #   diverse_split_signs  | DiverseTopKBounding | order + split-sign repulsion   | honoured
+    #   random               | RandomBounding      | uniform sampling               | ValueError
+    #   mcts                 | MCTSBounding        | depth_bound_blend, pinned      | ValueError
+    #
+    # greedy and annealed are the Oliva order-leading strategies (ECOOP 2025,
+    # arXiv:2507.17453); mcts is specified in docs/design/mcts_bab.md.
     bounding: "random"
+
+    # Cap on subproblems popped per wave, independent of the batch size.
+    # 0 = unbounded. Honoured by the four TopKBounding-family strategies above;
+    # rejected for random / mcts, which do not rank the pool by an order
+    # function. Unlike frontier_cap this discards nothing — the remainder stays
+    # pooled, so a smaller top_k only re-sorts priorities more often.
+    top_k: 0
+
+    # Cooling schedule for bounding: "annealed".
     sa_cooling_rate: 0.99
     mcts_exploration: 1.0
     mcts_lambda: 0.5
     mcts_virtual_loss: 1.0
     intermediate_refine: "none"
     reuse_root_bounds: false
+
+    # Neurons split jointly per branching step; each lane fans out into all 2^k
+    # sign combinations (verdict-boundary joint splitting). 1 = single split.
+    # Requires solver_tier dual_alpha or dual_alpha_eta and a neuron-branching
+    # method (babsr / fsb / gain). The k neurons are always
+    # chosen by the BaBSR heuristic (area x |nu|), whatever branching_method is.
     multi_split_levels: 1
     provenance_enabled: false
 

@@ -9,22 +9,43 @@
 # Purpose:
 #   Subproblem pool management for Branch-and-Bound.
 #
-#   Pool strategies (subclasses of ``BoundingStrategy``):
-#     * ``RandomBounding`` — uniform-random subproblem selection. Baseline.
-#     * ``TopKBounding`` — keep the top-k (bounded by the batch/tensor size) ranked
-#       by a swappable order strategy; supports frontier-cap eviction (``evict_to``),
-#       which drops worst-priority leaves and forces a sound ``UNKNOWN``.
-#     * ``MCTSBounding`` — MCTS side tables (``N``/``Q``) over the BaB tree, maintained as
-#       a pure observer; ``pop`` is plain top-k until UCB1 selection lands.
+#   Strategies selectable via ``--bab-bounding`` / ``BaBConfig.bounding``:
 #
-#   Order strategies (the ``OrderFunction`` Protocol; swapped in at pool construction):
-#     * ``DepthLowerBoundOrder`` — depth + lower-bound blend (default, 50/50).
-#     * ``GreedyOrder`` — best-first by lower bound (Oliva-Greedy, ``|lb|``).
-#     * ``SAOrder`` — simulated-annealing exploration (temperature-annealed; stochastically cools to greedy).
+#   +---------------------+---------------------+--------------------------------+-------------+
+#   | value               | pool class          | order function                 | --bab-top-k |
+#   +=====================+=====================+================================+=============+
+#   | depth_bound_blend   | TopKBounding        | DepthLowerBoundOrder:          | honoured    |
+#   |                     |                     | 0.5*norm(depth) + 0.5*urgency  |             |
+#   +---------------------+---------------------+--------------------------------+-------------+
+#   | greedy              | TopKBounding        | GreedyOrder: best-first on     | honoured    |
+#   |                     |                     | |lb| (Oliva-Greedy)            |             |
+#   +---------------------+---------------------+--------------------------------+-------------+
+#   | annealed            | TopKBounding        | SAOrder: Gumbel noise with     | honoured    |
+#   |                     |                     | temp = cooling_rate**step      |             |
+#   |                     |                     | (Oliva-SA)                     |             |
+#   +---------------------+---------------------+--------------------------------+-------------+
+#   | diverse_split_signs | DiverseTopKBounding | any order, then hash/soft      | honoured    |
+#   |                     |                     | repulsion over split-sign      |             |
+#   |                     |                     | signatures                     |             |
+#   +---------------------+---------------------+--------------------------------+-------------+
+#   | random              | RandomBounding      | none — uniform sampling        | ValueError  |
+#   +---------------------+---------------------+--------------------------------+-------------+
+#   | mcts                | MCTSBounding        | DepthLowerBoundOrder, pinned;  | ValueError  |
+#   |                     |                     | observer-only, pop is plain    |             |
+#   |                     |                     | top-k until UCB1 lands         |             |
+#   +---------------------+---------------------+--------------------------------+-------------+
+#
+#   The first four share the ``TopKBounding`` pool and so honour ``top_k``; the
+#   last two do not rank by an order function, so ``top_k`` is rejected rather
+#   than silently ignored. ``top_k`` caps a single ``pop`` without discarding
+#   anything — unlike ``evict_to``, which drops worst-priority leaves to honour a
+#   frontier cap and therefore forces a sound ``UNKNOWN``.
+#
 #   ``GreedyOrder`` / ``SAOrder`` implement the Oliva order-leading exploration of the
 #   BaB tree — "Efficient Neural Network Verification via Order Leading Exploration of
 #   Branch-and-Bound Trees", Guanqin Zhang, Kota Fukuda, Zhenya Zhang, H.M.N. Dilum
 #   Bandara, Shiping Chen, Jianjun Zhao, Yulei Sui, ECOOP 2025 (arXiv:2507.17453).
+#   ``MCTSBounding`` is specified in ``docs/design/mcts_bab.md``.
 #
 #   A bounding strategy maintains a *pool* of pending subproblems and
 #   decides which ones to process next.  All data flows through
@@ -247,6 +268,20 @@ class OrderFunction(Protocol):
         ...
 
 
+def _advance_order_schedule(order: OrderFunction) -> None:
+    """Tick a stateful order's schedule once per wave.
+
+    Scoring and scheduling must stay separate: ``pop`` skips ``_priority_scores``
+    whenever the pool already fits the wave, and ``evict_to`` scores without
+    consuming a wave. Folding the tick into ``__call__`` therefore made the
+    annealing temperature depend on pool size and eviction pressure rather than
+    on elapsed waves.
+    """
+    advance = getattr(order, "advance_schedule", None)
+    if advance is not None:
+        advance()
+
+
 class DepthLowerBoundOrder:
     def __init__(self, depth_weight: float = 0.5, bound_weight: float = 0.5) -> None:
         self.depth_weight = depth_weight
@@ -290,11 +325,13 @@ class SAOrder:
         self.cooling_rate = cooling_rate
         self.step = 0
 
+    def advance_schedule(self) -> None:
+        self.step += 1
+
     def __call__(self, depths: torch.Tensor, lower_bound: torch.Tensor) -> torch.Tensor:
         dtype = lower_bound.dtype
         eps = torch.finfo(dtype).eps
         temp = max(self.cooling_rate ** self.step, 1e-6)
-        self.step += 1
         base = (lower_bound.max() - lower_bound) / (
             lower_bound.max() - lower_bound.min()
         ).clamp(min=eps)
@@ -312,6 +349,12 @@ class TopKBounding(BoundingStrategy):
     swappable order strategy (default :class:`DepthLowerBoundOrder` — a
     50/50 blend of depth and lower bound).
 
+    ``k`` caps how many subproblems a single ``pop`` may return, independently of
+    the caller's ``batch_size``. ``k = 0`` means unbounded, matching the
+    ``BaBConfig.frontier_cap`` convention. Unlike ``evict_to``, capping ``pop``
+    never discards a subproblem: the remainder stays pooled for later waves, so
+    a smaller ``k`` only re-sorts priorities more often.
+
     Storage is lossless: bounds, depth, lower bound, parent margins and every
     incremental-state dict (including split_signs, which neuron-split BaB requires) are
     preserved across push/pop.
@@ -321,8 +364,13 @@ class TopKBounding(BoundingStrategy):
         self,
         order: Optional[OrderFunction] = None,
         select_probe: Optional[Callable[[SubproblemBatch], None]] = None,
+        *,
+        k: int = 0,
     ) -> None:
+        if k < 0:
+            raise ValueError(f"top-k must be non-negative, got k={k}")
         self.order: OrderFunction = order if order is not None else DepthLowerBoundOrder()
+        self.k = int(k)
         self.select_probe = select_probe
         self._lb: Optional[torch.Tensor] = None
         self._ub: Optional[torch.Tensor] = None
@@ -389,6 +437,9 @@ class TopKBounding(BoundingStrategy):
             raise IndexError("pop from empty pool")
         total = lb.shape[0]
         n = min(batch_size, total)
+        if self.k > 0:
+            n = min(n, self.k)
+        _advance_order_schedule(self.order)
         if n >= total:
             selected = torch.arange(total, device=lb.device)
             remaining: Optional[torch.Tensor] = None
@@ -484,10 +535,11 @@ class DiverseTopKBounding(TopKBounding):
         order: Optional[OrderFunction] = None,
         select_probe: Optional[Callable[[SubproblemBatch], None]] = None,
         *,
+        k: int = 0,
         diversity_mode: Literal["hash", "soft", "none"] = "hash",
         diversity_weight: float = 1.0,
     ) -> None:
-        super().__init__(order, select_probe=select_probe)
+        super().__init__(order, select_probe=select_probe, k=k)
         if diversity_mode not in {"hash", "soft", "none"}:
             raise ValueError(
                 "diversity_mode must be one of 'hash', 'soft', or 'none', "
@@ -502,6 +554,9 @@ class DiverseTopKBounding(TopKBounding):
             raise IndexError("pop from empty pool")
         total = lb.shape[0]
         n = min(batch_size, total)
+        if self.k > 0:
+            n = min(n, self.k)
+        _advance_order_schedule(self.order)
         if n >= total:
             selected = torch.arange(total, device=lb.device)
             remaining: Optional[torch.Tensor] = None
@@ -755,6 +810,7 @@ class MCTSBounding(BoundingStrategy):
             raise IndexError("pop from empty pool")
         total = lb.shape[0]
         n = min(batch_size, total)
+        _advance_order_schedule(self.order)
         if n >= total:
             selected = torch.arange(total, device=lb.device)
             remaining: Optional[torch.Tensor] = None

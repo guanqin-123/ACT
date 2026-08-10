@@ -22,11 +22,18 @@ import tempfile
 import time
 import inspect
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, Final, List, Optional, Tuple, Union, cast
 
 import torch
 
-from act.config.config import BaBConfig, DualConfig, VALID_BOUNDINGS, VALID_SOLVER_TIERS
+from act.config.config import (
+    BaBConfig,
+    DualConfig,
+    TOP_K_BOUNDINGS,
+    TOP_K_INCOMPATIBLE_BOUNDINGS,
+    VALID_BOUNDINGS,
+    VALID_SOLVER_TIERS,
+)
 from act.back_end.bab.node import (
     BabNode,
     SubproblemBatch,
@@ -84,6 +91,7 @@ class DualSolveResult:
     solution: BatchLPSolution
     bounds_dict: Optional[Dict[int, Bounds]] = None
     nu_per_layer: Optional[Dict[int, torch.Tensor]] = None
+    witness_input: Optional[torch.Tensor] = None
     row_slack: Optional[torch.Tensor] = None
     """Per-spec-row slack ``[K, m]``; ``slack >= 0`` means the row is certified
     (ALL-rows kinds). Consumed by the root spec-pruning presolve."""
@@ -249,11 +257,55 @@ def _interval_refresh_bounds(
     return out
 
 
-def _want_babsr_neuron_branching(config: BaBConfig) -> bool:
+def _neuron_branching_supported(config: BaBConfig) -> bool:
     return (
-        getattr(config, "branching_method", "random") in ("babsr", "fsb", "gain")
+        getattr(config, "branching_method", "random") in ("babsr", "fsb", "gain", "witness_residual")
         and getattr(config, "solver_tier", "lp") in ("dual_alpha", "dual_alpha_eta")
     )
+
+
+def _witness_residual_branching_active(config: BaBConfig) -> bool:
+    return getattr(config, "branching_method", "random") == "witness_residual"
+
+
+def _witness_relu_preactivations(
+    net: Net,
+    witness_input: torch.Tensor,
+    input_shape: tuple[int, ...],
+) -> Optional[Dict[int, torch.Tensor]]:
+    """Concrete per-ReLU pre-activations at the dual solver's spurious CE.
+
+    ``witness_residual`` scores each neuron by the relaxation gap realized at
+    that one point, so it needs ``z`` there; ``bounds_dict`` only carries
+    ``[l, u]`` over the whole sub-box. A concrete forward is the degenerate case
+    of the interval one, so ``compute_forward_bounds`` on ``lb == ub == witness``
+    supplies it — already keyed by layer id, already storing ReLU boxes
+    pre-activation.
+    """
+    from act.back_end.dual_tf.tf_forward import compute_forward_bounds
+
+    if witness_input.numel() == 0:
+        return None
+    x = witness_input
+    if input_shape and x.dim() == 2 and x.shape[1] == int(math.prod(input_shape)):
+        x = x.reshape(x.shape[0], *input_shape)
+    try:
+        bounds_dict = compute_forward_bounds(net, x, x)
+    except (ValueError, RuntimeError, KeyError, IndexError):
+        # Unregistered layer kind, or a shape/device mismatch in the witness.
+        # Both are recoverable: the caller falls back to BaBSR scoring.
+        return None
+    preacts = {
+        lid: bounds.lb.flatten(start_dim=1)
+        for lid, bounds in bounds_dict.items()
+        if _layer_kind_upper(net.by_id[lid]) == "RELU"
+    }
+    return preacts or None
+
+
+def _layer_kind_upper(layer: Layer) -> str:
+    kind = layer.kind
+    return kind.upper() if isinstance(kind, str) else str(kind)
 
 
 def _gain_tested_decision(
@@ -860,25 +912,33 @@ def _build_bounding(
     mcts_exploration: float = 1.0,
     mcts_lambda: float = 0.5,
     mcts_virtual_loss: float = 1.0,
+    top_k: int = 0,
 ) -> BoundingStrategy:
     if bounding not in VALID_BOUNDINGS:
         raise ValueError(
             f"Unknown bounding={bounding!r}. Valid: {VALID_BOUNDINGS}."
         )
+    if top_k > 0 and bounding in TOP_K_INCOMPATIBLE_BOUNDINGS:
+        raise ValueError(
+            f"top_k={top_k} is not supported by bounding={bounding!r}: it does not "
+            f"rank the pool by an order function. Use one of "
+            f"{TOP_K_BOUNDINGS}, or leave top_k=0 (unbounded)."
+        )
     if bounding == "random":
         return RandomBounding()
-    if bounding == "diverse":
+    if bounding == "diverse_split_signs":
         return DiverseTopKBounding(
-            DepthLowerBoundOrder(depth_weight=depth_weight, bound_weight=bound_weight)
+            DepthLowerBoundOrder(depth_weight=depth_weight, bound_weight=bound_weight),
+            k=top_k,
         )
-    # MCTS pins depth_lb: W2 replaces its scoring with UCB1, so the order is moot.
-    order_name = "depth_lb" if bounding == "mcts" else bounding
+    # MCTS pins depth_bound_blend: W2 replaces its scoring with UCB1, so the order is moot.
+    order_name = "depth_bound_blend" if bounding == "mcts" else bounding
     order: OrderFunction
-    if order_name == "depth_lb":
+    if order_name == "depth_bound_blend":
         order = DepthLowerBoundOrder(depth_weight=depth_weight, bound_weight=bound_weight)
     elif order_name == "greedy":
         order = GreedyOrder()
-    elif order_name == "sa":
+    elif order_name == "annealed":
         order = SAOrder(cooling_rate=cooling_rate)
     else:
         raise ValueError(f"No order registered for bounding {bounding!r}")
@@ -889,26 +949,35 @@ def _build_bounding(
             lambda_=mcts_lambda,
             virtual_loss=mcts_virtual_loss,
         )
-    return TopKBounding(order)
+    return TopKBounding(order, k=top_k)
 
 
 def _groups_to_tensors(groups: Dict[int, Any], batch: SubproblemBatch):
+    # Duplicate (layer, neuron) pairs within a lane are SOUND but wasteful: the
+    # sign write in _multi_split_from_groups is last-write-wins over the bit
+    # index, applied uniformly across all 2^k children, so a repeated pair
+    # yields redundant-but-covering children (the union still constrains that
+    # neuron both >=0 and <=0). It simply burns 2^k child rows on fewer than
+    # 2^k distinct regions, so we drop the repeats and shrink k_eff instead.
     bb = batch.batch_size
     if len(groups) != bb:
         return None, None, 0
-    k_eff = len(groups.get(0, []))
+    deduped: Dict[int, List[Tuple[int, int]]] = {}
+    for lane in range(bb):
+        seen: Dict[Tuple[int, int], None] = {}
+        for lid, nidx in groups.get(lane, []):
+            seen.setdefault((int(lid), int(nidx)), None)
+        deduped[lane] = list(seen)
+    k_eff = min((len(entries) for entries in deduped.values()), default=0)
     if k_eff < 1:
         return None, None, 0
     device = batch.lb.device
     top_layers = torch.zeros(bb, k_eff, dtype=torch.long, device=device)
     top_neurons = torch.zeros(bb, k_eff, dtype=torch.long, device=device)
     for lane in range(bb):
-        entries = groups.get(lane, [])
-        if len(entries) != k_eff:
-            return None, None, 0
-        for j, (lid, nidx) in enumerate(entries):
-            top_layers[lane, j] = int(lid)
-            top_neurons[lane, j] = int(nidx)
+        for j, (lid, nidx) in enumerate(deduped[lane][:k_eff]):
+            top_layers[lane, j] = lid
+            top_neurons[lane, j] = nidx
     return top_layers, top_neurons, k_eff
 
 
@@ -1024,7 +1093,7 @@ def _dispatch_dual_solve(
             m_specs = int(idx.numel())
     active_mask = torch.ones(k_actual, m_specs, dtype=torch.bool, device=device)
 
-    return_nu = _want_babsr_neuron_branching(config)
+    return_nu = _neuron_branching_supported(config)
     supports_return_nu = "return_nu_per_layer" in inspect.signature(
         dual.compute_certified_bound
     ).parameters
@@ -1098,11 +1167,12 @@ def _dispatch_dual_solve(
     )
     nvars = max((max(layer.out_vars) for layer in net.layers if layer.out_vars), default=-1) + 1
     x_candidate = torch.zeros(k_actual, nvars, device=device, dtype=dtype)
+    input_ids_list = get_input_ids(net)
     if sce is not None:
         sce_flat = sce.flatten(start_dim=1).to(device=device)
         row_offsets = torch.arange(k_actual, device=device) * m_specs + candidate_rows.to(device=device)
         chosen_sce = sce_flat.index_select(0, row_offsets)
-        input_ids = torch.tensor(get_input_ids(net), device=device, dtype=torch.long)
+        input_ids = torch.tensor(input_ids_list, device=device, dtype=torch.long)
         x_candidate[:, input_ids] = chosen_sce.to(device=device, dtype=dtype)
     else:
         # TODO: extend CE-candidate generation for dual paths that do not return SCE.
@@ -1164,6 +1234,11 @@ def _dispatch_dual_solve(
             solution=solution,
             bounds_dict=branch_bounds,
             nu_per_layer=branch_nu,
+            witness_input=x_candidate[:, torch.tensor(input_ids_list, device=device, dtype=torch.long)]
+            .reshape(k_actual, *batched_bounds.lb.shape[1:])
+            .detach()
+            if sce is not None
+            else None,
             row_slack=slack.detach(),
         )
     finally:
@@ -1349,6 +1424,25 @@ def verify_bab_batched(
         "babsr" if config.branching_method == "gain" else config.branching_method
     )
     brancher = _build_branching_strategy(brancher_method, dual_solver=fsb_dual_solver)
+
+    multi_split_stats: Dict[str, int] = {
+        "multi_split_k_requested": int(getattr(config, "multi_split_levels", 1)),
+        "multi_split_k_used": 1,
+        "multi_split_wave_count": 0,
+        "multi_split_clamped_wave_count": 0,
+        "multi_split_lane_starved_count": 0,
+    }
+
+    def _branching_metadata() -> Dict[str, int]:
+        meta: Dict[str, int] = dict(multi_split_stats)
+        meta["bounding_top_k_effective"] = int(getattr(pool, "k", 0))
+        if _witness_residual_branching_active(config):
+            meta["witness_residual_fallback_count"] = int(getattr(brancher, "fallback_count", 0))
+            meta["witness_residual_diff_from_babsr_count"] = int(
+                getattr(brancher, "different_from_babsr_count", 0)
+            )
+        return meta
+
     pool = _build_bounding(
         config.bounding,
         depth_weight=config.bounding_depth_weight,
@@ -1357,6 +1451,7 @@ def verify_bab_batched(
         mcts_exploration=config.mcts_exploration,
         mcts_lambda=config.mcts_lambda,
         mcts_virtual_loss=config.mcts_virtual_loss,
+        top_k=config.top_k,
     )
     llm_probe: Any = None
     _llm: Any = None
@@ -1547,9 +1642,10 @@ def verify_bab_batched(
         batched_bounds = Bounds(k_lb, k_ub)
 
         solver_tier = getattr(config, "solver_tier", "lp")
-        want_neuron_branching = _want_babsr_neuron_branching(config)
+        neuron_branching_supported = _neuron_branching_supported(config)
         bounds_dict_for_branching: Optional[Dict[int, Bounds]] = None
         nu_per_layer_for_branching: Optional[Dict[int, torch.Tensor]] = None
+        witness_input_for_branching: Optional[torch.Tensor] = None
         if solver_tier == "lp":
             solver = solver_factory()
             solution = setup_and_solve_batch(
@@ -1587,6 +1683,7 @@ def verify_bab_batched(
             solution = dual_solve_result.solution
             bounds_dict_for_branching = dual_solve_result.bounds_dict
             nu_per_layer_for_branching = dual_solve_result.nu_per_layer
+            witness_input_for_branching = dual_solve_result.witness_input
         else:
             raise ValueError(
                 f"Unknown solver_tier={solver_tier!r}. Valid: {VALID_SOLVER_TIERS}."
@@ -1633,6 +1730,7 @@ def verify_bab_batched(
                             "K": k_actual,
                             "nodes_minted": node_counter,
                             "any_dropped_frontier_cap": any_dropped_frontier_cap,
+                            **_branching_metadata(),
                         },
                     )
 
@@ -1733,7 +1831,7 @@ def verify_bab_batched(
                         else None
                     ),
                 )
-                if want_neuron_branching:
+                if neuron_branching_supported:
                     full_branch_idx = unresolved_idx.index_select(
                         0, branch_idx.to(unresolved_idx.device)
                     )
@@ -1743,6 +1841,17 @@ def verify_bab_batched(
                         full_branch_idx,
                         k_actual,
                     )
+                    witness_preact_branch: Optional[Dict[int, torch.Tensor]] = None
+                    if _witness_residual_branching_active(config) and witness_input_for_branching is not None:
+                        witness_branch = witness_input_for_branching.index_select(
+                            0,
+                            full_branch_idx.to(witness_input_for_branching.device),
+                        )
+                        witness_preact_branch = _witness_relu_preactivations(
+                            net,
+                            witness_branch,
+                            input_shape,
+                        )
                     multi = None
                     multi_k = int(getattr(config, "multi_split_levels", 1))
                     if llm_probe is not None and _llm is not None and llm_probe.wants_neuron:
@@ -1772,11 +1881,23 @@ def verify_bab_batched(
                                 if _tl is not None and _tn is not None:
                                     multi = _multi_split_from_groups(branch_batch, net, _tl, _tn, _keff)
                                     _wave_split_used = _keff
-                    if multi is None and config.branching_method == "gain" and multi_k > 1:
+                    # Joint splitting is orthogonal to how a split is SCORED, so
+                    # it is no longer keyed on branching_method == "gain": the k
+                    # neurons come from the BaBSR heuristic inside
+                    # _multi_split_from_decision either way. The enclosing
+                    # neuron_branching_supported guard already restricts this to a
+                    # neuron-branching method on a dual_alpha* tier.
+                    if multi is None and multi_k > 1:
                         # Adaptive split depth: fan out so children roughly
                         # fill one bounding batch; n_branch lanes x 2^k <=
                         # max_batch_size keeps the frontier from flooding
-                        # the pool.
+                        # the pool. Note this needs
+                        # effective_batch >= 4 * branch_batch.batch_size before
+                        # k_adaptive can exceed 1 at all, so joint splitting
+                        # stays dormant on waves where most lanes are
+                        # unresolved. The clamp is a memory guard and must stay
+                        # (forcing exact k risks OOM); the user's lever is
+                        # --bab-max-batch-size.
                         k_adaptive = max(
                             1,
                             min(
@@ -1791,11 +1912,28 @@ def verify_bab_batched(
                                 effective_batch=effective_batch,
                                 multi_split_levels=multi_k,
                             )
+                        if k_adaptive < multi_k:
+                            if multi_split_stats["multi_split_clamped_wave_count"] == 0:
+                                log.warning(
+                                    "joint multi-split clamped: requested k=%d but "
+                                    "effective_batch=%d / branch lanes=%d allows only "
+                                    "k=%d (needs effective_batch >= %d for k=%d); "
+                                    "raise --bab-max-batch-size to lift this",
+                                    multi_k, effective_batch, branch_batch.batch_size,
+                                    k_adaptive, branch_batch.batch_size * (2 ** multi_k),
+                                    multi_k,
+                                )
+                            multi_split_stats["multi_split_clamped_wave_count"] += 1
                         _wave_split_used = k_adaptive
                         if k_adaptive > 1:
                             multi = _multi_split_from_decision(
                                 branch_batch, net, bd_branch, nu_branch, k_adaptive,
                             )
+                            if multi is not None:
+                                multi_split_stats["multi_split_wave_count"] += 1
+                                multi_split_stats["multi_split_k_used"] = k_adaptive
+                                if multi[0].batch_size != branch_batch.batch_size * (2 ** k_adaptive):
+                                    multi_split_stats["multi_split_lane_starved_count"] += 1
                     if multi is not None:
                         children, parent_index = multi
                     else:
@@ -1814,11 +1952,17 @@ def verify_bab_batched(
                                 input_shape,
                             )
                         if decision is None:
+                            extra_branch_kwargs = (
+                                {"witness_preact_per_layer": witness_preact_branch}
+                                if _witness_residual_branching_active(config)
+                                else {}
+                            )
                             scores = cast(Any, brancher).compute_scores(
                                 branch_batch,
                                 net,
                                 bounds_dict=bd_branch,
                                 nu_per_layer=nu_branch,
+                                **extra_branch_kwargs,
                             )
                             decision = cast(SplitDecision, cast(Any, brancher).select(scores))
                         if decision.kind == "input_axis":
@@ -1937,6 +2081,7 @@ def verify_bab_batched(
                 "exhausted_budget_nodes": exhausted_nodes,
                 "nodes_minted": node_counter,
                 "any_dropped_frontier_cap": any_dropped_frontier_cap,
+                **_branching_metadata(),
             },
         )
 
@@ -1951,6 +2096,7 @@ def verify_bab_batched(
             "nodes_minted": node_counter,
             "any_dropped_frontier_cap": any_dropped_frontier_cap,
             "reason": "budget_exhausted_with_unproven_subboxes",
+            **_branching_metadata(),
         },
     )
 

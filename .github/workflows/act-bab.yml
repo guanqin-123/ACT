@@ -156,8 +156,53 @@ jobs:
         run: |
           cd ${{ github.workspace }}
           coverage run -p -m act.back_end --verify --network act/back_end/examples/nets/layer_testing_bab_deep.json \
-            --solver dual --bab --bab-branching gain --multi-split-levels 3 \
+            --solver dual --bab --bab-branching gain --bab-multi-split-levels 3 \
             --bab-max-depth 4 --bab-max-subproblems 40 --device cpu --dtype float64
+
+      # Joint multi-neuron splitting is orthogonal to the branching method: the
+      # k neurons come from the BaBSR heuristic either way, so this must work
+      # under --bab-branching babsr. The greps make the job non-vacuous — the
+      # telemetry counters are emitted only when the joint path actually runs,
+      # and k_requested proves the explicit flag survives the --solver dual
+      # preset instead of being silently forced to 4.
+      - name: BaB joint multi-split — decoupled from gain (babsr + dual_alpha_eta)
+        run: |
+          cd ${{ github.workspace }}
+          out=$(coverage run -p -m act.back_end --verify \
+            --network "$ACT_NETS_DIR/mlp_plain_3x8_64x64_3962224133.json" \
+            --solver dual --bab --bab-branching babsr --bab-solver-tier dual_alpha_eta \
+            --bab-multi-split-levels 3 --bab-max-batch-size 256 \
+            --bab-max-depth 6 --bab-max-subproblems 60 \
+            --device cpu --dtype float64 --verbose 2>&1)
+          echo "$out"
+          grep -qE "multi_split_k_requested: 3"    <<<"$out"
+          grep -qE "multi_split_wave_count: [1-9]" <<<"$out"
+          grep -qE "multi_split_k_used: [2-9]"     <<<"$out"
+
+      # top-k is a real parameter on the four TopKBounding-family strategies and
+      # a hard error on the other two. Both halves are asserted.
+      - name: BaB bounding — top-k parameter
+        run: |
+          cd ${{ github.workspace }}
+          for v in depth_bound_blend greedy annealed diverse_split_signs; do
+            out=$(coverage run -p -m act.back_end --verify \
+              --network "$ACT_NETS_DIR/mlp_plain_3x8_64x64_3962224133.json" \
+              --bab --bab-bounding $v --bab-top-k 2 \
+              --solver torchlp --device cpu --dtype float64 \
+              --timeout 30 --bab-max-depth 4 --bab-max-subproblems 40 --verbose 2>&1)
+            echo "$out"
+            grep -qE "^  nodes: [1-9]"              <<<"$out"
+            grep -qE "bounding_top_k_effective: 2"  <<<"$out"
+          done
+          for v in random mcts; do
+            if coverage run -p -m act.back_end --verify \
+              --network "$ACT_NETS_DIR/mlp_plain_3x8_64x64_3962224133.json" \
+              --bab --bab-bounding $v --bab-top-k 2 \
+              --solver torchlp --device cpu --dtype float64 \
+              --timeout 20 --bab-max-depth 2 --bab-max-subproblems 5 >/dev/null 2>&1; then
+              echo "expected --bab-top-k to be rejected for $v"; exit 1
+            fi
+          done
 
       # ===================================================================
       # SST/Yelp text-method selection: select_bert_method + BackendConfig
@@ -255,7 +300,7 @@ jobs:
           cd ${{ github.workspace }}
           coverage run -p -m act.pipeline --verify vnnlib --category acasxu_2023 --max-instances 2 \
             --solvers dual --bab --bab-solver-tier dual_alpha_eta \
-            --bab-bounding depth_lb --bab-branching-method babsr \
+            --bab-bounding depth_bound_blend --bab-branching-method babsr \
             --bab-max-depth 3 --bab-max-nodes 10 --device cpu --dtype float64
       
       - name: BaB split — input split (ACT nets)
@@ -263,7 +308,7 @@ jobs:
           cd ${{ github.workspace }}
           for net in layer_testing_bab_deep layer_testing_lrelu; do
             coverage run -p -m act.back_end --verify \
-              --network "$ACT_NETS_DIR/$net.json" --bab --bab-bounding depth_lb \
+              --network "$ACT_NETS_DIR/$net.json" --bab --bab-bounding depth_bound_blend \
               --bab-input-split-fanout 3 --bab-frontier-cap 8 \
               --timeout 30 --bab-max-depth 8 --bab-max-subproblems 300
           done
@@ -278,21 +323,21 @@ jobs:
           cd ${{ github.workspace }}
           for net in layer_testing_bab_deep layer_testing_lrelu; do
             coverage run -p -m act.back_end --verify \
-              --network "$ACT_NETS_DIR/$net.json" --bab --bab-bounding depth_lb \
+              --network "$ACT_NETS_DIR/$net.json" --bab --bab-bounding depth_bound_blend \
               --timeout 30 --bab-max-depth 8 --bab-max-subproblems 300
           done
 
-      - name: BaB bounding — top-k order (depth_lb / greedy / SA)
+      - name: BaB bounding — top-k order (depth_bound_blend / greedy / annealed)
         run: |
           cd ${{ github.workspace }}
-          for order in depth_lb greedy sa; do
+          for order in depth_bound_blend greedy annealed; do
             coverage run -p -m act.back_end --verify \
               --network "$ACT_NETS_DIR/layer_testing_bab_deep.json" --bab --bab-bounding $order \
               --bab-sa-cooling-rate 0.95 \
               --timeout 30 --bab-max-depth 8 --bab-max-subproblems 300
           done
 
-      # Greedy / SA / diverse / MCTS pool-selection strategies end-to-end through
+      # Greedy / annealed / diverse_split_signs / MCTS pool-selection strategies end-to-end through
       # the back-end CLI. mlp_plain_3x8 survives LP presolve and enters BaB; the
       # greps reject a vacuous run (nodes_minted is emitted only by the BaB wave
       # loop). stderr is folded in because the mcts wave summary is a log record.
@@ -301,8 +346,8 @@ jobs:
           cd ${{ github.workspace }}
           for opts in \
             "--bab-bounding greedy" \
-            "--bab-bounding sa --bab-sa-cooling-rate 0.95" \
-            "--bab-bounding diverse" \
+            "--bab-bounding annealed --bab-sa-cooling-rate 0.95" \
+            "--bab-bounding diverse_split_signs" \
             "--bab-bounding mcts --bab-solver-tier dual_alpha --bab-mcts-exploration 1.4 --bab-mcts-lambda 0.5 --bab-mcts-virtual-loss 1.0"; do
             out=$(coverage run -p -m act.back_end --verify \
               --network "$ACT_NETS_DIR/mlp_plain_3x8_64x64_3962224133.json" --bab $opts \
@@ -321,7 +366,7 @@ jobs:
           cd ${{ github.workspace }}
           coverage run -p -m act.pipeline --verify vnnlib --category acasxu_2023 --max-instances 2 \
             --solvers dual --bab --bab-solver-tier dual_alpha_eta \
-            --bab-bounding sa --bab-sa-cooling-rate 0.97 \
+            --bab-bounding annealed --bab-sa-cooling-rate 0.97 \
             --bab-input-split-fanout 3 --bab-frontier-cap 8 \
             --bab-max-depth 3 --bab-max-nodes 10 --device cpu --dtype float64
 
@@ -331,7 +376,7 @@ jobs:
           cd ${{ github.workspace }}
           coverage run -p -m act.pipeline --verify vnnlib --category acasxu_2023 --max-instances 1 \
             --solvers dual --bab --bab-solver-tier dual_alpha_eta \
-            --bab-bounding depth_lb --bab-provenance \
+            --bab-bounding depth_bound_blend --bab-provenance \
             --bab-max-depth 3 --bab-max-nodes 10 --device cpu --dtype float64
 
       # ── Coverage ───────────────────────────────────────────────────────

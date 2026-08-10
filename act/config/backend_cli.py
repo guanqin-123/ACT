@@ -205,8 +205,40 @@ def _make_solver(
         return TorchLPSolver(config=torchlp_config)
 
 
+_DUAL_BAB_PRESET: dict[str, Any] = {
+    "solver_tier": "dual_alpha_eta",
+    "branching_method": "gain",
+    "reuse_root_bounds": True,
+    "intermediate_refine": "all",
+    "multi_split_levels": 4,
+}
+
+_DUAL_PRESET_ARG_DESTS: dict[str, str] = {
+    "solver_tier": "bab_solver_tier",
+    "branching_method": "bab_branching",
+    "reuse_root_bounds": "bab_reuse_root_bounds",
+    "intermediate_refine": "bab_intermediate_refine",
+    "multi_split_levels": "bab_multi_split_levels",
+}
+
+
+def explicit_dual_preset_fields(args: argparse.Namespace) -> set[str]:
+    """BaB preset fields the user pinned on the command line.
+
+    Every BaB override flag parses with ``default=None``, so a non-None value is
+    proof the user typed it. The dual preset must yield on exactly those fields.
+    """
+    return {
+        field
+        for field, dest in _DUAL_PRESET_ARG_DESTS.items()
+        if getattr(args, dest, None) is not None
+    }
+
+
 def _verify_one_net(
-    net_path: str, backend_cfg
+    net_path: str,
+    backend_cfg,
+    explicit_bab_fields: Optional[set[str]] = None,
 ) -> tuple[list[Any], Optional[Union[_SkipUnsupported, str]], Optional[int]]:
     """[BATCHED-API] Verify *net_path* via 3-tier cascade.
 
@@ -330,18 +362,20 @@ def _verify_one_net(
 
             bab_cfg = backend_cfg.bab
             if is_dual:
-                # Dual-tier BaB: optimized alpha/eta bounds with gain-tested
-                # joint multi-neuron (verdict-boundary) branching.
+                # Convenience preset, NOT a mandate: --solver dual fills in
+                # optimized alpha/eta bounds with gain-tested joint multi-neuron
+                # (verdict-boundary) branching for users who pass no BaB flags,
+                # and yields on every field the user pinned explicitly.
                 import dataclasses
 
-                bab_cfg = dataclasses.replace(
-                    bab_cfg,
-                    solver_tier="dual_alpha_eta",
-                    branching_method="gain",
-                    reuse_root_bounds=True,
-                    intermediate_refine="all",
-                    multi_split_levels=4,
-                )
+                pinned = explicit_bab_fields or set()
+                preset = {
+                    field: value
+                    for field, value in _DUAL_BAB_PRESET.items()
+                    if field not in pinned
+                }
+                if preset:
+                    bab_cfg = dataclasses.replace(bab_cfg, **preset)
 
             try:
                 results = [
@@ -377,7 +411,9 @@ def run_verification(args, backend_cfg):
     """Run verification on a network using *backend_cfg*."""
     from act.util.stats import VerifyStatus
 
-    results, err, n_layers = _verify_one_net(args.network, backend_cfg)
+    results, err, n_layers = _verify_one_net(
+        args.network, backend_cfg, explicit_dual_preset_fields(args)
+    )
     if err is not None:
         if isinstance(err, _SkipUnsupported):
             print(
@@ -1142,7 +1178,13 @@ Examples:
         type=str,
         default=None,
         dest="bab_branching",
-        help="Branching strategy (default: from config.yaml)",
+        help=(
+            "Branching strategy: which neuron or input axis to split. "
+            "Neuron branching (babsr/fsb/gain) requires "
+            "--bab-solver-tier dual_alpha or dual_alpha_eta. Note that "
+            "--bab-multi-split-levels is orthogonal to this choice "
+            "(default: from config.yaml)"
+        ),
     )
     verify_group.add_argument(
         "--bab-bounding",
@@ -1150,14 +1192,25 @@ Examples:
         default=None,
         choices=VALID_BOUNDINGS,
         dest="bab_bounding",
-        help="Pool selection strategy (default: from config.yaml)",
+        help=(
+            "Pool selection: which pending subproblems the next wave expands. "
+            "depth_bound_blend = 0.5*norm(depth) + 0.5*bound-urgency blend; "
+            "greedy = best-first on |lb| (Oliva-Greedy, ECOOP 2025); "
+            "annealed = Gumbel noise with temp = sa_cooling_rate**step "
+            "(Oliva-SA, ECOOP 2025); "
+            "diverse_split_signs = top-k then split-sign diversity repulsion; "
+            "random = uniform sampling; "
+            "mcts = N/Q side tables over the BaB tree. "
+            "The first four honour --bab-top-k; random and mcts reject it "
+            "(default: from config.yaml)"
+        ),
     )
     verify_group.add_argument(
         "--bab-sa-cooling-rate",
         type=float,
         default=None,
         dest="bab_sa_cooling_rate",
-        help="Cooling rate for --bab-bounding sa (default: from config.yaml)",
+        help="Cooling rate for --bab-bounding annealed (default: from config.yaml)",
     )
     verify_group.add_argument(
         "--bab-frontier-cap",
@@ -1275,11 +1328,30 @@ Examples:
         help="Enable per-wave LLM-probe decision logging (default: from config.yaml)",
     )
     verify_group.add_argument(
-        "--multi-split-levels",
+        "--bab-multi-split-levels",
         type=int,
         default=None,
         dest="bab_multi_split_levels",
-        help="Simultaneous neuron splits per branching step for gain branching (default: from config.yaml)",
+        help=(
+            "Neurons split jointly per branching step; each lane fans out into "
+            "all 2^k sign combinations (verdict-boundary joint splitting). "
+            "1 = single split. The k neurons are chosen by the BaBSR heuristic "
+            "(area x |nu|) regardless of --bab-branching. Requires "
+            "--bab-solver-tier dual_alpha or dual_alpha_eta "
+            "(default: from config.yaml)"
+        ),
+    )
+    verify_group.add_argument(
+        "--bab-top-k",
+        type=int,
+        default=None,
+        dest="bab_top_k",
+        help=(
+            "Cap on subproblems popped per BaB wave, independent of the batch "
+            "size; 0 = unbounded. Honoured by --bab-bounding "
+            "depth_bound_blend/greedy/annealed/diverse_split_signs; rejected "
+            "for random/mcts (default: from config.yaml)"
+        ),
     )
     verify_group.add_argument(
         "--bab-input-split-fanout",
@@ -1431,6 +1503,7 @@ _BACKEND_ALIAS_OVERRIDE_SPEC: list[tuple[str, str, Optional[str], Any, str]] = [
     ("bab_llm_probe_decisions",          "bab_llm_probe_decisions",          None, None,  "not_none"),
     ("bab_llm_probe_log",                "bab_llm_probe_log",                None, None,  "user_set"),
     ("bab_multi_split_levels",           "bab_multi_split_levels",           None, int,   "not_none"),
+    ("bab_top_k",                        "bab_top_k",                        None, int,   "not_none"),
     ("gen_output_dir",       "output",              "ACT_GEN_OUTPUT", None, "not_none"),
     ("gen_num_instances",    "num",                 "ACT_GEN_NUM",    int,  "not_none"),
     ("gen_base_seed",        "base_seed",           "ACT_GEN_SEED",   int,  "not_none"),
