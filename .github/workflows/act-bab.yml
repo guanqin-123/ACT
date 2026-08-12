@@ -179,6 +179,23 @@ jobs:
           grep -qE "multi_split_wave_count: [1-9]" <<<"$out"
           grep -qE "multi_split_k_used: [2-9]"     <<<"$out"
 
+      # --bab-multi-split-levels 1 is load-bearing: when joint splitting fires it
+      # replaces the brancher entirely, so compute_scores is never called and this
+      # step would silently exercise nothing. wave_count: 0 asserts that.
+      - name: BaB branching — witness residual (dual_alpha_eta)
+        run: |
+          cd ${{ github.workspace }}
+          out=$(coverage run -p -m act.back_end --verify \
+            --network "$ACT_NETS_DIR/mlp_plain_3x8_64x64_3962224133.json" \
+            --solver dual --bab --bab-branching witness_residual \
+            --bab-solver-tier dual_alpha_eta --bab-multi-split-levels 1 \
+            --bab-max-batch-size 64 --bab-max-depth 5 --bab-max-subproblems 30 \
+            --device cpu --dtype float64 --verbose 2>&1)
+          echo "$out"
+          grep -qE "multi_split_wave_count: 0"              <<<"$out"
+          grep -qE "witness_residual_fallback_count: 0"     <<<"$out"
+          grep -qE "^  nodes: [1-9]"                        <<<"$out"
+
       # top-k is a real parameter on the four TopKBounding-family strategies and
       # a hard error on the other two. Both halves are asserted.
       - name: BaB bounding — top-k parameter
