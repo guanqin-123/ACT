@@ -67,6 +67,7 @@ from act.back_end.core import Net, Layer
 from act.back_end.serialization.serialization import NetSerializer
 from act.pipeline.verification.act2torch import ACTToTorch
 from act.util.device_manager import get_default_dtype, get_default_device
+from act.util.model_inference import to_bool
 
 logger = logging.getLogger(__name__)
 
@@ -358,12 +359,14 @@ def main():
                         print(f"  Output shape: {list(output.shape)}")
                         print(f"  Output range: [{output.min():.4f}, {output.max():.4f}]")
                         
-                        # Track test success
+                        # Track test success (convert Tensor[B] to bool for batch support)
                         total_tests += 1
-                        if input_satisfied and output_satisfied:
+                        input_ok = to_bool(input_satisfied)
+                        output_ok = to_bool(output_satisfied)
+                        if input_ok and output_ok:
                             passed_tests += 1
                             print(f"  ✅ Test PASSED (both constraints satisfied)")
-                        elif not input_satisfied:
+                        elif not input_ok:
                             print(f"  ⚠️  Test UNCERTAIN (input constraint violated)")
                         else:
                             print(f"  ❌ Test FAILED (output constraint violated)")

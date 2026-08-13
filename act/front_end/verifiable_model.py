@@ -77,7 +77,7 @@ import torch.nn as nn
 from typing import Dict, Any, Optional, List, Tuple, Union
 
 # Import ACT components
-from act.front_end.specs import InputSpec, OutputSpec, InKind, OutKind
+from act.front_end.specs import InputSpec, OutputSpec, InKind, OutKind, BatchedInputSpec, BatchedOutputSpec
 from act.front_end.spec_creator_base import LabeledInputTensor
 from act.back_end.layer_schema import LayerKind, REGISTRY
 from act.back_end.layer_util import create_layer
@@ -136,59 +136,74 @@ class VerifiableModel(nn.Sequential):
     def get_strict_mode(cls) -> bool:
         return cls._strict_mode
     
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> Dict[str, Any]:
         """
-        Forward pass with automatic constraint checking.
+        Forward pass with batched constraint checking.
         
-        Intercepts tuple returns from InputSpecLayer/OutputSpecLayer
-        and collects verification results.
+        Returns dict with output tensor and per-sample satisfaction status.
         """
-        input_satisfied = True
-        input_explanation = "No INPUT_SPEC layer"
-        output_satisfied = True
-        output_explanation = "No OUTPUT_SPEC layer"
+        B, device = x.shape[0], x.device
+        input_sat = output_sat = None
+        input_exp = output_exp = ""
         
-        # Process through all layers
-        for i, module in enumerate(self):
+        for module in self._modules.values():
             result = module(x)
             
-            # Check if layer returned constraint checking tuple
-            if isinstance(result, tuple) and len(result) == 3:
-                x, satisfied, explanation = result
-                
-                # Identify if this is input or output spec layer
-                # Input spec layers typically appear early (first few layers)
-                # Output spec layers typically appear at the end
-                if i < len(self) // 2:  # First half = likely INPUT_SPEC
-                    input_satisfied = satisfied
-                    input_explanation = explanation
-                else:  # Second half = likely OUTPUT_SPEC
-                    output_satisfied = satisfied
-                    output_explanation = explanation
+            if isinstance(module, InputSpecLayer):
+                x, input_sat, input_exp = result
+            elif isinstance(module, OutputSpecLayer):
+                x, output_sat, output_exp = result
             else:
-                # Regular layer, just pass through
                 x = result
         
-        # Strict mode: raise on constraint violations
-        if self._strict_mode:
-            if not input_satisfied:
-                print(f"[STRICT MODE] {input_explanation}")
-                raise ValueError(
-                    f"Input constraint violated in strict mode: {input_explanation}"
-                )
-            if not output_satisfied:
-                print(f"[STRICT MODE] {output_explanation}")
-                raise ValueError(
-                    f"Output constraint violated in strict mode: {output_explanation}"
-                )
+        # Default to all-satisfied if no spec layers
+        ones = lambda: torch.ones(B, dtype=torch.bool, device=device)
+        if input_sat is None:
+            input_sat, input_exp = ones(), "No INPUT_SPEC layer"
+        if output_sat is None:
+            output_sat, output_exp = ones(), "No OUTPUT_SPEC layer"
         
-        # Return comprehensive verification result
+        all_sat = input_sat & output_sat
+        
+        if self._strict_mode and not all_sat.all():
+            msg = input_exp if not input_sat.all() else output_exp
+            raise ValueError(f"Constraint violated in strict mode: {msg}")
+        
         return {
             'output': x,
-            'input_satisfied': input_satisfied,
-            'input_explanation': input_explanation,
-            'output_satisfied': output_satisfied,
-            'output_explanation': output_explanation
+            'input_satisfied': input_sat,
+            'output_satisfied': output_sat,
+            'all_satisfied': all_sat,
+            'input_explanation': input_exp,
+            'output_explanation': output_exp,
+            'summary': f"Batch: {all_sat.sum().item()}/{B} satisfied",
+        }
+    
+    def get_satisfaction_rate(self, x: torch.Tensor) -> Dict[str, float]:
+        """
+        Compute satisfaction rates for input, output, and combined constraints.
+        
+        Args:
+            x: Input tensor of shape [B, ...] where B is batch size
+            
+        Returns:
+            Dict with percentage satisfaction rates:
+            - 'input': Percentage of samples satisfying input constraints
+            - 'output': Percentage of samples satisfying output constraints
+            - 'all': Percentage of samples satisfying both constraints
+        """
+        with torch.no_grad():
+            result = self.forward(x)
+        
+        B = x.shape[0]
+        input_rate = 100.0 * result['input_satisfied'].sum().item() / B
+        output_rate = 100.0 * result['output_satisfied'].sum().item() / B
+        all_rate = 100.0 * result['all_satisfied'].sum().item() / B
+        
+        return {
+            'input': input_rate,
+            'output': output_rate,
+            'all': all_rate,
         }
 
 
@@ -223,8 +238,8 @@ class InputLayer(nn.Module):
         channels: Optional[int] = None,
     ):
         super().__init__()
-        if shape[0] != 1:
-            raise ValueError(f"Verification wrapper assumes batch=1, got batch size {shape[0]}")
+        # Note: Batch dimension is now flexible - supports both batch=1 (formal verification)
+        # and batch>1 (batched inference/fuzzing). Shape[0] is the batch size.
         
         # Core attributes (dtype now required)
         self.shape = tuple(shape)
@@ -484,80 +499,80 @@ class InputSpecLayer(nn.Module):
         )
         return [layer], in_vars
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, str]:
         """
-        Forward pass with constraint checking.
+        Forward pass with batched constraint checking.
+        
+        Args:
+            x: Input tensor of shape [B, ...] where B is batch size
         
         Returns:
-            Tuple of (tensor, satisfied, explanation)
+            Tuple of (tensor, satisfied, explanation) where:
+            - tensor: Pass-through input tensor [B, ...]
+            - satisfied: Boolean tensor [B] indicating per-sample satisfaction
+            - explanation: Human-readable summary string
         """
+        B = x.shape[0]
+        device = x.device
+        
         # If no spec, pass through without checking
         if self.spec is None:
-            return (x, True, "✅ INPUT: No constraints")
+            return (x, torch.ones(B, dtype=torch.bool, device=device), "✅ INPUT: No constraints")
         
         # Check constraints based on kind
         if self.kind == InKind.BOX:
             # Box constraint: lb <= x <= ub
             if self.lb is None or self.ub is None:
-                return (x, True, "⚠️ INPUT BOX: Missing lb/ub")
+                return (x, torch.ones(B, dtype=torch.bool, device=device), "⚠️ INPUT BOX: Missing lb/ub")
             
-            # Reshape bounds to match input shape (handles flat -> image reshape)
-            lb = self.lb.reshape(x.shape)
-            ub = self.ub.reshape(x.shape)
+            # Expand bounds to match input shape [B, ...]
+            lb = self.lb.expand_as(x)
+            ub = self.ub.expand_as(x)
             
-            lb_satisfied = (x >= lb).all()
-            ub_satisfied = (x <= ub).all()
-            satisfied = bool(lb_satisfied and ub_satisfied)
-            
-            if satisfied:
-                margin_lb = (x - lb).min().item()
-                margin_ub = (ub - x).min().item()
-                margin = min(margin_lb, margin_ub)
-                explanation = f"✅ INPUT BOX: lb≤x≤ub (margin={margin:.4f})"
-            else:
-                lb_viol = (x < lb).sum().item()
-                ub_viol = (x > ub).sum().item()
-                explanation = f"❌ INPUT BOX: {lb_viol} lb violations, {ub_viol} ub violations"
-            
+            # Per-sample satisfaction: all elements must satisfy bounds
+            satisfied = ((x >= lb) & (x <= ub)).flatten(1).all(dim=1)  # [B]
+            n = satisfied.sum().item()
+            explanation = f"BOX: {n}/{B} satisfied"
             return (x, satisfied, explanation)
         
         elif self.kind == InKind.LINF_BALL:
             # L∞-ball constraint: ||x - center||∞ <= eps
             if self.center is None or self.eps is None:
-                return (x, True, "⚠️ INPUT L∞: Missing center/eps")
+                return (x, torch.ones(B, dtype=torch.bool, device=device), "⚠️ INPUT L∞: Missing center/eps")
             
-            # Center has batch dimension matching x (both are (1, C, H, W))
-            linf_dist = (x - self.center).abs().max().item()
-            satisfied = linf_dist <= self.eps
+            # Expand center to match input shape
+            center = self.center.expand_as(x)
             
-            if satisfied:
-                explanation = f"✅ INPUT L∞: ||x-c||∞={linf_dist:.4f}≤ε={self.eps:.4f}"
-            else:
-                explanation = f"❌ INPUT L∞: ||x-c||∞={linf_dist:.4f}>ε={self.eps:.4f}"
-            
+            # Per-sample L∞ distance
+            linf_dist = (x - center).abs().flatten(1).max(dim=1).values  # [B]
+            satisfied = linf_dist <= self.eps  # [B]
+            n = satisfied.sum().item()
+            max_dist = linf_dist.max().item()
+            explanation = f"LINF: {n}/{B} satisfied, max_dist={max_dist:.4f}"
             return (x, satisfied, explanation)
         
         elif self.kind == InKind.LIN_POLY:
             # Linear polytope: Ax <= b
             if self.A is None or self.b is None:
-                return (x, True, "⚠️ INPUT LIN_POLY: Missing A/b")
+                return (x, torch.ones(B, dtype=torch.bool, device=device), "⚠️ INPUT LIN_POLY: Missing A/b")
             
-            x_flat = x.reshape(-1)
-            residuals = self.A @ x_flat - self.b  # Should be <= 0
-            max_violation = residuals.max().item()
-            satisfied = max_violation <= 0
+            x_flat = x.flatten(1)  # [B, D]
             
-            if satisfied:
-                margin = -max_violation  # How much slack we have
-                explanation = f"✅ INPUT LIN_POLY: Ax≤b (margin={margin:.4f})"
+            # Handle both batched A [B, M, D] and single A [M, D]
+            if self.A.dim() == 2:
+                # Single A matrix: broadcast across batch
+                residuals = x_flat @ self.A.T - self.b  # [B, M]
             else:
-                num_violations = (residuals > 0).sum().item()
-                explanation = f"❌ INPUT LIN_POLY: {num_violations} constraints violated (max={max_violation:.4f})"
+                # Batched A matrices
+                residuals = torch.bmm(self.A, x_flat.unsqueeze(-1)).squeeze(-1) - self.b  # [B, M]
             
+            satisfied = residuals.max(dim=1).values <= 0  # [B]
+            n = satisfied.sum().item()
+            explanation = f"LIN_POLY: {n}/{B} satisfied"
             return (x, satisfied, explanation)
         
         else:
-            return (x, True, f"⚠️ INPUT: Unknown kind {self.kind}")
+            return (x, torch.ones(B, dtype=torch.bool, device=device), f"⚠️ INPUT: Unknown kind {self.kind}")
 
 
 class OutputSpecLayer(nn.Module):
@@ -633,97 +648,107 @@ class OutputSpecLayer(nn.Module):
         )
         return [layer], in_vars
 
-    def forward(self, y: torch.Tensor):
+    def forward(self, y: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, str]:
         """
-        Forward pass with constraint checking.
+        Forward pass with batched constraint checking.
+        
+        Args:
+            y: Output tensor of shape [B, ...] where B is batch size
         
         Returns:
-            Tuple of (tensor, satisfied, explanation)
+            Tuple of (tensor, satisfied, explanation) where:
+            - tensor: Pass-through output tensor [B, ...]
+            - satisfied: Boolean tensor [B] indicating per-sample satisfaction
+            - explanation: Human-readable summary string
         """
+        B = y.shape[0]
+        device = y.device
+        y_flat = y.view(B, -1)  # [B, C]
+        
         # If no spec, pass through without checking
         if self.spec is None:
-            return (y, True, "✅ OUTPUT: No constraints")
+            return (y, torch.ones(B, dtype=torch.bool, device=device), "✅ OUTPUT: No constraints")
         
         # Check constraints based on kind
         if self.kind == OutKind.TOP1_ROBUST:
             # Top-1 robustness: y_true class has highest score
             if self.y_true is None:
-                return (y, True, "⚠️ OUTPUT TOP1: Missing y_true")
+                return (y, torch.ones(B, dtype=torch.bool, device=device), "⚠️ OUTPUT TOP1: Missing y_true")
             
-            y_flat = y.reshape(-1)
-            pred_class = y_flat.argmax().item()
-            y_true_score = y_flat[self.y_true].item()
-            max_other_score = y_flat[[i for i in range(len(y_flat)) if i != self.y_true]].max().item()
-            margin = y_true_score - max_other_score
-            
-            satisfied = pred_class == self.y_true
-            
-            if satisfied:
-                explanation = f"✅ OUTPUT TOP1: Class {self.y_true} wins (margin={margin:.4f})"
+            # Handle y_true as int (single label) or Tensor[B] (batched labels)
+            if isinstance(self.y_true, torch.Tensor):
+                y_true = self.y_true
             else:
-                explanation = f"❌ OUTPUT TOP1: Class {pred_class} wins, expected {self.y_true} (margin={margin:.4f})"
+                y_true = torch.tensor([self.y_true], device=device, dtype=torch.long).expand(B)
             
+            satisfied = y_flat.argmax(dim=1) == y_true  # [B]
+            n = satisfied.sum().item()
+            explanation = f"TOP1: {n}/{B} correct"
             return (y, satisfied, explanation)
         
         elif self.kind == OutKind.MARGIN_ROBUST:
             # Margin robustness: y_true class score exceeds others by margin
-            if self.y_true is None or self.margin is None:
-                return (y, True, "⚠️ OUTPUT MARGIN: Missing y_true/margin")
+            if self.y_true is None:
+                return (y, torch.ones(B, dtype=torch.bool, device=device), "⚠️ OUTPUT MARGIN: Missing y_true")
             
-            y_flat = y.reshape(-1)
-            y_true_score = y_flat[self.y_true].item()
-            max_other_score = y_flat[[i for i in range(len(y_flat)) if i != self.y_true]].max().item()
-            actual_margin = y_true_score - max_other_score
-            
-            satisfied = actual_margin >= self.margin
-            
-            if satisfied:
-                explanation = f"✅ OUTPUT MARGIN: margin={actual_margin:.4f}≥{self.margin:.4f}"
+            # Handle y_true as int or Tensor[B]
+            if isinstance(self.y_true, torch.Tensor):
+                y_true = self.y_true
             else:
-                explanation = f"❌ OUTPUT MARGIN: margin={actual_margin:.4f}<{self.margin:.4f}"
+                y_true = torch.tensor([self.y_true], device=device, dtype=torch.long).expand(B)
             
+            C = y_flat.shape[1]
+            # Create mask for "other" classes
+            mask = torch.ones(B, C, dtype=torch.bool, device=device)
+            mask.scatter_(1, y_true.unsqueeze(1), False)
+            
+            # Get scores
+            y_true_scores = y_flat.gather(1, y_true.unsqueeze(1)).squeeze(1)  # [B]
+            max_other = y_flat.masked_fill(~mask, float('-inf')).max(dim=1).values  # [B]
+            margins = y_true_scores - max_other  # [B]
+            
+            # Handle margin as float or Tensor
+            margin_threshold = self.margin if not isinstance(self.margin, torch.Tensor) else self.margin
+            satisfied = margins >= margin_threshold  # [B]
+            n = satisfied.sum().item()
+            min_margin = margins.min().item()
+            explanation = f"MARGIN: {n}/{B} satisfied, min={min_margin:.4f}"
             return (y, satisfied, explanation)
         
         elif self.kind == OutKind.LINEAR_LE:
             # Linear inequality: c^T y <= d
             if self.c is None or self.d is None:
-                return (y, True, "⚠️ OUTPUT LINEAR_LE: Missing c/d")
+                return (y, torch.ones(B, dtype=torch.bool, device=device), "⚠️ OUTPUT LINEAR_LE: Missing c/d")
             
-            y_flat = y.reshape(-1)
-            # Ensure dtype consistency for dot product
-            c_typed = self.c.to(dtype=y_flat.dtype, device=y_flat.device)
-            lhs = (c_typed @ y_flat).item()
-            satisfied = lhs <= self.d
+            c = self.c.to(dtype=y_flat.dtype, device=device)
             
-            if satisfied:
-                margin = self.d - lhs
-                explanation = f"✅ OUTPUT LINEAR_LE: c^T·y={lhs:.4f}≤d={self.d:.4f} (margin={margin:.4f})"
+            # Handle c as [C] (single) or [B, C] (batched)
+            if c.dim() == 1:
+                lhs = (y_flat * c).sum(dim=1)  # [B]
             else:
-                violation = lhs - self.d
-                explanation = f"❌ OUTPUT LINEAR_LE: c^T·y={lhs:.4f}>d={self.d:.4f} (violation={violation:.4f})"
+                lhs = (y_flat * c).sum(dim=1)  # [B]
             
+            # Handle d as float or Tensor
+            d = self.d if not isinstance(self.d, torch.Tensor) else self.d
+            satisfied = lhs <= d  # [B]
+            n = satisfied.sum().item()
+            explanation = f"LINEAR_LE: {n}/{B} satisfied"
             return (y, satisfied, explanation)
         
         elif self.kind == OutKind.RANGE:
             # Range constraint: lb <= y <= ub
-            if self.lb is None or self.ub is None:
-                return (y, True, "⚠️ OUTPUT RANGE: Missing lb/ub")
+            satisfied = torch.ones(B, dtype=torch.bool, device=device)
             
-            lb_satisfied = (y >= self.lb).all()
-            ub_satisfied = (y <= self.ub).all()
-            satisfied = bool(lb_satisfied and ub_satisfied)
+            if self.lb is not None:
+                lb = self.lb.expand_as(y_flat) if self.lb.dim() > 0 else self.lb
+                satisfied &= (y_flat >= lb).all(dim=1)
+            if self.ub is not None:
+                ub = self.ub.expand_as(y_flat) if self.ub.dim() > 0 else self.ub
+                satisfied &= (y_flat <= ub).all(dim=1)
             
-            if satisfied:
-                margin_lb = (y - self.lb).min().item()
-                margin_ub = (self.ub - y).min().item()
-                margin = min(margin_lb, margin_ub)
-                explanation = f"✅ OUTPUT RANGE: lb≤y≤ub (margin={margin:.4f})"
-            else:
-                lb_viol = (y < self.lb).sum().item()
-                ub_viol = (y > self.ub).sum().item()
-                explanation = f"❌ OUTPUT RANGE: {lb_viol} lb violations, {ub_viol} ub violations"
-            
+            n = satisfied.sum().item()
+            explanation = f"RANGE: {n}/{B} satisfied"
             return (y, satisfied, explanation)
         
         else:
-            return (y, True, f"⚠️ OUTPUT: Unknown kind {self.kind}")
+            return (y, torch.ones(B, dtype=torch.bool, device=device), f"⚠️ OUTPUT: Unknown kind {self.kind}")

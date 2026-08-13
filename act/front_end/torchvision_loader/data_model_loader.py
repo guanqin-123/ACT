@@ -10,7 +10,7 @@ Copyright (C) 2025 SVF-tools/ACT
 License: AGPLv3+
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import os
 import json
 import torch
@@ -541,7 +541,16 @@ def load_dataset_model_pair(
     
     # Normalize names (case-insensitive)
     dataset_name = find_dataset_name(dataset_name)
-    model_name = find_model_name(model_name)
+    
+    # If model_name is None, use first recommended model for this dataset
+    if model_name is None:
+        info = get_dataset_info(dataset_name)
+        if info and info.get('models'):
+            model_name = info['models'][0]
+        else:
+            raise ValueError(f"No recommended models for dataset '{dataset_name}'")
+    else:
+        model_name = find_model_name(model_name)
     
     # Check if pair exists
     dataset_dir = Path(root_dir) / dataset_name
@@ -943,6 +952,47 @@ def main():
             print(f"   • {pair_key}: {reason}")
     
     print("="*80)
+
+
+# =============================================================================
+# Batched Loading
+# =============================================================================
+
+def load_torchvision_batched(
+    dataset_name: str,
+    num_samples: int,
+    eps: float = 0.0,
+    model_name: Optional[str] = None,
+    split: str = "test",
+) -> Tuple['BatchedInputSpec', 'BatchedOutputSpec', torch.nn.Module]:
+    """
+    Load batched specs from TorchVision dataset.
+    
+    Args:
+        dataset_name: Name of the dataset (e.g., 'MNIST', 'CIFAR10')
+        num_samples: Number of samples to load (batch size)
+        eps: Perturbation epsilon for L-inf ball
+        model_name: Optional model name to load
+        split: Dataset split ('train' or 'test')
+    
+    Returns:
+        Tuple of (BatchedInputSpec, BatchedOutputSpec, model)
+        
+    Example:
+        >>> in_spec, out_spec, model = load_torchvision_batched('MNIST', 100, eps=0.1)
+        >>> print(in_spec.batch_size)  # 100
+    """
+    from act.front_end.batched_loader import BatchedSpecLoader
+    
+    loader = BatchedSpecLoader.from_torchvision(
+        dataset_name=dataset_name,
+        num_samples=num_samples,
+        eps=eps,
+        model_name=model_name,
+        split=split,
+    )
+    in_spec, out_spec = loader.get_batched_specs()
+    return in_spec, out_spec, loader.model
 
 
 if __name__ == "__main__":

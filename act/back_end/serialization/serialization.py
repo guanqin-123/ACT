@@ -63,35 +63,23 @@ class TensorEncoder:
         }
     
     @staticmethod
-    def decode_tensor(tensor_dict: Dict[str, Any], target_device: Optional[str] = None) -> torch.Tensor:
-        """Convert JSON dictionary back to PyTorch tensor."""
+    def decode_tensor(tensor_dict: Dict[str, Any]) -> torch.Tensor:
+        """Convert JSON dictionary back to PyTorch tensor.
+        
+        Converts to current device_manager dtype/device settings.
+        """
         if not HAS_TORCH:
             raise ACTSerializationError("PyTorch not available for tensor decoding")
-            
-        # Decode base64 data
-        encoded_data = tensor_dict["data"]
-        buffer = io.BytesIO(base64.b64decode(encoded_data.encode('utf-8')))
-        np_array = np.load(buffer)
         
-        # Create tensor with original properties
-        tensor = torch.from_numpy(np_array)
+        from act.util.device_manager import get_default_dtype, get_default_device
         
-        # Apply dtype conversion if needed
-        if "dtype" in tensor_dict:
-            dtype_str = tensor_dict["dtype"]
-            if hasattr(torch, dtype_str.split('.')[-1]):
-                dtype = getattr(torch, dtype_str.split('.')[-1])
-                tensor = tensor.to(dtype)
+        buffer = io.BytesIO(base64.b64decode(tensor_dict["data"].encode('utf-8')))
+        tensor = torch.from_numpy(np.load(buffer))
+        tensor = tensor.to(dtype=get_default_dtype(), device=get_default_device())
         
-        # Move to device
-        device = target_device or tensor_dict.get("device", "cpu")
-        if device != "cpu":
-            tensor = tensor.to(device)
-            
-        # Set requires_grad
         if tensor_dict.get("requires_grad", False):
             tensor.requires_grad_(True)
-            
+        
         return tensor
 
 class LayerSerializer:
@@ -130,27 +118,34 @@ class LayerSerializer:
         }
     
     @staticmethod
-    def deserialize_layer(layer_dict: Dict[str, Any], target_device: Optional[str] = None) -> Layer:
-        """Convert JSON dictionary to Layer object with proper validation."""
+    def deserialize_layer(layer_dict: Dict[str, Any]) -> Layer:
+        """Convert JSON dictionary to Layer object.
+        
+        Converts tensors/metadata to current device_manager settings.
+        """
+        from act.util.device_manager import get_default_dtype, get_default_device
+        
         # Decode tensor parameters
         params_decoded = {}
         for name, value in layer_dict.get("params", {}).items():
             if isinstance(value, dict) and "dtype" in value and "shape" in value:
-                # This is a tensor that was encoded
-                params_decoded[name] = TensorEncoder.decode_tensor(value, target_device)
+                params_decoded[name] = TensorEncoder.decode_tensor(value)
             else:
-                # This is a regular value (float, int, string, etc.)
                 params_decoded[name] = value
         
         # Decode cache tensors
         cache_decoded = {}
         for name, value in layer_dict.get("cache", {}).items():
             if isinstance(value, dict) and "dtype" in value and "shape" in value:
-                # This is a tensor that was encoded
-                cache_decoded[name] = TensorEncoder.decode_tensor(value, target_device)
+                cache_decoded[name] = TensorEncoder.decode_tensor(value)
             else:
-                # This is a regular value
                 cache_decoded[name] = value
+        
+        # Update INPUT layer meta to match device_manager
+        meta = dict(layer_dict.get("meta", {}))
+        if layer_dict.get("kind") == "INPUT":
+            meta["dtype"] = str(get_default_dtype())
+            meta["device"] = str(get_default_device())
         
         # Create Layer object with validation using the schema
         try:
@@ -158,7 +153,7 @@ class LayerSerializer:
                 id=layer_dict["id"],
                 kind=layer_dict["kind"],
                 params=params_decoded,
-                meta=layer_dict["meta"],
+                meta=meta,
                 in_vars=layer_dict["in_vars"],
                 out_vars=layer_dict["out_vars"],
                 cache=cache_decoded
@@ -174,7 +169,7 @@ class LayerSerializer:
                 layer.id = layer_dict["id"]
                 layer.kind = layer_dict["kind"]
                 layer.params = params_decoded
-                layer.meta = layer_dict["meta"]
+                layer.meta = meta  # Use updated meta with device_manager dtype
                 layer.in_vars = layer_dict["in_vars"]
                 layer.out_vars = layer_dict["out_vars"]
                 layer.cache = cache_decoded
@@ -219,9 +214,8 @@ class NetSerializer:
         }
     
     @staticmethod
-    def deserialize_net(net_dict: Dict[str, Any], target_device: Optional[str] = None) -> Tuple[Net, Dict[str, Any]]:
-        """Convert JSON dictionary to Net object and metadata with validation."""
-        # Version check
+    def deserialize_net(net_dict: Dict[str, Any]) -> Tuple[Net, Dict[str, Any]]:
+        """Convert JSON dictionary to Net object and metadata."""
         format_version = net_dict.get("format_version", "unknown")
         if format_version != SERIALIZATION_VERSION:
             print(f"Warning: Format version mismatch. Expected {SERIALIZATION_VERSION}, got {format_version}")
@@ -229,10 +223,7 @@ class NetSerializer:
         act_net = net_dict["act_net"]
         
         # Deserialize layers
-        layers = []
-        for layer_dict in act_net["layers"]:
-            layer = LayerSerializer.deserialize_layer(layer_dict, target_device)
-            layers.append(layer)
+        layers = [LayerSerializer.deserialize_layer(ld) for ld in act_net["layers"]]
         
         # Reconstruct graph structure
         graph = act_net.get("graph", {})
@@ -289,25 +280,22 @@ def save_net_to_file(net: Net, filepath: str, metadata: Optional[Dict[str, Any]]
     
     print(f"✅ Net saved to {filepath}")
 
-def load_net_from_file(filepath: str, target_device: Optional[str] = None) -> Tuple[Net, Dict[str, Any]]:
-    """Load ACT Net from JSON file with metadata."""
+def load_net_from_file(filepath: str) -> Tuple[Net, Dict[str, Any]]:
+    """Load ACT Net from JSON file."""
     with open(filepath, 'r', encoding='utf-8') as f:
         net_dict = json.load(f)
-    
-    net, metadata = NetSerializer.deserialize_net(net_dict, target_device)
+    net, metadata = NetSerializer.deserialize_net(net_dict)
     print(f"✅ Net loaded from {filepath}")
     return net, metadata
 
-def save_net_to_string(net: Net, metadata: Optional[Dict[str, Any]] = None, 
-                       indent: int = 2) -> str:
+def save_net_to_string(net: Net, metadata: Optional[Dict[str, Any]] = None, indent: int = 2) -> str:
     """Serialize ACT Net to JSON string."""
     net_dict = NetSerializer.serialize_net(net, metadata)
     return json.dumps(net_dict, indent=indent, ensure_ascii=False, cls=ACTJSONEncoder)
 
-def load_net_from_string(json_str: str, target_device: Optional[str] = None) -> Tuple[Net, Dict[str, Any]]:
-    """Deserialize ACT Net from JSON string with metadata."""
-    net_dict = json.loads(json_str)
-    return NetSerializer.deserialize_net(net_dict, target_device)
+def load_net_from_string(json_str: str) -> Tuple[Net, Dict[str, Any]]:
+    """Deserialize ACT Net from JSON string."""
+    return NetSerializer.deserialize_net(json.loads(json_str))
 
 # Validation utilities
 def validate_json_schema(net_dict: Dict[str, Any]) -> List[str]:

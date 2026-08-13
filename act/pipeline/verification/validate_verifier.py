@@ -144,17 +144,19 @@ import copy
 import torch
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Union
 
 from act.pipeline.verification.model_factory import ModelFactory
 from act.pipeline.verification.torch2act import TorchToACT
 from act.pipeline.verification.per_neuron_bounds import PerNeuronCheckConfig, run_per_neuron_bounds_check
 from act.back_end.verifier import verify_once, gather_input_spec_layers, seed_from_input_specs, get_input_ids, get_assert_layer, find_entry_layer_id
+from act.util.stats import VerifyStatus
 from act.back_end.solver.solver_gurobi import GurobiSolver
 from act.back_end.solver.solver_gurobi import is_gurobi_available
 from act.back_end.solver.solver_torch import TorchLPSolver
 from act.util.options import PerformanceOptions
 from act.front_end.specs import OutKind
+from act.util.model_inference import to_bool
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -243,7 +245,7 @@ class VerificationValidator:
             x = x.to(device=self.device, dtype=self.dtype)
             with torch.no_grad():
                 res = model(x)
-            if isinstance(res, dict) and res.get("input_satisfied", False) and (not res.get("output_satisfied", True)):
+            if isinstance(res, dict) and to_bool(res.get("input_satisfied", False)) and (not to_bool(res.get("output_satisfied", True))):
                 logger.info("  🔴 Counterexample found (spec_center)")
                 logger.info("     Input explanation:  %s", res.get("input_explanation"))
                 logger.info("     Output explanation: %s", res.get("output_explanation"))
@@ -260,7 +262,7 @@ class VerificationValidator:
                         x = x.to(device=self.device, dtype=self.dtype)
                         with torch.no_grad():
                             res = model(x)
-                        if isinstance(res, dict) and res.get("input_satisfied", False) and (not res.get("output_satisfied", True)):
+                        if isinstance(res, dict) and to_bool(res.get("input_satisfied", False)) and (not to_bool(res.get("output_satisfied", True))):
                             logger.info("  🔴 Counterexample found (spec_per_dim_%s_%d)", tag, i)
                             logger.info("     Input explanation:  %s", res.get("input_explanation"))
                             logger.info("     Output explanation: %s", res.get("output_explanation"))
@@ -274,7 +276,7 @@ class VerificationValidator:
                 x = x.to(device=self.device, dtype=self.dtype)
                 with torch.no_grad():
                     res = model(x)
-                if isinstance(res, dict) and res.get("input_satisfied", False) and (not res.get("output_satisfied", True)):
+                if isinstance(res, dict) and to_bool(res.get("input_satisfied", False)) and (not to_bool(res.get("output_satisfied", True))):
                     logger.info("  🔴 Counterexample found (spec_random_%d)", k)
                     logger.info("     Input explanation:  %s", res.get("input_explanation"))
                     logger.info("     Output explanation: %s", res.get("output_explanation"))
@@ -436,7 +438,7 @@ class VerificationValidator:
         network_name: str,
         solver_name: str,
         concrete_counterexample: Optional[Tuple],
-        verifier_status: str
+        verifier_status: VerifyStatus
     ) -> Dict[str, Any]:
         """
         Cross-validate concrete inference vs formal verification (Level 1).
@@ -459,7 +461,7 @@ class VerificationValidator:
             # We found a real counterexample - verifier MUST NOT claim CERTIFIED
             input_tensor, inference_results = concrete_counterexample
             
-            if verifier_status == 'CERTIFIED':
+            if verifier_status == VerifyStatus.CERTIFIED:
                 # CRITICAL BUG: Verifier claims safe, but we have a counterexample!
                 result['validation_status'] = 'FAILED'
                 result['explanation'] = (
@@ -471,7 +473,7 @@ class VerificationValidator:
                             f"range=[{input_tensor.min():.4f}, {input_tensor.max():.4f}]")
                 logger.error(f"     Output violation: {inference_results['output_explanation']}")
                 
-            elif verifier_status == 'FALSIFIED':
+            elif verifier_status == VerifyStatus.FALSIFIED:
                 # CORRECT: Verifier correctly identified the issue
                 result['validation_status'] = 'PASSED'
                 result['explanation'] = (
@@ -480,7 +482,7 @@ class VerificationValidator:
                 )
                 logger.info(f"\n  {result['explanation']}")
                 
-            elif verifier_status == 'UNKNOWN':
+            elif verifier_status == VerifyStatus.UNKNOWN:
                 # ACCEPTABLE: Verifier couldn't decide (incomplete but sound)
                 result['validation_status'] = 'ACCEPTABLE'
                 result['explanation'] = (

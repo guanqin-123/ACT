@@ -17,13 +17,15 @@ import torch
 import torch.nn as nn
 from pathlib import Path
 
-from act.front_end.specs import InputSpec, OutputSpec
+from act.front_end.specs import InputSpec, OutputSpec, InKind, OutKind, BatchedInputSpec, BatchedOutputSpec
 from act.front_end.spec_creator_base import LabeledInputTensor
-from act.front_end.verifiable_model import InputSpecLayer, OutputSpecLayer
+from act.front_end.verifiable_model import (
+    VerifiableModel, InputSpecLayer, OutputSpecLayer,
+)
 from act.pipeline.fuzzing.mutations import MutationEngine
 from act.pipeline.fuzzing.coverage import CoverageTracker
 from act.pipeline.fuzzing.corpus import SeedCorpus, FuzzingSeed
-from act.pipeline.fuzzing.checker import PropertyChecker, Counterexample
+from act.pipeline.fuzzing.checker import Counterexample, PropertyChecker
 from act.util.path_config import get_pipeline_log_dir
 
 
@@ -93,6 +95,9 @@ class FuzzingConfig:
     trace_sample_rate: int = 1  # Capture every Nth iteration
     trace_storage: str = "json"  # "json" or "hdf5"
     trace_output: Optional[Path] = None  # Auto-generated if None
+    
+    # Batched fuzzing configuration
+    batch_size: int = 1  # Number of samples to process per iteration (1 = sequential, >1 = batched)
 
 
 @dataclass
@@ -184,14 +189,18 @@ class ACTFuzzer:
                           (contains InputSpecLayer and OutputSpecLayer)
             initial_seeds: List of LabeledInputTensor from spec creators
             config: Fuzzing configuration (uses defaults if None)
+        
+        Note:
+            VerifiableModel supports batching natively. Specs are extracted
+            for the MutationEngine. The core model (without spec layers) is
+            extracted for inference and avoid mismatch between spec and model.
         """
         self.config = config or FuzzingConfig()
-        self.model = wrapped_model.to(self.config.device)
         self.device = torch.device(self.config.device)
         
-        # Extract specs from model
-        self.input_spec = self._extract_spec(InputSpecLayer)
-        self.output_spec = self._extract_spec(OutputSpecLayer)
+        # Extract specs and core model (supports both single and batched models)
+        self.input_spec, self.output_spec, core_model = self._extract_specs_and_model(wrapped_model)
+        self.model = core_model.to(self.config.device)
         
         # Initialize components
         self.mutation_engine = MutationEngine(
@@ -242,16 +251,96 @@ class ACTFuzzer:
         """Get file extension for trace storage."""
         return {"hdf5": "h5", "json": "json"}[self.config.trace_storage]
     
-    def _extract_spec(self, layer_type) -> Optional[InputSpec | OutputSpec]:
-        """Extract spec from wrapper layer."""
-        for layer in self.model.children():
-            if isinstance(layer, layer_type):
-                return layer.spec
-        return None
+    @staticmethod
+    def _batched_input_to_single(batched_in: BatchedInputSpec) -> InputSpec:
+        """Convert BatchedInputSpec to single-sample InputSpec (using first sample)."""
+        if batched_in.kind == InKind.LINF_BALL:
+            eps_val = batched_in.eps
+            if not isinstance(eps_val, (int, float)):
+                eps_val = float(eps_val[0].item())  # type: ignore
+            return InputSpec(
+                kind=InKind.LINF_BALL,
+                center=batched_in.center[0:1] if batched_in.center is not None else None,
+                eps=eps_val,
+            )
+        elif batched_in.kind == InKind.BOX:
+            return InputSpec(
+                kind=InKind.BOX,
+                lb=batched_in.lb[0:1] if batched_in.lb is not None else None,
+                ub=batched_in.ub[0:1] if batched_in.ub is not None else None,
+            )
+        return InputSpec(kind=batched_in.kind)  # Fallback
+
+    @staticmethod
+    def _batched_output_to_single(batched_out: BatchedOutputSpec) -> OutputSpec:
+        """Convert BatchedOutputSpec to single-sample OutputSpec (using first sample)."""
+        margin_val = batched_out.margin
+        if margin_val is not None and not isinstance(margin_val, (int, float)):
+            margin_val = float(margin_val[0].item())  # type: ignore
+        return OutputSpec(
+            kind=batched_out.kind,
+            y_true=int(batched_out.y_true[0].item()) if batched_out.y_true is not None else None,
+            margin=margin_val if margin_val is not None else 0.0,
+            lb=batched_out.lb[0:1] if hasattr(batched_out, 'lb') and batched_out.lb is not None else None,
+            ub=batched_out.ub[0:1] if hasattr(batched_out, 'ub') and batched_out.ub is not None else None,
+        )
+
+    def _extract_specs_and_model(
+        self, wrapped_model: nn.Module
+    ) -> Tuple[Optional[InputSpec], Optional[OutputSpec], nn.Module]:
+        """
+        Extract InputSpec, OutputSpec, and core model from wrapped model.
+        
+        Supports VerifiableModel (which now handles both single and batched inputs).
+        If the model's spec layers have a larger batch size than config.batch_size,
+        the spec layer tensors are capped to match the fuzzer's batch size.
+        """
+        input_spec: Optional[InputSpec] = None
+        output_spec: Optional[OutputSpec] = None
+        max_batch = self.config.batch_size
+        
+        for layer in wrapped_model.children():
+            if isinstance(layer, InputSpecLayer):
+                input_spec = layer.spec
+                self._cap_spec_layer_tensors(layer, layer.spec, ("lb", "ub", "center", "A", "b"), max_batch)
+            elif isinstance(layer, OutputSpecLayer):
+                output_spec = layer.spec
+                self._cap_spec_layer_tensors(layer, layer.spec, ("c", "lb", "ub"), max_batch)
+                # Handle y_true separately (not a buffer, stored as attribute)
+                y_true = layer.y_true
+                if isinstance(y_true, torch.Tensor) and y_true.dim() > 0 and y_true.shape[0] > max_batch:
+                    capped_y_true = y_true[:max_batch]
+                    layer.y_true = capped_y_true
+                    if layer.spec is not None:
+                        layer.spec.y_true = capped_y_true
+        
+        return input_spec, output_spec, wrapped_model
+    
+    def _cap_spec_layer_tensors(
+        self, 
+        layer: nn.Module, 
+        spec: Optional[object], 
+        field_names: Tuple[str, ...], 
+        max_batch: int
+    ) -> None:
+        """
+        Cap tensor fields in a spec layer to max_batch if they exceed it.
+        
+        Modifies the layer buffers and spec attributes in-place.
+        """
+        for name in field_names:
+            tensor = getattr(layer, name, None)
+            if isinstance(tensor, torch.Tensor) and tensor.dim() > 0 and tensor.shape[0] > max_batch:
+                capped = tensor[:max_batch]
+                layer.register_buffer(name, capped)
+                if spec is not None:
+                    setattr(spec, name, capped)
     
     def fuzz(self) -> FuzzingReport:
         """
         Main fuzzing loop.
+        
+        Automatically uses batched mode if config.batch_size > 1.
         
         Returns:
             FuzzingReport with counterexamples and statistics
@@ -261,13 +350,28 @@ class ACTFuzzer:
         print(f"Inference-based whitebox fuzzing for neural network verification")
         print(f"{'='*80}\n")
         
+        batch_size = self.config.batch_size
+        mode_str = f"batched (batch_size={batch_size})" if batch_size > 1 else "sequential"
+        
         print(f"🚀 Starting ACTFuzzer with {len(self.seed_corpus)} seeds")
         print(f"   Device: {self.device}")
+        print(f"   Mode: {mode_str}")
         print(f"   Max iterations: {self.config.max_iterations}")
         print(f"   Timeout: {self.config.timeout_seconds}s\n")
         
         self.start_time = time.time()
         
+        if batch_size > 1:
+            # Batched fuzzing loop
+            self._fuzz_batched_loop()
+        else:
+            # Sequential fuzzing loop (original)
+            self._fuzz_sequential_loop()
+        
+        return self._generate_report()
+    
+    def _fuzz_sequential_loop(self):
+        """Original sequential fuzzing loop (batch_size=1)."""
         for iteration in range(self.config.max_iterations):
             # Check timeout
             if time.time() - self.start_time > self.config.timeout_seconds:
@@ -280,8 +384,108 @@ class ACTFuzzer:
             # Periodic reporting
             if iteration > 0 and iteration % self.config.report_interval == 0:
                 self._print_progress(iteration)
+    
+    def _fuzz_batched_loop(self):
+        """Batched fuzzing loop for GPU efficiency."""
+        batch_size = self.config.batch_size
+        iteration = 0
         
-        return self._generate_report()
+        while iteration < self.config.max_iterations:
+            # Check timeout
+            if time.time() - self.start_time > self.config.timeout_seconds:
+                print(f"⏱️  Timeout reached after {iteration} iterations")
+                break
+            
+            # Process a batch
+            actual_batch_size = min(batch_size, self.config.max_iterations - iteration)
+            self._fuzz_batch_iteration(iteration, actual_batch_size)
+            iteration += actual_batch_size
+            
+            # Periodic reporting
+            if iteration > 0 and iteration % self.config.report_interval < batch_size:
+                self._print_progress(iteration)
+    
+    def _fuzz_batch_iteration(self, start_iteration: int, batch_size: int):
+        """
+        Process a batch of B samples with single inference call AND batched mutation.
+        
+        Key optimizations:
+        1. Batched mutation: Single forward pass for gradient-based mutations (PGD/FGSM)
+        2. Batched inference: Single forward pass for B samples
+        3. Batched property checking: Vectorized violation detection
+        
+        Args:
+            start_iteration: Starting iteration number
+            batch_size: Number of samples to process in this batch
+        """
+        # 1. Select B seeds
+        seeds = [self.seed_corpus.select() for _ in range(batch_size)]
+        
+        # 2. BATCHED mutation (key optimization!)
+        # Instead of B sequential mutations, do 1 batched mutation
+        batch_input = self.mutation_engine.mutate_batch(seeds)  # [B, C, H, W]
+        
+        with torch.no_grad():
+            output_dict = self.model(batch_input)
+        
+        # Handle VerifiableModel output (dict) or plain tensor
+        if isinstance(output_dict, dict):
+            batch_output = output_dict['output']
+        else:
+            batch_output = output_dict
+        
+        # 3. BATCHED property checking
+        labels = [s.label for s in seeds]
+        seed_tensors = [s.tensor for s in seeds]
+        violations = self.property_checker.check_batch(
+            inputs=batch_input,
+            outputs=batch_output,
+            labels=labels,
+            seed_tensors=seed_tensors
+        )
+        
+        # 4. Process results (sequential but cheap)
+        # Get activations from batched forward (shared across samples)
+        activations = self.mutation_engine.get_activation_map()
+        
+        for i, (seed, violation) in enumerate(zip(seeds, violations)):
+            iteration = start_iteration + i
+            
+            # Extract single sample from batch for corpus: [B, C, H, W] -> [1, C, H, W]
+            candidate_single = batch_input[i:i+1]
+            
+            # Update coverage (approximate: use shared batch activations)
+            # This is a trade-off for speed - coverage is approximate in batched mode
+            coverage_delta = self.coverage_tracker.update(candidate_single, activations)
+            
+            # Compute energy
+            if violation or coverage_delta > 0:
+                energy = self._compute_energy(coverage_delta, violation is not None)
+            else:
+                energy = 0.0
+            
+            # Handle violations
+            if violation:
+                self.counterexamples.append(violation)
+                if self.config.verbose >= 2:
+                    print(f"🚨 Counterexample #{len(self.counterexamples)}: {violation.summary()}")
+                
+                if self.config.save_counterexamples:
+                    self.config.output_dir.mkdir(parents=True, exist_ok=True)
+                    violation.save(self.config.output_dir / f"ce_{len(self.counterexamples)}.pt")
+            
+            # Add to corpus if interesting
+            if violation or coverage_delta > 0:
+                new_seed = FuzzingSeed(
+                    tensor=candidate_single.cpu(),
+                    label=seed.label,
+                    energy=energy,
+                    depth=seed.depth + 1,
+                    parent_id=seed.id
+                )
+                self.seed_corpus.add(new_seed)
+        
+        self.iterations = start_iteration + batch_size
     
     def _fuzz_iteration(self, iteration: int):
         """Single fuzzing iteration with optional tracing."""
