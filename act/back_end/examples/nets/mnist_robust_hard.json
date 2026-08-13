@@ -3368,7 +3368,7 @@
         "params": {},
         "meta": {
           "kind": "TOP1_ROBUST",
-          "y_true": 5
+          "y_true": 1
         },
         "in_vars": [
           800,

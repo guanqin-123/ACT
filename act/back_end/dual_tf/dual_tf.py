@@ -10,11 +10,16 @@
 #   DualTF class implementing Wong & Kolter backward pass for dual bounds.
 #   Algorithm: v=-c, backward through layers, accumulate contributions.
 #
+#   Dual Mode:
+#     'v' - Verification: torch.no_grad() enabled (default, efficient inference)
+#     't' - Training: gradients flow for provable training loss
+#
 #===---------------------------------------------------------------------===#
 
 
 import torch
-from typing import Dict, Optional, Tuple
+from functools import wraps
+from typing import Dict, Literal, Optional, Tuple
 from act.back_end.core import Bounds, Fact, Layer, Net, ConSet
 from act.back_end.layer_schema import LayerKind
 from act.back_end.transfer_functions import TransferFunction
@@ -25,8 +30,52 @@ from .tf_smooth import dual_sigmoid_backward, dual_tanh_backward
 from .tf_forward import compute_forward_bounds
 
 
+# ============================================================================
+# Dual Mode Type and Decorator
+# ============================================================================
+
+DualModeType = Literal['v', 't']
+
+
+def _dual_mode(func):
+    """
+    Decorator that applies torch.no_grad() based on self.mode.
+    
+    - mode='v': runs with torch.no_grad() (verification)
+    - mode='t': runs normally with gradients (training)
+    """
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        if self.mode == 'v':
+            with torch.no_grad():
+                return func(self, *args, **kwargs)
+        else:  # mode == 't'
+            return func(self, *args, **kwargs)
+    return wrapper
+
+
+# ============================================================================
+# DualTF Class
+# ============================================================================
+
 class DualTF(TransferFunction):
-    """Dual TF for Lagrangian bounds. Backward pass: v=-c, propagate, accumulate."""
+    """
+    Dual TF for Lagrangian bounds. Backward pass: v=-c, propagate, accumulate.
+    
+    Args:
+        mode: 'v' for verification (no_grad), 't' for training (with grad)
+        
+    Usage:
+        # Verification (default) - no gradients, efficient inference
+        tf = DualTF()  # or DualTF(mode='v')
+        bound = tf.compute_bound(net, bounds_dict, c)
+        
+        # Training - gradients flow for loss.backward()
+        tf = DualTF(mode='t')
+        bound = tf.compute_bound(net, bounds_dict, c)
+        loss = -bound
+        loss.backward()  # Gradients flow!
+    """
     
     _BACKWARD_REGISTRY = {
         # Core layers
@@ -48,8 +97,14 @@ class DualTF(TransferFunction):
         "ADD": "_backward_add",
     }
     
-    def __init__(self):
-        """Initialize DualTF with empty cache for forward bounds."""
+    def __init__(self, mode: DualModeType = 'v'):
+        """
+        Initialize DualTF.
+        
+        Args:
+            mode: 'v' for verification (@torch.no_grad()), 't' for training (with grad)
+        """
+        self.mode: DualModeType = mode
         self._forward_bounds_cache: Dict[int, Bounds] = {}
         self._cache_net_id: Optional[int] = None  # Track which net the cache is for
     
@@ -61,6 +116,7 @@ class DualTF(TransferFunction):
         return layer_kind.upper() in self._BACKWARD_REGISTRY
     
     # -------- TransferFunction Interface (for analyze()) --------
+    @_dual_mode
     def apply(self, L: Layer, input_bounds: Bounds, net: Net,
               before: Dict[int, Fact], after: Dict[int, Fact]) -> Fact:
         """
@@ -107,7 +163,7 @@ class DualTF(TransferFunction):
         self._forward_bounds_cache.clear()
         self._cache_net_id = None
     
-    @torch.no_grad()
+    @_dual_mode
     def compute_bound(self, net: Net, bounds_dict: Dict[int, Bounds], c: torch.Tensor,
                       return_sce: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Compute certified lower bound on c^T @ output."""
@@ -134,7 +190,7 @@ class DualTF(TransferFunction):
         obj = obj + input_contrib
         return (obj, sce) if return_sce else obj
     
-    @torch.no_grad()
+    @_dual_mode
     def compute_robust_bound(self, net: Net, bounds_dict: Dict[int, Bounds],
                              y_true: int, num_classes: int) -> Tuple[torch.Tensor, bool]:
         """Compute min margin: output[y_true] - output[j] for all j != y_true."""

@@ -278,8 +278,8 @@ class ModelFactory:
         return tensor
     
     def list_networks(self) -> List[str]:
-        """List all available network names."""
-        return list(self.config['networks'].keys())
+        """List all available network names (only those with loaded ACT Nets)."""
+        return list(self.nets.keys())
     
     def get_network_info(self, name: str) -> Dict[str, Any]:
         """Get metadata about a network without creating it."""

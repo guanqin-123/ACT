@@ -18,15 +18,95 @@
 
 import torch
 import torch.nn.functional as F
-from typing import Dict, Tuple
+from typing import Dict, List, Optional, Tuple
 from act.back_end.core import Bounds, Net, Layer
 from act.back_end.layer_schema import LayerKind
 
+
 # ============================================================================
-# Main Entry Point
+# Core Forward Functions 
 # ============================================================================
 
-@torch.no_grad()
+def fwd_linear(
+    W: torch.Tensor, b: Optional[torch.Tensor],
+    A: torch.Tensor, bias: torch.Tensor,
+    x0: torch.Tensor, eps: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Linear/Dense forward: new = W @ (A @ x + bias) + b = (W @ A) @ x + (W @ bias + b)
+    
+    Args:
+        W: Weight matrix [out, in]
+        b: Bias vector [out] or None
+        A, bias: Current linear coefficients
+        x0, eps: Input center and half-width
+        
+    Returns:
+        A_new, bias_new, lb, ub
+    """
+    n_in = W.shape[1]
+    if A.shape[0] != n_in:
+        if A.shape[0] < n_in:
+            pad = n_in - A.shape[0]
+            A = torch.cat([A, torch.zeros(pad, A.shape[1], dtype=A.dtype, device=A.device)], dim=0)
+            bias = torch.cat([bias, torch.zeros(pad, dtype=bias.dtype, device=bias.device)])
+        else:
+            A, bias = A[:n_in, :], bias[:n_in]
+    
+    A_new = W @ A
+    bias_new = W @ bias + b if b is not None else W @ bias
+    center = A_new @ x0 + bias_new
+    radius = A_new.abs() @ eps
+    return A_new, bias_new, center - radius, center + radius
+
+
+def fwd_relu(
+    A: torch.Tensor, bias: torch.Tensor,
+    x0: torch.Tensor, eps: torch.Tensor,
+    lb: torch.Tensor, ub: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    ReLU forward bounds using CROWN-style upper envelope, interval-style lower bound.
+    
+    Upper bound: uses linear relaxation y <= (u/(u-l)) * (x - l) for crossing neurons
+    Lower bound: uses interval propagation lb_out = max(0, lb_in) for soundness
+    """
+    device, dtype = lb.device, lb.dtype
+    on, off, amb = lb >= 0, ub <= 0, ~((lb >= 0) | (ub <= 0))
+    
+    # Upper bound linear relaxation slope
+    d_ub = torch.where(on, torch.ones_like(lb), torch.zeros_like(lb))
+    offset_ub = torch.zeros_like(lb)
+    
+    if amb.any():
+        denom = (ub - lb).clamp(min=1e-12)
+        slope = ub / denom
+        d_ub = torch.where(amb, slope, d_ub)
+        offset_ub = torch.where(amb, -slope * lb, offset_ub)
+    
+    # Compute upper bound using linear relaxation
+    A_ub = d_ub.unsqueeze(1) * A
+    bias_ub = d_ub * bias + offset_ub
+    center_ub = A_ub @ x0 + bias_ub
+    radius_ub = A_ub.abs() @ eps
+    ub_out = center_ub + radius_ub
+    
+    # Lower bound: use interval propagation (sound but looser)
+    lb_out = lb.clamp(min=0)
+    
+    return A_ub, bias_ub, lb_out, ub_out
+
+
+def _fwd_dense(layer: Layer, A: torch.Tensor, bias: torch.Tensor, 
+               x0: torch.Tensor, eps: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Wrapper for fwd_linear using ACT Layer params."""
+    return fwd_linear(layer.params["W"], layer.params.get("b"), A, bias, x0, eps)
+
+
+# ============================================================================
+# Main Entry Point (for ACT Net format)
+# ============================================================================
+
 def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Tensor,
                            post_activation: bool = False) -> Dict[int, Bounds]:
     """
@@ -62,7 +142,7 @@ def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Ten
         if kind in [LayerKind.RELU.value, "RELU"]:
             if not post_activation:
                 bounds_dict[lid] = Bounds(lb.clone(), ub.clone())  # PRE-activation (for dual backward)
-            A, bias, lb, ub = _fwd_relu(A, bias, x0, eps, lb, ub)
+            A, bias, lb, ub = fwd_relu(A, bias, x0, eps, lb, ub)
             if post_activation:
                 bounds_dict[lid] = Bounds(lb.clone(), ub.clone())  # POST-activation (for validation)
                 # Reset state after ReLU in post_activation mode for sound interval propagation
@@ -169,68 +249,8 @@ def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Ten
     return bounds_dict
 
 # ============================================================================
-# Layer Handlers
+# Other Layer Handlers (for Net format)
 # ============================================================================
-
-def _fwd_dense(layer: Layer, A: torch.Tensor, bias: torch.Tensor, 
-               x0: torch.Tensor, eps: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Dense: new = W @ (A @ x + bias) + b = (W @ A) @ x + (W @ bias + b)"""
-    W = layer.params["W"]
-    b = layer.params.get("b")
-    
-    n_in = W.shape[1]
-    if A.shape[0] != n_in:
-        if A.shape[0] < n_in:
-            pad = n_in - A.shape[0]
-            A = torch.cat([A, torch.zeros(pad, A.shape[1], dtype=A.dtype, device=A.device)], dim=0)
-            bias = torch.cat([bias, torch.zeros(pad, dtype=bias.dtype, device=bias.device)])
-        else:
-            A, bias = A[:n_in, :], bias[:n_in]
-    
-    A_new = W @ A
-    bias_new = W @ bias + b if b is not None else W @ bias
-    center = A_new @ x0 + bias_new
-    radius = A_new.abs() @ eps
-    return A_new, bias_new, center - radius, center + radius
-
-def _fwd_relu(A: torch.Tensor, bias: torch.Tensor, x0: torch.Tensor, eps: torch.Tensor,
-              lb: torch.Tensor, ub: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    ReLU forward bounds using CROWN-style upper envelope, interval-style lower bound.
-    
-    Upper bound: uses linear relaxation y <= (u/(u-l)) * (x - l) for crossing neurons
-    Lower bound: uses interval propagation lb_out = max(0, lb_in) for soundness
-    
-    This ensures sound bounds (lb_out <= true <= ub_out) at the cost of some tightness
-    in the lower bound. This is the standard approach for forward propagation.
-    """
-    device, dtype = lb.device, lb.dtype
-    on, off, amb = lb >= 0, ub <= 0, ~((lb >= 0) | (ub <= 0))
-    
-    # Upper bound linear relaxation slope
-    d_ub = torch.where(on, torch.ones_like(lb), torch.zeros_like(lb))
-    offset_ub = torch.zeros_like(lb)
-    
-    if amb.any():
-        denom = (ub - lb).clamp(min=1e-12)
-        slope = ub / denom
-        d_ub = torch.where(amb, slope, d_ub)
-        offset_ub = torch.where(amb, -slope * lb, offset_ub)
-    
-    # Compute upper bound using linear relaxation
-    A_ub = d_ub.unsqueeze(1) * A
-    bias_ub = d_ub * bias + offset_ub
-    center_ub = A_ub @ x0 + bias_ub
-    radius_ub = A_ub.abs() @ eps
-    ub_out = center_ub + radius_ub
-    
-    # Lower bound: use interval propagation (sound but looser)
-    # lb_out = max(0, lb_in), ub_out from linear relaxation
-    lb_out = lb.clamp(min=0)
-    
-    # For tracking: use upper bound coefficients (will be used for next layer)
-    # But the lb_out is computed via interval for soundness
-    return A_ub, bias_ub, lb_out, ub_out
 
 def _fwd_bias(layer: Layer, A: torch.Tensor, bias: torch.Tensor,
               x0: torch.Tensor, eps: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:

@@ -15,17 +15,17 @@
 #
 #===---------------------------------------------------------------------===#
 
-# Core DualTF class
-from .dual_tf import DualTF, compute_dual_bound, compute_robust_loss_bound
+# Core DualTF class and dual mode type
+from .dual_tf import DualTF, compute_dual_bound, compute_robust_loss_bound, DualModeType
 
-# MLP backward functions
+# MLP backward functions (single-sample for verification)
 from .tf_mlp import (
     dual_relu_backward, dual_dense_backward, get_relu_masks,
     dual_bias_backward, dual_scale_backward, dual_bn_backward, dual_identity_backward,
 )
 
-# Forward bounds (via IntervalTF)
-from .tf_forward import compute_forward_bounds
+# Forward bounds (single-sample for verification)
+from .tf_forward import compute_forward_bounds, fwd_linear, fwd_relu
 
 # CNN backward functions
 from .tf_cnn import dual_conv2d_backward, dual_maxpool2d_backward, dual_avgpool2d_backward
@@ -44,12 +44,12 @@ from .tf_transformer import dual_attention_backward, dual_layernorm_backward, du
 
 __all__ = [
     # Core
-    'DualTF', 'compute_dual_bound', 'compute_robust_loss_bound',
-    # MLP
+    'DualTF', 'compute_dual_bound', 'compute_robust_loss_bound', 'DualModeType',
+    # MLP (single-sample for verification)
     'dual_relu_backward', 'dual_dense_backward', 'get_relu_masks',
     'dual_bias_backward', 'dual_scale_backward', 'dual_bn_backward', 'dual_identity_backward',
-    # Forward
-    'compute_forward_bounds',
+    # Forward (single-sample for verification)
+    'compute_forward_bounds', 'fwd_linear', 'fwd_relu',
     # CNN
     'dual_conv2d_backward', 'dual_maxpool2d_backward', 'dual_avgpool2d_backward',
     # Smooth activations (Sigmoid, Tanh)

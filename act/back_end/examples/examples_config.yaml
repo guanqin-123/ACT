@@ -94,7 +94,7 @@ networks:
       params: {}
       meta:
         kind: TOP1_ROBUST
-        y_true: 3
+        y_true: 4
   mnist_robust_hard:
     description: MNIST MLP with hard robustness (eps=0.15)
     architecture_type: mlp
@@ -140,7 +140,7 @@ networks:
       params: {}
       meta:
         kind: TOP1_ROBUST
-        y_true: 5
+        y_true: 1
   cifar_margin_tight:
     description: CIFAR-10 CNN with tight margin (0.1)
     architecture_type: cnn

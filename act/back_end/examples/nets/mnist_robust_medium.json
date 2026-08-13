@@ -3432,7 +3432,7 @@
         "params": {},
         "meta": {
           "kind": "TOP1_ROBUST",
-          "y_true": 3
+          "y_true": 4
         },
         "in_vars": [
           816,

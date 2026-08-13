@@ -176,8 +176,12 @@ class VerificationValidator:
             dtype: Data type for computation (float32 or float64)
         """
         self.factory = ModelFactory()
-        self.device = device
-        self.dtype = dtype
+        # Convert to torch types for .to() compatibility
+        self.device = torch.device(device) if isinstance(device, str) else device
+        if isinstance(dtype, str):
+            self.dtype = torch.float64 if dtype == 'float64' else torch.float32
+        else:
+            self.dtype = dtype
         self.validation_results = []
         
         # Initialize debug file (GUARDED)
