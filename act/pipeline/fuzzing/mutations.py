@@ -84,16 +84,17 @@ class MutationStrategy(ABC):
                input_tensor: torch.Tensor,
                model: nn.Module,
                activations: Optional[Dict[str, torch.Tensor]] = None,
-               label: Optional[int] = None
+               label: Optional[Union[int, List[int]]] = None
               ) -> torch.Tensor:
         """
         Apply mutation to input tensor.
         
         Args:
-            input_tensor: Seed input
+            input_tensor: Seed input, batched as [B, ...]
             model: Model for gradient computation
             activations: Activations from previous inference (optional)
-            label: Ground truth label for targeted attacks (optional)
+            label: Ground truth label(s) for targeted attacks. A single int is
+                broadcast across the batch; a list supplies one label per sample.
         
         Returns:
             Mutated input tensor
@@ -188,7 +189,12 @@ class PGDMutation(MutationStrategy):
         self.step_size = step_size
         self.random_start = random_start
 
-    def mutate(self, input_tensor, model, activations=None, label=None):
+    def mutate(self,
+               input_tensor: torch.Tensor,
+               model: nn.Module,
+               activations: Optional[Dict[str, torch.Tensor]] = None,
+               label: Optional[Union[int, List[int]]] = None
+              ) -> torch.Tensor:
         """Apply PGD mutation.
         
         Args:

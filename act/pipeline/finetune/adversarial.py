@@ -18,9 +18,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple, Optional, Literal
+from typing import Dict, Tuple, Optional, Literal, TYPE_CHECKING
 
 from .actloss import RobustLoss
+
+if TYPE_CHECKING:
+    from act.pipeline.fuzzing.mutations import MutationStrategy
 
 
 # ============================================================================
@@ -180,7 +183,7 @@ class AdversarialLoss(RobustLoss):
     def is_certified(self) -> bool:
         return False
     
-    def _get_mutation(self, epsilon: float):
+    def _get_mutation(self, epsilon: float) -> 'MutationStrategy':
         """
         Get or create mutation strategy for current epsilon.
         
@@ -288,42 +291,35 @@ class AdversarialLoss(RobustLoss):
             X_adv: Adversarial batch [B, ...] (detached, no grad)
         """
         mutation = self._get_mutation(epsilon)
-        
-        # Save and restore default dtype (front-end may change it via device_manager)
-        original_dtype = torch.get_default_dtype()
-        
+
         # Set model to eval for attack generation
         was_training = model.training
         model.eval()
-        
-        B = X.size(0)
-        X_adv_list = []
-        
-        for i in range(B):
-            x_i = X[i:i+1]  # Keep batch dimension [1, ...]
-            label_i = y[i].item()
-            
-            # Use front-end mutation (handles gradient computation internally)
-            x_adv_i = mutation.mutate(x_i, model, label=label_i)
-            
-            # Ensure output matches input dtype (mutation may change it)
-            if x_adv_i.dtype != X.dtype:
-                x_adv_i = x_adv_i.to(X.dtype)
-            
-            # Clamp to valid input range
-            x_adv_i = x_adv_i.clamp(self.input_min, self.input_max)
-            
-            X_adv_list.append(x_adv_i)
-        
-        # Restore model training mode
-        if was_training:
-            model.train()
-        
-        # Restore original default dtype (in case mutation changed it)
-        if torch.get_default_dtype() != original_dtype:
-            torch.set_default_dtype(original_dtype)
-        
-        return torch.cat(X_adv_list, dim=0).detach()
+
+        try:
+            if self.attack == 'pgd':
+                # PGD takes per-sample labels and drives a cross-entropy loss, and
+                # its update uses sign(grad). The 1/B factor from the batch-mean CE
+                # is erased by sign(), so a single batched call is numerically
+                # identical to looping one sample at a time.
+                X_adv = mutation.mutate(X, model, label=y.tolist())
+            else:
+                # FGSM maximises output.var(), which has no per-sample structure:
+                # batching would compute the variance across all B*C logits jointly
+                # and change the attack. Keep it per-sample.
+                X_adv = torch.cat(
+                    [mutation.mutate(X[i:i + 1], model, label=int(y[i].item()))
+                     for i in range(X.size(0))],
+                    dim=0,
+                )
+        finally:
+            if was_training:
+                model.train()
+
+        if X_adv.dtype != X.dtype:
+            X_adv = X_adv.to(X.dtype)
+
+        return X_adv.clamp(self.input_min, self.input_max).detach()
     
     def generate_adversarial(
         self,
