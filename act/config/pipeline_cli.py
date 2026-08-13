@@ -21,7 +21,7 @@ import torch
 
 from act.util.cli_utils import add_device_args, initialize_from_args
 from act.util.format_utils import rule
-from act.config.config import VALID_SOLVER_TIERS
+from act.config.config import VALID_BOUNDINGS, VALID_SOLVER_TIERS
 
 logger = logging.getLogger(__name__)
 from act.front_end.specs import OutputSpec
@@ -176,11 +176,12 @@ _PIPELINE_BAB_ATTR_MAP: dict[str, str] = {
     "max_depth": "bab_max_depth",
     "max_nodes": "bab_max_nodes",
     "branching_method": "bab_branching_method",
-    "bounding_method": "bab_bounding_method",
-    "bounding_order": "bab_bounding_order",
+    "bounding": "bab_bounding",
     "sa_cooling_rate": "bab_sa_cooling_rate",
     "frontier_cap": "bab_frontier_cap",
+    "top_k": "bab_top_k",
     "input_split_fanout": "bab_input_split_fanout",
+    "multi_split_levels": "bab_multi_split_levels",
     "provenance_enabled": "bab_provenance",
 }
 _PIPELINE_VAL_ATTR_MAP: dict[str, str] = {
@@ -235,11 +236,12 @@ def _apply_pipeline_config_defaults(args: Any) -> PipelineConfig:
     args.bab_max_depth = config.bab.max_depth
     args.bab_max_nodes = config.bab.max_nodes
     args.bab_branching_method = config.bab.branching_method
-    args.bab_bounding_method = config.bab.bounding_method
-    args.bab_bounding_order = config.bab.bounding_order
+    args.bab_bounding = config.bab.bounding
     args.bab_sa_cooling_rate = config.bab.sa_cooling_rate
     args.bab_frontier_cap = config.bab.frontier_cap
+    args.bab_top_k = config.bab.top_k
     args.bab_input_split_fanout = config.bab.input_split_fanout
+    args.bab_multi_split_levels = config.bab.multi_split_levels
     args.bab_per_class_alpha = "true" if config.dual.per_class_alpha else "false"
     args.bab_no_incremental_start = not config.dual.incremental_start_enabled
     args.bab_provenance = config.bab.provenance_enabled
@@ -1472,30 +1474,60 @@ Examples:
         type=str,
         default=None,
         choices=["random", "babsr", "fsb", "gain", "width"],
-        help="BaB branching strategy when --bab is set (default: from config.yaml)",
-    )
-    bab_group.add_argument(
-        "--bab-bounding-method",
-        type=str,
-        default=None,
-        choices=["random", "topk"],
         help=(
-            "Pool selection when subproblems exceed the batch size: 'random' or "
-            "'topk' (keep the top-k by depth + lower-bound). Default: from config.yaml."
+            "BaB branching strategy when --bab is set: which neuron or input "
+            "axis to split. Neuron branching (babsr/fsb/gain) "
+            "requires --bab-solver-tier dual_alpha or dual_alpha_eta. "
+            "--bab-multi-split-levels is orthogonal to this choice. "
+            "Default: from config.yaml."
         ),
     )
     bab_group.add_argument(
-        "--bab-bounding-order",
+        "--bab-bounding",
         type=str,
         default=None,
-        choices=["depth_lb", "greedy", "sa"],
-        help="TopKBounding order policy (default: from config.yaml)",
+        choices=list(VALID_BOUNDINGS),
+        help=(
+            "Pool selection when subproblems exceed the batch size. "
+            "'depth_bound_blend' = 0.5*norm(depth) + 0.5*bound-urgency blend; "
+            "'greedy' = best-first on |lb| (Oliva-Greedy, ECOOP 2025); "
+            "'annealed' = Gumbel noise, temp = sa_cooling_rate**step "
+            "(Oliva-SA, ECOOP 2025); "
+            "'diverse_split_signs' = top-k then split-sign diversity repulsion; "
+            "'random' = uniform sampling; 'mcts' = N/Q side tables over the BaB "
+            "tree. The first four honour --bab-top-k; random and mcts reject it. "
+            "Default: from config.yaml."
+        ),
+    )
+    bab_group.add_argument(
+        "--bab-top-k",
+        type=int,
+        default=None,
+        help=(
+            "Cap on subproblems popped per BaB wave, independent of the batch "
+            "size; 0 = unbounded. Honoured by --bab-bounding "
+            "depth_bound_blend/greedy/annealed/diverse_split_signs; rejected "
+            "for random/mcts (default: from config.yaml)"
+        ),
+    )
+    bab_group.add_argument(
+        "--bab-multi-split-levels",
+        type=int,
+        default=None,
+        help=(
+            "Neurons split jointly per branching step; each lane fans out into "
+            "all 2^k sign combinations (verdict-boundary joint splitting). "
+            "1 = single split. With --bab-multi-split-levels > 1 the k neurons "
+            "are chosen by the BaBSR heuristic (area x |nu|) regardless of "
+            "--bab-branching-method. Requires --bab-solver-tier dual_alpha or "
+            "dual_alpha_eta (default: from config.yaml)"
+        ),
     )
     bab_group.add_argument(
         "--bab-sa-cooling-rate",
         type=float,
         default=None,
-        help="Cooling rate for --bab-bounding-order sa (default: from config.yaml)",
+        help="Cooling rate for --bab-bounding annealed (default: from config.yaml)",
     )
     bab_group.add_argument(
         "--bab-per-class-alpha",
@@ -1529,7 +1561,7 @@ Examples:
         "--bab-provenance",
         action="store_true",
         default=None,
-        help="Enable node_id/parent_id provenance sidecar (requires --bab-bounding-method topk).",
+        help="Enable node_id/parent_id provenance sidecar (requires --bab-bounding other than random).",
     )
 
     # Fuzzing configuration
