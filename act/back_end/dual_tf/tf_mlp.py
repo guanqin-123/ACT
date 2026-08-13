@@ -36,15 +36,14 @@ def dual_relu_backward(nu: torch.Tensor, bounds: Bounds) -> Tuple[torch.Tensor, 
     ReLU backward pass for dual bound computation (Wong-Kolter style).
     
     Uses FIXED upper-bound slope for all crossing neurons.
-    The contribution uses [nu]+ BEFORE applying the slope (matching Wong-Kolter).
     
     For crossing neurons (l < 0 < u):
     - Slope: d = u / (u - l) (upper bound relaxation)
-    - Contribution: [nu]+ * l (using nu BEFORE slope, not after)
+    - Contribution: -[nu]_- * d * l
     
-    This matches the Wong-Kolter reference implementation in dual_layers.py:
-    - forward(): return d*x (apply fixed slope)
-    - objective(): return (nu.clamp(min=0)*zl).matmul(I...) (use [nu]+ * l)
+    Note the sign convention: this module initialises nu = +c, whereas
+    Wong-Kolter's paper uses nu = -c and therefore publishes the contribution
+    as l * [nu]_+. Under nu = +c the offset is owed on the negative branch.
     
     Returns: (v_out, contribution)
     """
@@ -73,16 +72,16 @@ def dual_relu_backward(nu: torch.Tensor, bounds: Bounds) -> Tuple[torch.Tensor, 
     # Apply slope to get output dual variable
     v_out = d * v
     
-    # Contribution from crossing neurons (Wong-Kolter style)
-    # Uses [nu]+ * l where nu is BEFORE applying slope (not v_out)
-    # Since l < 0 for crossing neurons, [nu]+ * l is NEGATIVE when nu > 0
-    # This gives a lower (more conservative) bound
+    # Contribution from crossing neurons.
+    # This file initialises nu = +c (not Wong-Kolter's nu = -c), so the
+    # relaxation offset lands on the negative branch: for nu_j >= 0 the lower
+    # envelope z >= d*z_hat already holds and costs nothing, while for nu_j < 0
+    # the chord z <= d*(z_hat - l) must be paid for with -[nu]_- * d * l.
     contrib = torch.tensor(0.0, dtype=v.dtype, device=v.device)
     if amb.any():
-        # Use v (BEFORE slope), not v_out (after slope) - this is key!
         crossing_contrib = torch.where(
             amb,
-            v.clamp(min=0) * l,  # [nu]+ * l (nu before slope)
+            -v.clamp(max=0) * d * l,
             torch.zeros_like(l)
         )
         contrib = crossing_contrib.sum()
@@ -91,19 +90,19 @@ def dual_relu_backward(nu: torch.Tensor, bounds: Bounds) -> Tuple[torch.Tensor, 
 
 # -------- Dense --------
 def dual_dense_backward(nu: torch.Tensor, W: torch.Tensor, b: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Dense backward: v_out = W^T @ v, contrib = -b^T @ v."""
+    """Dense backward: v_out = W^T @ v, contrib = b^T @ v."""
     assert W.dim() == 2, f"W must be 2D, got shape {W.shape}"
     assert nu.numel() == W.shape[0], f"nu size {nu.numel()} != W.shape[0] {W.shape[0]}"
     
     v_out = W.T @ nu
-    contrib = -(b @ nu) if b is not None else torch.tensor(0.0, dtype=nu.dtype, device=nu.device)
+    contrib = (b @ nu) if b is not None else torch.tensor(0.0, dtype=nu.dtype, device=nu.device)
     return v_out, contrib
 
 # -------- Bias / Scale / BatchNorm --------
 def dual_bias_backward(nu: torch.Tensor, c: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Bias backward (y=x+c): v_out=v, contrib=-c^T@v."""
+    """Bias backward (y=x+c): v_out=v, contrib=c^T@v."""
     v, c_flat = nu.flatten(), _align(c, nu.numel())
-    return nu, -(c_flat @ v)
+    return nu, (c_flat @ v)
 
 def dual_scale_backward(nu: torch.Tensor, a: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Scale backward (y=a*x): v_out=a*v, contrib=0."""
@@ -111,11 +110,11 @@ def dual_scale_backward(nu: torch.Tensor, a: torch.Tensor) -> Tuple[torch.Tensor
     return a_aligned * nu, torch.tensor(0.0, dtype=nu.dtype, device=nu.device)
 
 def dual_bn_backward(nu: torch.Tensor, A: torch.Tensor, c: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """BatchNorm backward (y=A*x+c): v_out=A*v, contrib=-c^T@v."""
+    """BatchNorm backward (y=A*x+c): v_out=A*v, contrib=c^T@v."""
     v = nu.flatten()
     A_aligned = _align(A, nu.numel()).view(nu.shape)
     c_aligned = _align(c, nu.numel())
-    return A_aligned * nu, -(c_aligned @ v)
+    return A_aligned * nu, (c_aligned @ v)
 
 # -------- Identity-like --------
 def dual_identity_backward(nu: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

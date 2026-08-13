@@ -145,8 +145,10 @@ def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Ten
             A, bias, lb, ub = fwd_relu(A, bias, x0, eps, lb, ub)
             if post_activation:
                 bounds_dict[lid] = Bounds(lb.clone(), ub.clone())  # POST-activation (for validation)
-                # Reset state after ReLU in post_activation mode for sound interval propagation
-                A, bias, x0, eps = _reset_state(lb, ub, device, dtype)
+            # fwd_relu returns only the ReLU UPPER envelope, so carrying its affine
+            # form into the next layer lets relaxation errors cancel under
+            # sign-mixing weights instead of accumulating. Reset unconditionally.
+            A, bias, x0, eps = _reset_state(lb, ub, device, dtype)
             
         elif kind in [LayerKind.DENSE.value, "DENSE"]:
             A, bias, lb, ub = _fwd_dense(layer, A, bias, x0, eps)
@@ -196,6 +198,7 @@ def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Ten
             A, bias, lb, ub = _fwd_lrelu(A, bias, x0, eps, lb, ub, alpha)
             if post_activation:
                 bounds_dict[lid] = Bounds(lb.clone(), ub.clone())  # POST-activation (for validation)
+            A, bias, x0, eps = _reset_state(lb, ub, device, dtype)
             
         elif kind in ["MAXPOOL2D"]:
             lb, ub = _fwd_maxpool2d(layer, lb, ub)
