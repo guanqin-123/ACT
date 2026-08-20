@@ -80,6 +80,7 @@ import numpy as np
 
 from act.front_end.specs import InputSpec, InKind, OutputSpec
 from act.front_end.verifiable_model import VerifiableModel
+from act.pipeline.fuzzing.checker import INPUT_FEASIBILITY_ATTR
 from act.util.device_manager import get_default_device
 
 if TYPE_CHECKING:
@@ -490,9 +491,12 @@ class MutationEngine:
         self.last_strategy: Optional[str] = None  # Track last mutation strategy for tracing
         self.last_gradients: Optional[Dict[str, torch.Tensor]] = None  # For Level 3 tracing: gradient capture
         self.last_loss: Optional[float] = None  # For Level 3 tracing: loss value capture
+        self._pending_rows: Optional[torch.Tensor] = None
+        self._feasibility_forward_active = False
         
         # Setup hooks for activation capture
         self._setup_hooks()
+        self._setup_feasibility_hooks()
     
     @staticmethod
     def _resolve_attack_target(model: nn.Module) -> tuple[nn.Module, OutputSpec]:
@@ -584,6 +588,42 @@ class MutationEngine:
         for name, module in self.model.named_modules():
             if isinstance(module, (nn.ReLU, nn.Linear, nn.Conv2d)):
                 module.register_forward_hook(make_hook(name))
+
+    def _setup_feasibility_hooks(self) -> None:
+        """Carry lane rows and input feasibility through the fuzzer inference."""
+        def inject_rows(module, args, kwargs):
+            rows = self._pending_rows
+            if rows is None:
+                return None
+            self._pending_rows = None
+            self._feasibility_forward_active = True
+            if "rows" in kwargs:
+                raise RuntimeError("Fuzzer inference rows were provided twice")
+            kwargs["rows"] = rows
+            return args, kwargs
+
+        def attach_feasibility(module, args, kwargs, output):
+            if not self._feasibility_forward_active:
+                return None
+            self._feasibility_forward_active = False
+            if not isinstance(output, dict):
+                raise RuntimeError(
+                    "VerifiableModel.forward must return input feasibility metadata"
+                )
+            model_output = output.get("output")
+            input_satisfied = output.get("input_satisfied_per_sample")
+            if not isinstance(model_output, torch.Tensor) or not isinstance(
+                input_satisfied, torch.Tensor
+            ):
+                raise RuntimeError(
+                    "VerifiableModel.forward did not return a per-sample input "
+                    "feasibility mask"
+                )
+            setattr(model_output, INPUT_FEASIBILITY_ATTR, input_satisfied)
+            return None
+
+        self.model.register_forward_pre_hook(inject_rows, with_kwargs=True)
+        self.model.register_forward_hook(attach_feasibility, with_kwargs=True)
                 
     def mutate(self, seeds: 'FuzzingSeed') -> torch.Tensor:
         """
@@ -666,6 +706,10 @@ class MutationEngine:
         
         # Project to InputSpec constraints
         mutated = self._project(mutated, seeds)
+
+        # The next wrapped-model inference must check each lane against the
+        # InputSpec row from which that seed originated.
+        self._pending_rows = rows
         
         self.total_mutations += B
         return mutated
@@ -741,7 +785,16 @@ class MutationEngine:
             
             delta = tensor - center
             delta = torch.clamp(delta, -eps, eps)
-            return center + delta
+            projected = center + delta
+
+            # Reconstructing a point exactly at ±eps can round one ULP outside
+            # the ball. Pull only those coordinates one representable value
+            # toward the center so the exact InputSpecLayer check agrees with
+            # this projection.
+            overshot = (projected - center).abs() > eps
+            return torch.where(
+                overshot, torch.nextafter(projected, center), projected
+            )
         
         elif self.input_spec.kind == InKind.LIN_POLY:
             # TODO: Implement quadratic programming projection

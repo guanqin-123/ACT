@@ -20,6 +20,9 @@ if TYPE_CHECKING:
     from act.pipeline.fuzzing.corpus import FuzzingSeed
 
 
+INPUT_FEASIBILITY_ATTR = "_act_input_satisfied_per_sample"
+
+
 @dataclass
 class Counterexample:
     """
@@ -117,6 +120,7 @@ class PropertyChecker:
     def __init__(self, output_spec: Optional[OutputSpec]):
         """Initialize property checker."""
         self.spec = output_spec
+        self.infeasible_candidates = 0
     
     def check(
         self,
@@ -137,10 +141,35 @@ class PropertyChecker:
         """
         if self.spec is None:
             raise ValueError("PropertyChecker requires an OutputSpec")
+
+        input_satisfied = getattr(outputs, INPUT_FEASIBILITY_ATTR, None)
+        if not isinstance(input_satisfied, torch.Tensor):
+            raise RuntimeError(
+                "PropertyChecker requires lane-aware input feasibility metadata "
+                "from VerifiableModel.forward"
+            )
+        input_satisfied = input_satisfied.to(
+            device=outputs.device, dtype=torch.bool
+        ).reshape(-1)
+        if input_satisfied.shape != (inputs.shape[0],):
+            raise RuntimeError(
+                "Input feasibility mask must have shape "
+                f"({inputs.shape[0]},), got {tuple(input_satisfied.shape)}"
+            )
         
         violations_mask, severity = self.spec.violation(
             outputs, rows=seeds.original_index
         )
+        rejected_mask = violations_mask & ~input_satisfied
+        rejected_count = int(rejected_mask.sum().item())
+        if rejected_count:
+            self.infeasible_candidates += rejected_count
+            print(
+                "⚠️  [PropertyChecker] Rejected "
+                f"{rejected_count} infeasible counterexample candidate(s) "
+                f"(total: {self.infeasible_candidates})"
+            )
+        violations_mask = violations_mask & input_satisfied
         return self._build_results(
             inputs, outputs, violations_mask, severity, seeds=seeds
         )

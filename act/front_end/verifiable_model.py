@@ -135,7 +135,7 @@ class VerifiableModel(nn.Module):
     def get_strict_mode(cls) -> bool:
         return cls._strict_mode
     
-    def forward(self, x):
+    def forward(self, x, rows: Optional[torch.Tensor] = None):
         input_satisfied = True
         input_explanation = "No INPUT_SPEC layer"
         output_satisfied = True
@@ -143,7 +143,11 @@ class VerifiableModel(nn.Module):
 
         x = self.input_layer(x)
 
-        result = self.input_spec(x)
+        result = (
+            self.input_spec(x)
+            if rows is None
+            else self.input_spec(x, rows=rows)
+        )
         if isinstance(result, tuple) and len(result) == 3:
             x, input_satisfied, input_explanation = result
         else:
@@ -570,7 +574,29 @@ class InputSpecLayer(nn.Module):
                 layer.cache["perturbed_positions"] = self.perturbed_positions
         return [layer], in_vars
 
-    def forward(self, x: torch.Tensor):
+    @staticmethod
+    def _gather_rows(
+        value: torch.Tensor,
+        rows: torch.Tensor,
+        batch_size: int,
+        name: str,
+    ) -> torch.Tensor:
+        """Align a row-indexed spec tensor with the current batch lanes."""
+        if value.shape[0] == 1:
+            return value.expand(batch_size, *value.shape[1:])
+        value_rows = rows.to(device=value.device)
+        if value_rows.numel() and int(value_rows.max().item()) >= value.shape[0]:
+            raise IndexError(
+                f"InputSpecLayer rows out of range for {name}: "
+                f"max={int(value_rows.max().item())} >= {value.shape[0]} rows"
+            )
+        return value.index_select(0, value_rows)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        rows: Optional[torch.Tensor] = None,
+    ):
         """
         Forward pass with unified constraint checking for single or batched input.
         
@@ -582,19 +608,27 @@ class InputSpecLayer(nn.Module):
             return (x, True, "✅ INPUT: No constraints")
         
         batch_size = x.shape[0]
-
-        # IMPORTANT — IDENTITY-LANE ASSUMPTION: lane i is checked against spec
-        # row i. SeedCorpus.select() samples with replacement, so selected
-        # fuzzer batches are not lane-aligned; their
-        # input_satisfied_per_sample result must not be trusted without first
-        # gathering the InputSpec rows by original_index.
+        if rows is None:
+            rows = torch.arange(batch_size, device=x.device)
+        else:
+            rows = rows.to(device=x.device, dtype=torch.long)
+            if rows.dim() != 1 or rows.numel() != batch_size:
+                raise ValueError(
+                    f"InputSpecLayer rows must have shape ({batch_size},), "
+                    f"got {tuple(rows.shape)}"
+                )
+            if rows.numel() and bool((rows < 0).any()):
+                raise IndexError("InputSpecLayer rows must be non-negative")
         
         if self.kind == InKind.BOX:
-            if self.lb is None or self.ub is None:
+            lb_buffer, ub_buffer = self.lb, self.ub
+            if not isinstance(lb_buffer, torch.Tensor) or not isinstance(
+                ub_buffer, torch.Tensor
+            ):
                 return (x, True, "⚠️ INPUT BOX: Missing lb/ub")
             
-            lb, ub = self.lb, self.ub
-            # model_synthesis.py ensures lb.shape[0] == batch_size
+            lb = self._gather_rows(lb_buffer, rows, batch_size, "lb")
+            ub = self._gather_rows(ub_buffer, rows, batch_size, "ub")
 
             lb_ok = (x >= lb).reshape(batch_size, -1).all(dim=1)  # (batch,)
             ub_ok = (x <= ub).reshape(batch_size, -1).all(dim=1)  # (batch,)
@@ -606,16 +640,23 @@ class InputSpecLayer(nn.Module):
             return (x, satisfied, explanation)
         
         elif self.kind == InKind.LINF_BALL:
-            if self.center is None or self.eps is None:
+            center_buffer, eps_buffer = self.center, self.eps
+            if not isinstance(center_buffer, torch.Tensor) or not isinstance(
+                eps_buffer, torch.Tensor
+            ):
                 return (x, True, "⚠️ INPUT L∞: Missing center/eps")
             
-            center = self.center
+            center = self._gather_rows(
+                center_buffer, rows, batch_size, "center"
+            )
             
             # Per-sample L∞ distance
             linf = (x - center).abs().reshape(batch_size, -1).max(dim=1)[0]  # (batch,)
             
             # Compare against per-sample eps threshold.
-            eps = self.eps.reshape(self.eps.shape[0])
+            eps = self._gather_rows(
+                eps_buffer, rows, batch_size, "eps"
+            ).reshape(batch_size)
             satisfied = linf <= eps
             
             n_ok = satisfied.sum().item()
@@ -625,24 +666,35 @@ class InputSpecLayer(nn.Module):
             return (x, satisfied, explanation)
         
         elif self.kind == InKind.LP_EMBEDDING:
-            if self.lb is None or self.ub is None:
+            lb_buffer, ub_buffer = self.lb, self.ub
+            if not isinstance(lb_buffer, torch.Tensor) or not isinstance(
+                ub_buffer, torch.Tensor
+            ):
                 return (x, True, "⚠️ INPUT LP_EMBEDDING: Missing lb/ub")
 
-            lb_ok = (x >= self.lb).reshape(batch_size, -1).all(dim=1)
-            ub_ok = (x <= self.ub).reshape(batch_size, -1).all(dim=1)
+            lb = self._gather_rows(lb_buffer, rows, batch_size, "lb")
+            ub = self._gather_rows(ub_buffer, rows, batch_size, "ub")
+            lb_ok = (x >= lb).reshape(batch_size, -1).all(dim=1)
+            ub_ok = (x <= ub).reshape(batch_size, -1).all(dim=1)
             satisfied = lb_ok & ub_ok
             n_ok = satisfied.sum().item()
             explanation = f"✅ INPUT LP_EMBEDDING: {n_ok}/{batch_size} satisfied"
             return (x, satisfied, explanation)
 
         elif self.kind == InKind.LIN_POLY:
-            if self.A is None or self.b is None:
+            A_buffer, b_buffer = self.A, self.b
+            if not isinstance(A_buffer, torch.Tensor) or not isinstance(
+                b_buffer, torch.Tensor
+            ):
                 return (x, True, "⚠️ INPUT LIN_POLY: Missing A/b")
             
-            # LIN_POLY typically single sample; batched requires per-sample A,b
             x_flat = x.reshape(batch_size, -1)  # (batch, n_vars)
-            # For now, apply same A,b to each sample
-            residuals = x_flat @ self.A.T - self.b  # (batch, n_constraints)
+            if A_buffer.dim() == 3:
+                A = self._gather_rows(A_buffer, rows, batch_size, "A")
+                b = self._gather_rows(b_buffer, rows, batch_size, "b")
+                residuals = torch.bmm(A, x_flat.unsqueeze(-1)).squeeze(-1) - b
+            else:
+                residuals = x_flat @ A_buffer.T - b_buffer
             max_viol = residuals.max(dim=1)[0]  # (batch,)
             satisfied = max_viol <= 0
             

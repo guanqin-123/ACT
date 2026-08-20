@@ -295,14 +295,12 @@ class OutputSpec:
             else:
                 self.y_true = torch.tensor([int(self.y_true)], dtype=torch.int64)
         
-        # Convert margin (scalar → 1-D tensor)
-        if self.margin is not None and not isinstance(self.margin, torch.Tensor):
-            self.margin = torch.tensor([float(self.margin)])
-        
-        # Convert c, d, lb, ub (list/tuple → tensor; scalar → 1-D tensor).
-        # ``d`` is scalar for LINEAR_LE but a vector for UNSAFE_LINEAR, so it
-        # joins the list-aware conversion path below.
-        for field in ['c', 'd', 'lb', 'ub']:
+        # Convert margin, c, d, lb, ub (list/tuple → tensor; scalar → 1-D
+        # tensor). ``d`` is scalar for LINEAR_LE but a vector for
+        # UNSAFE_LINEAR, and ``margin`` is scalar for a shared spec but a
+        # vector once there is one row per batch lane, so both belong on this
+        # list-aware conversion path.
+        for field in ['margin', 'c', 'd', 'lb', 'ub']:
             val = getattr(self, field, None)
             if val is not None and not isinstance(val, torch.Tensor):
                 if isinstance(val, (list, tuple)):
@@ -725,15 +723,22 @@ class OutputSpec:
         =============== ==================================== ==========
         kind            severity                             violated
         =============== ==================================== ==========
-        TOP1_ROBUST     ``max_{j != t} z_j - z_t``           ``> 0``
-        MARGIN_ROBUST   ``m - (z_t - max_{j != t} z_j)``     ``> 0``
+        TOP1_ROBUST     ``max_{j != t} z_j - z_t``           ``>= 0``
+        MARGIN_ROBUST   ``m - (z_t - max_{j != t} z_j)``     ``>= 0``
         RANGE           ``max(max_k(lb_k - z_k),
                         max_k(z_k - ub_k))``                 ``> 0``
         LINEAR_LE       ``max_i (c_i . z - d_i)``            ``> 0``
         UNSAFE_LINEAR   ``-max_i (c_i . z - d_i)``           ``>= 0``
         =============== ==================================== ==========
 
-        ``UNSAFE_LINEAR`` compares with ``>=`` rather than ``>``: its unsafe
+        ``TOP1_ROBUST``, ``MARGIN_ROBUST`` and ``UNSAFE_LINEAR`` compare with
+        ``>=`` rather than ``>``. For ``TOP1_ROBUST`` an exact tie already
+        falsifies the strict ``z_t > z_j`` requirement, and ``MARGIN_ROBUST``
+        is the same requirement shifted by ``m`` — a separation of exactly
+        ``m`` already falsifies it. Both match ``bab.check_violations_batched``
+        and ``encode_linear`` (whose ``thresholds`` are ``0`` and ``-m``
+        respectively, certified iff the row max is strictly below the
+        threshold). For ``UNSAFE_LINEAR``: its unsafe
         set is the *closed* polytope ``(C z <= d).all()``, so a lane sitting
         exactly on a face is already unsafe.
 
@@ -778,7 +783,9 @@ class OutputSpec:
             )
             target = params["y_true"].reshape(-1).to(torch.long)
             severity = self._runner_up_gap(z, target)
-            violated = severity > 0
+            # ``>=`` (not ``>``) — a tie falsifies strict ``z_t > z_j``. Matches
+            # bab.check_violations_batched and encode_linear; argmax cannot.
+            violated = severity >= 0
 
         elif self.kind == OutKind.MARGIN_ROBUST:
             if self.y_true is None or self.margin is None:
@@ -789,7 +796,10 @@ class OutputSpec:
             target = params["y_true"].reshape(-1).to(torch.long)
             # m - (z_t - max_other) == m + (max_other - z_t) == m + gap.
             severity = params["margin"].reshape(-1) + self._runner_up_gap(z, target)
-            violated = severity > 0
+            # ``>=`` (not ``>``) — the separation must be strictly greater than
+            # the margin, so gap == -m already falsifies it. Matches
+            # bab.check_violations_batched and encode_linear.
+            violated = severity >= 0
 
         elif self.kind == OutKind.RANGE:
             if self.lb is None and self.ub is None:

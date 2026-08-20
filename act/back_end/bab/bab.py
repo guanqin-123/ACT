@@ -704,7 +704,10 @@ def check_violations_batched(net: object, x_batch: torch.Tensor, assert_layer: L
         mask = torch.ones_like(y_batch, dtype=torch.bool)
         _ = mask.scatter_(1, y_true.unsqueeze(1), False)
         other_scores = y_batch.masked_fill(~mask, -float("inf"))
-        return (other_scores.max(dim=1).values - y_true_scores) >= margin
+        # ``-margin``, not ``+margin``: ``encode_linear`` emits rows ``e_j - e_t``
+        # with ``thresholds = -margin``, so a lane is certified iff
+        # ``max_j(z_j - z_t) < -margin``. The negative sign is deliberate.
+        return (other_scores.max(dim=1).values - y_true_scores) >= -margin
 
     if kind == OutKind.LINEAR_LE:
         c_raw = params["c"]
