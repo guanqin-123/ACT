@@ -21,7 +21,12 @@ from pathlib import Path
 
 from act.front_end.specs import InputSpec, OutputSpec
 from act.front_end.spec_creator_base import LabeledInputTensor
-from act.front_end.verifiable_model import InputSpecLayer, OutputSpecLayer
+from act.front_end.verifiable_model import (
+    InputLayer,
+    InputSpecLayer,
+    OutputSpecLayer,
+    VerifiableModel,
+)
 from act.pipeline.fuzzing.mutations import MutationEngine
 from act.pipeline.fuzzing.coverage import CoverageTracker
 from act.pipeline.fuzzing.corpus import SeedCorpus, FuzzingSeed
@@ -244,11 +249,37 @@ class ACTFuzzer:
         self.config = config or FuzzingConfig.from_yaml()
         self.device = get_default_device()
 
+        assert not VerifiableModel.get_strict_mode(), (
+            "ACTFuzzer requires VerifiableModel strict mode to be disabled; "
+            "violations must be returned to PropertyChecker, not raised by forward()"
+        )
         self.model = wrapped_model.to(self.device)
 
         # Extract specs for MutationEngine (projection) and PropertyChecker (violation detection).
         self.input_spec = cast(Optional[InputSpec], self._extract_spec(InputSpecLayer))
         self.output_spec = cast(Optional[OutputSpec], self._extract_spec(OutputSpecLayer))
+
+        input_layer = next(
+            (layer for layer in self.model.children() if isinstance(layer, InputLayer)),
+            None,
+        )
+        assert input_layer is not None, "ACTFuzzer requires an InputLayer"
+        assert initial_seeds, "ACTFuzzer requires at least one initial seed"
+        assert all(seed.tensor.shape[0] == 1 for seed in initial_seeds), (
+            "Each initial_seeds[i] must represent exactly one spec row"
+        )
+        seed_inputs = torch.cat([seed.tensor for seed in initial_seeds], dim=0).to(
+            device=input_layer.input_tensor.device,
+            dtype=input_layer.input_tensor.dtype,
+        )
+        assert seed_inputs.shape == input_layer.input_tensor.shape, (
+            "Initial seed count/shape must match synthesized spec rows: "
+            f"seeds={tuple(seed_inputs.shape)}, specs={tuple(input_layer.input_tensor.shape)}"
+        )
+        assert torch.equal(seed_inputs, input_layer.input_tensor), (
+            "initial_seeds[i] must equal InputLayer row i; original_index relies "
+            "on this seed/spec-row alignment"
+        )
 
         # Batch size is determined by model synthesis (number of VNNLib instances).
         self.batch_size = (
@@ -416,7 +447,10 @@ class ACTFuzzer:
         for ce in counterexamples:
             self.counterexamples.append(ce)
             if self.config.verbose >= 2:
-                print(f"🚨 Counterexample #{len(self.counterexamples)}: {ce.summary()}")
+                print(
+                    f"🚨 Counterexample #{len(self.counterexamples)}: "
+                    f"{ce.summary()}"
+                )
             if self.config.save_counterexamples:
                 self.config.output_dir.mkdir(parents=True, exist_ok=True)
                 ce.save(self.config.output_dir / f"ce_{len(self.counterexamples)}.pt")
@@ -435,6 +469,9 @@ class ACTFuzzer:
 
         # 9. Tracing ( per-sample for detail)
         if self.tracer:
+            counterexamples_by_lane = dict(
+                zip(violation_mask.nonzero(as_tuple=True)[0].tolist(), counterexamples)
+            )
             coverage = self.coverage_tracker.get_coverage()
             mutation_strategy = self.mutation_engine.last_strategy or "unknown"
             gradients = None
@@ -446,21 +483,11 @@ class ACTFuzzer:
             for i in range(batch_size):
                 iteration = start_iteration + i
                 if self.tracer.should_trace(iteration):
-                    # Build per-sample violation for tracer (None if no violation at this index)
-                    violation_at_i = None
-                    if violation_mask[i]:
-                        # Find the counterexample for this index (sparse search)
-                        seed_idx_val = int(seeds.original_index[i].item())
-                        for ce in counterexamples:
-                            if ce.seed_index == seed_idx_val:
-                                violation_at_i = ce
-                                break
-
                     self.tracer.record_iteration(
                         iteration=iteration,
                         timestamp=time.time(),
                         mutation_strategy=mutation_strategy,
-                        violation=violation_at_i,
+                        violation=counterexamples_by_lane.get(i),
                         coverage=coverage,
                         coverage_delta=global_delta / batch_size,
                         energy=float(energies[i]),

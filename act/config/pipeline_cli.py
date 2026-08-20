@@ -940,15 +940,32 @@ def _sliced_net_view(net, sample_idx: int, batch_size: int):
     orig_spec_params = [deepcopy(spec_layer.params) for spec_layer in spec_layers]
     orig_input_outvars = list(input_layer.out_vars)
     try:
-        for key in OutputSpec.SLICEABLE_PARAM_KEYS:
-            val = orig_assert_params.get(key)
-            if (
-                val is not None
-                and hasattr(val, "dim")
-                and val.dim() >= 1
-                and val.shape[0] == batch_size
-            ):
-                assert_layer.params[key] = val[sample_idx : sample_idx + 1]
+        assert_kind = orig_assert_params.get("kind")
+        if not isinstance(assert_kind, str):
+            raise TypeError(
+                f"ASSERT kind must be str, got {type(assert_kind).__name__}"
+            )
+        reference = next(
+            (
+                value
+                for value in orig_assert_params.values()
+                if isinstance(value, torch.Tensor) and value.is_floating_point()
+            ),
+            None,
+        )
+        if reference is None:
+            raise RuntimeError("ASSERT params contain no floating tensor for slicing")
+        assert_layer.params.update(
+            OutputSpec(kind=assert_kind)._gather_rows(
+                rows=torch.tensor([sample_idx], device=reference.device),
+                batch_size=1,
+                device=reference.device,
+                dtype=reference.dtype,
+                shared_ndim={},
+                source=orig_assert_params,
+                source_batch_size=batch_size,
+            )
+        )
 
         for spec_layer, sp_orig in zip(spec_layers, orig_spec_params):
             for sp_key, sp_val in sp_orig.items():

@@ -582,6 +582,12 @@ class InputSpecLayer(nn.Module):
             return (x, True, "✅ INPUT: No constraints")
         
         batch_size = x.shape[0]
+
+        # IMPORTANT — IDENTITY-LANE ASSUMPTION: lane i is checked against spec
+        # row i. SeedCorpus.select() samples with replacement, so selected
+        # fuzzer batches are not lane-aligned; their
+        # input_satisfied_per_sample result must not be trusted without first
+        # gathering the InputSpec rows by original_index.
         
         if self.kind == InKind.BOX:
             if self.lb is None or self.ub is None:
@@ -673,25 +679,6 @@ class OutputSpecLayer(nn.Module):
         super().__init__()
         self.spec = spec or OutputSpec(**kwargs)
         self.kind = self.spec.kind
-        self.d = self.spec.d
-        
-        # register as buffer for device mobility
-        if self.spec.y_true is not None:
-            self.register_buffer("y_true", self.spec.y_true)
-        else:
-            self.y_true = None
-        
-        if self.spec.margin is not None:
-            self.register_buffer("margin", self.spec.margin)
-        else:
-            self.margin = None
-
-        for name in ("c", "lb", "ub"):
-            val = getattr(self.spec, name, None)
-            if isinstance(val, torch.Tensor):
-                self.register_buffer(name, val)
-            else:
-                setattr(self, name, None)
         self._validate_schema()
 
     def _validate_schema(self):
@@ -754,105 +741,10 @@ class OutputSpecLayer(nn.Module):
             Tuple of (tensor, satisfied, explanation)
             For batch=1 and batch>1: satisfied is (batch,) bool tensor
         """
-        if self.spec is None:
-            return (y, True, "✅ OUTPUT: No constraints")
-        
         batch_size = y.shape[0]
-        
-        if self.kind == OutKind.TOP1_ROBUST:
-            if self.y_true is None:
-                return (y, True, "⚠️ OUTPUT TOP1: Missing y_true")
-            
-            preds = y.argmax(dim=1)  # (batch,)
-            satisfied = preds == self.y_true  # (batch,) bool tensor
-            
-            # Unified explanation format (consistent across all batch sizes)
-            n_ok = satisfied.sum().item()
-            explanation = f"✅ OUTPUT TOP1: {n_ok}/{batch_size} robust"
-            
-            # Always return tensor (unified output format)
-            return (y, satisfied, explanation)
-        
-        elif self.kind == OutKind.MARGIN_ROBUST:
-            if self.y_true is None:
-                return (y, True, "⚠️ OUTPUT MARGIN: Missing y_true")
-            
-            # y is (batch, n_classes)
-            true_scores = y[torch.arange(batch_size, device=y.device), self.y_true]  # (batch,)
-            
-            # Mask out true class to get max of others
-            mask = torch.ones_like(y, dtype=torch.bool)
-            mask[torch.arange(batch_size, device=y.device), self.y_true] = False
-            other_scores = y.masked_fill(~mask, float('-inf'))
-            max_other = other_scores.max(dim=1)[0]  # (batch,)
-            
-            actual_margin = true_scores - max_other  # (batch,)
-            margin_threshold = self.margin  # always a tensor, including the n=1 case
-            satisfied = actual_margin >= margin_threshold  # (batch,) bool
-            
-            # Unified explanation format (consistent across all batch sizes)
-            n_ok = satisfied.sum().item()
-            explanation = f"✅ OUTPUT MARGIN: {n_ok}/{batch_size} satisfied"
-            
-            # Always return tensor (unified output format)
-            return (y, satisfied, explanation)
-        
-        elif self.kind == OutKind.LINEAR_LE:
-            if self.c is None or self.d is None:
-                return (y, True, "⚠️ OUTPUT LINEAR_LE: Missing c/d")
-
-            y_2d = y.reshape(batch_size, -1)  # (batch, n_vars)
-            # c is [n_out] (single-sample) or [B, n_out] (batch-native).
-            # Element-wise multiply + sum gives a per-lane lhs in both cases
-            # (broadcasts when c is 1-D); plain matmul would mismatch on the
-            # batch-native shape.
-            lhs = (y_2d * self.c).sum(dim=1)  # (batch,)
-            satisfied = lhs <= self.d.reshape(-1)  # (batch,) bool
-            n_ok = satisfied.sum().item()
-            explanation = f"✅ OUTPUT LINEAR_LE: {n_ok}/{batch_size} satisfied"
-            return (y, satisfied, explanation)
-        
-        elif self.kind == OutKind.RANGE:
-            if self.lb is None or self.ub is None:
-                return (y, True, "⚠️ OUTPUT RANGE: Missing lb/ub")
-            
-            lb, ub = self.lb, self.ub
-            # ensures lb.shape[0] == batch_size
-            # No broadcast needed - shapes always match
-            
-            lb_ok = (y >= lb).reshape(batch_size, -1).all(dim=1)  # (batch,)
-            ub_ok = (y <= ub).reshape(batch_size, -1).all(dim=1)  # (batch,)
-            satisfied = lb_ok & ub_ok  # (batch,) bool
-            
-            # Unified explanation format (consistent across all batch sizes)
-            n_ok = satisfied.sum().item()
-            explanation = f"✅ OUTPUT RANGE: {n_ok}/{batch_size} satisfied"
-            
-            # Always return tensor (unified output format)
-            return (y, satisfied, explanation)
-        
-        elif self.kind == OutKind.UNSAFE_LINEAR:
-            if self.c is None or self.d is None:
-                return (y, True, "⚠️ OUTPUT UNSAFE_LINEAR: Missing c/d")
-            y_2d = y.reshape(batch_size, -1)
-            # c shape branches:
-            #   [n_out]          single-row legacy → promote to [1, n_out]
-            #   [N, n_out]       single-sample, N rows
-            #   [B, N, n_out]    batch-native, per-lane rows
-            # d shape pairs naturally: [1] / [N] / [B, N]. y is in {Cy <= d}
-            # iff ALL rows hold; safe iff NOT in the polytope.
-            if self.c.dim() == 3:
-                Cy = torch.einsum("bmn,bn->bm", self.c, y_2d)  # [B, N]
-                d_per_lane = self.d  # [B, N]
-            else:
-                C = self.c if self.c.dim() == 2 else self.c.unsqueeze(0)
-                Cy = y_2d @ C.T  # [B, N]
-                d_per_lane = self.d.reshape(-1)  # [N]
-            unsafe = (Cy <= d_per_lane).all(dim=1)
-            satisfied = ~unsafe
-            n_ok = satisfied.sum().item()
-            explanation = f"✅ OUTPUT UNSAFE_LINEAR: {n_ok}/{batch_size} safe (UNSAFE={batch_size - n_ok})"
-            return (y, satisfied, explanation)
-        
-        else:
-            return (y, True, f"⚠️ OUTPUT: Unknown kind {self.kind}")
+        violated, _severity = self.spec.violation(y)
+        satisfied = ~violated
+        n_ok = satisfied.sum().item()
+        kind_label = self.spec.kind.removesuffix("_ROBUST")
+        explanation = f"✅ OUTPUT {kind_label}: {n_ok}/{batch_size} satisfied"
+        return (y, satisfied, explanation)

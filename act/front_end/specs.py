@@ -13,7 +13,7 @@
 #===---------------------------------------------------------------------===#
 
 from __future__ import annotations
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, List, Optional
 import torch
@@ -560,3 +560,278 @@ class OutputSpec:
         params["thresholds"] = thresholds
         params["M"] = m_specs
         return params
+
+    def _gather_rows(
+        self,
+        rows: Optional[torch.Tensor],
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        shared_ndim: Mapping[str, int],
+        *,
+        source: Optional[Mapping[str, Any]] = None,
+        source_batch_size: Optional[int] = None,
+        drop_singleton_batch: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        """Select the spec parameters backing each batch lane.
+
+        Walks :attr:`SLICEABLE_PARAM_KEYS` and returns present tensor fields
+        aligned to ``batch_size`` lanes. By default fields come from this spec
+        and a field is row-indexed when its rank exceeds
+        ``shared_ndim[key]``. Encoded ASSERT dictionaries can instead be
+        supplied through ``source``; in that mode, ``source_batch_size``
+        identifies their leading batch axis by size.
+
+        A singleton leading row expands to every lane; otherwise ``rows``
+        gathers the backing row. Every tensor is moved explicitly to ``device``
+        and floating tensors are also cast to ``dtype``.
+        ``drop_singleton_batch`` removes a gathered leading ``[1]`` from
+        rank-two-or-higher fields so a shared spec can be re-encoded for a new
+        batch size.
+        """
+        gathered: Dict[str, torch.Tensor] = {}
+        for key in self.SLICEABLE_PARAM_KEYS:
+            value = source.get(key) if source is not None else getattr(self, key, None)
+            if not isinstance(value, torch.Tensor):
+                continue
+            value = (
+                value.to(device=device, dtype=dtype)
+                if value.is_floating_point()
+                else value.to(device=device)
+            )
+            if source_batch_size is None:
+                base_ndim = shared_ndim.get(key)
+                row_indexed = base_ndim is not None and value.dim() > base_ndim
+            else:
+                row_indexed = (
+                    value.dim() >= 1
+                    and value.shape[0] in (1, source_batch_size)
+                )
+            if row_indexed:
+                if value.shape[0] == 1:
+                    value = value.expand(batch_size, *value.shape[1:])
+                elif rows is not None:
+                    value = value.index_select(0, rows)
+                elif value.shape[0] != batch_size:
+                    raise ValueError(
+                        f"{self.kind}: {key} carries {value.shape[0]} spec rows "
+                        f"but the batch has {batch_size} lanes; pass rows= to "
+                        f"map lanes onto spec rows"
+                    )
+            if drop_singleton_batch and value.dim() >= 2 and value.shape[0] == 1:
+                value = value[0]
+            gathered[key] = value
+        return gathered
+
+    @staticmethod
+    def _runner_up_gap(z: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Per-lane ``max_{j != target} z_j - z_target``.
+
+        This is the Carlini-Wagner robustness gap: positive iff some non-target
+        output outranks the target one. TOP1 and MARGIN differ only by an
+        additive margin, so both read this single quantity.
+
+        Args:
+            z: Outputs of shape ``[B, n_out]``.
+            target: Long tensor of shape ``[B]``, the target index per lane.
+
+        Returns:
+            Float tensor of shape ``[B]``.
+
+        Raises:
+            ValueError: If ``z`` has fewer than two columns, leaving no
+                runner-up to compare against.
+        """
+        if z.shape[1] < 2:
+            raise ValueError(
+                f"TOP1/MARGIN robustness requires >= 2 classes, got {z.shape[1]}"
+            )
+        index = target.reshape(-1, 1)
+        z_target = z.gather(1, index).squeeze(1)
+        target_mask = torch.zeros_like(z, dtype=torch.bool).scatter_(1, index, True)
+        max_other = z.masked_fill(target_mask, float("-inf")).max(dim=1).values
+        return max_other - z_target
+
+    @staticmethod
+    def _linear_row_slack(
+        z: torch.Tensor,
+        c: torch.Tensor,
+        d: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-lane, per-row slack ``c_i . z - d_i`` of shape ``[B, N]``.
+
+        Accepts the three ``c`` layouts the framework emits, mirroring the
+        shape branches in ``OutputSpecLayer.forward``: ``[n_out]`` (a single
+        row), ``[N, n_out]`` (a row block shared by every lane) and
+        ``[B, N, n_out]`` (per-lane rows). ``d`` pairs as ``[1]``, ``[N]`` or
+        ``[B, N]``; a singleton ``d`` applies to every row, as in
+        :meth:`encode_linear`.
+
+        Args:
+            z: Outputs of shape ``[B, n_out]``.
+            c: Constraint coefficients in one of the layouts above.
+            d: Constraint right-hand sides.
+
+        Returns:
+            Float tensor of shape ``[B, N]``. Row ``i`` of lane ``b`` satisfies
+            ``c_i . z <= d_i`` iff its slack is ``<= 0``.
+
+        Raises:
+            ValueError: If ``c`` has rank above 3, or ``d`` cannot be paired
+                with the row count implied by ``c``.
+        """
+        if c.dim() == 3:
+            slack = torch.einsum("bmn,bn->bm", c, z)
+        elif c.dim() <= 2:
+            c_rows = c if c.dim() == 2 else c.unsqueeze(0)
+            slack = z @ c_rows.T
+        else:
+            raise ValueError(f"c must have rank 1, 2 or 3, got {c.dim()}")
+        n_rows = slack.shape[1]
+        if d.dim() <= 1:
+            d_rows = d.reshape(-1)
+            if d_rows.numel() not in (1, n_rows):
+                raise ValueError(
+                    f"d length {d_rows.numel()} is neither 1 nor the row count "
+                    f"{n_rows} implied by c"
+                )
+        else:
+            if tuple(d.shape) != tuple(slack.shape):
+                raise ValueError(
+                    f"d shape {tuple(d.shape)} != per-lane row shape "
+                    f"{tuple(slack.shape)}"
+                )
+            d_rows = d
+        return slack - d_rows
+
+    def violation(
+        self,
+        y: torch.Tensor,
+        rows: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Evaluate this output property against concrete model outputs.
+
+        Single source of truth for *concrete* violation semantics: given a real
+        forward pass, decide per batch lane whether the property is broken and
+        by how much. Comparisons are exact, with no epsilon tolerance, because
+        a genuine forward pass that breaks the property *is* a counterexample.
+        (``bab.check_violations_batched`` deliberately keeps a tolerance — it
+        validates LP-solver candidates, where numerical slop is expected.)
+
+        ``severity`` is a signed violation margin that doubles as an attack
+        objective: it grows monotonically with how badly the property is
+        broken, so ascending it drives an input toward a violation.
+
+        =============== ==================================== ==========
+        kind            severity                             violated
+        =============== ==================================== ==========
+        TOP1_ROBUST     ``max_{j != t} z_j - z_t``           ``> 0``
+        MARGIN_ROBUST   ``m - (z_t - max_{j != t} z_j)``     ``> 0``
+        RANGE           ``max(max_k(lb_k - z_k),
+                        max_k(z_k - ub_k))``                 ``> 0``
+        LINEAR_LE       ``max_i (c_i . z - d_i)``            ``> 0``
+        UNSAFE_LINEAR   ``-max_i (c_i . z - d_i)``           ``>= 0``
+        =============== ==================================== ==========
+
+        ``UNSAFE_LINEAR`` compares with ``>=`` rather than ``>``: its unsafe
+        set is the *closed* polytope ``(C z <= d).all()``, so a lane sitting
+        exactly on a face is already unsafe.
+
+        Note:
+            ``argmax`` breaks ties toward the lowest index, so on an exact
+            output tie ``TOP1_ROBUST`` can disagree with an ``argmax``-based
+            check. That disagreement set has measure zero.
+
+        Args:
+            y: Concrete model outputs. The leading axis is the batch axis; any
+                trailing axes are flattened, so ``[B, n_out]`` and
+                ``[B, ...]`` are both accepted.
+            rows: Long tensor of length ``B`` where ``rows[i]`` is the spec row
+                backing batch lane ``i``. Required whenever lanes are not
+                aligned with spec rows — for instance a corpus that samples
+                with replacement. ``None`` means identity, lane ``i`` <-> row
+                ``i``.
+
+        Returns:
+            ``(violated, severity)``: a bool tensor of shape ``[B]`` and a
+            float tensor of shape ``[B]``.
+
+        Raises:
+            ValueError: If fields required by ``self.kind`` are missing, a
+                gathered field cannot be aligned to the ``B`` lanes, or
+                ``self.kind`` is not one of the five supported output kinds.
+        """
+        z = y.reshape(y.shape[0], -1)
+        batch_size = z.shape[0]
+        if rows is not None:
+            rows = rows.to(device=z.device, dtype=torch.long).reshape(-1)
+            if rows.numel() != batch_size:
+                raise ValueError(
+                    f"rows length {rows.numel()} != batch size {batch_size}"
+                )
+
+        if self.kind == OutKind.TOP1_ROBUST:
+            if self.y_true is None:
+                raise ValueError("TOP1_ROBUST requires y_true")
+            params = self._gather_rows(
+                rows, batch_size, z.device, z.dtype, {"y_true": 0}
+            )
+            target = params["y_true"].reshape(-1).to(torch.long)
+            severity = self._runner_up_gap(z, target)
+            violated = severity > 0
+
+        elif self.kind == OutKind.MARGIN_ROBUST:
+            if self.y_true is None or self.margin is None:
+                raise ValueError("MARGIN_ROBUST requires both y_true and margin")
+            params = self._gather_rows(
+                rows, batch_size, z.device, z.dtype, {"y_true": 0, "margin": 0}
+            )
+            target = params["y_true"].reshape(-1).to(torch.long)
+            # m - (z_t - max_other) == m + (max_other - z_t) == m + gap.
+            severity = params["margin"].reshape(-1) + self._runner_up_gap(z, target)
+            violated = severity > 0
+
+        elif self.kind == OutKind.RANGE:
+            if self.lb is None and self.ub is None:
+                raise ValueError("RANGE requires lb and/or ub")
+            params = self._gather_rows(
+                rows, batch_size, z.device, z.dtype, {"lb": 1, "ub": 1}
+            )
+            sides: List[torch.Tensor] = []
+            if "lb" in params:
+                sides.append((params["lb"] - z).max(dim=1).values)
+            if "ub" in params:
+                sides.append((z - params["ub"]).max(dim=1).values)
+            severity = sides[0] if len(sides) == 1 else torch.maximum(*sides)
+            violated = severity > 0
+
+        elif self.kind == OutKind.LINEAR_LE:
+            if self.c is None or self.d is None:
+                raise ValueError("LINEAR_LE requires both c and d")
+            params = self._gather_rows(
+                rows, batch_size, z.device, z.dtype, {"c": 2, "d": 1}
+            )
+            slack = self._linear_row_slack(z, params["c"], params["d"])
+            # Conjunction: certified iff EVERY row holds, so the worst row wins.
+            severity = slack.max(dim=1).values
+            violated = severity > 0
+
+        elif self.kind == OutKind.UNSAFE_LINEAR:
+            if self.c is None or self.d is None:
+                raise ValueError("UNSAFE_LINEAR requires both c and d")
+            params = self._gather_rows(
+                rows, batch_size, z.device, z.dtype, {"c": 2, "d": 1}
+            )
+            slack = self._linear_row_slack(z, params["c"], params["d"])
+            severity = -slack.max(dim=1).values
+            # Closed unsafe polytope (C z <= d).all(): a lane on a face is
+            # already unsafe, hence >= rather than >.
+            violated = severity >= 0
+
+        else:
+            raise ValueError(
+                f"Unsupported output kind {self.kind!r}. Supported: "
+                f"LINEAR_LE, UNSAFE_LINEAR, TOP1_ROBUST, MARGIN_ROBUST, RANGE."
+            )
+
+        return violated, severity

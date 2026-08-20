@@ -559,21 +559,6 @@ def _slice_branching_state(
 
 
 
-def _unbatch_field(val: Any) -> Any:
-    """Strip lazy-M broadcast batch dim when a field is shared by one sample.
-
-    BaB dual dispatch rebuilds an ``OutputSpec`` from ASSERT parameters while
-    subproblem lanes live in the leading lazy-M dimension. If a parameter is a
-    tensor with a singleton leading batch axis, remove that axis so
-    ``OutputSpec.encode_linear`` can re-broadcast it to the current K lanes.
-    """
-    if isinstance(val, torch.Tensor) and val.dim() >= 2 and val.shape[0] == 1:
-        return val[0]
-    return val
-
-
-
-
 def _as_batched_vector(
     value: object,
     n_batch: int,
@@ -1044,12 +1029,16 @@ def _dispatch_dual_solve(
     if not isinstance(out_kind_raw, str):
         raise TypeError(f"ASSERT kind must be str, got {type(out_kind_raw).__name__}")
 
-    out_spec_fields: dict[str, torch.Tensor] = {}
-    for key in OutputSpec.SLICEABLE_PARAM_KEYS:
-        if key in assert_layer.params and assert_layer.params[key] is not None:
-            value = assert_layer.params[key]
-            tensor_value = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
-            out_spec_fields[key] = _unbatch_field(tensor_value)
+    out_spec_fields = OutputSpec(kind=out_kind_raw)._gather_rows(
+        rows=None,
+        batch_size=1,
+        device=batched_bounds.lb.device,
+        dtype=batched_bounds.lb.dtype,
+        shared_ndim={},
+        source=assert_layer.params,
+        source_batch_size=1,
+        drop_singleton_batch=True,
+    )
 
     out_spec = OutputSpec(
         kind=out_kind_raw,
