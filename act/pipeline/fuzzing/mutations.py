@@ -78,7 +78,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-from act.front_end.specs import InputSpec, InKind
+from act.front_end.specs import InputSpec, InKind, OutputSpec
+from act.front_end.verifiable_model import VerifiableModel
 from act.util.device_manager import get_default_device
 
 if TYPE_CHECKING:
@@ -93,16 +94,16 @@ class MutationStrategy(ABC):
                input_tensor: torch.Tensor,
                model: nn.Module,
                activations: Optional[Dict[str, torch.Tensor]] = None,
-               label: Optional[torch.Tensor] = None
+               rows: Optional[torch.Tensor] = None
               ) -> torch.Tensor:
         """
         Apply mutation to input tensor.
         
         Args:
             input_tensor: Seed input
-            model: Model for gradient computation
+            model: Inner network for gradient computation
             activations: Activations from previous inference (optional)
-            label: Ground truth label for targeted attacks (optional)
+            rows: [B] int64 — spec row backing each batch lane (optional)
         
         Returns:
             Mutated input tensor
@@ -110,44 +111,96 @@ class MutationStrategy(ABC):
         pass
 
 
-class FGSMMutation(MutationStrategy):
+class GradientMutation(MutationStrategy, ABC):
+    """
+    Base class for the gradient-guided strategies (FGSM, PGD).
+
+    Both ascend the same objective, and this is the only place it is defined:
+    the violation severity of the model's ``OutputSpec``. Severity is signed so
+    that ``severity > 0`` means the property is broken, which makes it a direct
+    gradient-ascent target for every ``OutKind``. For ``TOP1_ROBUST`` it is
+    exactly the Carlini-Wagner margin ``max_{j != t} z_j - z_t`` that PGD used
+    to compute inline; routing through ``OutputSpec.violation`` generalises that
+    loss to the other four kinds instead of falling back to a label-free proxy.
+    """
+
+    def __init__(
+        self,
+        output_spec: OutputSpec,
+        perturb_size: Union[float, torch.Tensor],
+    ):
+        """
+        Initialize a gradient-guided mutation.
+
+        Args:
+            output_spec: Property to attack. Supplies the ascent objective.
+            perturb_size: Mutation perturbation magnitude (scalar or per-dimension tensor)
+        """
+        self.output_spec = output_spec
+        self.perturb_size = perturb_size
+
+    def _severity_sum(
+        self,
+        x: torch.Tensor,
+        model: nn.Module,
+        rows: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Forward ``x`` and return the batch's total violation severity.
+
+        The returned scalar stays inside the autograd graph, so
+        ``torch.autograd.grad(loss, x)`` yields the direction that drives the
+        batch toward violating the property. Lanes are summed because they are
+        independent: ``d severity_i / d x_j`` is zero for ``i != j``, so the sum
+        gives each lane its own gradient.
+
+        Args:
+            x: Input tensor [B, ...] that requires grad.
+            model: Inner network; returns logits [B, n_out].
+            rows: [B] int64 mapping each lane onto its spec row, or None for
+                identity. The corpus samples with replacement, so lane ``i`` is
+                generally NOT spec row ``i``.
+
+        Returns:
+            Scalar tensor to ascend.
+        """
+        _, severity = self.output_spec.violation(model(x), rows=rows)
+        return severity.sum()
+
+
+class FGSMMutation(GradientMutation):
     """
     FGSM-style gradient-guided mutation (single-step).
 
-    Computes gradients to maximize output variance, then applies a single-step
-    sign-gradient perturbation.
+    Takes one sign-gradient step along the violation-severity gradient.
     """
 
-    def __init__(self, perturb_size: Union[float, torch.Tensor] = 8/255):
+    def __init__(
+        self,
+        output_spec: OutputSpec,
+        perturb_size: Union[float, torch.Tensor] = 8/255,
+    ):
         """
         Initialize FGSM mutation.
 
         Args:
+            output_spec: Property to attack (supplies the ascent objective)
             perturb_size: Mutation perturbation magnitude (scalar or per-dimension tensor)
         """
-        self.perturb_size = perturb_size
+        super().__init__(output_spec, perturb_size)
 
-    def mutate(self, input_tensor, model, activations=None, label=None):
+    def mutate(self, input_tensor, model, activations=None, rows=None):
         """Apply FGSM gradient-based perturbation (single-step).
         
         Args:
             input_tensor: Seed input tensor
-            model: Model for gradient computation
+            model: Inner network for gradient computation
             activations: Activations from previous inference (unused)
-            label: Ground truth label (unused by FGSM, kept for interface consistency)
+            rows: [B] int64 — spec row backing each batch lane
         """
         # Enable gradients
         x = input_tensor.clone().detach().requires_grad_(True)
 
-        # Forward pass
-        output = model(x)
-
-        # Extract output tensor if dict (from VerifiableModel)
-        if isinstance(output, dict):
-            output = output['output']
-
-        # Compute loss: maximize output variance (unsupervised, label-free)
-        loss = output.var()
+        loss = self._severity_sum(x, model, rows)
 
         # Get gradient w.r.t. input only (avoid accumulating grads on model params)
         grad = torch.autograd.grad(loss, x, retain_graph=False, create_graph=False)[0].detach()
@@ -160,7 +213,7 @@ class FGSMMutation(MutationStrategy):
         return input_tensor + perturbation
 
 
-class PGDMutation(MutationStrategy):
+class PGDMutation(GradientMutation):
     """
     PGD-style gradient-guided mutation (iterative).
 
@@ -169,15 +222,12 @@ class PGDMutation(MutationStrategy):
     - Optional random start within the feasible box
     - Iterative sign-gradient ascent with projection back to the feasible box
 
-    Loss Function:
-    - If label is provided: Cross-entropy loss (adversarial attack, more effective for counterexamples)
-    - If label is None: Output variance (unsupervised exploration)
-
     Note: Global InputSpec constraints are enforced by MutationEngine projection after mutation.
     """
 
     def __init__(
         self,
+        output_spec: OutputSpec,
         perturb_size: Union[float, torch.Tensor] = 8/255,
         num_steps: int = 50,
         step_size: Optional[float] = None,
@@ -187,25 +237,25 @@ class PGDMutation(MutationStrategy):
         Initialize PGD mutation.
 
         Args:
+            output_spec: Property to attack (supplies the ascent objective)
             perturb_size: L_infinity radius of local feasible box around the seed (scalar or per-dimension tensor)
             num_steps: Number of PGD iterations
             step_size: Per-iteration step size (if None, computed from feasible box range / steps as in notebook)
             random_start: Whether to start uniformly within the feasible box (recommended)
         """
-        self.perturb_size = perturb_size
+        super().__init__(output_spec, perturb_size)
         self.num_steps = int(num_steps)
         self.step_size = step_size
         self.random_start = random_start
 
-    def mutate(self, input_tensor, model, activations=None, label=None):
+    def mutate(self, input_tensor, model, activations=None, rows=None):
         """Apply PGD mutation.
         
         Args:
             input_tensor: Seed input tensor [B, C, H, W] or [1, C, H, W]
-            model: Model for gradient computation
+            model: Inner network for gradient computation
             activations: Activations from previous inference (unused by PGD)
-            label: Tensor[B] int64, -1 = no label. Uses cross-entropy loss when
-                   any label >= 0, otherwise maximizes output variance.
+            rows: [B] int64 — spec row backing each batch lane
         
         Returns:
             Adversarially perturbed input tensor [B, C, H, W]
@@ -237,34 +287,7 @@ class PGDMutation(MutationStrategy):
         for _ in range(self.num_steps):
             x_adv.requires_grad_(True)
 
-            # Forward pass
-            output = model(x_adv)
-
-            # Extract output tensor if dict (from VerifiableModel)
-            if isinstance(output, dict):
-                output = output['output']
-
-            # Loss selection based on label availability
-            # label is a Tensor[B] int64, -1 = no label
-            label_tensor = label if isinstance(label, torch.Tensor) else None
-            has_labels = label_tensor is not None and bool((label_tensor >= 0).any().item())
-            if has_labels and label_tensor is not None:
-                # CW-style margin loss: maximize (max_{j != target} z_j - z_target).
-                # More directed than cross-entropy for TOP1/MARGIN robustness - its
-                # gradient does not vanish once the target probability is small, so
-                # it keeps climbing toward narrow, small-margin violations that an
-                # unbounded-CE ascent stalls before.
-                assert output.dim() >= 2, (
-                    f"Model output should have batch dimension, got shape {output.shape}. "
-                    f"Ensure model outputs include batch dimension."
-                )
-                target = label_tensor.clamp(min=0).to(output.device).view(-1, 1)
-                tgt_logit = output.gather(1, target).squeeze(1)
-                other = output.scatter(1, target, float("-inf"))
-                loss = (other.max(dim=1).values - tgt_logit).sum()
-            else:
-                # If no label is provided, maximize output variance
-                loss = output.var()
+            loss = self._severity_sum(x_adv, model, rows)
 
             grad = torch.autograd.grad(loss, x_adv, retain_graph=False, create_graph=False)[0].detach()
 
@@ -295,14 +318,14 @@ class ActivationMutation(MutationStrategy):
         """
         self.perturb_size = perturb_size
     
-    def mutate(self, input_tensor, model, activations=None, label=None):
+    def mutate(self, input_tensor, model, activations=None, rows=None):
         """Apply activation-guided perturbation.
         
         Args:
             input_tensor: Seed input tensor
             model: Model (unused)
             activations: Activations from previous inference (unused currently)
-            label: Ground truth label (unused, kept for interface consistency)
+            rows: Spec rows (unused, kept for interface consistency)
         """
         # Random direction (future: weight by inactive neurons)
         direction = torch.randn_like(input_tensor)
@@ -332,14 +355,14 @@ class BoundaryMutation(MutationStrategy):
         """
         self.perturb_size = perturb_size
     
-    def mutate(self, input_tensor, model, activations=None, label=None):
+    def mutate(self, input_tensor, model, activations=None, rows=None):
         """Push toward boundaries (will be projected by engine).
         
         Args:
             input_tensor: Seed input tensor
             model: Model (unused)
             activations: Activations (unused)
-            label: Ground truth label (unused, kept for interface consistency)
+            rows: Spec rows (unused, kept for interface consistency)
         """
         # Random direction
         direction = torch.sign(torch.randn_like(input_tensor))
@@ -364,14 +387,14 @@ class RandomMutation(MutationStrategy):
         """
         self.perturb_size = perturb_size
     
-    def mutate(self, input_tensor, model, activations=None, label=None):
+    def mutate(self, input_tensor, model, activations=None, rows=None):
         """Apply random Gaussian noise.
         
         Args:
             input_tensor: Seed input tensor
             model: Model (unused)
             activations: Activations (unused)
-            label: Ground truth label (unused, kept for interface consistency)
+            rows: Spec rows (unused, kept for interface consistency)
         """
         # Handle both scalar and tensor perturb_size
         perturb_size = self.perturb_size.to(input_tensor.device) if isinstance(self.perturb_size, torch.Tensor) else self.perturb_size
@@ -405,25 +428,45 @@ class MutationEngine:
         Initialize mutation engine.
         
         Args:
-            model: VerifiableModel (or core model) for gradient computation
+            model: VerifiableModel for gradient computation. Hooks are registered
+                across its whole module tree, but the gradient strategies attack
+                its inner network (see :meth:`_resolve_attack_target`).
             input_spec: InputSpec for constraint projection (batched bounds from model synthesis)
             weights: Strategy weights (e.g., {"gradient": 0.4, "random": 0.1})
             perturb_mode: Perturbation size computation mode ("adaptive_scalar", "adaptive_perdim", "fixed")
             perturb_scale: Fraction of range per mutation perturbation (e.g., 0.1 = 10% = ~10 steps to traverse)
+        
+        Raises:
+            TypeError: If ``model`` is not a VerifiableModel.
+            ValueError: If ``model`` carries no OutputSpec, or weights are invalid.
         """
         self.model = model
+        self.attack_model, self.output_spec = self._resolve_attack_target(model)
         self.input_spec = input_spec
         self.device = get_default_device()
         self.perturb_mode = perturb_mode
         self.perturb_scale = perturb_scale
         
-        # Compute perturb_size based on mode
-        perturb_size = self._compute_adaptive_perturb_size()
+        valid_perturb_modes = {"adaptive_scalar", "adaptive_perdim", "fixed"}
+        if self.perturb_mode not in valid_perturb_modes:
+            raise ValueError(
+                f"Unknown perturb_mode: {self.perturb_mode}. "
+                "Valid options: 'adaptive_scalar', 'adaptive_perdim', 'fixed'"
+            )
+
+        # Adaptive modes replace this placeholder with the dynamic per-seed
+        # schedule before the selected strategy is used. Fixed mode retains its
+        # range-aware baseline; without an InputSpec, 0.01 remains the fallback.
+        perturb_size = (
+            self._compute_fixed_perturb_size()
+            if self.perturb_mode == "fixed" or self.input_spec is None
+            else 0.0
+        )
         
         # Initialize strategies with computed perturb_size
         self.strategies = {
-            "gradient": FGSMMutation(perturb_size=perturb_size),
-            "pgd": PGDMutation(perturb_size=perturb_size),
+            "gradient": FGSMMutation(self.output_spec, perturb_size=perturb_size),
+            "pgd": PGDMutation(self.output_spec, perturb_size=perturb_size),
             "activation": ActivationMutation(perturb_size=perturb_size),
             "boundary": BoundaryMutation(perturb_size=perturb_size),
             "random": RandomMutation(perturb_size=perturb_size),
@@ -451,41 +494,50 @@ class MutationEngine:
         # Setup hooks for activation capture
         self._setup_hooks()
     
-    def _compute_adaptive_perturb_size(self) -> Union[float, torch.Tensor]:
-        """
-        Compute perturb_size based on InputSpec bounds and perturb_mode.
+    @staticmethod
+    def _resolve_attack_target(model: nn.Module) -> tuple[nn.Module, OutputSpec]:
+        """Split a wrapped model into the network to attack and the property to attack it with.
         
-        Note: We use "perturb_size" to avoid confusion with InputSpec.eps (L∞ radius constraint).
+        The gradient strategies attack the INNER network rather than the
+        VerifiableModel wrapper. ``InputLayer`` and ``InputSpecLayer`` are tensor
+        pass-throughs, so the logits are identical, but every wrapper forward runs
+        ``.sum().item()`` in each spec-layer branch — roughly 4 CUDA syncs that PGD
+        would otherwise pay ``num_steps`` times per mutation. Coverage hooks are
+        unaffected: they are registered across the whole module tree, and the
+        inner network is part of it.
+        
+        Args:
+            model: VerifiableModel from model synthesis.
         
         Returns:
-            - float: Scalar perturb_size (for "adaptive_scalar" or "fixed" modes)
-            - torch.Tensor: Per-dimension perturb_size (for "adaptive_perdim" mode)
+            Tuple of (inner network returning logits, output property to ascend).
         
-        Algorithm:
-            1. adaptive_scalar: perturb_size = mean(ub - lb) * perturb_scale
-               - Single perturb_size value computed from mean range
-               - Best for uniform ranges (e.g., VNNLib BOX constraints)
-            
-            2. adaptive_perdim: perturb_size = (ub - lb) * perturb_scale
-               - Tensor of perturb_size values, one per dimension
-               - Best for non-uniform ranges (different feature scales)
-            
-            3. fixed: Computes perturb_size from mean range (range-aware)
-               - perturb_size = mean(ub - lb)
-               - Uses the average feasible range as perturbation size
-        
-        Interpretation:
-            perturb_scale represents the fraction of range each perturbation covers.
-            steps_to_traverse = 1 / perturb_scale
-            
-            Examples:
-                - perturb_scale=0.1  → 10% per perturbation → ~10 steps to traverse
-                - perturb_scale=0.2  → 20% per perturbation → ~5 steps to traverse
-                - perturb_scale=0.05 → 5% per perturbation  → ~20 steps to traverse
+        Raises:
+            TypeError: If ``model`` is not a VerifiableModel, so no inner network
+                and no property can be identified.
+            ValueError: If the wrapper carries no OutputSpec; the gradient
+                strategies have no objective without one.
         """
-        
+        if not isinstance(model, VerifiableModel):
+            raise TypeError(
+                f"MutationEngine requires a VerifiableModel to source the attack "
+                f"objective, got {type(model).__name__}."
+            )
+        output_spec = model.output_spec.spec
+        if output_spec is None:
+            raise ValueError(
+                "MutationEngine requires an OutputSpec: the gradient strategies "
+                "ascend its violation severity."
+            )
+        return model.model, output_spec
+    
+    def _compute_fixed_perturb_size(self) -> float:
+        """Return the range-aware perturbation baseline used by fixed mode."""
         if self.input_spec is None:
-            print(f"[MutationEngine] No InputSpec provided, falling back to fixed perturb_size=0.01")
+            print(
+                "[MutationEngine] No InputSpec provided, falling back to "
+                "fixed perturb_size=0.01"
+            )
             return 0.01
         
         # Extract bounds based on InputSpec kind
@@ -507,48 +559,14 @@ class MutationEngine:
         elif self.input_spec.kind == InKind.LP_EMBEDDING:
             lb, ub = self.input_spec.materialize_box_seed()
         else:
-            print(f"[MutationEngine] Unsupported InputSpec kind '{self.input_spec.kind}', falling back to fixed perturb_size=0.01")
+            print(
+                f"[MutationEngine] Unsupported InputSpec kind "
+                f"'{self.input_spec.kind}', falling back to fixed "
+                "perturb_size=0.01"
+            )
             return 0.01
-        
-        # Compute range for perturbation scaling
-        range_tensor = ub - lb
-        
-        # Range-aware fixed mode: use mean range as perturb_size
-        if self.perturb_mode == "fixed":
-            return (ub - lb).mean().item()
-        
-        # Compute single perturb_size from mean range
-        if self.perturb_mode == "adaptive_scalar":
-            mean_range = range_tensor.mean().item()
-            perturb_size = mean_range * self.perturb_scale
-            
-            print(f"[MutationEngine] Adaptive Scalar Perturbation Size:")
-            print(f"  - perturb_scale: {self.perturb_scale} (fraction of range per perturbation)")
-            print(f"  - mean_range: {mean_range:.6f}")
-            print(f"  - computed perturb_size: {perturb_size:.6f}")
-            print(f"  - steps_to_traverse: ~{1/self.perturb_scale:.1f} steps")
-            print(f"  - interpretation: Each mutation perturbation covers {self.perturb_scale*100:.1f}% of the range")
-            
-            return perturb_size
-        
-        # Compute per-dimension perturb_size tensor
-        elif self.perturb_mode == "adaptive_perdim":
-            perturb_size_tensor = range_tensor * self.perturb_scale
-            
-            print(f"[MutationEngine] Adaptive Per-Dimension Perturbation Size:")
-            print(f"  - perturb_scale: {self.perturb_scale} (fraction of range per perturbation)")
-            print(f"  - range shape: {range_tensor.shape}")
-            print(f"  - perturb_size shape: {perturb_size_tensor.shape}")
-            print(f"  - perturb_size range: [{perturb_size_tensor.min().item():.6f}, {perturb_size_tensor.max().item():.6f}]")
-            print(f"  - perturb_size mean: {perturb_size_tensor.mean().item():.6f}")
-            print(f"  - steps_to_traverse: ~{1/self.perturb_scale:.1f} steps per dimension")
-            print(f"  - interpretation: Each mutation perturbation covers {self.perturb_scale*100:.1f}% of each dimension's range")
-            
-            return perturb_size_tensor
-        
-        else:
-            raise ValueError(f"Unknown perturb_mode: {self.perturb_mode}. "
-                           f"Valid options: 'adaptive_scalar', 'adaptive_perdim', 'fixed'")
+
+        return (ub - lb).mean().item()
     
     def _setup_hooks(self):
         """Setup forward hooks to capture activations."""
@@ -575,7 +593,7 @@ class MutationEngine:
         for gradient-based strategies (FGSM/PGD).
         
         Args:
-            seeds: FuzzingSeed batch with .tensor [B,C,H,W] and .label [B] int64 (-1=no label)
+            seeds: FuzzingSeed batch with .tensor [B,C,H,W] and .original_index [B] int64
         
         Returns:
             Mutated tensor [B, C, H, W] satisfying InputSpec constraints
@@ -587,7 +605,10 @@ class MutationEngine:
         
         # Use batch tensor directly: [B, C, H, W]
         batch_input = seeds.tensor.to(self.device)
-        labels = seeds.label.to(self.device)
+        # Spec row backing each lane. The corpus samples WITH REPLACEMENT, so
+        # lane i is not spec row i; identity rows would attack another
+        # instance's property (and gather another instance's bounds below).
+        rows = seeds.original_index.to(self.device)
         
         # Select strategy (same for all samples)
         strategy_names = list(self.weights.keys())
@@ -616,8 +637,11 @@ class MutationEngine:
                     _lb = self.input_spec.lb.to(self.device)
                     _ub = self.input_spec.ub.to(self.device)
                 if _lb.shape[0] > 1:
-                    _ix = seeds.original_index.clamp(max=_lb.shape[0] - 1).to(self.device)
-                    _lb, _ub = _lb[_ix], _ub[_ix]
+                    assert bool((rows < _lb.shape[0]).all()), (
+                        f"original_index out of range for InputSpec bounds: "
+                        f"max={int(rows.max().item())} >= {_lb.shape[0]} rows"
+                    )
+                    _lb, _ub = _lb[rows], _ub[rows]
                 elif _lb.shape[0] == 1 and B > 1:
                     _lb = _lb.expand(B, *_lb.shape[1:])
                     _ub = _ub.expand(B, *_ub.shape[1:])
@@ -635,9 +659,9 @@ class MutationEngine:
         # Apply mutation
         mutated = strategy.mutate(
             batch_input,
-            self.model,
+            self.attack_model,
             self.activation_map,
-            label=labels
+            rows=rows
         )
         
         # Project to InputSpec constraints
@@ -688,7 +712,11 @@ class MutationEngine:
             
             # bounds: use seeds.original_index to gather correct bounds
             if lb.shape[0] > 1 and seeds is not None:
-                indices = seeds.original_index.clamp(max=lb.shape[0] - 1).to(lb.device)
+                indices = seeds.original_index.to(lb.device)
+                assert bool((indices < lb.shape[0]).all()), (
+                    f"original_index out of range for InputSpec bounds: "
+                    f"max={int(indices.max().item())} >= {lb.shape[0]} rows"
+                )
                 lb = lb[indices]  # (B, ...) vectorized gather
                 ub = ub[indices]
             elif lb.shape[0] == 1 and B > 1:

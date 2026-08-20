@@ -464,6 +464,7 @@ class ACTFuzzer:
             energy=energies,
             depth=seeds.depth + 1,
             parent_id=seeds.id,
+            select_count=seeds.select_count,
         )
         self.seed_corpus.add(child_seeds, interesting_mask)
 

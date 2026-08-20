@@ -239,7 +239,7 @@ class SeedCorpus:
         self._depths = torch.cat([self._depths, seeds.depth[idx]])
         self._ids = torch.cat([self._ids, seeds.id[idx]])
         self._parent_ids = torch.cat([self._parent_ids, seeds.parent_id[idx]])
-        self._select_counts = torch.cat([self._select_counts, torch.zeros(len(keep), dtype=torch.long, device=self._device)])
+        self._select_counts = torch.cat([self._select_counts, seeds.select_count[idx]])
     
     def __len__(self) -> int:
         """Return corpus size."""

@@ -280,9 +280,12 @@ def _build_batched_model(
     return vm
 
 
-def synthesize_models_from_specs(
+def synthesize_models_and_seeds_from_specs(
     spec_results: List[Tuple[str, str, nn.Module, List[LabeledInputTensor], List[Tuple[InputSpec, OutputSpec]]]]
-) -> Dict[Tuple[str, str, str, str], nn.Module]:
+) -> Tuple[
+    Dict[Tuple[str, str, str, str], nn.Module],
+    Dict[Tuple[str, str, str, str], List[LabeledInputTensor]],
+]:
     """
     Synthesize wrapped models with automatic batching.
     
@@ -294,7 +297,8 @@ def synthesize_models_from_specs(
                               labeled_tensors, spec_pairs)
     
     Returns:
-        synthesis_models: Dict[(dataset, model, in_kind, out_kind), VerifiableModel]
+        A pair containing synthesized models and their spec-row-aligned seeds,
+        both keyed by (dataset, model, in_kind, out_kind).
     """
     from collections import defaultdict
     
@@ -341,6 +345,9 @@ def synthesize_models_from_specs(
     # Synthesis Loop: Build batched models from grouped specs
     # -------------------------------------------------------------------------
     synthesis_models: Dict[Tuple[str, str, str, str], nn.Module] = {}
+    synthesis_seeds: Dict[
+        Tuple[str, str, str, str], List[LabeledInputTensor]
+    ] = {}
     disjunct_counter: Dict[Tuple[str, str, str, str], int] = defaultdict(int)
     for gkey, grouped_specs in groups.items():
         data_src, mid, in_kind, out_kind, _cd_sig = gkey
@@ -357,6 +364,7 @@ def synthesize_models_from_specs(
             display_key = (data_src, f"{rep_name}#d{idx}", in_kind, out_kind)
         vm = _build_batched_model(display_key, grouped_specs, pytorch_model)
         synthesis_models[display_key] = vm
+        synthesis_seeds[display_key] = [item[0] for item in grouped_specs]
     
     # -------------------------------------------------------------------------
     # Summary: Print statistics and return results
@@ -366,7 +374,15 @@ def synthesize_models_from_specs(
     print(f"\n🎉 Synthesis Complete:")
     print(f"   Total specs: {total_specs}")
     print(f"   Wrapped models: {len(synthesis_models)}")
-    return synthesis_models 
+    return synthesis_models, synthesis_seeds
+
+
+def synthesize_models_from_specs(
+    spec_results: List[Tuple[str, str, nn.Module, List[LabeledInputTensor], List[Tuple[InputSpec, OutputSpec]]]]
+) -> Dict[Tuple[str, str, str, str], nn.Module]:
+    """Synthesize wrapped models with automatic batching."""
+    synthesis_models, _ = synthesize_models_and_seeds_from_specs(spec_results)
+    return synthesis_models
 
 
 # -----------------------------------------------------------------------------
