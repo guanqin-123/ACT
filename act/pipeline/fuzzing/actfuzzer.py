@@ -14,7 +14,6 @@ from typing import List, Dict, Optional, Tuple, Any, cast
 import os
 import time
 import json
-import yaml
 import torch
 import torch.nn as nn
 from pathlib import Path
@@ -106,6 +105,20 @@ class FuzzingConfig:
     # Stop as soon as the first counterexample is found (for a fast pre-attack:
     # total_time then measures time-to-first-counterexample). Default off.
     stop_on_first_violation: bool = False
+
+    # Tensor dtype for the pipeline tier. See act/config/pipeline.yaml for why
+    # this deliberately differs from the back_end tier.
+    dtype: str = "float32"
+
+    # Independent PGD random starts per mutation; the best lane-wise result
+    # wins and restarts stop early once every lane violates. 1 = single start,
+    # i.e. no extra cost.
+    pgd_restarts: int = 1
+
+    # Used instead of pgd_restarts once sign estimators are installed, which
+    # only happens on a binarized network. Restarts alternate the estimator
+    # between its loose and tight eps.
+    pgd_restarts_binarized: int = 40
 
     def __post_init__(self):
         """Normalize output_dir to Path object."""
@@ -295,6 +308,8 @@ class ACTFuzzer:
             weights=self.config.mutation_weights,
             perturb_mode=self.config.perturb_mode,
             perturb_scale=self.config.perturb_scale,
+            pgd_restarts=self.config.pgd_restarts,
+            pgd_restarts_binarized=self.config.pgd_restarts_binarized,
         )
         self.coverage_tracker = CoverageTracker(
             model=self.model,
@@ -503,13 +518,6 @@ class ACTFuzzer:
                     )
 
         self.iterations = start_iteration + batch_size
-
-    def _compute_energy(self, coverage_delta: float, found_violation: bool) -> float:
-        """Compute seed energy (higher = more interesting)."""
-        energy = coverage_delta * 10.0
-        if found_violation:
-            energy += 100.0  # Violations are very interesting
-        return max(energy, 0.1)  # Minimum energy
 
     def _print_progress(self, iteration: int):
         """Print fuzzing progress with incremental counterexample count."""

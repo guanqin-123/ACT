@@ -60,6 +60,9 @@ _FUZZ_OVERRIDE_SPEC: list[tuple[str, str, str, Any]] = [
     ("trace_storage", "--trace-storage", "trace_storage", str),
     ("trace_output", "--trace-output", "trace_output", Path),
     ("stop_on_first_violation", "--stop-on-first-violation", "stop_on_first_violation", bool),
+    ("dtype", "--dtype", "dtype", str),
+    ("pgd_restarts", "--pgd-restarts", "pgd_restarts", int),
+    ("pgd_restarts_binarized", "--pgd-restarts-binarized", "pgd_restarts_binarized", int),
 ]
 
 
@@ -149,6 +152,18 @@ def _add_fuzz_config_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Stop after the first counterexample (default: from config.yaml/FuzzingConfig default)",
     )
+    group.add_argument(
+        "--pgd-restarts",
+        type=int,
+        default=None,
+        help="PGD random starts per mutation (default: from config.yaml)",
+    )
+    group.add_argument(
+        "--pgd-restarts-binarized",
+        type=int,
+        default=None,
+        help="PGD random starts per mutation on binarized networks (default: from config.yaml)",
+    )
 
 
 def _collect_fuzzing_overrides(args: Any) -> dict[str, Any]:
@@ -232,6 +247,8 @@ def _collect_pipeline_config_overrides(args: Any) -> dict[str, Any]:
 
 def _apply_pipeline_config_defaults(args: Any) -> PipelineConfig:
     config = PipelineConfig.from_yaml(**_collect_pipeline_config_overrides(args))
+    if getattr(args, "dtype", None) is None:
+        args.dtype = FuzzingConfig.from_yaml().dtype
     args.bab_solver_tier = config.bab.solver_tier
     args.bab_max_depth = config.bab.max_depth
     args.bab_max_nodes = config.bab.max_nodes
@@ -1739,7 +1756,7 @@ Examples:
     )
 
     # Add standard device/dtype arguments (shared across all ACT CLIs)
-    add_device_args(parser)
+    add_device_args(parser, default_dtype=None)
 
     _add_fuzz_config_args(parser)
 

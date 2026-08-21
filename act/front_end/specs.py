@@ -277,6 +277,10 @@ class OutputSpec:
     SLICEABLE_PARAM_KEYS: ClassVar[tuple[str, ...]] = (
         "y_true", "margin", "c", "d", "lb", "ub", "C", "thresholds"
     )
+    # Kinds whose unsafe set is closed, so severity == 0 already violates.
+    CLOSED_KINDS: ClassVar[frozenset[str]] = frozenset(
+        {OutKind.TOP1_ROBUST, OutKind.MARGIN_ROBUST, OutKind.UNSAFE_LINEAR}
+    )
 
     kind: str
     c: Optional[torch.Tensor] = None
@@ -702,6 +706,119 @@ class OutputSpec:
             d_rows = d
         return slack - d_rows
 
+    def severity(
+        self,
+        y: torch.Tensor,
+        rows: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Score how badly ``y`` breaks this property, without deciding it.
+
+        ``severity`` is a signed violation margin that doubles as an attack
+        objective: it grows monotonically with how badly the property is
+        broken, so ascending it drives an input toward a violation.
+
+        =============== ====================================
+        kind            severity
+        =============== ====================================
+        TOP1_ROBUST     ``max_{j != t} z_j - z_t``
+        MARGIN_ROBUST   ``m - (z_t - max_{j != t} z_j)``
+        RANGE           ``max(max_k(lb_k - z_k),
+                        max_k(z_k - ub_k))``
+        LINEAR_LE       ``max_i (c_i . z - d_i)``
+        UNSAFE_LINEAR   ``-max_i (c_i . z - d_i)``
+        =============== ====================================
+
+        This is the gradient-guidance entry point, deliberately separated from
+        :meth:`violation` so an attack may score a tensor that is *not* the
+        model's declared output — for instance pre-softmax logits, whose
+        ranking matches the saturating softmax but whose gradient does not
+        vanish. Scoring such a surrogate tensor is sound only for kinds that
+        depend on ``z`` through its ranking alone; kinds that constrain output
+        *values* (``RANGE``, ``LINEAR_LE``, ``UNSAFE_LINEAR``) must be scored
+        on the real output. Callers own that choice. The violation DECISION
+        always stays with :meth:`violation` on the real output.
+
+        Args:
+            y: Tensor to score. The leading axis is the batch axis; any
+                trailing axes are flattened, so ``[B, n_out]`` and
+                ``[B, ...]`` are both accepted.
+            rows: Long tensor of length ``B`` where ``rows[i]`` is the spec row
+                backing batch lane ``i``. ``None`` means identity, lane ``i``
+                <-> row ``i``.
+
+        Returns:
+            Float tensor of shape ``[B]``.
+
+        Raises:
+            ValueError: If fields required by ``self.kind`` are missing, a
+                gathered field cannot be aligned to the ``B`` lanes, or
+                ``self.kind`` is not one of the five supported output kinds.
+        """
+        z = y.reshape(y.shape[0], -1)
+        batch_size = z.shape[0]
+        if rows is not None:
+            rows = rows.to(device=z.device, dtype=torch.long).reshape(-1)
+            if rows.numel() != batch_size:
+                raise ValueError(
+                    f"rows length {rows.numel()} != batch size {batch_size}"
+                )
+
+        if self.kind == OutKind.TOP1_ROBUST:
+            if self.y_true is None:
+                raise ValueError("TOP1_ROBUST requires y_true")
+            params = self._gather_rows(
+                rows, batch_size, z.device, z.dtype, {"y_true": 0}
+            )
+            target = params["y_true"].reshape(-1).to(torch.long)
+            return self._runner_up_gap(z, target)
+
+        elif self.kind == OutKind.MARGIN_ROBUST:
+            if self.y_true is None or self.margin is None:
+                raise ValueError("MARGIN_ROBUST requires both y_true and margin")
+            params = self._gather_rows(
+                rows, batch_size, z.device, z.dtype, {"y_true": 0, "margin": 0}
+            )
+            target = params["y_true"].reshape(-1).to(torch.long)
+            # m - (z_t - max_other) == m + (max_other - z_t) == m + gap.
+            return params["margin"].reshape(-1) + self._runner_up_gap(z, target)
+
+        elif self.kind == OutKind.RANGE:
+            if self.lb is None and self.ub is None:
+                raise ValueError("RANGE requires lb and/or ub")
+            params = self._gather_rows(
+                rows, batch_size, z.device, z.dtype, {"lb": 1, "ub": 1}
+            )
+            sides: List[torch.Tensor] = []
+            if "lb" in params:
+                sides.append((params["lb"] - z).max(dim=1).values)
+            if "ub" in params:
+                sides.append((z - params["ub"]).max(dim=1).values)
+            return sides[0] if len(sides) == 1 else torch.maximum(*sides)
+
+        elif self.kind == OutKind.LINEAR_LE:
+            if self.c is None or self.d is None:
+                raise ValueError("LINEAR_LE requires both c and d")
+            params = self._gather_rows(
+                rows, batch_size, z.device, z.dtype, {"c": 2, "d": 1}
+            )
+            slack = self._linear_row_slack(z, params["c"], params["d"])
+            # Conjunction: certified iff EVERY row holds, so the worst row wins.
+            return slack.max(dim=1).values
+
+        elif self.kind == OutKind.UNSAFE_LINEAR:
+            if self.c is None or self.d is None:
+                raise ValueError("UNSAFE_LINEAR requires both c and d")
+            params = self._gather_rows(
+                rows, batch_size, z.device, z.dtype, {"c": 2, "d": 1}
+            )
+            slack = self._linear_row_slack(z, params["c"], params["d"])
+            return -slack.max(dim=1).values
+
+        raise ValueError(
+            f"Unsupported output kind {self.kind!r}. Supported: "
+            f"LINEAR_LE, UNSAFE_LINEAR, TOP1_ROBUST, MARGIN_ROBUST, RANGE."
+        )
+
     def violation(
         self,
         y: torch.Tensor,
@@ -716,31 +833,18 @@ class OutputSpec:
         (``bab.check_violations_batched`` deliberately keeps a tolerance — it
         validates LP-solver candidates, where numerical slop is expected.)
 
-        ``severity`` is a signed violation margin that doubles as an attack
-        objective: it grows monotonically with how badly the property is
-        broken, so ascending it drives an input toward a violation.
-
-        =============== ==================================== ==========
-        kind            severity                             violated
-        =============== ==================================== ==========
-        TOP1_ROBUST     ``max_{j != t} z_j - z_t``           ``>= 0``
-        MARGIN_ROBUST   ``m - (z_t - max_{j != t} z_j)``     ``>= 0``
-        RANGE           ``max(max_k(lb_k - z_k),
-                        max_k(z_k - ub_k))``                 ``> 0``
-        LINEAR_LE       ``max_i (c_i . z - d_i)``            ``> 0``
-        UNSAFE_LINEAR   ``-max_i (c_i . z - d_i)``           ``>= 0``
-        =============== ==================================== ==========
-
-        ``TOP1_ROBUST``, ``MARGIN_ROBUST`` and ``UNSAFE_LINEAR`` compare with
-        ``>=`` rather than ``>``. For ``TOP1_ROBUST`` an exact tie already
-        falsifies the strict ``z_t > z_j`` requirement, and ``MARGIN_ROBUST``
-        is the same requirement shifted by ``m`` — a separation of exactly
-        ``m`` already falsifies it. Both match ``bab.check_violations_batched``
-        and ``encode_linear`` (whose ``thresholds`` are ``0`` and ``-m``
+        The magnitude comes from :meth:`severity`; this method adds only the
+        decision. ``TOP1_ROBUST``, ``MARGIN_ROBUST`` and ``UNSAFE_LINEAR``
+        compare with ``>=`` rather than ``>`` (see :attr:`CLOSED_KINDS`). For
+        ``TOP1_ROBUST`` an exact tie already falsifies the strict
+        ``z_t > z_j`` requirement, and ``MARGIN_ROBUST`` is the same
+        requirement shifted by ``m`` — a separation of exactly ``m`` already
+        falsifies it. Both match ``bab.check_violations_batched`` and
+        ``encode_linear`` (whose ``thresholds`` are ``0`` and ``-m``
         respectively, certified iff the row max is strictly below the
-        threshold). For ``UNSAFE_LINEAR``: its unsafe
-        set is the *closed* polytope ``(C z <= d).all()``, so a lane sitting
-        exactly on a face is already unsafe.
+        threshold). For ``UNSAFE_LINEAR``: its unsafe set is the *closed*
+        polytope ``(C z <= d).all()``, so a lane sitting exactly on a face is
+        already unsafe.
 
         Note:
             ``argmax`` breaks ties toward the lowest index, so on an exact
@@ -766,82 +870,8 @@ class OutputSpec:
                 gathered field cannot be aligned to the ``B`` lanes, or
                 ``self.kind`` is not one of the five supported output kinds.
         """
-        z = y.reshape(y.shape[0], -1)
-        batch_size = z.shape[0]
-        if rows is not None:
-            rows = rows.to(device=z.device, dtype=torch.long).reshape(-1)
-            if rows.numel() != batch_size:
-                raise ValueError(
-                    f"rows length {rows.numel()} != batch size {batch_size}"
-                )
-
-        if self.kind == OutKind.TOP1_ROBUST:
-            if self.y_true is None:
-                raise ValueError("TOP1_ROBUST requires y_true")
-            params = self._gather_rows(
-                rows, batch_size, z.device, z.dtype, {"y_true": 0}
-            )
-            target = params["y_true"].reshape(-1).to(torch.long)
-            severity = self._runner_up_gap(z, target)
-            # ``>=`` (not ``>``) — a tie falsifies strict ``z_t > z_j``. Matches
-            # bab.check_violations_batched and encode_linear; argmax cannot.
-            violated = severity >= 0
-
-        elif self.kind == OutKind.MARGIN_ROBUST:
-            if self.y_true is None or self.margin is None:
-                raise ValueError("MARGIN_ROBUST requires both y_true and margin")
-            params = self._gather_rows(
-                rows, batch_size, z.device, z.dtype, {"y_true": 0, "margin": 0}
-            )
-            target = params["y_true"].reshape(-1).to(torch.long)
-            # m - (z_t - max_other) == m + (max_other - z_t) == m + gap.
-            severity = params["margin"].reshape(-1) + self._runner_up_gap(z, target)
-            # ``>=`` (not ``>``) — the separation must be strictly greater than
-            # the margin, so gap == -m already falsifies it. Matches
-            # bab.check_violations_batched and encode_linear.
-            violated = severity >= 0
-
-        elif self.kind == OutKind.RANGE:
-            if self.lb is None and self.ub is None:
-                raise ValueError("RANGE requires lb and/or ub")
-            params = self._gather_rows(
-                rows, batch_size, z.device, z.dtype, {"lb": 1, "ub": 1}
-            )
-            sides: List[torch.Tensor] = []
-            if "lb" in params:
-                sides.append((params["lb"] - z).max(dim=1).values)
-            if "ub" in params:
-                sides.append((z - params["ub"]).max(dim=1).values)
-            severity = sides[0] if len(sides) == 1 else torch.maximum(*sides)
-            violated = severity > 0
-
-        elif self.kind == OutKind.LINEAR_LE:
-            if self.c is None or self.d is None:
-                raise ValueError("LINEAR_LE requires both c and d")
-            params = self._gather_rows(
-                rows, batch_size, z.device, z.dtype, {"c": 2, "d": 1}
-            )
-            slack = self._linear_row_slack(z, params["c"], params["d"])
-            # Conjunction: certified iff EVERY row holds, so the worst row wins.
-            severity = slack.max(dim=1).values
-            violated = severity > 0
-
-        elif self.kind == OutKind.UNSAFE_LINEAR:
-            if self.c is None or self.d is None:
-                raise ValueError("UNSAFE_LINEAR requires both c and d")
-            params = self._gather_rows(
-                rows, batch_size, z.device, z.dtype, {"c": 2, "d": 1}
-            )
-            slack = self._linear_row_slack(z, params["c"], params["d"])
-            severity = -slack.max(dim=1).values
-            # Closed unsafe polytope (C z <= d).all(): a lane on a face is
-            # already unsafe, hence >= rather than >.
-            violated = severity >= 0
-
-        else:
-            raise ValueError(
-                f"Unsupported output kind {self.kind!r}. Supported: "
-                f"LINEAR_LE, UNSAFE_LINEAR, TOP1_ROBUST, MARGIN_ROBUST, RANGE."
-            )
-
+        severity = self.severity(y, rows=rows)
+        violated = (
+            severity >= 0 if self.kind in self.CLOSED_KINDS else severity > 0
+        )
         return violated, severity
