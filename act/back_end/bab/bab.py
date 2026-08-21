@@ -2350,19 +2350,18 @@ def _test_check_violations_batched_per_kind():  # pragma: no cover
     expected_top1 = y.argmax(dim=1) != y_true_top1
     assert torch.equal(check_violations_batched(net, y, top1), expected_top1)
 
-    margin = _make_assert_layer(
-        OutKind.MARGIN_ROBUST,
-        {
-            "y_true": torch.tensor([0, 0, 1, 1, 2, 2, 3, 3]),
-            "margin": torch.full((n_batch,), 1.5, dtype=y.dtype),
-        },
-        n_out,
+    margin_spec = OutputSpec(
+        kind=OutKind.MARGIN_ROBUST,
+        y_true=torch.tensor([0, 0, 1, 1, 2, 2, 3, 3]),
+        margin=torch.full((n_batch,), 1.5, dtype=y.dtype),
     )
-    y_true = torch.tensor([0, 0, 1, 1, 2, 2, 3, 3])
-    true_scores = y.gather(1, y_true.unsqueeze(1)).squeeze(1)
-    mask = torch.ones_like(y, dtype=torch.bool)
-    _ = mask.scatter_(1, y_true.unsqueeze(1), False)
-    expected_margin = (y.masked_fill(~mask, -float("inf")).max(dim=1).values - true_scores) >= 1.5
+    margin_params = margin_spec.encode_linear(n_batch, n_out, y.device, y.dtype)
+    margin = _make_assert_layer(OutKind.MARGIN_ROBUST, margin_params, n_out)
+    margin_rows = torch.einsum(
+        "bmo,bo->bm", margin_params["C"].reshape(n_batch, -1, n_out), y
+    )
+    # encode_linear certifies iff every row C @ y < threshold; violation is the complement.
+    expected_margin = (margin_rows >= margin_params["thresholds"]).any(dim=1)
     assert torch.equal(check_violations_batched(net, y, margin), expected_margin)
 
     linear = _make_assert_layer(
