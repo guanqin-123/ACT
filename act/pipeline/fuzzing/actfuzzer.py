@@ -320,6 +320,10 @@ class ACTFuzzer:
         self.seed_corpus = SeedCorpus(
             initial_seeds=initial_seeds, strategy=self.config.seed_selection_strategy
         )
+        assert len(self.seed_corpus) == self.batch_size, (
+            "Initial corpus must preserve exactly one seed slot per synthesized "
+            f"spec row: corpus={len(self.seed_corpus)}, specs={self.batch_size}"
+        )
 
         # Initialize tracer (only if trace_level > 0)
         if self.config.trace_level > 0:

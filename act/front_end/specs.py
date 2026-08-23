@@ -420,7 +420,10 @@ class OutputSpec:
             d_vec = self.d.to(device=device, dtype=dtype).flatten()
             if d_vec.shape[0] != N:
                 raise ValueError(
-                    f"UNSAFE_LINEAR: d length {d_vec.shape[0]} != N {N}"
+                    f"UNSAFE_LINEAR: d length {d_vec.shape[0]} != N {N}. A d of "
+                    f"shape {tuple(self.d.shape)} means this model was synthesized "
+                    f'with cd_group="shape", which batches per-lane d for fuzzing '
+                    f"and is not consumable by the verifier."
                 )
             params["c"] = c_mat.unsqueeze(0).expand(B, -1, -1).contiguous()
             params["d"] = d_vec.unsqueeze(0).expand(B, -1).contiguous()

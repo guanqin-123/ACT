@@ -31,7 +31,7 @@ from act.front_end.vnnlib_loader import category_mapping as vnnlib_mapping
 from act.front_end.torchvision_loader.create_specs import TorchVisionSpecCreator
 from act.front_end.torchvision_loader import data_model_loader as tv_loader
 from act.front_end.torchvision_loader import data_model_mapping as tv_mapping
-from act.front_end.model_synthesis import synthesize_models_from_specs
+from act.front_end.model_synthesis import synthesize_models_and_seeds_from_specs
 from act.pipeline.fuzzing.actfuzzer import ACTFuzzer, FuzzingConfig
 from act.pipeline.verification.per_neuron_bounds import PerNeuronCheckConfig
 from act.config.config import PipelineConfig
@@ -553,8 +553,6 @@ def cmd_fuzz(args):
     print(f"{rule()}\n")
 
     spec_results = []
-    initial_seeds = []
-
     try:
         if creator == "vnnlib":
             spec_creator = VNNLibSpecCreator()
@@ -665,7 +663,9 @@ def cmd_fuzz(args):
     VerifiableModel.set_strict_mode(args.strict_mode)
 
     try:
-        wrapped_models = synthesize_models_from_specs(cast(Any, spec_results))
+        wrapped_models, synthesized_seeds = synthesize_models_and_seeds_from_specs(
+            cast(Any, spec_results), cd_group="shape"
+        )
     except Exception as e:
         print(f"❌ Model synthesis failed: {e}")
         import traceback
@@ -684,9 +684,8 @@ def cmd_fuzz(args):
     print(f"STEP 3: Seed Extraction")
     print(f"{rule()}\n")
 
-    # Single model only; mixing seeds across spec_results breaks SeedCorpus(torch.cat).
-    _, _, _, labeled_tensors, _ = spec_results[0]
-    initial_seeds.extend(labeled_tensors)
+    model_id = list(wrapped_models.keys())[0]
+    initial_seeds = synthesized_seeds[model_id]
 
     if not initial_seeds:
         print("❌ No initial seeds extracted!")
@@ -699,7 +698,6 @@ def cmd_fuzz(args):
     print(f"STEP 4: Fuzzing")
     print(f"{rule()}\n")
 
-    model_id = list(wrapped_models.keys())[0]
     wrapped_model = wrapped_models[model_id]
 
     print(f"Fuzzing model: {model_id}\n")
