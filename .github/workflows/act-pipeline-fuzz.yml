@@ -93,6 +93,11 @@ jobs:
           cd ${{ github.workspace }}
           coverage run -p -m act.pipeline --fuzz --category cifar100_2024 --max-instances 2 --timeout 30 --iterations 500
 
+      - name: Run fuzzing at float64 (non-quantized CIFAR-100)
+        run: |
+          cd ${{ github.workspace }}
+          coverage run -p -m act.pipeline --fuzz --category cifar100_2024 --dtype float64 --max-instances 2 --timeout 30 --iterations 200
+
       - name: Cache traffic signs VNNLIB benchmark
         id: trafficsigns-cache
         uses: actions/cache@v4
@@ -105,11 +110,6 @@ jobs:
         run: |
           cd ${{ github.workspace }}
           coverage run -p -m act.pipeline --download traffic_signs_recognition_2023
-
-      - name: Run fuzzing at float64 (non-quantized CIFAR-100)
-        run: |
-          cd ${{ github.workspace }}
-          coverage run -p -m act.pipeline --fuzz --category cifar100_2024 --dtype float64 --max-instances 2 --timeout 30 --iterations 200
 
       - name: Run fuzzing at float64 (binarized traffic signs, sign-STE path)
         run: |
