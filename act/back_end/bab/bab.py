@@ -559,21 +559,6 @@ def _slice_branching_state(
 
 
 
-def _unbatch_field(val: Any) -> Any:
-    """Strip lazy-M broadcast batch dim when a field is shared by one sample.
-
-    BaB dual dispatch rebuilds an ``OutputSpec`` from ASSERT parameters while
-    subproblem lanes live in the leading lazy-M dimension. If a parameter is a
-    tensor with a singleton leading batch axis, remove that axis so
-    ``OutputSpec.encode_linear`` can re-broadcast it to the current K lanes.
-    """
-    if isinstance(val, torch.Tensor) and val.dim() >= 2 and val.shape[0] == 1:
-        return val[0]
-    return val
-
-
-
-
 def _as_batched_vector(
     value: object,
     n_batch: int,
@@ -719,7 +704,10 @@ def check_violations_batched(net: object, x_batch: torch.Tensor, assert_layer: L
         mask = torch.ones_like(y_batch, dtype=torch.bool)
         _ = mask.scatter_(1, y_true.unsqueeze(1), False)
         other_scores = y_batch.masked_fill(~mask, -float("inf"))
-        return (other_scores.max(dim=1).values - y_true_scores) >= margin
+        # ``-margin``, not ``+margin``: ``encode_linear`` emits rows ``e_j - e_t``
+        # with ``thresholds = -margin``, so a lane is certified iff
+        # ``max_j(z_j - z_t) < -margin``. The negative sign is deliberate.
+        return (other_scores.max(dim=1).values - y_true_scores) >= -margin
 
     if kind == OutKind.LINEAR_LE:
         c_raw = params["c"]
@@ -1044,12 +1032,16 @@ def _dispatch_dual_solve(
     if not isinstance(out_kind_raw, str):
         raise TypeError(f"ASSERT kind must be str, got {type(out_kind_raw).__name__}")
 
-    out_spec_fields: dict[str, torch.Tensor] = {}
-    for key in OutputSpec.SLICEABLE_PARAM_KEYS:
-        if key in assert_layer.params and assert_layer.params[key] is not None:
-            value = assert_layer.params[key]
-            tensor_value = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
-            out_spec_fields[key] = _unbatch_field(tensor_value)
+    out_spec_fields = OutputSpec(kind=out_kind_raw)._gather_rows(
+        rows=None,
+        batch_size=1,
+        device=batched_bounds.lb.device,
+        dtype=batched_bounds.lb.dtype,
+        shared_ndim={},
+        source=assert_layer.params,
+        source_batch_size=1,
+        drop_singleton_batch=True,
+    )
 
     out_spec = OutputSpec(
         kind=out_kind_raw,
@@ -2358,19 +2350,18 @@ def _test_check_violations_batched_per_kind():  # pragma: no cover
     expected_top1 = y.argmax(dim=1) != y_true_top1
     assert torch.equal(check_violations_batched(net, y, top1), expected_top1)
 
-    margin = _make_assert_layer(
-        OutKind.MARGIN_ROBUST,
-        {
-            "y_true": torch.tensor([0, 0, 1, 1, 2, 2, 3, 3]),
-            "margin": torch.full((n_batch,), 1.5, dtype=y.dtype),
-        },
-        n_out,
+    margin_spec = OutputSpec(
+        kind=OutKind.MARGIN_ROBUST,
+        y_true=torch.tensor([0, 0, 1, 1, 2, 2, 3, 3]),
+        margin=torch.full((n_batch,), 1.5, dtype=y.dtype),
     )
-    y_true = torch.tensor([0, 0, 1, 1, 2, 2, 3, 3])
-    true_scores = y.gather(1, y_true.unsqueeze(1)).squeeze(1)
-    mask = torch.ones_like(y, dtype=torch.bool)
-    _ = mask.scatter_(1, y_true.unsqueeze(1), False)
-    expected_margin = (y.masked_fill(~mask, -float("inf")).max(dim=1).values - true_scores) >= 1.5
+    margin_params = margin_spec.encode_linear(n_batch, n_out, y.device, y.dtype)
+    margin = _make_assert_layer(OutKind.MARGIN_ROBUST, margin_params, n_out)
+    margin_rows = torch.einsum(
+        "bmo,bo->bm", margin_params["C"].reshape(n_batch, -1, n_out), y
+    )
+    # encode_linear certifies iff every row C @ y < threshold; violation is the complement.
+    expected_margin = (margin_rows >= margin_params["thresholds"]).any(dim=1)
     assert torch.equal(check_violations_batched(net, y, margin), expected_margin)
 
     linear = _make_assert_layer(
