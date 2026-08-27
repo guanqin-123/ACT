@@ -22,13 +22,19 @@ except ImportError:
 
 import act.back_end.interval_tf.tf_transformer as interval
 from act.back_end.core import Bounds, Fact
-from act.back_end.hybridz_tf.tf_mlp import _broadcast_flat
+from act.back_end.hybridz_tf.tf_mlp import _broadcast_flat, _matmul_term_rows
 from act.back_end.solver.solver_hz import (
     hz_add_const,
     hz_bounds_are_liftable,
+    hz_concat,
     hz_lift_bounds,
+    hz_multiply,
+    hz_tighten_bounds,
+    sparse_abs_row_sum,
     sparse_hz_add_const,
+    sparse_hz_concat,
     sparse_hz_lift_bounds,
+    sparse_hz_linear,
 )
 from act.back_end.utils import scale_interval
 
@@ -74,7 +80,7 @@ def _sparse_simplex(rowsize: int, n_out: int):
     return matrix, np.ones(groups, dtype=np.float64)
 
 
-def _softmax_ratio_inequalities(bounds: Bounds, rowsize: int):
+def _softmax_ratio_inequalities(bounds: Bounds, rowsize: int, differences=None):
     if sp is None or rowsize <= 1 or bounds.lb.numel() % rowsize:
         return None, None
     lb = bounds.lb.detach().cpu().double().numpy().reshape(-1, rowsize)
@@ -89,8 +95,13 @@ def _softmax_ratio_inequalities(bounds: Bounds, rowsize: int):
             pairs = ((i, ref) for i in range(rowsize) if i != ref)
         offset = group * rowsize
         for i, j in pairs:
-            lower_delta = lb[group, i] - ub[group, j]
-            upper_delta = ub[group, i] - lb[group, j]
+            if differences is None:
+                lower_delta = lb[group, i] - ub[group, j]
+                upper_delta = ub[group, i] - lb[group, j]
+            else:
+                difference_lb, difference_ub = differences
+                lower_delta = -difference_ub[group, i, j]
+                upper_delta = -difference_lb[group, i, j]
             lower = (
                 np.nextafter(np.exp(lower_delta), 0.0)
                 if -745.0 < lower_delta <= np.log(1e12)
@@ -120,6 +131,213 @@ def _softmax_ratio_inequalities(bounds: Bounds, rowsize: int):
         dtype=np.float64,
     )
     return matrix, np.zeros(row, dtype=np.float64)
+
+
+def _attention_score_differences(L, bounds: Bounds, rowsize: int, tf):
+    tf._softmax_score_contexts.pop(L.id, None)
+    predecessors = tf._net.preds.get(L.id, [])
+    if len(predecessors) != 1:
+        return None
+    n_scores = bounds.lb.numel()
+    scale = np.ones(n_scores, dtype=np.float64)
+    shift = np.zeros(n_scores, dtype=np.float64)
+    current = predecessors[0]
+    while True:
+        score_layer = tf._net.by_id.get(current)
+        if score_layer is None:
+            return None
+        kind = score_layer.kind.upper()
+        if kind == "MATMUL":
+            break
+        layer_predecessors = tf._net.preds.get(current, [])
+        if len(layer_predecessors) != 1:
+            return None
+        if kind in {"RESHAPE", "FLATTEN", "SQUEEZE", "UNSQUEEZE"}:
+            current = layer_predecessors[0]
+            continue
+        if kind in {"SCALE", "BIAS"}:
+            key = "a" if kind == "SCALE" else "c"
+            try:
+                value = (
+                    _broadcast_flat(score_layer.params[key], n_scores)
+                    .detach().cpu().double().numpy()
+                )
+            except ValueError:
+                return None
+            if kind == "SCALE":
+                scale *= value
+            else:
+                shift += scale * value
+            current = layer_predecessors[0]
+            continue
+        return None
+
+    score_predecessors = tf._net.preds.get(score_layer.id, [])
+    if len(score_predecessors) != 2:
+        return None
+    q_hz = tf._sparse_hz_cache.get(score_predecessors[0])
+    k_hz = tf._sparse_hz_cache.get(score_predecessors[1])
+    if q_hz is None or k_hz is None or q_hz.frame_id != k_hz.frame_id:
+        return None
+    q_bounds = tf._net.get_predecessor_bounds(
+        score_layer.id, tf._after, tf._before, 0
+    )
+    k_bounds = tf._net.get_predecessor_bounds(
+        score_layer.id, tf._after, tf._before, 1
+    )
+    rows = _matmul_term_rows(score_layer, int(q_bounds.lb.shape[0]))
+    if rows is None:
+        return None
+    q_rows, k_rows = rows
+    if q_rows.shape[0] != n_scores or n_scores % rowsize:
+        return None
+    groups, reduction = n_scores // rowsize, q_rows.shape[1]
+    q_lower = q_bounds.lb.detach().cpu().double().numpy().reshape(-1)
+    q_upper = q_bounds.ub.detach().cpu().double().numpy().reshape(-1)
+    lower = np.zeros((groups, rowsize, rowsize), dtype=np.float64)
+    upper = np.zeros_like(lower)
+    score_scale = scale.reshape(groups, rowsize)
+    score_shift = shift.reshape(groups, rowsize)
+    key_cache = {}
+    pairs = rowsize * rowsize
+    term_rows = np.repeat(np.arange(pairs, dtype=np.int64), reduction)
+    term_cols = np.arange(pairs * reduction, dtype=np.int64)
+    for group in range(groups):
+        block = k_rows[group * rowsize : (group + 1) * rowsize]
+        key = (block.tobytes(), score_scale[group].tobytes())
+        delta = key_cache.get(key)
+        if delta is None:
+            left = np.broadcast_to(
+                block[None, :, :], (rowsize, rowsize, reduction)
+            ).reshape(-1)
+            right = np.broadcast_to(
+                block[:, None, :], (rowsize, rowsize, reduction)
+            ).reshape(-1)
+            left_scale = np.broadcast_to(
+                score_scale[group][None, :, None],
+                (rowsize, rowsize, reduction),
+            ).reshape(-1)
+            right_scale = np.broadcast_to(
+                score_scale[group][:, None, None],
+                (rowsize, rowsize, reduction),
+            ).reshape(-1)
+            center = (
+                left_scale * k_hz.c[left] - right_scale * k_hz.c[right]
+            ).reshape(rowsize, rowsize, reduction)
+            continuous = (
+                sp.diags(left_scale) @ k_hz.Gc[left]
+                - sp.diags(right_scale) @ k_hz.Gc[right]
+            ).tocsr()
+            radius = sparse_abs_row_sum(continuous).reshape(
+                rowsize, rowsize, reduction
+            )
+            if k_hz.n_bin:
+                binary = (
+                    sp.diags(left_scale) @ k_hz.Gb[left]
+                    - sp.diags(right_scale) @ k_hz.Gb[right]
+                ).tocsr()
+                radius += sparse_abs_row_sum(binary).reshape(
+                    rowsize, rowsize, reduction
+                )
+            else:
+                binary = sp.csr_matrix((center.size, 0), dtype=np.float64)
+            delta = (
+                center,
+                continuous,
+                binary,
+                center - radius,
+                center + radius,
+            )
+            key_cache[key] = delta
+        center, continuous, binary, delta_lower, delta_upper = delta
+        q_term_rows = q_rows[group * rowsize]
+        ql, qu = q_lower[q_term_rows], q_upper[q_term_rows]
+        corners = np.stack(
+            (ql * delta_lower, ql * delta_upper, qu * delta_lower, qu * delta_upper),
+            axis=0,
+        )
+        interval_lower = np.min(corners, axis=0).sum(axis=-1)
+        interval_upper = np.max(corners, axis=0).sum(axis=-1)
+
+        q_mid = np.broadcast_to(
+            (ql + qu) * 0.5, (pairs, reduction)
+        ).reshape(-1)
+        delta_mid = ((delta_lower + delta_upper) * 0.5).reshape(-1)
+        q_operator = sp.csr_matrix(
+            (delta_mid, (term_rows, np.tile(q_term_rows, pairs))),
+            shape=(pairs, q_hz.n_out),
+        )
+        delta_operator = sp.csr_matrix(
+            (q_mid, (term_rows, term_cols)),
+            shape=(pairs, pairs * reduction),
+        )
+        affine_center = (
+            np.asarray(q_operator @ q_hz.c).reshape(-1)
+            + np.asarray(delta_operator @ center.reshape(-1)).reshape(-1)
+            - np.add.reduceat(q_mid * delta_mid, term_cols[::reduction])
+        ).reshape(rowsize, rowsize)
+        affine_continuous = (
+            q_operator @ q_hz.Gc + delta_operator @ continuous
+        ).tocsr()
+        affine_radius = sparse_abs_row_sum(affine_continuous).reshape(
+            rowsize, rowsize
+        )
+        if q_hz.n_bin:
+            affine_binary = (
+                q_operator @ q_hz.Gb + delta_operator @ binary
+            ).tocsr()
+            affine_radius += sparse_abs_row_sum(affine_binary).reshape(
+                rowsize, rowsize
+            )
+        affine_radius += (
+            (qu - ql)[None, None, :] * (delta_upper - delta_lower) * 0.25
+        ).sum(axis=-1)
+        lower[group] = np.maximum(
+            interval_lower, affine_center - affine_radius
+        )
+        upper[group] = np.minimum(
+            interval_upper, affine_center + affine_radius
+        )
+        shift_delta = score_shift[group][None, :] - score_shift[group][:, None]
+        lower[group] = np.nextafter(lower[group] + shift_delta, -np.inf)
+        upper[group] = np.nextafter(upper[group] + shift_delta, np.inf)
+
+    tf._softmax_score_contexts[L.id] = {
+        "q_hz": q_hz,
+        "k_hz": k_hz,
+        "q_bounds": q_bounds,
+        "k_bounds": k_bounds,
+        "q_rows": q_rows,
+        "k_rows": k_rows,
+        "scale": scale,
+        "shift": shift,
+    }
+    return lower, upper
+
+
+def _softmax_box_from_differences(bounds: Bounds, differences) -> Bounds:
+    lower, upper = differences
+    with np.errstate(over="ignore"):
+        lower_denominator = np.sum(np.exp(upper), axis=-1)
+        upper_denominator = np.sum(np.exp(lower), axis=-1)
+    probability_lower = np.divide(
+        1.0,
+        lower_denominator,
+        out=np.zeros_like(lower_denominator),
+        where=lower_denominator > 0,
+    )
+    probability_upper = np.divide(
+        1.0,
+        upper_denominator,
+        out=np.ones_like(upper_denominator),
+        where=upper_denominator > 0,
+    )
+    probability_lower = np.nextafter(probability_lower, 0.0)
+    probability_upper = np.nextafter(probability_upper, np.inf)
+    return Bounds(
+        torch.from_numpy(probability_lower.reshape(-1)).to(bounds.lb).reshape_as(bounds.lb),
+        torch.from_numpy(probability_upper.reshape(-1)).to(bounds.ub).reshape_as(bounds.ub),
+    )
 
 
 def _sparse_lift(
@@ -237,6 +455,62 @@ def _layernorm_equalities(L, fact):
     return matrix, (weights * beta).sum().expand(groups)
 
 
+def _mha_split_operator(L, n_in: int, n_out: int):
+    weight = L.params.get("weight")
+    if sp is None or not isinstance(weight, torch.Tensor):
+        return None
+    hidden = int(L.params.get("hidden_size", weight.shape[1]))
+    input_shape = tuple(
+        int(d) for d in L.params.get("input_shape", (1, hidden))
+    )
+    sequence = int(input_shape[-2]) if len(input_shape) >= 2 else 1
+    per_sample = sequence * hidden
+    if per_sample <= 0 or n_in % per_sample:
+        return None
+    matrix = weight.detach().cpu().double().numpy()
+    bias = L.params.get("bias")
+    bias_vector = (
+        bias.detach().cpu().double().numpy().reshape(-1)
+        if isinstance(bias, torch.Tensor)
+        else np.zeros(matrix.shape[0], dtype=np.float64)
+    )
+    role = str(L.params.get("role", ""))
+    if role in {"query", "key"}:
+        position = int(L.params.get("position", 0))
+        if position < 0 or position >= sequence:
+            return None
+        single = sp.hstack(
+            [
+                sp.csr_matrix((matrix.shape[0], position * hidden)),
+                sp.csr_matrix(matrix),
+                sp.csr_matrix(
+                    (matrix.shape[0], (sequence - position - 1) * hidden)
+                ),
+            ],
+            format="csr",
+        )
+        single_bias = bias_vector
+    elif role == "value":
+        feature = int(L.params.get("feature", 0))
+        if feature < 0 or feature >= matrix.shape[0]:
+            return None
+        single = sp.kron(
+            sp.eye(sequence, format="csr"),
+            sp.csr_matrix(matrix[feature : feature + 1]),
+            format="csr",
+        )
+        single_bias = np.full(sequence, bias_vector[feature], dtype=np.float64)
+    else:
+        single = sp.kron(
+            sp.eye(sequence, format="csr"), sp.csr_matrix(matrix), format="csr"
+        )
+        single_bias = np.tile(bias_vector, sequence)
+    batch = n_in // per_sample
+    operator = sp.block_diag([single] * batch, format="csr")
+    full_bias = np.tile(single_bias, batch)
+    return (operator, full_bias) if operator.shape == (n_out, n_in) else None
+
+
 def tf_posenc(L, bounds, tf):
     fact = interval.tf_posenc(L, bounds)
     hz = tf._hz_cache.get(L.id)
@@ -260,15 +534,29 @@ def tf_gelu(L, bounds, tf):
 
 
 def tf_att_scores(L, bounds, tf):
-    return interval.tf_att_scores(L,
-        tf._before[L.params["q_src"]].bounds,
-        tf._before[L.params["k_src"]].bounds)
+    fact = interval.tf_att_scores(
+        L,
+        tf._after[L.params["q_src"]].bounds,
+        tf._after[L.params["k_src"]].bounds,
+    )
+    return _dense_lift(L, fact, tf)
 
 
 def tf_softmax(L, bounds, tf):
     fact = interval.tf_softmax(L, bounds)
     rowsize = interval.softmax_rowsize(L, bounds)
-    fact = Fact(bounds=_softmax_box(bounds, rowsize), cons=fact.cons)
+    softmax_bounds = _softmax_box(bounds, rowsize)
+    differences = (
+        _attention_score_differences(L, bounds, rowsize, tf)
+        if rowsize is not None else None
+    )
+    if differences is not None:
+        softmax_bounds = hz_tighten_bounds(
+            softmax_bounds,
+            _softmax_box_from_differences(bounds, differences),
+        )
+    tf._softmax_differences[L.id] = differences
+    fact = Fact(bounds=softmax_bounds, cons=fact.cons)
     fact.cons.add_box(L.id, L.out_vars, fact.bounds)
     hz = tf._hz_cache.get(L.id)
     equalities = rhs = inequalities = upper = None
@@ -280,7 +568,7 @@ def tf_softmax(L, bounds, tf):
             equalities = torch.from_numpy(sparse_equalities.toarray()).to(hz.c)
             rhs = torch.from_numpy(sparse_rhs).to(hz.c)
         sparse_inequalities, sparse_upper = _softmax_ratio_inequalities(
-            bounds, rowsize
+            bounds, rowsize, differences
         )
         if sparse_inequalities is not None:
             inequalities = torch.from_numpy(sparse_inequalities.toarray()).to(hz.c)
@@ -291,18 +579,39 @@ def tf_softmax(L, bounds, tf):
 
 
 def tf_att_mix(L, bounds, tf):
-    return interval.tf_att_mix(L,
-        tf._before[L.params["w_src"]].bounds,
-        tf._before[L.params["v_src"]].bounds)
+    fact = interval.tf_att_mix(
+        L,
+        tf._after[L.params["w_src"]].bounds,
+        tf._after[L.params["v_src"]].bounds,
+    )
+    return _dense_lift(L, fact, tf)
 
 
 def tf_mha_split(L, bounds, tf):
-    return interval.tf_mha_split(L, bounds)
+    fact = interval.tf_mha_split(L, bounds)
+    hz = tf._hz_cache.get(L.id)
+    if hz is not None:
+        affine = _mha_split_operator(L, hz.c.shape[0], fact.bounds.lb.numel())
+        if affine is not None:
+            operator, bias = affine
+            dense_operator = torch.from_numpy(operator.toarray()).to(hz.c)
+            tf._hz_cache[L.id] = hz_add_const(
+                hz_multiply(hz, dense_operator), torch.from_numpy(bias).to(hz.c)
+            )
+            return fact
+    return _dense_lift(L, fact, tf)
 
 
 def tf_mha_join(L, bounds, tf):
-    return interval.tf_mha_join(L,
-        tf._net.get_all_predecessor_bounds(L.id, tf._after, tf._before))
+    fact = interval.tf_mha_join(
+        L, tf._net.get_all_predecessor_bounds(L.id, tf._after, tf._before)
+    )
+    parts = [tf._hz_cache.get(pid) for pid in tf._net.preds.get(L.id, [])]
+    if parts and all(part is not None for part in parts):
+        tf._hz_cache[L.id] = hz_concat(parts)
+    else:
+        tf._hz_cache.pop(L.id, None)
+    return fact
 
 
 def tf_mask_add(L, bounds, tf):
@@ -322,10 +631,21 @@ def sparse_hz_apply_layer(L, hz, input_bounds, result, tf):
         return True, sparse_hz_add_const(
             hz, _broadcast_flat(L.params[key], hz.n_out)
         ), None
+    if kind == "MHA_JOIN":
+        parts = [
+            tf._sparse_hz_cache.get(pid)
+            for pid in tf._net.preds.get(L.id, [])
+        ]
+        return (
+            (True, sparse_hz_concat(parts), None)
+            if parts and all(part is not None for part in parts)
+            else (True, None, "missing_sparse_mha_join_input")
+        )
     if kind == "SOFTMAX":
         rowsize = interval.softmax_rowsize(L, input_bounds)
+        differences = tf._softmax_differences.get(L.id)
         inequalities, upper = (
-            _softmax_ratio_inequalities(input_bounds, rowsize)
+            _softmax_ratio_inequalities(input_bounds, rowsize, differences)
             if rowsize is not None
             else (None, None)
         )
@@ -339,13 +659,20 @@ def sparse_hz_apply_layer(L, hz, input_bounds, result, tf):
             inequality_rhs=upper,
         )
         return True, out, reason
+    if kind == "MHA_SPLIT":
+        affine = _mha_split_operator(L, hz.n_out, result.bounds.lb.numel())
+        if affine is not None:
+            operator, bias = affine
+            return True, sparse_hz_linear(hz, operator, bias), None
+        out, reason = _sparse_lift(L, hz, result, tf)
+        return True, out, reason
     if kind == "LAYERNORM":
         equalities, rhs = _layernorm_equalities(L, result)
         out, reason = _sparse_lift(
             L, hz, result, tf, output_equalities=equalities, equality_rhs=rhs
         )
         return True, out, reason
-    if kind == "GELU":
+    if kind in {"GELU", "ATT_SCORES", "ATT_MIX"}:
         out, reason = _sparse_lift(L, hz, result, tf)
         return True, out, reason
     return False, None, None

@@ -30,6 +30,7 @@ from act.back_end.solver.solver_hz import (
     hz_bounds_are_liftable,
     hz_from_bounds,
     hz_lift_bounds,
+    hz_tighten_bounds,
     sparse_hz_fast_bounds,
     sparse_hz_from_bounds,
 )
@@ -53,6 +54,8 @@ class HybridzTF(RegistryTF):
         self._sparse_drop_reasons: Dict[int, str] = {}
         self._sigmoid_affine_targets: Dict[int, int] = {}
         self._sigmoid_affine_inputs: Dict[int, HZono] = {}
+        self._softmax_differences: Dict[int, object] = {}
+        self._softmax_score_contexts: Dict[int, object] = {}
         self._cache_net_id: Optional[int] = None
         self._tanh_K: int = 2
         self._sigmoid_K: int = int(cfg.sigmoid_segments)
@@ -237,7 +240,7 @@ class HybridzTF(RegistryTF):
         )
 
     _HZ_MAX_INPUT_DIM = 1024
-    _SPARSE_MAX_AFFINE_CELLS = 8_000_000
+    _SPARSE_MAX_AFFINE_CELLS = 64_000_000
 
     @staticmethod
     def _find_sigmoid_affine_targets(net: Net) -> Dict[int, int]:
@@ -378,13 +381,8 @@ class HybridzTF(RegistryTF):
     @staticmethod
     def _sparse_fact(fact: Fact, hz: SparseHZono) -> Fact:
         hb = sparse_hz_fast_bounds(hz)
-        lb = hb.lb.to(dtype=fact.bounds.lb.dtype, device=fact.bounds.lb.device)
-        ub = hb.ub.to(dtype=fact.bounds.ub.dtype, device=fact.bounds.ub.device)
         return Fact(
-            bounds=Bounds(
-                lb=torch.maximum(lb.reshape_as(fact.bounds.lb), fact.bounds.lb),
-                ub=torch.minimum(ub.reshape_as(fact.bounds.ub), fact.bounds.ub),
-            ),
+            bounds=hz_tighten_bounds(fact.bounds, hb),
             cons=fact.cons,
         )
 
@@ -461,6 +459,8 @@ class HybridzTF(RegistryTF):
             self._sparse_hz_cache.clear()
             self._sparse_drop_reasons.clear()
             self._sigmoid_affine_inputs.clear()
+            self._softmax_differences.clear()
+            self._softmax_score_contexts.clear()
             self._sparse_frame_widths.clear()
             self._sparse_relu_slots.clear()
             self._sparse_aux_slots.clear()
