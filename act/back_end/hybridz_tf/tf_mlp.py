@@ -30,8 +30,11 @@ from act.back_end.solver.solver_hz import (
     hz_fresh_col_ids,
     hz_compute_bounds,
     hz_concat,
+    hz_bounds_are_liftable,
+    hz_lift_bounds,
     hz_sgm_add,
     hz_sub,
+    hz_tighten_bounds,
     sparse_hz_add_const,
     sparse_hz_add_same_frame,
     sparse_hz_concat,
@@ -51,10 +54,8 @@ import act.back_end.interval_tf.tf_cnn as interval_cnn
 
 def _hz_fact(fact: Fact, hz: HZono) -> Fact:
     hb = hz_compute_bounds(hz)
-    lb = torch.maximum(hb.lb.reshape_as(fact.bounds.lb), fact.bounds.lb)
-    ub = torch.minimum(hb.ub.reshape_as(fact.bounds.ub), fact.bounds.ub)
     return Fact(
-        bounds=Bounds(lb=lb, ub=ub),
+        bounds=hz_tighten_bounds(fact.bounds, hb),
         cons=fact.cons,
     )
 
@@ -383,6 +384,7 @@ def sparse_hz_apply_relu_exact(
         Aub=sp.vstack([padded.Aub, ineq_Ab], format="csr"),
         ub=np.concatenate([padded.ub, np.zeros(2 * k, dtype=np.float64)]),
         frame_id=hz.frame_id,
+        exact=hz.exact,
     )
 
 
@@ -491,6 +493,13 @@ def sparse_hz_apply_layer(L, hz: SparseHZono, input_bounds: Bounds, result: Fact
             if rows is not None
             else (True, None, "unsupported_sparse_reduce_sum")
         )
+    if k == "MEAN":
+        out_n = int(result.bounds.lb.numel())
+        rows = _row_indices_mean(L, hz.n_out, out_n)
+        if rows is None or hz.n_out % out_n:
+            return True, None, "unsupported_sparse_mean"
+        out = sparse_hz_reduce_sum_rows(hz, rows.detach().cpu().numpy(), out_n)
+        return True, sparse_hz_scale(out, out_n / hz.n_out), None
     if k == "ADD":
         preds = tf._net.preds.get(L.id, [])
         other = tf._sparse_hz_cache.get(preds[1]) if len(preds) > 1 else None
@@ -959,7 +968,7 @@ def _row_indices_expand(L, n: int):
         return None
 
 
-def _row_indices_reduce_sum(L, n_in: int, n_out: int):
+def _row_indices_reduce(L, n_in: int, n_out: int, axes_key: str, keepdims_key: str):
     in_shape = L.params.get("input_shape")
     if in_shape is None:
         return None
@@ -968,10 +977,10 @@ def _row_indices_reduce_sum(L, n_in: int, n_out: int):
     if per == 0 or int(n_in) % per != 0:
         return None
     batch = int(n_in) // per
-    axes = L.params.get("axes")
+    axes = L.params.get(axes_key)
     axes = list(range(len(in_shape))) if not axes else [int(a) for a in axes]
     axes = [(a + len(in_shape)) if a < 0 else a for a in axes]
-    keepdims = bool(L.params.get("keepdims", 0))
+    keepdims = bool(L.params.get(keepdims_key, 0))
     out_shape = []
     for i, dim in enumerate(in_shape):
         if i in axes:
@@ -986,6 +995,37 @@ def _row_indices_reduce_sum(L, n_in: int, n_out: int):
     for i, dim in enumerate(in_shape):
         view_shape.append(1 if i in axes else dim)
     return out_idx.reshape(tuple(view_shape)).broadcast_to(batch, *in_shape).reshape(-1)
+
+
+def _row_indices_reduce_sum(L, n_in: int, n_out: int):
+    return _row_indices_reduce(L, n_in, n_out, "axes", "keepdims")
+
+
+def _row_indices_mean(L, n_in: int, n_out: int):
+    return _row_indices_reduce(L, n_in, n_out, "dim", "keepdim")
+
+
+def _hz_reduce_rows(hz: HZono, rows: torch.Tensor, n_out: int) -> HZono:
+    rows = rows.to(device=hz.c.device)
+    c = hz.c.new_zeros(n_out, 1)
+    Gc = hz.Gc.new_zeros(n_out, hz.Gc.shape[1])
+    Gb = hz.Gb.new_zeros(n_out, hz.Gb.shape[1])
+    c.index_add_(0, rows, hz.c)
+    if hz.Gc.shape[1]:
+        Gc.index_add_(0, rows, hz.Gc)
+    if hz.Gb.shape[1]:
+        Gb.index_add_(0, rows, hz.Gb)
+    return HZono(
+        c=c,
+        Gc=Gc,
+        Gb=Gb,
+        Ac=hz.Ac,
+        Ab=hz.Ab,
+        b=hz.b,
+        eq_mask=hz.eq_mask,
+        col_ids=hz.col_ids,
+        bcol_ids=hz.bcol_ids,
+    )
 
 
 def tf_scatter_nd(L, bounds, tf):
@@ -1006,30 +1046,29 @@ def tf_reduce_sum(L, bounds, tf):
             L, hz_in.c.shape[0], fact.bounds.lb.numel()
         )
         if rows is None:
-            tf._hz_cache[L.id] = hz_from_bounds(
-                fact.bounds, fact.bounds.lb.dtype, fact.bounds.lb.device
-            )
+            if hz_bounds_are_liftable(fact.bounds):
+                tf._hz_cache[L.id] = hz_lift_bounds(hz_in, fact.bounds)
+            else:
+                tf._hz_cache.pop(L.id, None)
         else:
-            rows = rows.to(device=hz_in.c.device)
-            out_n = int(fact.bounds.lb.numel())
-            c = hz_in.c.new_zeros(out_n, 1)
-            Gc = hz_in.Gc.new_zeros(out_n, hz_in.Gc.shape[1])
-            Gb = hz_in.Gb.new_zeros(out_n, hz_in.Gb.shape[1])
-            c.index_add_(0, rows, hz_in.c)
-            if hz_in.Gc.shape[1]:
-                Gc.index_add_(0, rows, hz_in.Gc)
-            if hz_in.Gb.shape[1]:
-                Gb.index_add_(0, rows, hz_in.Gb)
-            tf._hz_cache[L.id] = HZono(
-                c=c,
-                Gc=Gc,
-                Gb=Gb,
-                Ac=hz_in.Ac,
-                Ab=hz_in.Ab,
-                b=hz_in.b,
-                eq_mask=hz_in.eq_mask,
-                col_ids=hz_in.col_ids,
-                bcol_ids=hz_in.bcol_ids,
+            tf._hz_cache[L.id] = _hz_reduce_rows(
+                hz_in, rows, int(fact.bounds.lb.numel())
+            )
+    return fact
+
+
+def tf_mean(L, bounds, tf):
+    hz_in = tf._hz_cache.get(L.id)
+    fact = interval.tf_mean(L, bounds)
+    if hz_in is not None:
+        out_n = int(fact.bounds.lb.numel())
+        rows = _row_indices_mean(L, hz_in.c.shape[0], out_n)
+        if rows is None or hz_in.c.shape[0] % out_n:
+            tf._hz_cache.pop(L.id, None)
+        else:
+            out = _hz_reduce_rows(hz_in, rows, out_n)
+            tf._hz_cache[L.id] = _hz_scale_elementwise(
+                out, out.c.new_full((out_n,), out_n / hz_in.c.shape[0])
             )
     return fact
 
@@ -1043,6 +1082,7 @@ def tf_concat(L, bounds, tf):
             tf._hz_cache[L.id] = hz_concat(parts)
         else:
             hz_in = None
+            tf._hz_cache.pop(L.id, None)
     fact = interval.tf_concat(
         L, tf._net.get_all_predecessor_bounds(L.id, tf._after, tf._before)
     )
