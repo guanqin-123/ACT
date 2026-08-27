@@ -63,6 +63,7 @@ class SparseHZono:
     Aub: Optional["sp.csr_matrix"] = None
     ub: Optional["np.ndarray"] = None
     frame_id: Optional[int] = None
+    exact: bool = True
 
     def __post_init__(self) -> None:
         _require_sparse()
@@ -127,6 +128,34 @@ class SparseHZono:
     @property
     def n_ineq(self) -> int:
         return int(self.Auc.shape[0])
+
+
+def hz_tighten_bounds(base: Bounds, candidate: Bounds) -> Bounds:
+    candidate_lb = candidate.lb.reshape_as(base.lb).to(base.lb)
+    candidate_ub = candidate.ub.reshape_as(base.ub).to(base.ub)
+    lb = torch.maximum(base.lb, candidate_lb)
+    ub = torch.minimum(base.ub, candidate_ub)
+    conflict = lb > ub
+    if bool(conflict.any()):
+        scale = torch.maximum(
+            torch.maximum(lb.abs(), ub.abs()),
+            torch.ones((), dtype=lb.dtype, device=lb.device),
+        )
+        tolerance = 128 * torch.finfo(lb.dtype).eps * scale
+        if bool(((lb - ub > tolerance) & conflict).any()):
+            raise ValueError("HZ and interval bounds have a non-numerical conflict")
+    return Bounds(
+        lb=torch.where(conflict, base.lb, lb),
+        ub=torch.where(conflict, base.ub, ub),
+    )
+
+
+def hz_bounds_are_liftable(bounds: Bounds) -> bool:
+    return bool(
+        torch.isfinite(bounds.lb).all()
+        and torch.isfinite(bounds.ub).all()
+        and (bounds.lb <= bounds.ub).all()
+    )
 
 
 _NEXT_COL_ID = [-1]
@@ -292,6 +321,90 @@ def hz_from_bounds(
     return hz
 
 
+def hz_lift_bounds(
+    hz: HZono,
+    bounds: Bounds,
+    *,
+    output_equalities: Optional[torch.Tensor] = None,
+    equality_rhs: Optional[torch.Tensor] = None,
+    output_inequalities: Optional[torch.Tensor] = None,
+    inequality_rhs: Optional[torch.Tensor] = None,
+) -> HZono:
+    dtype, device = hz.c.dtype, hz.c.device
+    lb = bounds.lb.flatten().to(dtype=dtype, device=device)
+    ub = bounds.ub.flatten().to(dtype=dtype, device=device)
+    if not bool(torch.isfinite(lb).all() and torch.isfinite(ub).all()):
+        raise ValueError("cannot lift non-finite bounds into a dense HZ")
+    if not bool((lb <= ub).all()):
+        raise ValueError("cannot lift inconsistent bounds into a dense HZ")
+
+    center = (lb + ub) * 0.5
+    radius = (ub - lb) * 0.5
+    n_out = int(center.numel())
+    old_cont = int(hz.Gc.shape[1])
+    old_bin = int(hz.Gb.shape[1])
+    Gc = torch.zeros((n_out, old_cont + n_out), dtype=dtype, device=device)
+    if n_out:
+        rows = torch.arange(n_out, device=device)
+        Gc[rows, old_cont + rows] = radius
+    Gb = torch.zeros((n_out, old_bin), dtype=dtype, device=device)
+    Ac = torch.cat(
+        [hz.Ac, torch.zeros((hz.Ac.shape[0], n_out), dtype=dtype, device=device)],
+        dim=1,
+    )
+    Ab = hz.Ab.clone()
+    b = hz.b.clone()
+    eq_mask = _constraint_mask(hz)
+
+    def add_rows(matrix, rhs, equality):
+        nonlocal Ac, Ab, b, eq_mask
+        if matrix is None:
+            return
+        matrix = matrix.to(dtype=dtype, device=device)
+        if matrix.ndim != 2 or matrix.shape[1] != n_out:
+            raise ValueError("output constraint shape mismatch")
+        rhs = (
+            torch.zeros(matrix.shape[0], dtype=dtype, device=device)
+            if rhs is None
+            else rhs.to(dtype=dtype, device=device).reshape(-1)
+        )
+        if rhs.numel() != matrix.shape[0]:
+            raise ValueError("output constraint rhs shape mismatch")
+        Ac = torch.cat([Ac, matrix @ Gc], dim=0)
+        Ab = torch.cat(
+            [Ab, torch.zeros((matrix.shape[0], old_bin), dtype=dtype, device=device)],
+            dim=0,
+        )
+        b = torch.cat([b, (rhs - matrix @ center).view(-1, 1)], dim=0)
+        eq_mask = torch.cat(
+            [
+                eq_mask,
+                torch.full(
+                    (matrix.shape[0],), equality, dtype=torch.bool, device=device
+                ),
+            ]
+        )
+
+    add_rows(output_equalities, equality_rhs, True)
+    add_rows(output_inequalities, inequality_rhs, False)
+    col_ids = None
+    if hz.col_ids is not None:
+        col_ids = torch.cat(
+            [hz.col_ids.to(device), hz_fresh_col_ids(n_out, device=device)]
+        )
+    return HZono(
+        c=center.view(-1, 1),
+        Gc=Gc,
+        Gb=Gb,
+        Ac=Ac,
+        Ab=Ab,
+        b=b,
+        eq_mask=eq_mask,
+        col_ids=col_ids,
+        bcol_ids=_clone_ids(hz.bcol_ids),
+    )
+
+
 def _require_sparse() -> None:
     if not _HAS_SCIPY:
         raise RuntimeError("Sparse HybridZ requires scipy")
@@ -315,6 +428,13 @@ def _as_csr(mat, *, shape=None):
 def _torch_to_csr(t: torch.Tensor):
     arr = t.detach().cpu().numpy().astype(np.float64)
     return sp.csr_matrix(arr)
+
+
+def _bounds_to_numpy(bounds: Bounds):
+    return tuple(
+        value.detach().cpu().double().numpy().reshape(-1)
+        for value in (bounds.lb, bounds.ub)
+    )
 
 
 def sparse_empty(rows: int, cols: int):
@@ -344,6 +464,7 @@ def sparse_hz_pad_frame(hz: SparseHZono, n_cont: int, n_bin: int) -> SparseHZono
         Aub=sparse_pad_cols(hz.Aub, n_bin),
         ub=hz.ub,
         frame_id=hz.frame_id,
+        exact=hz.exact,
     )
 
 
@@ -380,6 +501,82 @@ def sparse_hz_from_bounds(
         Aub=sparse_empty(0, 0),
         ub=np.zeros(0, dtype=np.float64),
         frame_id=frame_id,
+        exact=True,
+    )
+
+
+def sparse_hz_lift_bounds(
+    hz: SparseHZono,
+    bounds: Bounds,
+    slots,
+    n_cont: int,
+    *,
+    output_equalities=None,
+    equality_rhs=None,
+    output_inequalities=None,
+    inequality_rhs=None,
+) -> SparseHZono:
+    lb, ub = _bounds_to_numpy(bounds)
+    if not np.isfinite(lb).all() or not np.isfinite(ub).all():
+        raise ValueError("cannot lift non-finite bounds into a sparse HZ")
+    if np.any(lb > ub):
+        raise ValueError("cannot lift inconsistent bounds into a sparse HZ")
+    slots = np.asarray(slots, dtype=np.int64).reshape(-1)
+    if slots.size != lb.size:
+        raise ValueError(f"sparse lift slot mismatch: {slots.size} vs {lb.size}")
+
+    rows = np.arange(lb.size, dtype=np.int64)
+    center = (lb + ub) * 0.5
+    radius = (ub - lb) * 0.5
+    nonzero = radius != 0.0
+    Gc = sp.csr_matrix(
+        (radius[nonzero], (rows[nonzero], slots[nonzero])),
+        shape=(lb.size, int(n_cont)),
+        dtype=np.float64,
+    )
+    Gb = sparse_empty(lb.size, hz.n_bin)
+
+    def lift_rows(matrix, rhs, kind):
+        if matrix is None:
+            return (
+                sparse_empty(0, int(n_cont)),
+                sparse_empty(0, hz.n_bin),
+                np.zeros(0, dtype=np.float64),
+            )
+        matrix = _as_csr(matrix)
+        if matrix.shape[1] != lb.size:
+            raise ValueError(
+                f"sparse output {kind} shape mismatch: {matrix.shape} vs {lb.size}"
+            )
+        rhs = (
+            np.zeros(matrix.shape[0], dtype=np.float64)
+            if rhs is None
+            else np.asarray(rhs, dtype=np.float64).reshape(-1)
+        )
+        if rhs.size != matrix.shape[0]:
+            raise ValueError(f"sparse output {kind} rhs shape mismatch")
+        return (
+            (matrix @ Gc).tocsr(),
+            sparse_empty(matrix.shape[0], hz.n_bin),
+            rhs - np.asarray(matrix @ center).reshape(-1),
+        )
+
+    Ac, Ab, b = lift_rows(output_equalities, equality_rhs, "equality")
+    Auc, Aub, upper = lift_rows(
+        output_inequalities, inequality_rhs, "inequality"
+    )
+    return SparseHZono(
+        c=center,
+        Gc=Gc,
+        Gb=Gb,
+        Ac=Ac,
+        Ab=Ab,
+        b=b,
+        Auc=Auc,
+        Aub=Aub,
+        ub=upper,
+        frame_id=hz.frame_id,
+        exact=False,
     )
 
 
@@ -409,6 +606,7 @@ def sparse_hz_linear(hz: SparseHZono, W, bias=None) -> SparseHZono:
         Aub=hz.Aub,
         ub=hz.ub,
         frame_id=hz.frame_id,
+        exact=hz.exact,
     )
 
 
@@ -432,6 +630,7 @@ def sparse_hz_add_const(hz: SparseHZono, bias) -> SparseHZono:
         Aub=hz.Aub,
         ub=hz.ub,
         frame_id=hz.frame_id,
+        exact=hz.exact,
     )
 
 
@@ -461,6 +660,7 @@ def sparse_hz_gather_rows(hz: SparseHZono, rows) -> SparseHZono:
         Aub=hz.Aub,
         ub=hz.ub,
         frame_id=hz.frame_id,
+        exact=hz.exact,
     )
 
 
@@ -511,6 +711,7 @@ def sparse_hz_concat(parts) -> SparseHZono:
         Aub=_sparse_vstack([p.Aub for p in padded], n_bin),
         ub=_sparse_concat_arrays([p.ub for p in padded]),
         frame_id=padded[0].frame_id,
+        exact=all(p.exact for p in padded),
     )
 
 
@@ -538,6 +739,7 @@ def sparse_hz_add_same_frame(x: SparseHZono, y: SparseHZono) -> SparseHZono:
         Aub=_sparse_vstack([xp.Aub, yp.Aub], n_bin),
         ub=_sparse_concat_arrays([xp.ub, yp.ub]),
         frame_id=xp.frame_id,
+        exact=xp.exact and yp.exact,
     )
 
 
@@ -1201,6 +1403,7 @@ class HZSolver(Solver):
 
         exact_witness = (
             isinstance(output_hz, SparseHZono)
+            and output_hz.exact
             and input_hz is not None
             and output_hz.frame_id is not None
             and output_hz.frame_id == input_hz.frame_id
