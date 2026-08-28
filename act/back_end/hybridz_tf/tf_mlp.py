@@ -41,12 +41,18 @@ from act.back_end.solver.solver_hz import (
     sparse_hz_fast_bounds,
     sparse_hz_from_bounds,
     sparse_hz_gather_rows,
+    sparse_hz_intersect_bounds,
     sparse_hz_is_point,
+    sparse_hz_lift_bounds,
     sparse_hz_linear,
+    sparse_hz_matmul_relaxation,
     sparse_hz_pad_frame,
     sparse_hz_reduce_sum_rows,
+    sparse_hz_reframe_point,
     sparse_hz_scale,
+    sparse_hz_softmax_value_relaxation,
     sparse_hz_sub_same_frame,
+    softmax_ratio_weighted_extreme,
 )
 import act.back_end.interval_tf.tf_mlp as interval
 import act.back_end.interval_tf.tf_cnn as interval_cnn
@@ -152,6 +158,123 @@ def _prod(shape) -> int:
     for dim in shape:
         out *= int(dim)
     return out
+
+
+def _matmul_term_rows(L, batch: int):
+    x_shape = tuple(int(d) for d in L.params["x_shape"])
+    y_shape = tuple(int(d) for d in L.params["y_shape"])
+    if len(x_shape) < 2 or len(y_shape) < 2 or x_shape[-1] != y_shape[-2]:
+        return None
+    try:
+        batch_shape = np.broadcast_shapes(x_shape[:-2], y_shape[:-2])
+        m, reduction, n = x_shape[-2], x_shape[-1], y_shape[-1]
+        x_local = np.broadcast_to(
+            np.arange(_prod(x_shape), dtype=np.int64).reshape(x_shape),
+            (*batch_shape, m, reduction),
+        )
+        y_local = np.broadcast_to(
+            np.arange(_prod(y_shape), dtype=np.int64).reshape(y_shape),
+            (*batch_shape, reduction, n),
+        )
+        x_terms = np.broadcast_to(
+            x_local[..., :, None, :], (*batch_shape, m, n, reduction)
+        ).reshape(-1, reduction)
+        y_terms = np.broadcast_to(
+            np.swapaxes(y_local, -2, -1)[..., None, :, :],
+            (*batch_shape, m, n, reduction),
+        ).reshape(-1, reduction)
+    except (ValueError, TypeError):
+        return None
+    x_size, y_size = _prod(x_shape), _prod(y_shape)
+    offsets = np.arange(int(batch), dtype=np.int64)[:, None, None]
+    return (
+        (x_terms[None] + offsets * x_size).reshape(-1, reduction),
+        (y_terms[None] + offsets * y_size).reshape(-1, reduction),
+    )
+
+
+def _softmax_source(tf, layer_id: int):
+    current = int(layer_id)
+    while True:
+        layer = tf._net.by_id.get(current)
+        if layer is None:
+            return None
+        if layer.kind.upper() == "SOFTMAX":
+            return current
+        if layer.kind.upper() not in {
+            "RESHAPE", "FLATTEN", "SQUEEZE", "UNSQUEEZE"
+        }:
+            return None
+        predecessors = tf._net.preds.get(current, [])
+        if len(predecessors) != 1:
+            return None
+        current = predecessors[0]
+
+
+def _softmax_value_bounds(L, bx: Bounds, by: Bounds, output_bounds: Bounds, tf):
+    predecessors = tf._net.preds.get(L.id, [])
+    softmax_id = (
+        _softmax_source(tf, predecessors[0])
+        if len(predecessors) == 2 else None
+    )
+    if softmax_id is None:
+        return None
+    if not hz_bounds_are_liftable(bx) or not hz_bounds_are_liftable(by):
+        return None
+    rows = _matmul_term_rows(L, int(bx.lb.shape[0]))
+    if rows is None:
+        return None
+    x_rows, y_rows = rows
+    if x_rows.shape[0] != output_bounds.lb.numel():
+        return None
+    probability_lower = bx.lb.detach().cpu().double().numpy().reshape(-1)[x_rows]
+    probability_upper = bx.ub.detach().cpu().double().numpy().reshape(-1)[x_rows]
+    value_lower = by.lb.detach().cpu().double().numpy().reshape(-1)[y_rows]
+    value_upper = by.ub.detach().cpu().double().numpy().reshape(-1)[y_rows]
+    rowsize = x_rows.shape[1]
+    groups = x_rows[:, 0] // rowsize
+    differences = tf._softmax_differences.get(softmax_id)
+    score_lower = score_upper = None
+    score_predecessors = tf._net.preds.get(softmax_id, [])
+    if len(score_predecessors) == 1:
+        score_bounds = tf._net.get_predecessor_bounds(
+            softmax_id, tf._after, tf._before, 0
+        )
+        if score_bounds.lb.numel() == bx.lb.numel():
+            score_lower = (
+                score_bounds.lb.detach().cpu().double().numpy().reshape(-1)[x_rows]
+            )
+            score_upper = (
+                score_bounds.ub.detach().cpu().double().numpy().reshape(-1)[x_rows]
+            )
+    lower = softmax_ratio_weighted_extreme(
+        value_lower,
+        probability_lower,
+        probability_upper,
+        groups,
+        differences,
+        True,
+        score_lower,
+        score_upper,
+    )
+    upper = softmax_ratio_weighted_extreme(
+        value_upper,
+        probability_lower,
+        probability_upper,
+        groups,
+        differences,
+        False,
+        score_lower,
+        score_upper,
+    )
+    if not np.isfinite(lower).all() or not np.isfinite(upper).all():
+        return None
+    if np.any(lower > upper):
+        return None
+    return Bounds(
+        torch.from_numpy(lower).to(bx.lb).reshape_as(output_bounds.lb),
+        torch.from_numpy(upper).to(bx.ub).reshape_as(output_bounds.ub),
+    )
 
 
 def _shared_const_block(flat: torch.Tensor, shape, batch: int):
@@ -451,7 +574,66 @@ def sparse_hz_apply_layer(L, hz: SparseHZono, input_bounds: Bounds, result: Fact
             out = _sparse_matmul_const(L, hz, other.c, variable_is_left=True)
         elif sparse_hz_is_point(hz):
             out = _sparse_matmul_const(L, other, hz.c, variable_is_left=False)
-        return (True, out, None) if out is not None else (True, None, "unsupported_sparse_matmul")
+        if out is not None:
+            return True, out, None
+        rows = _matmul_term_rows(L, input_bounds.lb.shape[0])
+        shared = (
+            rows is not None
+            and hz.frame_id is not None
+            and hz.frame_id == other.frame_id
+        )
+        reservation = tf._sparse_cont_slots_for(
+            hz, L.id, result.bounds.lb.numel()
+        )
+        if reservation is None:
+            return True, None, "sparse_matmul_size_limit"
+        slots, n_cont = reservation
+        if not shared:
+            return True, sparse_hz_lift_bounds(
+                hz, result.bounds, slots, n_cont
+            ), None
+        bx = tf._net.get_predecessor_bounds(L.id, tf._after, tf._before, 0)
+        by = tf._net.get_predecessor_bounds(L.id, tf._after, tf._before, 1)
+        softmax_id = _softmax_source(tf, preds[0])
+        if softmax_id is not None:
+            score_predecessors = tf._net.preds.get(softmax_id, [])
+            score_hz = (
+                tf._sparse_hz_cache.get(score_predecessors[0])
+                if len(score_predecessors) == 1 else None
+            )
+            if score_hz is None:
+                return True, None, "missing_sparse_softmax_scores"
+            score_bounds = tf._net.get_predecessor_bounds(
+                softmax_id, tf._after, tf._before, 0
+            )
+            out = sparse_hz_softmax_value_relaxation(
+                hz,
+                other,
+                bx,
+                by,
+                rows[0],
+                rows[1],
+                slots,
+                n_cont,
+                scores=score_hz,
+                score_bounds=score_bounds,
+                score_differences=tf._softmax_differences.get(softmax_id),
+                score_context=tf._softmax_score_contexts.get(softmax_id),
+            )
+            return True, sparse_hz_intersect_bounds(
+                out, result.bounds
+            ), None
+        return True, sparse_hz_matmul_relaxation(
+            hz,
+            other,
+            bx,
+            by,
+            result.bounds,
+            rows[0],
+            rows[1],
+            slots,
+            n_cont,
+        ), None
     if k in {"FLATTEN", "RESHAPE", "SQUEEZE", "UNSQUEEZE"}:
         return True, hz, None
     if k == "TRANSPOSE":
@@ -519,11 +701,20 @@ def sparse_hz_apply_layer(L, hz: SparseHZono, input_bounds: Bounds, result: Fact
     if k == "CONCAT":
         preds = tf._net.preds.get(L.id, [])
         parts = [tf._sparse_hz_cache.get(pid) for pid in preds]
-        return (
-            (True, sparse_hz_concat(parts), None)
-            if parts and all(p is not None for p in parts)
-            else (True, None, "missing_sparse_concat_input")
+        if not parts or any(part is None for part in parts):
+            return True, None, "missing_sparse_concat_input"
+        target = next(
+            (part for part in parts if not sparse_hz_is_point(part)), parts[0]
         )
+        aligned = []
+        for part in parts:
+            if part.frame_id == target.frame_id:
+                aligned.append(part)
+            elif sparse_hz_is_point(part) and part.n_eq == 0 and part.n_ineq == 0:
+                aligned.append(sparse_hz_reframe_point(part, target))
+            else:
+                return True, None, "incompatible_sparse_concat_frames"
+        return True, sparse_hz_concat(aligned), None
     if k == "CONSTANT":
         return True, sparse_hz_from_bounds(result.bounds, frame_id=hz.frame_id), None
     if k in {"LRELU", "SIGMOID", "TANH", "MAXPOOL2D"}:
@@ -832,6 +1023,12 @@ def tf_matmul(L, bounds, tf):
     bx = tf._net.get_predecessor_bounds(L.id, tf._after, tf._before, 0)
     by = tf._net.get_predecessor_bounds(L.id, tf._after, tf._before, 1)
     fact = interval.tf_matmul(L, bx, by)
+    fused_bounds = _softmax_value_bounds(L, bx, by, fact.bounds, tf)
+    if fused_bounds is not None:
+        fact = Fact(
+            bounds=hz_tighten_bounds(fact.bounds, fused_bounds), cons=fact.cons
+        )
+        fact.cons.add_box(L.id, L.out_vars, fact.bounds)
     hz_in = tf._hz_cache.get(L.id)
     if hz_in is not None:
         preds = tf._net.preds.get(L.id, [])
@@ -845,6 +1042,11 @@ def tf_matmul(L, bounds, tf):
             if out is not None:
                 tf._hz_cache[L.id] = out
                 return _hz_fact(fact, tf._hz_cache[L.id])
+        if hz_bounds_are_liftable(fact.bounds):
+            out = hz_lift_bounds(hz_in, fact.bounds)
+            if not _hz_exceeds_limit(tf, L, out):
+                tf._hz_cache[L.id] = out
+                return fact
     tf._hz_cache.pop(L.id, None)
     return fact
 
