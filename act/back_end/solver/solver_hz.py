@@ -4,7 +4,7 @@ import logging
 import time
 
 import torch
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional, TYPE_CHECKING
 from act.back_end.core import Bounds
 from act.back_end.solver.solver_base import Solver, SolverCaps
@@ -21,7 +21,7 @@ try:
     import numpy as np
     import scipy.sparse as sp
     from scipy.optimize import Bounds as SciPyBounds
-    from scipy.optimize import LinearConstraint, milp
+    from scipy.optimize import LinearConstraint, linprog, milp
 
     _HAS_SCIPY = True
 except ImportError:
@@ -442,6 +442,22 @@ def sparse_empty(rows: int, cols: int):
     return sp.csr_matrix((int(rows), int(cols)), dtype=np.float64)
 
 
+def sparse_abs_row_sum(mat):
+    _require_sparse()
+    matrix = mat if sp.isspmatrix_csr(mat) else sp.csr_matrix(mat)
+    matrix.sum_duplicates()
+    result = np.zeros(matrix.shape[0], dtype=np.float64)
+    rows = np.flatnonzero(np.diff(matrix.indptr))
+    if rows.size:
+        result[rows] = np.add.reduceat(np.abs(matrix.data), matrix.indptr[rows])
+    return result
+
+
+def _sparse_generator_radius(Gc, Gb):
+    radius = sparse_abs_row_sum(Gc)
+    return radius + (sparse_abs_row_sum(Gb) if Gb.shape[1] else 0.0)
+
+
 def sparse_pad_cols(mat, cols: int):
     mat = _as_csr(mat)
     cols = int(cols)
@@ -580,6 +596,22 @@ def sparse_hz_lift_bounds(
     )
 
 
+def sparse_hz_reframe_point(hz: SparseHZono, target: SparseHZono) -> SparseHZono:
+    if not sparse_hz_is_point(hz) or hz.n_eq or hz.n_ineq:
+        raise ValueError("only unconstrained point HZs can be reframed")
+    return replace(
+        hz,
+        Gc=sparse_empty(hz.n_out, target.n_cont),
+        Gb=sparse_empty(hz.n_out, target.n_bin),
+        Ac=sparse_empty(0, target.n_cont),
+        Ab=sparse_empty(0, target.n_bin),
+        Auc=sparse_empty(0, target.n_cont),
+        Aub=sparse_empty(0, target.n_bin),
+        frame_id=target.frame_id,
+        exact=hz.exact and target.exact,
+    )
+
+
 def sparse_hz_linear(hz: SparseHZono, W, bias=None) -> SparseHZono:
     Wsp = _as_csr(W)
     if Wsp.shape[1] != hz.n_out:
@@ -607,6 +639,34 @@ def sparse_hz_linear(hz: SparseHZono, W, bias=None) -> SparseHZono:
         ub=hz.ub,
         frame_id=hz.frame_id,
         exact=hz.exact,
+    )
+
+
+def sparse_hz_intersect_bounds(hz: SparseHZono, bounds: Bounds) -> SparseHZono:
+    lb, ub = _bounds_to_numpy(bounds)
+    if lb.size != hz.n_out or not np.isfinite(lb).all() or not np.isfinite(ub).all():
+        raise ValueError("sparse HZ box intersection requires finite matching bounds")
+    if np.any(lb > ub):
+        raise ValueError("sparse HZ box intersection received inconsistent bounds")
+    radius = _sparse_generator_radius(hz.Gc, hz.Gb)
+    upper_rows = np.flatnonzero(ub < hz.c + radius)
+    lower_rows = np.flatnonzero(lb > hz.c - radius)
+    return replace(
+        hz,
+        Auc=sp.vstack(
+            [hz.Auc, hz.Gc[upper_rows], -hz.Gc[lower_rows]], format="csr"
+        ),
+        Aub=sp.vstack(
+            [hz.Aub, hz.Gb[upper_rows], -hz.Gb[lower_rows]], format="csr"
+        ),
+        ub=np.concatenate(
+            [
+                hz.ub,
+                ub[upper_rows] - hz.c[upper_rows],
+                hz.c[lower_rows] - lb[lower_rows],
+            ]
+        ),
+        exact=False,
     )
 
 
@@ -689,6 +749,918 @@ def _sparse_vstack(mats, cols: int):
 def _sparse_concat_arrays(arrs):
     arrs = [np.asarray(a, dtype=np.float64).reshape(-1) for a in arrs if np.asarray(a).size]
     return np.concatenate(arrs) if arrs else np.zeros(0, dtype=np.float64)
+
+
+def _sparse_constraint_prefix(Ac_x, Ab_x, b_x, Ac_y, Ab_y, b_y) -> int:
+    count = min(int(Ac_x.shape[0]), int(Ac_y.shape[0]))
+    if count == 0:
+        return 0
+    dc = (Ac_x[:count] - Ac_y[:count]).tocsr()
+    db = (Ab_x[:count] - Ab_y[:count]).tocsr()
+    dc.eliminate_zeros()
+    db.eliminate_zeros()
+    same = (
+        (np.asarray(dc.getnnz(axis=1)).reshape(-1) == 0)
+        & (np.asarray(db.getnnz(axis=1)).reshape(-1) == 0)
+        & (np.asarray(b_x[:count]) == np.asarray(b_y[:count]))
+    )
+    different = np.flatnonzero(~same)
+    return int(different[0]) if different.size else count
+
+
+def _sparse_merge_constraints(parts, c_name, b_name, rhs_name, n_cont, n_bin):
+    base_index = max(
+        range(len(parts)), key=lambda i: getattr(parts[i], c_name).shape[0]
+    )
+    base = parts[base_index]
+    Ac_base = sparse_pad_cols(getattr(base, c_name), n_cont)
+    Ab_base = sparse_pad_cols(getattr(base, b_name), n_bin)
+    rhs_base = np.asarray(getattr(base, rhs_name), dtype=np.float64).reshape(-1)
+    Ac_parts, Ab_parts, rhs_parts = [Ac_base], [Ab_base], [rhs_base]
+    for index, part in enumerate(parts):
+        if index == base_index:
+            continue
+        Ac = sparse_pad_cols(getattr(part, c_name), n_cont)
+        Ab = sparse_pad_cols(getattr(part, b_name), n_bin)
+        rhs = np.asarray(getattr(part, rhs_name), dtype=np.float64).reshape(-1)
+        prefix = _sparse_constraint_prefix(
+            Ac_base, Ab_base, rhs_base, Ac, Ab, rhs
+        )
+        Ac_parts.append(Ac[prefix:])
+        Ab_parts.append(Ab[prefix:])
+        rhs_parts.append(rhs[prefix:])
+    return (
+        _sparse_vstack(Ac_parts, n_cont),
+        _sparse_vstack(Ab_parts, n_bin),
+        _sparse_concat_arrays(rhs_parts),
+    )
+
+
+def _sparse_merge_all_constraints(parts, n_cont, n_bin):
+    return (
+        *_sparse_merge_constraints(parts, "Ac", "Ab", "b", n_cont, n_bin),
+        *_sparse_merge_constraints(parts, "Auc", "Aub", "ub", n_cont, n_bin),
+    )
+
+
+def _sparse_truncate_rows(matrix, max_terms: int):
+    matrix = matrix.tocsr()
+    omitted_radius = np.zeros(matrix.shape[0], dtype=np.float64)
+    if max_terms <= 0 or np.diff(matrix.indptr).max(initial=0) <= max_terms:
+        return matrix, omitted_radius
+    rows, cols, data = [], [], []
+    for row in range(matrix.shape[0]):
+        start, stop = matrix.indptr[row], matrix.indptr[row + 1]
+        row_data = matrix.data[start:stop]
+        row_cols = matrix.indices[start:stop]
+        if row_data.size > max_terms:
+            selected = np.argpartition(np.abs(row_data), -max_terms)[-max_terms:]
+            omitted = np.ones(row_data.size, dtype=bool)
+            omitted[selected] = False
+            omitted_radius[row] = np.abs(row_data[omitted]).sum()
+            row_data, row_cols = row_data[selected], row_cols[selected]
+        rows.extend([row] * row_data.size)
+        cols.extend(row_cols.tolist())
+        data.extend(row_data.tolist())
+    return sp.csr_matrix(
+        (data, (rows, cols)), shape=matrix.shape, dtype=np.float64
+    ), omitted_radius
+
+
+def _sparse_add_error_generators(Gc, radius, slots, n_cont: int):
+    radius = np.asarray(radius, dtype=np.float64).reshape(-1)
+    slots = np.asarray(slots, dtype=np.int64).reshape(-1)
+    nonzero = np.flatnonzero(radius != 0.0)
+    if nonzero.size:
+        Gc = Gc + sp.csr_matrix(
+            (radius[nonzero], (nonzero, slots[nonzero])),
+            shape=(radius.size, int(n_cont)),
+        )
+    return Gc.tocsr()
+
+
+def sparse_hz_matmul_relaxation(
+    x: SparseHZono,
+    y: SparseHZono,
+    x_bounds: Bounds,
+    y_bounds: Bounds,
+    output_bounds: Bounds,
+    x_rows,
+    y_rows,
+    slots,
+    n_cont: int,
+) -> SparseHZono:
+    if not _sparse_same_frame([x, y]):
+        raise ValueError("sparse variable MatMul requires one shared frame")
+    x_rows = np.asarray(x_rows, dtype=np.int64)
+    y_rows = np.asarray(y_rows, dtype=np.int64)
+    if x_rows.ndim != 2 or x_rows.shape != y_rows.shape:
+        raise ValueError("MatMul term rows must have matching shapes")
+    lbx, ubx = _bounds_to_numpy(x_bounds)
+    lby, uby = _bounds_to_numpy(y_bounds)
+    slots = np.asarray(slots, dtype=np.int64).reshape(-1)
+    n_out, reduction = x_rows.shape
+    if n_out != output_bounds.lb.numel() or slots.size != n_out:
+        raise ValueError("MatMul output rows, bounds, and slots do not match")
+    if x_rows.size and (x_rows.min() < 0 or x_rows.max() >= x.n_out):
+        raise ValueError("MatMul left term row is out of range")
+    if y_rows.size and (y_rows.min() < 0 or y_rows.max() >= y.n_out):
+        raise ValueError("MatMul right term row is out of range")
+
+    n_bin = max(x.n_bin, y.n_bin)
+    xp = sparse_hz_pad_frame(x, int(n_cont), n_bin)
+    yp = sparse_hz_pad_frame(y, int(n_cont), n_bin)
+    out_idx = np.arange(n_out, dtype=np.int64)
+    Ac, Ab, b, Auc, Aub, ub = _sparse_merge_all_constraints(
+        [xp, yp], int(n_cont), n_bin
+    )
+    lx, ux = lbx[x_rows], ubx[x_rows]
+    ly, uy = lby[y_rows], uby[y_rows]
+    cx, cy = (lx + ux) * 0.5, (ly + uy) * 0.5
+    term_rows = np.repeat(out_idx, reduction)
+    X0 = sp.csr_matrix(
+        (cy.reshape(-1), (term_rows, x_rows.reshape(-1))),
+        shape=(n_out, x.n_out),
+    )
+    Y0 = sp.csr_matrix(
+        (cx.reshape(-1), (term_rows, y_rows.reshape(-1))),
+        shape=(n_out, y.n_out),
+    )
+    center = (
+        np.asarray(X0 @ xp.c).reshape(-1)
+        + np.asarray(Y0 @ yp.c).reshape(-1)
+        - np.sum(cx * cy, axis=1)
+    )
+    Gc = (X0 @ xp.Gc + Y0 @ yp.Gc).tocsr()
+    Gc, omitted = _sparse_truncate_rows(Gc, 256)
+    radius = np.nextafter(
+        np.sum((ux - lx) * (uy - ly), axis=1) * 0.25 + omitted,
+        np.inf,
+    )
+    Gc = _sparse_add_error_generators(Gc, radius, slots, n_cont)
+    Gb = (
+        (X0 @ xp.Gb + Y0 @ yp.Gb).tocsr()
+        if n_bin else sparse_empty(n_out, 0)
+    )
+    out = SparseHZono(
+        c=center,
+        Gc=Gc,
+        Gb=Gb,
+        Ac=Ac,
+        Ab=Ab,
+        b=b,
+        Auc=Auc,
+        Aub=Aub,
+        ub=ub,
+        frame_id=x.frame_id,
+        exact=False,
+    )
+    return sparse_hz_intersect_bounds(out, output_bounds)
+
+
+def softmax_ratio_weighted_extreme(
+    values,
+    probability_lower,
+    probability_upper,
+    groups,
+    score_differences,
+    minimize: bool,
+    score_lower=None,
+    score_upper=None,
+):
+    order = np.argsort(values, axis=1)
+    if not minimize:
+        order = order[:, ::-1]
+    ordered_values = np.take_along_axis(values, order, axis=1)
+    ordered_lower = np.take_along_axis(probability_lower, order, axis=1)
+    ordered_upper = np.take_along_axis(probability_upper, order, axis=1)
+    selected = ordered_lower.copy()
+    remaining = np.maximum(0.0, 1.0 - selected.sum(axis=1))
+    for column in range(values.shape[1]):
+        added = np.minimum(
+            remaining, ordered_upper[:, column] - ordered_lower[:, column]
+        )
+        selected[:, column] += added
+        remaining -= added
+    extrema = np.min(values, axis=1) if minimize else np.max(values, axis=1)
+    result = np.sum(selected * ordered_values, axis=1)
+    result = np.where(remaining <= 1e-10, result, extrema)
+    result = np.nextafter(result, -np.inf if minimize else np.inf)
+
+    if score_lower is None or score_upper is None:
+        return result
+    score_lower = np.asarray(score_lower, dtype=np.float64)
+    score_upper = np.asarray(score_upper, dtype=np.float64)
+    if score_lower.shape != values.shape or score_upper.shape != values.shape:
+        return result
+    objective = values if minimize else -values
+    order = np.argsort(objective, axis=1)
+    ordered_objective = np.take_along_axis(objective, order, axis=1).astype(
+        np.longdouble
+    )
+    ordered_lower = np.take_along_axis(score_lower, order, axis=1).astype(
+        np.longdouble
+    )
+    ordered_upper = np.take_along_axis(score_upper, order, axis=1).astype(
+        np.longdouble
+    )
+    shift = np.max(ordered_upper, axis=1, keepdims=True)
+    exp_lower = np.exp(ordered_lower - shift)
+    exp_upper = np.exp(ordered_upper - shift)
+    prefix_num = np.concatenate(
+        [
+            np.zeros((values.shape[0], 1), dtype=np.longdouble),
+            np.cumsum(ordered_objective * exp_upper, axis=1),
+        ],
+        axis=1,
+    )
+    prefix_den = np.concatenate(
+        [
+            np.zeros((values.shape[0], 1), dtype=np.longdouble),
+            np.cumsum(exp_upper, axis=1),
+        ],
+        axis=1,
+    )
+    lower_num = np.concatenate(
+        [
+            np.zeros((values.shape[0], 1), dtype=np.longdouble),
+            np.cumsum(ordered_objective * exp_lower, axis=1),
+        ],
+        axis=1,
+    )
+    lower_den = np.concatenate(
+        [
+            np.zeros((values.shape[0], 1), dtype=np.longdouble),
+            np.cumsum(exp_lower, axis=1),
+        ],
+        axis=1,
+    )
+    candidates = (prefix_num + lower_num[:, -1:] - lower_num) / (
+        prefix_den + lower_den[:, -1:] - lower_den
+    )
+    vertex = np.asarray(np.min(candidates, axis=1), dtype=np.float64)
+    vertex -= 32.0 * np.finfo(np.float64).eps * (1.0 + np.abs(vertex))
+    if minimize:
+        return np.maximum(result, vertex)
+    return np.minimum(result, -vertex)
+
+
+def _softmax_taylor_coefficients(
+    score_bounds: Bounds,
+    score_rows,
+    groups,
+    weights,
+    score_differences,
+    probability_lower,
+    probability_upper,
+):
+    score_rows = np.asarray(score_rows, dtype=np.int64)
+    groups = np.asarray(groups, dtype=np.int64).reshape(-1)
+    weights = np.asarray(weights, dtype=np.float64)
+    n_out, reduction = score_rows.shape
+    score_lb, score_ub = _bounds_to_numpy(score_bounds)
+    score_lb, score_ub = score_lb[score_rows], score_ub[score_rows]
+    score_center = 0.5 * (score_lb + score_ub)
+    reference = np.argmax(score_center, axis=1)
+    rows = np.arange(n_out, dtype=np.int64)
+    difference_lb = score_lb - score_ub[rows, reference, None]
+    difference_ub = score_ub - score_lb[rows, reference, None]
+    if score_differences is not None:
+        diff_lb, diff_ub = (
+            np.asarray(part, dtype=np.float64) for part in score_differences
+        )
+        if (
+            diff_lb.ndim == 3
+            and diff_lb.shape == diff_ub.shape
+            and diff_lb.shape[0] > int(groups.max(initial=-1))
+            and diff_lb.shape[1:] == (reduction, reduction)
+        ):
+            difference_lb = np.maximum(
+                difference_lb, diff_lb[groups, reference]
+            )
+            difference_ub = np.minimum(
+                difference_ub, diff_ub[groups, reference]
+            )
+    difference_center = 0.5 * (difference_lb + difference_ub)
+    difference_center[rows, reference] = 0.0
+    difference_radius = np.maximum(
+        difference_center - np.minimum(difference_lb, difference_center),
+        np.maximum(difference_ub, difference_center) - difference_center,
+    )
+    difference_radius[rows, reference] = 0.0
+
+    shifted = difference_center - np.max(difference_center, axis=1, keepdims=True)
+    probability_center = np.exp(shifted)
+    probability_center /= probability_center.sum(axis=1, keepdims=True)
+    weighted_center = np.sum(probability_center * weights, axis=1)
+    affine = probability_center * (weights - weighted_center[:, None])
+    intercept = weighted_center - np.sum(affine * difference_center, axis=1)
+
+    upper_shift = score_ub[:, None, :] - score_lb[:, :, None]
+    lower_shift = score_lb[:, None, :] - score_ub[:, :, None]
+    diagonal = np.arange(reduction)
+    upper_shift[:, diagonal, diagonal] = 0.0
+    lower_shift[:, diagonal, diagonal] = 0.0
+
+    def inverse_exp_sum(shifts):
+        maximum = np.max(shifts, axis=2, keepdims=True)
+        log_denominator = maximum[:, :, 0] + np.log(
+            np.exp(shifts - maximum).sum(axis=2)
+        )
+        return np.exp(-log_denominator)
+
+    raw_probability_lower = np.nextafter(inverse_exp_sum(upper_shift), 0.0)
+    raw_probability_upper = np.nextafter(inverse_exp_sum(lower_shift), np.inf)
+    probability_lower = np.asarray(probability_lower, dtype=np.float64)
+    probability_upper = np.asarray(probability_upper, dtype=np.float64)
+    tightened_lower = np.maximum(raw_probability_lower, probability_lower)
+    tightened_upper = np.minimum(raw_probability_upper, probability_upper)
+    consistent = tightened_lower <= tightened_upper
+    raw_probability_lower = np.where(
+        consistent, tightened_lower, raw_probability_lower
+    )
+    raw_probability_upper = np.where(
+        consistent, tightened_upper, raw_probability_upper
+    )
+
+    def weighted_extreme(coefficients, minimize):
+        return softmax_ratio_weighted_extreme(
+            coefficients,
+            raw_probability_lower,
+            raw_probability_upper,
+            groups,
+            score_differences,
+            minimize,
+            score_lb,
+            score_ub,
+        )
+
+    weighted_lower = weighted_extreme(weights, True)
+    weighted_upper = weighted_extreme(weights, False)
+    candidates = np.stack(
+        [
+            raw_probability_lower,
+            raw_probability_upper,
+            np.clip(0.25, raw_probability_lower, raw_probability_upper),
+            np.clip(0.5, raw_probability_lower, raw_probability_upper),
+        ],
+        axis=0,
+    )
+    diagonal_factor = np.max(
+        candidates * np.abs(1.0 - 2.0 * candidates), axis=0
+    )
+    weight_pair = weights[:, :, None] + weights[:, None, :]
+    hessian = (
+        raw_probability_upper[:, :, None]
+        * raw_probability_upper[:, None, :]
+        * np.maximum(
+            np.abs(weight_pair - 2.0 * weighted_lower[:, None, None]),
+            np.abs(weight_pair - 2.0 * weighted_upper[:, None, None]),
+        )
+    )
+    hessian[:, diagonal, diagonal] = diagonal_factor * np.maximum(
+        np.abs(weights - weighted_lower[:, None]),
+        np.abs(weights - weighted_upper[:, None]),
+    )
+    taylor_radius = 0.5 * np.einsum(
+        "nij,ni,nj->n", hessian, difference_radius, difference_radius
+    )
+    delta_lower = difference_lb - difference_center
+    delta_upper = difference_ub - difference_center
+    delta_span = np.max(delta_upper, axis=1) - np.min(delta_lower, axis=1)
+    weight_span = np.max(weights, axis=1) - np.min(weights, axis=1)
+    directional_radius = np.nextafter(
+        0.125 * weight_span * np.square(delta_span), np.inf
+    )
+    taylor_radius = np.minimum(taylor_radius, directional_radius)
+
+    valid_log = (
+        np.all(raw_probability_lower > 0.0, axis=1)
+        & np.all(raw_probability_upper >= raw_probability_lower, axis=1)
+    )
+    log_lower = np.log(np.maximum(raw_probability_lower, np.finfo(float).tiny))
+    log_upper = np.log(np.maximum(raw_probability_upper, np.finfo(float).tiny))
+    probability_width = raw_probability_upper - raw_probability_lower
+    secant_slope = np.divide(
+        log_upper - log_lower,
+        probability_width,
+        out=1.0 / np.maximum(raw_probability_lower, np.finfo(float).tiny),
+        where=probability_width > 1e-12,
+    )
+    secant_intercept = log_lower - secant_slope * raw_probability_lower
+    tangent_point = np.clip(
+        probability_center, raw_probability_lower, raw_probability_upper
+    )
+    tangent_slope = 1.0 / tangent_point
+    tangent_intercept = np.log(tangent_point) - 1.0
+    log_coefficient = -affine
+    upper_uses_tangent = log_coefficient >= 0.0
+    upper_slope = np.where(upper_uses_tangent, tangent_slope, secant_slope)
+    upper_intercept = np.where(
+        upper_uses_tangent, tangent_intercept, secant_intercept
+    )
+    lower_slope = np.where(upper_uses_tangent, secant_slope, tangent_slope)
+    lower_intercept = np.where(
+        upper_uses_tangent, secant_intercept, tangent_intercept
+    )
+    upper_coefficients = weights + log_coefficient * upper_slope
+    lower_coefficients = weights + log_coefficient * lower_slope
+    residual_upper = (
+        np.sum(log_coefficient * upper_intercept, axis=1)
+        + weighted_extreme(upper_coefficients, False)
+        - intercept
+    )
+    residual_lower = (
+        np.sum(log_coefficient * lower_intercept, axis=1)
+        + weighted_extreme(lower_coefficients, True)
+        - intercept
+    )
+    guard = 1e-10 * (
+        1.0 + np.maximum(np.abs(residual_lower), np.abs(residual_upper))
+    )
+    residual_lower -= guard
+    residual_upper += guard
+    error_lower = np.maximum(-taylor_radius, residual_lower)
+    error_upper = np.minimum(taylor_radius, residual_upper)
+    consistent = valid_log & (error_lower <= error_upper)
+    error_lower = np.where(consistent, error_lower, -taylor_radius)
+    error_upper = np.where(consistent, error_upper, taylor_radius)
+    return affine, intercept, error_lower, error_upper
+
+
+def _attention_score_affine(
+    context,
+    affine,
+    probability_rows,
+    n_cont: int,
+    n_bin: int,
+):
+    if not isinstance(context, dict):
+        return None
+    q = context.get("q_hz")
+    k = context.get("k_hz")
+    if not isinstance(q, SparseHZono) or not isinstance(k, SparseHZono):
+        return None
+    if not _sparse_same_frame([q, k]):
+        return None
+
+    probability_rows = np.asarray(probability_rows, dtype=np.int64)
+    affine = np.asarray(affine, dtype=np.float64)
+    q_rows = np.asarray(context.get("q_rows"), dtype=np.int64)
+    k_rows = np.asarray(context.get("k_rows"), dtype=np.int64)
+    scale = np.asarray(context.get("scale"), dtype=np.float64).reshape(-1)
+    shift = np.asarray(context.get("shift"), dtype=np.float64).reshape(-1)
+    if (
+        probability_rows.ndim != 2
+        or affine.shape != probability_rows.shape
+        or q_rows.ndim != 2
+        or q_rows.shape != k_rows.shape
+        or q_rows.shape[0] != scale.size
+        or shift.size != scale.size
+        or probability_rows.size == 0
+        or probability_rows.min() < 0
+        or probability_rows.max() >= q_rows.shape[0]
+    ):
+        return None
+
+    selected_q = q_rows[probability_rows]
+    selected_k = k_rows[probability_rows]
+    if not np.all(selected_q == selected_q[:, :1, :]):
+        return None
+    n_out, width = probability_rows.shape
+    reduction = q_rows.shape[1]
+    coefficients = affine * scale[probability_rows]
+    q_term_rows = selected_q[:, 0, :]
+    mixed_rows = np.broadcast_to(
+        np.arange(n_out * reduction, dtype=np.int64).reshape(n_out, 1, reduction),
+        (n_out, width, reduction),
+    )
+    mixed_coefficients = np.broadcast_to(
+        coefficients[:, :, None], (n_out, width, reduction)
+    )
+    key_operator = sp.csr_matrix(
+        (
+            mixed_coefficients.reshape(-1),
+            (mixed_rows.reshape(-1), selected_k.reshape(-1)),
+        ),
+        shape=(n_out * reduction, k.n_out),
+    )
+
+    kp = sparse_hz_pad_frame(k, int(n_cont), n_bin)
+    qp = sparse_hz_pad_frame(q, int(n_cont), n_bin)
+    mixed_center = np.asarray(key_operator @ kp.c).reshape(n_out, reduction)
+    mixed_Gc = (key_operator @ kp.Gc).tocsr()
+    mixed_Gb = (
+        (key_operator @ kp.Gb).tocsr()
+        if n_bin else sparse_empty(n_out * reduction, 0)
+    )
+    k_bounds = context.get("k_bounds")
+    q_bounds = context.get("q_bounds")
+    if not isinstance(k_bounds, Bounds) or not isinstance(q_bounds, Bounds):
+        return None
+    k_lb, k_ub = _bounds_to_numpy(k_bounds)
+    k_lb, k_ub = k_lb[selected_k], k_ub[selected_k]
+    positive = coefficients[:, :, None] >= 0.0
+    interval_lower = np.sum(
+        mixed_coefficients * np.where(positive, k_lb, k_ub), axis=1
+    )
+    interval_upper = np.sum(
+        mixed_coefficients * np.where(positive, k_ub, k_lb), axis=1
+    )
+    mixed_radius = _sparse_generator_radius(mixed_Gc, mixed_Gb).reshape(
+        n_out, reduction
+    )
+    mixed_lower = np.maximum(interval_lower, mixed_center - mixed_radius)
+    mixed_upper = np.minimum(interval_upper, mixed_center + mixed_radius)
+    consistent = mixed_lower <= mixed_upper
+    mixed_lower = np.where(consistent, mixed_lower, interval_lower)
+    mixed_upper = np.where(consistent, mixed_upper, interval_upper)
+
+    q_lb, q_ub = _bounds_to_numpy(q_bounds)
+    q_lb, q_ub = q_lb[q_term_rows], q_ub[q_term_rows]
+    q_center = qp.c[q_term_rows]
+    q_radius = _sparse_generator_radius(qp.Gc, qp.Gb)[q_term_rows]
+    q_lower = np.maximum(q_lb, q_center - q_radius)
+    q_upper = np.minimum(q_ub, q_center + q_radius)
+    consistent = q_lower <= q_upper
+    q_lower = np.where(consistent, q_lower, q_lb)
+    q_upper = np.where(consistent, q_upper, q_ub)
+
+    q_mid = 0.5 * (q_lower + q_upper)
+    k_mid = 0.5 * (mixed_lower + mixed_upper)
+    product_error = np.nextafter(
+        np.sum(
+            0.25 * (q_upper - q_lower) * (mixed_upper - mixed_lower),
+            axis=1,
+        ),
+        np.inf,
+    )
+    output_rows = np.repeat(np.arange(n_out, dtype=np.int64), reduction)
+    q_operator = sp.csr_matrix(
+        (k_mid.reshape(-1), (output_rows, q_term_rows.reshape(-1))),
+        shape=(n_out, q.n_out),
+    )
+    key_output_rows = np.broadcast_to(
+        np.arange(n_out, dtype=np.int64)[:, None, None], selected_k.shape
+    )
+    key_operator = sp.csr_matrix(
+        (
+            (mixed_coefficients * q_mid[:, None, :]).reshape(-1),
+            (key_output_rows.reshape(-1), selected_k.reshape(-1)),
+        ),
+        shape=(n_out, k.n_out),
+    )
+    key_center = np.asarray(key_operator @ kp.c).reshape(-1)
+    key_Gc = (key_operator @ kp.Gc).tocsr()
+    key_Gb = (
+        (key_operator @ kp.Gb).tocsr()
+        if n_bin else sparse_empty(n_out, 0)
+    )
+    center = (
+        np.asarray(q_operator @ qp.c).reshape(-1)
+        + key_center
+        - np.sum(q_mid * k_mid, axis=1)
+        + np.sum(affine * shift[probability_rows], axis=1)
+    )
+    Gc = (q_operator @ qp.Gc + key_Gc).tocsr()
+    Gb = (
+        (q_operator @ qp.Gb + key_Gb).tocsr()
+        if n_bin else sparse_empty(n_out, 0)
+    )
+    return center, Gc, Gb, product_error, (qp, kp)
+
+
+def _sparse_hz_softmax_value_fused(
+    scores: SparseHZono,
+    values: SparseHZono,
+    score_bounds: Bounds,
+    probability_rows,
+    value_rows,
+    slots,
+    n_cont: int,
+    p0,
+    probability_lower,
+    probability_upper,
+    mid,
+    cross_radius,
+    score_differences,
+    score_context,
+) -> SparseHZono:
+    probability_rows = np.asarray(probability_rows, dtype=np.int64)
+    value_rows = np.asarray(value_rows, dtype=np.int64)
+    n_out, reduction = probability_rows.shape
+    groups = probability_rows[:, 0] // reduction
+    affine, intercept, error_lower, error_upper = _softmax_taylor_coefficients(
+        score_bounds,
+        probability_rows,
+        groups,
+        mid,
+        score_differences,
+        probability_lower,
+        probability_upper,
+    )
+    error_lower -= cross_radius
+    error_upper += cross_radius
+    error_center = 0.5 * (error_lower + error_upper)
+    error_radius = np.nextafter(0.5 * (error_upper - error_lower), np.inf)
+
+    n_bin = max(scores.n_bin, values.n_bin)
+    value_padded = sparse_hz_pad_frame(values, int(n_cont), n_bin)
+    direct_score = _attention_score_affine(
+        score_context, affine, probability_rows, int(n_cont), n_bin
+    )
+    output_rows = np.repeat(np.arange(n_out, dtype=np.int64), reduction)
+    if direct_score is None:
+        score_padded = sparse_hz_pad_frame(scores, int(n_cont), n_bin)
+        score_operator = sp.csr_matrix(
+            (affine.reshape(-1), (output_rows, probability_rows.reshape(-1))),
+            shape=(n_out, scores.n_out),
+        )
+        score_center = np.asarray(score_operator @ score_padded.c).reshape(-1)
+        score_Gc = (score_operator @ score_padded.Gc).tocsr()
+        score_Gb = (
+            (score_operator @ score_padded.Gb).tocsr()
+            if n_bin else sparse_empty(n_out, 0)
+        )
+        score_error = np.zeros(n_out, dtype=np.float64)
+        constraint_parts = [score_padded, value_padded]
+    else:
+        score_center, score_Gc, score_Gb, score_error, score_parts = direct_score
+        constraint_parts = [*score_parts, value_padded]
+    value_operator = sp.csr_matrix(
+        (p0.reshape(-1), (output_rows, value_rows.reshape(-1))),
+        shape=(n_out, values.n_out),
+    )
+    error_radius = np.nextafter(error_radius + score_error, np.inf)
+    center = (
+        score_center
+        + np.asarray(value_operator @ value_padded.c).reshape(-1)
+        + intercept
+        - np.sum(p0 * mid, axis=1)
+        + error_center
+    )
+    Gc = (score_Gc + value_operator @ value_padded.Gc).tocsr()
+    Gc = _sparse_add_error_generators(Gc, error_radius, slots, n_cont)
+    Gb = (
+        (score_Gb + value_operator @ value_padded.Gb).tocsr()
+        if n_bin else sparse_empty(n_out, 0)
+    )
+    Ac, Ab, b, Auc, Aub, ub = _sparse_merge_all_constraints(
+        constraint_parts, int(n_cont), n_bin
+    )
+    return SparseHZono(
+        c=center,
+        Gc=Gc,
+        Gb=Gb,
+        Ac=Ac,
+        Ab=Ab,
+        b=b,
+        Auc=Auc,
+        Aub=Aub,
+        ub=ub,
+        frame_id=value_padded.frame_id,
+        exact=False,
+    )
+
+
+def _softmax_value_cross_radius(
+    probability_lower,
+    probability_upper,
+    reference,
+    value_radius,
+    score_lower,
+    score_upper,
+    score_differences,
+    groups,
+):
+    width = int(probability_lower.shape[1])
+    if width > 8:
+        positive = np.maximum(probability_upper - reference, 0.0)
+        negative = np.maximum(reference - probability_lower, 0.0)
+        mass = np.minimum(positive.sum(axis=1), negative.sum(axis=1))
+
+        def radius_for(weights):
+            independent = np.sum(
+                np.maximum(
+                    np.abs(probability_lower - reference),
+                    np.abs(probability_upper - reference),
+                )
+                * weights,
+                axis=1,
+            )
+            order = np.argsort(-weights, axis=1)
+            sorted_weights = np.take_along_axis(weights, order, axis=1)
+            sorted_positive = np.take_along_axis(positive, order, axis=1)
+            sorted_negative = np.take_along_axis(negative, order, axis=1)
+
+            def weighted_mass(capacity, target):
+                before = np.cumsum(capacity, axis=1) - capacity
+                used = np.clip(target[:, None] - before, 0.0, capacity)
+                return np.sum(used * sorted_weights, axis=1)
+
+            relaxed = np.nextafter(
+                weighted_mass(sorted_positive, mass)
+                + weighted_mass(sorted_negative, mass),
+                np.inf,
+            )
+            capacity = positive + negative
+            switches = np.divide(
+                weights * (positive - negative),
+                capacity,
+                out=np.zeros_like(weights),
+                where=capacity > 0.0,
+            )
+            max_weight = np.max(weights, axis=1, keepdims=True)
+            multipliers = np.concatenate(
+                [-max_weight, switches, max_weight], axis=1
+            )
+            lower_side = negative[:, None, :] * (
+                weights[:, None, :] + multipliers[:, :, None]
+            )
+            upper_side = positive[:, None, :] * (
+                weights[:, None, :] - multipliers[:, :, None]
+            )
+            lagrangian = np.nextafter(
+                np.min(
+                    np.sum(np.maximum(lower_side, upper_side), axis=2), axis=1
+                ),
+                np.inf,
+            )
+            depth = min(width, 8)
+            disjoint = np.full(weights.shape[0], -np.inf, dtype=np.float64)
+            for assignment in range(1 << depth):
+                positive_capacity = sorted_positive.copy()
+                negative_capacity = sorted_negative.copy()
+                positive_side = (
+                    (assignment >> np.arange(depth, dtype=np.int64)) & 1
+                ).astype(bool)
+                positive_capacity[:, np.flatnonzero(~positive_side)] = 0.0
+                negative_capacity[:, np.flatnonzero(positive_side)] = 0.0
+                branch_mass = np.minimum(
+                    positive_capacity.sum(axis=1),
+                    negative_capacity.sum(axis=1),
+                )
+                branch = weighted_mass(
+                    positive_capacity, branch_mass
+                ) + weighted_mass(negative_capacity, branch_mass)
+                disjoint = np.maximum(disjoint, branch)
+            disjoint = np.nextafter(disjoint, np.inf)
+            return np.minimum(
+                independent, np.minimum(relaxed, np.minimum(disjoint, lagrangian))
+            )
+
+        return reference, radius_for(value_radius)
+
+    signs = 2.0 * (
+        (
+            np.arange(1 << width, dtype=np.uint64)[:, None]
+            >> np.arange(width, dtype=np.uint64)
+        )
+        & 1
+    ).astype(np.float64) - 1.0
+    weights = (value_radius[:, None, :] * signs[None, :, :]).reshape(-1, width)
+    lower = np.repeat(probability_lower, signs.shape[0], axis=0)
+    upper = np.repeat(probability_upper, signs.shape[0], axis=0)
+    repeated_score_lower = np.repeat(score_lower, signs.shape[0], axis=0)
+    repeated_score_upper = np.repeat(score_upper, signs.shape[0], axis=0)
+    extrema = softmax_ratio_weighted_extreme(
+        weights,
+        lower,
+        upper,
+        np.repeat(np.asarray(groups, dtype=np.int64), signs.shape[0]),
+        score_differences,
+        False,
+        repeated_score_lower,
+        repeated_score_upper,
+    ).reshape(probability_lower.shape[0], -1)
+    signed_weights = weights.reshape(probability_lower.shape[0], -1, width)
+    optimized = reference.copy()
+    objective = np.zeros(width + 1, dtype=np.float64)
+    objective[-1] = 1.0
+    equality = np.zeros((1, width + 1), dtype=np.float64)
+    equality[0, :width] = 1.0
+    for row in range(probability_lower.shape[0]):
+        inequalities = np.empty((signs.shape[0], width + 1), dtype=np.float64)
+        inequalities[:, :width] = -signed_weights[row]
+        inequalities[:, -1] = -1.0
+        result = linprog(
+            objective,
+            A_ub=inequalities,
+            b_ub=-extrema[row],
+            A_eq=equality,
+            b_eq=np.ones(1, dtype=np.float64),
+            bounds=[
+                *zip(probability_lower[row], probability_upper[row]),
+                (0.0, None),
+            ],
+            method="highs-ds",
+        )
+        if result.success:
+            optimized[row] = result.x[:width]
+    radius = (
+        extrema - np.einsum("nsi,ni->ns", signed_weights, optimized)
+    ).max(axis=1)
+    radius = np.nextafter(np.maximum(radius, 0.0), np.inf)
+    independent = np.sum(
+        np.maximum(
+            np.abs(probability_lower - optimized),
+            np.abs(probability_upper - optimized),
+        )
+        * value_radius,
+        axis=1,
+    )
+    return optimized, np.minimum(independent, radius)
+
+
+def sparse_hz_softmax_value_relaxation(
+    probabilities: SparseHZono,
+    values: SparseHZono,
+    probability_bounds: Bounds,
+    value_bounds: Bounds,
+    probability_rows,
+    value_rows,
+    slots,
+    n_cont: int,
+    *,
+    scores: SparseHZono,
+    score_bounds: Bounds,
+    score_differences=None,
+    score_context=None,
+) -> SparseHZono:
+    if not _sparse_same_frame([probabilities, values, scores]):
+        raise ValueError("Softmax-value operands require one shared frame")
+    probability_rows = np.asarray(probability_rows, dtype=np.int64)
+    value_rows = np.asarray(value_rows, dtype=np.int64)
+    if probability_rows.ndim != 2 or probability_rows.shape != value_rows.shape:
+        raise ValueError("Softmax-value term rows must have matching shapes")
+    n_out, reduction = probability_rows.shape
+    slots = np.asarray(slots, dtype=np.int64).reshape(-1)
+    if slots.size != n_out:
+        raise ValueError("Softmax-value output rows and slots do not match")
+    if probability_rows.size and (
+        probability_rows.min() < 0
+        or probability_rows.max() >= probabilities.n_out
+        or probability_rows.max() >= scores.n_out
+    ):
+        raise ValueError("Softmax probability row is out of range")
+    probability_lb, probability_ub = _bounds_to_numpy(probability_bounds)
+    value_lb, value_ub = _bounds_to_numpy(value_bounds)
+    if value_rows.size and (
+        value_rows.min() < 0 or value_rows.max() >= values.n_out
+        or value_rows.max() >= value_lb.size
+    ):
+        raise ValueError("Softmax value row is out of range")
+    if probability_rows.size and probability_rows.max() >= probability_lb.size:
+        raise ValueError("Softmax probability bound row is out of range")
+    mid = (value_lb[value_rows] + value_ub[value_rows]) * 0.5
+    value_radius = (value_ub[value_rows] - value_lb[value_rows]) * 0.5
+    probability_lower = probability_lb[probability_rows]
+    probability_upper = probability_ub[probability_rows]
+    probability_mid = (probability_lower + probability_upper) * 0.5
+    delta = 1.0 - probability_mid.sum(axis=1)
+    capacity = np.where(
+        delta[:, None] >= 0.0,
+        probability_upper - probability_mid,
+        probability_mid - probability_lower,
+    )
+    order = np.argsort(value_radius, axis=1)
+    ordered_capacity = np.take_along_axis(capacity, order, axis=1)
+    before = np.cumsum(ordered_capacity, axis=1) - ordered_capacity
+    selected = np.clip(
+        np.abs(delta)[:, None] - before, 0.0, ordered_capacity
+    )
+    adjustment = np.zeros_like(probability_mid)
+    np.put_along_axis(adjustment, order, selected, axis=1)
+    reference = probability_mid + np.sign(delta)[:, None] * adjustment
+    score_lb, score_ub = _bounds_to_numpy(score_bounds)
+    score_lb, score_ub = score_lb[probability_rows], score_ub[probability_rows]
+    groups = probability_rows[:, 0] // reduction
+    reference, residual = _softmax_value_cross_radius(
+        probability_lower,
+        probability_upper,
+        reference,
+        value_radius,
+        score_lb,
+        score_ub,
+        score_differences,
+        groups,
+    )
+    return _sparse_hz_softmax_value_fused(
+        scores,
+        values,
+        score_bounds,
+        probability_rows,
+        value_rows,
+        slots,
+        n_cont,
+        reference,
+        probability_lower,
+        probability_upper,
+        mid,
+        residual,
+        score_differences,
+        score_context,
+    )
 
 
 def sparse_hz_concat(parts) -> SparseHZono:
