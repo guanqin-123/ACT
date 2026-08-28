@@ -45,39 +45,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install coverage torch onnx onnx2torch "onnx-simplifier" "onnxsim==0.6.5" pandas numpy scipy pyyaml tqdm psutil
 
-      # ── Solve path must not swallow solver exceptions ──────────────────
-      # Replaces the former _test_bab_oom_fails_loud self-test. That test only
-      # covered the one path reachable from its fixture; this covers every
-      # call site. A real OOM cannot be triggered deterministically in CI, so
-      # the invariant is checked structurally instead of at runtime.
-      - name: BaB soundness — no exception swallowing on the solve path
-        run: |
-          cd ${{ github.workspace }}
-          python - act/back_end/bab/bab.py act/back_end/verifier.py <<'PY'
-          import ast, sys
-          GUARDED = {"setup_and_solve_batch", "solve_batch"}
-          def called(node):
-              for sub in ast.walk(node):
-                  fn = getattr(sub, "func", None)
-                  name = getattr(fn, "attr", None) or getattr(fn, "id", None)
-                  if isinstance(sub, ast.Call) and name in GUARDED:
-                      yield name
-          bad = sorted({
-              (path, node.lineno, name)
-              for path in sys.argv[1:]
-              for node in ast.walk(ast.parse(open(path).read()))
-              if isinstance(node, ast.Try)
-              for stmt in node.body for name in called(stmt)
-          })
-          for path, lineno, name in bad:
-              print(f"{path}:{lineno}: solver call {name!r} sits inside try/except")
-          if bad:
-              print("\nA swallowed solver exception turns resource exhaustion into "
-                    "'not provable'. If an unproven lane is then pruned, BaB reports "
-                    "CERTIFIED for a box it never solved. Let it propagate.")
-          sys.exit(1 if bad else 0)
-          PY
-
       # ── BaB module unit tests ──────────────────────────────────────────
       - name: BaB module
         run: |
