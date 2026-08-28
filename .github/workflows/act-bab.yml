@@ -56,28 +56,26 @@ jobs:
           python - act/back_end/bab/bab.py act/back_end/verifier.py <<'PY'
           import ast, sys
           GUARDED = {"setup_and_solve_batch", "solve_batch"}
-          failed = False
-          for arg in sys.argv[1:]:
-              tree = ast.parse(open(arg).read())
-              for node in ast.walk(tree):
-                  if not isinstance(node, ast.Try):
-                      continue
-                  hits = set()
-                  for stmt in node.body:
-                      for sub in ast.walk(stmt):
-                          if isinstance(sub, ast.Call):
-                              fn = sub.func
-                              name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
-                              if name in GUARDED:
-                                  hits.add(name)
-                  if hits:
-                      failed = True
-                      print(f"{arg}:{node.lineno}: solver call {sorted(hits)} sits inside try/except")
-          if failed:
+          def called(node):
+              for sub in ast.walk(node):
+                  fn = getattr(sub, "func", None)
+                  name = getattr(fn, "attr", None) or getattr(fn, "id", None)
+                  if isinstance(sub, ast.Call) and name in GUARDED:
+                      yield name
+          bad = sorted({
+              (path, node.lineno, name)
+              for path in sys.argv[1:]
+              for node in ast.walk(ast.parse(open(path).read()))
+              if isinstance(node, ast.Try)
+              for stmt in node.body for name in called(stmt)
+          })
+          for path, lineno, name in bad:
+              print(f"{path}:{lineno}: solver call {name!r} sits inside try/except")
+          if bad:
               print("\nA swallowed solver exception turns resource exhaustion into "
                     "'not provable'. If an unproven lane is then pruned, BaB reports "
                     "CERTIFIED for a box it never solved. Let it propagate.")
-          sys.exit(1 if failed else 0)
+          sys.exit(1 if bad else 0)
           PY
 
       # ── BaB module unit tests ──────────────────────────────────────────
