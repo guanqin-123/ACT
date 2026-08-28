@@ -4,7 +4,7 @@ name: ACT Pipeline Verify Tests
 # One step per benchmark; each step iterates the (TF, Solver) combos it
 # supports. VNNLIB benchmarks (vnncomp2024 subset): acasxu_2023, dist_shift_2023,
 # safenlp_2024 run all three combos (interval/hybridz/dual); collins_rul_cnn_2022
-# runs dual only; vit_2023 (ViT) runs interval + dual.
+# runs dual only; vit_2023 (ViT) runs interval + hybridz + dual.
 # TorchVision MNIST +
 # simple_cnn runs all three combos, exercising TOP1_ROBUST + MARGIN_ROBUST spec
 # kinds. Factory-network verification lives in the backend CIs.
@@ -117,6 +117,11 @@ jobs:
           for combo in "--tf-modes interval --solvers torchlp" "--solvers dual"; do
             coverage run -p -m act.pipeline --verify vnnlib --category vit_2023 --max-instances 1 $combo --validate-soundness --device cpu --dtype float64
           done
+
+      - name: Verify vit_2023 with hybridz transformer propagation
+        run: |
+          cd ${{ github.workspace }}
+          python -m coverage run -p -m act.pipeline --verify vnnlib --category vit_2023 --max-instances 1 --tf-modes hybridz --solvers torchlp --device cpu --dtype float64
 
       - name: Verify TorchVision MNIST + simple_cnn (interval / hybridz / dual — TOP1_ROBUST + MARGIN_ROBUST spec coverage)
         run: |
