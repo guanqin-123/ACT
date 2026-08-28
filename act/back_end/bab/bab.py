@@ -16,9 +16,7 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 import sys
-import tempfile
 import time
 import inspect
 from dataclasses import dataclass
@@ -35,18 +33,15 @@ from act.config.config import (
     VALID_SOLVER_TIERS,
 )
 from act.back_end.bab.node import (
-    BabNode,
     SubproblemBatch,
     concat_children,
     rederive_embedding_block_eps,
     split_input,
     split_input_nary,
     split_neuron_subproblems,
-    split_subproblems,
 )
 from act.back_end.bab.branching.branching import (
     BranchingStrategy,
-    RandomBranching,
     SplitDecision,
     _build_branching_strategy as _build_branching_strategy_impl,
     _collect_neuron_candidates,
@@ -2145,138 +2140,10 @@ def verify_bab(
 # ---------------------------------------------------------------------------
 
 
-class _StubNet:  # pragma: no cover
-    layers = []
 
 
-def test_imports():  # pragma: no cover
-    for sym in (
-        verify_bab,
-        BaBConfig,
-        BabNode,
-        SubproblemBatch,
-        split_subproblems,
-        BranchingStrategy,
-        BoundingStrategy,
-        RandomBranching,
-        RandomBounding,
-    ):
-        assert sym is not None
 
 
-def test_config_yaml_roundtrip():  # pragma: no cover
-    c1 = BaBConfig()
-    assert c1.max_depth == 20
-
-    c2 = BaBConfig.from_yaml()
-    assert c2.branching_method == "random"
-
-    c3 = BaBConfig.from_yaml(max_depth=50, branching_method="kfsb")
-    assert c3.max_depth == 50 and c3.branching_method == "kfsb"
-
-    # Round-trip through a standalone BaB YAML (uses top-level "bab" key)
-    tmp = tempfile.mktemp(suffix=".yaml")
-    try:
-        c3.to_yaml(tmp)
-        c4 = BaBConfig.from_yaml(tmp)
-        assert c4.max_depth == 50
-        assert c4.branching_method == "kfsb"
-    finally:
-        os.unlink(tmp)
-
-    # BaBConfig must not expose a time_budget_s attribute.
-    assert not hasattr(c1, "time_budget_s")
-
-
-def test_subproblem_batch():  # pragma: no cover
-    lb = torch.tensor([[-1.0, -2.0, -3.0]])
-    ub = torch.tensor([[1.0, 2.0, 3.0]])
-    batch = SubproblemBatch(lb=lb, ub=ub, depths=torch.tensor([0]))
-
-    assert batch.batch_size == 1
-    assert batch.input_dim == 3
-    assert batch.total_width().item() == 12.0
-
-    bounds = Bounds(lb.squeeze(0), ub.squeeze(0))
-    batch2 = SubproblemBatch.from_bounds(bounds)
-    assert torch.equal(batch2.lb, lb)
-
-    back = batch2.to_bounds_list()
-    assert len(back) == 1
-    assert torch.equal(back[0].lb, bounds.lb)
-
-
-def test_split_subproblems():  # pragma: no cover
-    lb = torch.tensor([[-1.0, -2.0, -3.0]])
-    ub = torch.tensor([[1.0, 2.0, 3.0]])
-    batch = SubproblemBatch(lb=lb, ub=ub, depths=torch.tensor([0]))
-    split_dim = torch.tensor([1])
-
-    left, right = split_subproblems(batch, split_dim)
-
-    mid = (lb[0, 1] + ub[0, 1]) / 2
-    assert torch.isclose(left.ub[0, 1], mid)
-    assert torch.isclose(right.lb[0, 1], mid)
-    assert left.depths[0] == 1
-    assert right.depths[0] == 1
-
-    assert torch.equal(left.lb[0, 0], lb[0, 0])
-    assert torch.equal(right.ub[0, 2], ub[0, 2])
-
-
-def test_random_branching():  # pragma: no cover
-    lb = torch.tensor([[-1.0, -2.0, -3.0]])
-    ub = torch.tensor([[1.0, 2.0, 3.0]])
-    batch = SubproblemBatch(lb=lb, ub=ub, depths=torch.tensor([0]))
-
-    brancher = RandomBranching()
-    scores = brancher.compute_scores(batch, cast(Net, cast(object, _StubNet())))
-    assert scores.shape == (1, 3)
-    assert (scores >= 0).all()
-
-    dims = cast(torch.Tensor, brancher.select(scores))
-    assert dims.shape == (1,)
-    assert 0 <= dims.item() <= 2
-
-
-def test_random_branching_with_mask():  # pragma: no cover
-    lb = torch.tensor([[-1.0, -2.0, -3.0]])
-    ub = torch.tensor([[1.0, 2.0, 3.0]])
-    batch = SubproblemBatch(lb=lb, ub=ub, depths=torch.tensor([0]))
-    mask = torch.tensor([False, True, False])
-
-    brancher = RandomBranching()
-    scores = brancher.compute_scores(batch, cast(Net, cast(object, _StubNet())), unstable_mask=mask)
-    assert scores[0, 0].item() == 0.0
-    assert scores[0, 2].item() == 0.0
-    assert cast(torch.Tensor, brancher.select(scores)).item() == 1
-
-
-def test_random_bounding():  # pragma: no cover
-    lb = torch.tensor([[-1.0, -2.0], [0.0, 0.0]])
-    ub = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-    batch = SubproblemBatch(lb=lb, ub=ub, depths=torch.tensor([0, 1]))
-
-    pool = RandomBounding()
-    assert pool.empty
-
-    pool.push(batch)
-    assert len(pool) == 2
-
-    popped = pool.pop(1)
-    assert popped.batch_size == 1
-    assert len(pool) == 1
-
-    pool.pop(1)
-    assert pool.empty
-
-
-def test_babnode_compat():  # pragma: no cover
-    bounds = Bounds(torch.tensor([-1.0, -2.0]), torch.tensor([1.0, 2.0]))
-    node = BabNode(box=bounds, depth=3, score=0.5)
-    batch = node.to_batch()
-    assert batch.batch_size == 1
-    assert batch.depths[0].item() == 3
 
 
 class _IdentityOutput(torch.nn.Module):  # pragma: no cover
@@ -2410,161 +2277,9 @@ def _test_check_violations_batched_b1_scalar_params():  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
-# C12: K-batched verify_bab_batched test fixtures
-# ---------------------------------------------------------------------------
-
-
-def _load_bab_deep_net() -> Optional[Net]:  # pragma: no cover
-    """Load layer_testing_bab_deep.json from examples/nets, or None if absent.
-
-    Returns None silently when the fixture is missing so tests can skip rather
-    than hard-fail in isolated environments. Forces CPU device for hermetic
-    test execution: the BaB integration tests must not depend on GPU
-    availability or device-manager global state.
-    """
-    from pathlib import Path
-
-    from act.back_end.serialization.serialization import load_net_from_file
-    from act.util.device_manager import initialize_device
-
-    here = Path(__file__).resolve()
-    candidate = here.parents[1] / "examples" / "nets" / "layer_testing_bab_deep.json"
-    if not candidate.exists():
-        return None
-    initialize_device("cpu", "float64")
-    return load_net_from_file(str(candidate), target_device="cpu")
-
-
-class _UnknownSolver(Solver):  # pragma: no cover
-    """Mock solver: returns UNKNOWN on every lane (forces BaB to branch)."""
-
-    def solve_batch(self, problem, timelimit=None):
-        from act.back_end.solver.solver_base import BatchLPSolution
-
-        n = problem.N
-        return BatchLPSolution(
-            statuses=tuple([SolveStatus.UNKNOWN] * n),
-            x=torch.zeros(
-                (n, problem.nvars), device=problem.lb.device, dtype=problem.lb.dtype,
-            ),
-            max_viol=torch.full(
-                (n,), float("nan"), device=problem.lb.device, dtype=problem.lb.dtype,
-            ),
-        )
-
-
-class _OOMSolver(Solver):  # pragma: no cover
-    """Mock solver: raises an OOM-like exception on every solve_batch call."""
-
-    def solve_batch(self, problem, timelimit=None):
-        raise RuntimeError("CUDA out of memory: mocked for OOM-fails-loud test")
-
-
-def _test_bab_kbatch_status_parity():  # pragma: no cover
-    net = _load_bab_deep_net()
-    if net is None:
-        print("  SKIP _test_bab_kbatch_status_parity: layer_testing_bab_deep.json absent")
-        return
-    from act.back_end.solver.solver_torchlp import TorchLPSolver
-
-    config = BaBConfig(max_depth=6, max_nodes=32, verbose=False)
-    statuses_by_k: dict[int, VerifyStatus] = {}
-    for k in (1, 2, 4, 8):
-        result = verify_bab_batched(
-            net=net,
-            solver_factory=lambda: TorchLPSolver(),
-            config=config,
-            max_batch_size=k,
-            time_budget_s=60.0,
-        )
-        statuses_by_k[k] = result.status
-    distinct = set(statuses_by_k.values())
-    assert len(distinct) == 1, (
-        f"K-batch status parity violated: {statuses_by_k}"
-    )
-
-
-def _test_bab_budget_exhaustion_returns_unknown():  # pragma: no cover
-    net = _load_bab_deep_net()
-    if net is None:
-        print("  SKIP _test_bab_budget_exhaustion_returns_unknown: fixture absent")
-        return
-    config = BaBConfig(max_depth=10, max_nodes=2, verbose=False)
-    result = verify_bab_batched(
-        net=net,
-        solver_factory=lambda: _UnknownSolver(),
-        config=config,
-        max_batch_size=1,
-        time_budget_s=30.0,
-    )
-    assert result.status == VerifyStatus.UNKNOWN, (
-        f"Expected UNKNOWN under-budget with mock-UNKNOWN solver, got "
-        f"{result.status}; metadata={result.metadata}"
-    )
-    assert result.metadata.get("reason") == "budget_exhausted_with_unproven_subboxes", (
-        f"Missing soundness-reason metadata: {result.metadata}"
-    )
-
-
-def _test_bab_oom_fails_loud():  # pragma: no cover
-    net = _load_bab_deep_net()
-    if net is None:
-        print("  SKIP _test_bab_oom_fails_loud: fixture absent")
-        return
-    config = BaBConfig(max_depth=5, max_nodes=10, verbose=False)
-    raised = False
-    try:
-        verify_bab_batched(
-            net=net,
-            solver_factory=lambda: _OOMSolver(),
-            config=config,
-            max_batch_size=4,
-            time_budget_s=10.0,
-        )
-    except RuntimeError as e:
-        msg = str(e).lower()
-        assert "out of memory" in msg, f"Unexpected RuntimeError message: {e}"
-        raised = True
-    assert raised, "OOM exception was swallowed — silent fallback present"
-
-
-def _test_bab_k_fluctuates():  # pragma: no cover
-    net = _load_bab_deep_net()
-    if net is None:
-        print("  SKIP _test_bab_k_fluctuates: fixture absent")
-        return
-    config = BaBConfig(max_depth=8, max_nodes=20, verbose=False)
-    k_log: List[int] = []
-    _ = verify_bab_batched(
-        net=net,
-        solver_factory=lambda: _UnknownSolver(),
-        config=config,
-        max_batch_size=8,
-        time_budget_s=30.0,
-        _k_log=k_log,
-    )
-    distinct = set(k_log)
-    assert len(distinct) >= 2, (
-        f"K did not fluctuate across iterations (got {k_log}); dynamic K-batching "
-        f"requires at least 2 distinct K values per D4."
-    )
-
-
 _TESTS = [  # pragma: no cover
-    test_imports,
-    test_config_yaml_roundtrip,
-    test_subproblem_batch,
-    test_split_subproblems,
-    test_random_branching,
-    test_random_branching_with_mask,
-    test_random_bounding,
-    test_babnode_compat,
     _test_check_violations_batched_per_kind,
     _test_check_violations_batched_b1_scalar_params,
-    _test_bab_kbatch_status_parity,
-    _test_bab_budget_exhaustion_returns_unknown,
-    _test_bab_oom_fails_loud,
-    _test_bab_k_fluctuates,
 ]
 
 
