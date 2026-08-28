@@ -1,0 +1,815 @@
+{
+  "format_version": "2.0",
+  "act_net": {
+    "layers": [
+      {
+        "id": 0,
+        "kind": "INPUT",
+        "params": {
+          "shape": [
+            1,
+            4
+          ],
+          "dtype": "torch.float64"
+        },
+        "in_vars": [],
+        "out_vars": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "cache": {}
+      },
+      {
+        "id": 1,
+        "kind": "INPUT_SPEC",
+        "params": {
+          "kind": "BOX",
+          "lb_val": -0.07,
+          "ub_val": 0.07,
+          "lb": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIArsUbgeheuxv+xRuB6F67G/7FG4HoXrsb/sUbgeheuxvw==",
+            "dtype": "torch.float64",
+            "shape": [
+              1,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "ub": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIArsUbgeheuxP+xRuB6F67E/7FG4HoXrsT/sUbgeheuxPw==",
+            "dtype": "torch.float64",
+            "shape": [
+              1,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          }
+        },
+        "in_vars": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "out_vars": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "cache": {}
+      },
+      {
+        "id": 2,
+        "kind": "DENSE",
+        "params": {
+          "weight": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAo9q7IbzA/UP+gUG5qqs74/AAAAAAAAAAAAAAAAAAAAAJs4USanw7O/1KKEhQlM3b8AAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "in_features": 4,
+          "out_features": 2,
+          "weight_pos": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAo9q7IbzA/UP+gUG5qqs74/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "weight_neg": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAJs4USanw7O/1KKEhQlM3b8AAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "bias": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "input_shape": [
+            4
+          ]
+        },
+        "in_vars": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "out_vars": [
+          4,
+          5
+        ],
+        "cache": {}
+      },
+      {
+        "id": 3,
+        "kind": "DENSE",
+        "params": {
+          "weight": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAPauyG8wP1D/oFBuaqrO+PwAAAAAAAAAAAAAAAAAAAACbOFEmp8Ozv9SihIUJTN2/",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "in_features": 4,
+          "out_features": 2,
+          "weight_pos": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAPauyG8wP1D/oFBuaqrO+PwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "weight_neg": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACbOFEmp8Ozv9SihIUJTN2/",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "bias": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "input_shape": [
+            4
+          ]
+        },
+        "in_vars": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "out_vars": [
+          6,
+          7
+        ],
+        "cache": {}
+      },
+      {
+        "id": 4,
+        "kind": "DENSE",
+        "params": {
+          "weight": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAqN2bckV5rJvzHL6bWgj8K/AAAAAAAAAAAAAAAAAAAAABruJLusObK/Zx+2Vue0q78AAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "in_features": 4,
+          "out_features": 2,
+          "weight_pos": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "weight_neg": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAqN2bckV5rJvzHL6bWgj8K/AAAAAAAAAAAAAAAAAAAAABruJLusObK/Zx+2Vue0q78AAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "bias": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "input_shape": [
+            4
+          ]
+        },
+        "in_vars": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "out_vars": [
+          8,
+          9
+        ],
+        "cache": {}
+      },
+      {
+        "id": 5,
+        "kind": "DENSE",
+        "params": {
+          "weight": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAjdm3JFeayb8xy+m1oI/CvwAAAAAAAAAAAAAAAAAAAAAa7iS7rDmyv2cftlbntKu/",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "in_features": 4,
+          "out_features": 2,
+          "weight_pos": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "weight_neg": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAjdm3JFeayb8xy+m1oI/CvwAAAAAAAAAAAAAAAAAAAAAa7iS7rDmyv2cftlbntKu/",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "bias": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "input_shape": [
+            4
+          ]
+        },
+        "in_vars": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "out_vars": [
+          10,
+          11
+        ],
+        "cache": {}
+      },
+      {
+        "id": 6,
+        "kind": "DENSE",
+        "params": {
+          "weight": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAqWNQakPziIP8SuqNehwrY/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACWNQakPziIP8SuqNehwrY/",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "in_features": 4,
+          "out_features": 2,
+          "weight_pos": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAqWNQakPziIP8SuqNehwrY/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACWNQakPziIP8SuqNehwrY/",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "weight_neg": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "bias": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "input_shape": [
+            4
+          ]
+        },
+        "in_vars": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "out_vars": [
+          12,
+          13
+        ],
+        "cache": {}
+      },
+      {
+        "id": 7,
+        "kind": "DENSE",
+        "params": {
+          "weight": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAqynq4MLSbPv82J7FtuNdE/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACynq4MLSbPv82J7FtuNdE/",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "in_features": 4,
+          "out_features": 2,
+          "weight_pos": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAM2J7FtuNdE/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM2J7FtuNdE/",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "weight_neg": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDQpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAqynq4MLSbPvwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACynq4MLSbPvwAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              4
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "bias": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "input_shape": [
+            4
+          ]
+        },
+        "in_vars": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "out_vars": [
+          14,
+          15
+        ],
+        "cache": {}
+      },
+      {
+        "id": 8,
+        "kind": "ATT_SCORES",
+        "params": {
+          "dk": 1.4142135623730951,
+          "q_src": 2,
+          "k_src": 4,
+          "q_vars": [
+            4,
+            5
+          ],
+          "k_vars": [
+            8,
+            9
+          ]
+        },
+        "in_vars": [
+          4,
+          5,
+          8,
+          9
+        ],
+        "out_vars": [
+          16
+        ],
+        "cache": {}
+      },
+      {
+        "id": 9,
+        "kind": "ATT_SCORES",
+        "params": {
+          "dk": 1.4142135623730951,
+          "q_src": 2,
+          "k_src": 5,
+          "q_vars": [
+            4,
+            5
+          ],
+          "k_vars": [
+            10,
+            11
+          ]
+        },
+        "in_vars": [
+          4,
+          5,
+          10,
+          11
+        ],
+        "out_vars": [
+          17
+        ],
+        "cache": {}
+      },
+      {
+        "id": 10,
+        "kind": "CONCAT",
+        "params": {
+          "concat_dim": -1
+        },
+        "in_vars": [
+          16,
+          17
+        ],
+        "out_vars": [
+          18,
+          19
+        ],
+        "cache": {}
+      },
+      {
+        "id": 11,
+        "kind": "SOFTMAX",
+        "params": {
+          "axis": -1
+        },
+        "in_vars": [
+          18,
+          19
+        ],
+        "out_vars": [
+          20,
+          21
+        ],
+        "cache": {}
+      },
+      {
+        "id": 12,
+        "kind": "ATT_MIX",
+        "params": {
+          "rowsize": 2,
+          "w_src": 11,
+          "v_src": 6,
+          "w_vars": [
+            20,
+            21
+          ],
+          "v_vars": [
+            12,
+            13
+          ]
+        },
+        "in_vars": [
+          20,
+          21,
+          12,
+          13
+        ],
+        "out_vars": [
+          22
+        ],
+        "cache": {}
+      },
+      {
+        "id": 13,
+        "kind": "ATT_MIX",
+        "params": {
+          "rowsize": 2,
+          "w_src": 11,
+          "v_src": 7,
+          "w_vars": [
+            20,
+            21
+          ],
+          "v_vars": [
+            14,
+            15
+          ]
+        },
+        "in_vars": [
+          20,
+          21,
+          14,
+          15
+        ],
+        "out_vars": [
+          23
+        ],
+        "cache": {}
+      },
+      {
+        "id": 14,
+        "kind": "CONCAT",
+        "params": {
+          "concat_dim": -1
+        },
+        "in_vars": [
+          22,
+          23
+        ],
+        "out_vars": [
+          24,
+          25
+        ],
+        "cache": {}
+      },
+      {
+        "id": 15,
+        "kind": "LAYERNORM",
+        "params": {
+          "gamma": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAADwPwAAAAAAAPA/",
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "beta": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAAAAAAAAAAAAAAAA",
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "variant": "no_var"
+        },
+        "in_vars": [
+          24,
+          25
+        ],
+        "out_vars": [
+          26,
+          27
+        ],
+        "cache": {}
+      },
+      {
+        "id": 16,
+        "kind": "GELU",
+        "params": {},
+        "in_vars": [
+          26,
+          27
+        ],
+        "out_vars": [
+          28,
+          29
+        ],
+        "cache": {}
+      },
+      {
+        "id": 17,
+        "kind": "ASSERT",
+        "params": {
+          "kind": "LINEAR_LE",
+          "c": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAADwPwAAAAAAAPA/",
+            "dtype": "torch.float64",
+            "shape": [
+              1,
+              2
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "d": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEsKSwgfSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAABZQA==",
+            "dtype": "torch.float64",
+            "shape": [
+              1
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "C": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAADwPwAAAAAAAPA/",
+            "dtype": "torch.float64",
+            "shape": [
+              1,
+              2
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "thresholds": {
+            "data": "k05VTVBZAQB2AHsnZGVzY3InOiAnPGY4JywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDEsIDEpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoAAAAAAABZQA==",
+            "dtype": "torch.float64",
+            "shape": [
+              1,
+              1
+            ],
+            "device": "cpu",
+            "requires_grad": false
+          },
+          "M": 1
+        },
+        "in_vars": [
+          28,
+          29
+        ],
+        "out_vars": [
+          28,
+          29
+        ],
+        "cache": {}
+      }
+    ],
+    "graph": {
+      "preds": {
+        "0": [],
+        "1": [
+          0
+        ],
+        "2": [
+          1
+        ],
+        "3": [
+          1
+        ],
+        "4": [
+          1
+        ],
+        "5": [
+          1
+        ],
+        "6": [
+          1
+        ],
+        "7": [
+          1
+        ],
+        "8": [
+          2,
+          4
+        ],
+        "9": [
+          2,
+          5
+        ],
+        "10": [
+          8,
+          9
+        ],
+        "11": [
+          10
+        ],
+        "12": [
+          11,
+          6
+        ],
+        "13": [
+          11,
+          7
+        ],
+        "14": [
+          12,
+          13
+        ],
+        "15": [
+          14
+        ],
+        "16": [
+          15
+        ],
+        "17": [
+          16
+        ]
+      },
+      "succs": {
+        "0": [
+          1
+        ],
+        "1": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "2": [
+          8,
+          9
+        ],
+        "3": [],
+        "4": [
+          8
+        ],
+        "5": [
+          9
+        ],
+        "6": [
+          12
+        ],
+        "7": [
+          13
+        ],
+        "8": [
+          10
+        ],
+        "9": [
+          10
+        ],
+        "10": [
+          11
+        ],
+        "11": [
+          12,
+          13
+        ],
+        "12": [
+          14
+        ],
+        "13": [
+          14
+        ],
+        "14": [
+          15
+        ],
+        "15": [
+          16
+        ],
+        "16": [
+          17
+        ],
+        "17": []
+      }
+    }
+  }
+}
