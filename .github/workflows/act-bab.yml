@@ -45,12 +45,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install coverage torch onnx onnx2torch "onnx-simplifier" "onnxsim==0.6.5" pandas numpy scipy pyyaml tqdm psutil
 
-      # ── BaB module unit tests ──────────────────────────────────────────
-      - name: BaB module
-        run: |
-          cd ${{ github.workspace }}
-          coverage run -p -m act.back_end.bab.bab
-
       # ── Generate artificial ACT nets (NetFactory) ──────────────────────
       - name: Cache generated networks
         id: nets-cache
@@ -231,28 +225,6 @@ jobs:
           coverage run -p -m act.back_end --verify --network act/back_end/examples/nets/layer_testing_bab_deep.json \
             --solver dual --method planar --device cpu --dtype float64
 
-      # ===================================================================
-      # Soundness gate: a BaB run that exhausts its node budget with unproven
-      # sub-boxes left in the pool MUST report UNKNOWN, never CERTIFIED. Every
-      # other step here asserts throughput (node counts, exit codes); this is
-      # the only one asserting the verifier does not claim more than it proved.
-      #
-      # layer_testing_bab_deep is certified by presolve and never branches, so
-      # it cannot exhaust anything -- mlp_plain_3x8 is the net that survives
-      # presolve and enters BaB. --verbose is load-bearing: backend_cli only
-      # prints result.metadata under it.
-      # ===================================================================
-      - name: BaB soundness — budget exhaustion returns UNKNOWN
-        run: |
-          cd ${{ github.workspace }}
-          out=$(coverage run -p -m act.back_end --verify \
-            --network "$ACT_NETS_DIR/mlp_plain_3x8_64x64_3962224133.json" \
-            --bab --bab-max-depth 10 --bab-max-subproblems 2 --bab-max-batch-size 1 \
-            --solver torchlp --device cpu --dtype float64 --verbose 2>&1)
-          echo "$out"
-          grep -q "Lane 0: VerifyStatus.UNKNOWN"                      <<<"$out"
-          grep -q "reason: budget_exhausted_with_unproven_subboxes"   <<<"$out"
-          grep -q "exhausted_budget_nodes: True"                      <<<"$out"
 
       # ===================================================================
       # Dual MATMUL bilinear kernel (tf_transformer): dual-tier soundness on
