@@ -31,10 +31,6 @@ NO_REFINEMENT_MODE: Final[str] = "none"
 #   split_refresh  | yes                          | _interval_refresh_bounds +
 #                  |                              | per_subproblem_refine
 VALID_ROOT_BOUNDS_REUSE: Final[tuple[str, ...]] = ("none", "plain", "split_refresh")
-# Rounding discipline of the forward concretization (``dual.outward_rounding``).
-# 'none' concretizes in the active dtype; 'float64_last_pass' runs the final
-# pass in float64 and rounds lb down / ub up before casting back.
-VALID_OUTWARD_ROUNDING: Final[tuple[str, ...]] = ("none", "float64_last_pass")
 # BaB subproblem-pool selection strategies (``--bab-bounding``).
 #
 #   value                | pool class          | order function                       | --bab-top-k | reference
@@ -58,7 +54,7 @@ VALID_BOUNDINGS: Final[tuple[str, ...]] = (
     "mcts",
 )
 TOP_K_BOUNDINGS: Final[tuple[str, ...]] = VALID_BOUNDINGS[:4]
-CLIMB_BRANCHING_METHODS: Final[tuple[str, ...]] = (
+NEURON_BRANCHING_METHODS: Final[tuple[str, ...]] = (
     "babsr",
     "fsb",
     "gain",
@@ -149,8 +145,8 @@ class BaBConfig:
 
     branching_method: str = "random"
     bounding: str = "random"
-    bounding_depth_weight: float = field(default=0.5, metadata={"in_yaml": False})
-    bounding_bound_weight: float = field(default=0.5, metadata={"in_yaml": False})
+    bounding_depth_weight: float = 0.5
+    bounding_bound_weight: float = 0.5
     sa_cooling_rate: float = 0.99
     mcts_exploration: float = 1.0
     mcts_lambda: float = 0.5
@@ -174,13 +170,13 @@ class BaBConfig:
     provenance_enabled: bool = False
     """Track logical BaB node ids and parent ids in TopKBounding."""
 
-    eta_only_children: bool = field(default=False, metadata={"in_yaml": False})
+    eta_only_children: bool = False
     """Freeze alpha in child subproblems (depth > 0): children inherit the
     parent's optimized alpha and refine only the split multipliers (eta).
     Cuts the per-node Adam graph and, combined with root_bounds_reuse,
     removes the per-iteration forward pass entirely."""
 
-    presplit_levels: int = field(default=0, metadata={"in_yaml": False})
+    presplit_levels: int = 0
     """Pre-split the root's top-k scored unstable neurons into all 2^k sign
     combinations before the main loop (LEAPS-style leap: descendants are
     materialized directly, intermediate tree levels are never bounded). The
@@ -193,7 +189,7 @@ class BaBConfig:
     intermediate_refine_ratio x the median - targets wide fan-in
     concretization loss), 'all' (every unstable activation layer)."""
 
-    intermediate_refine_ratio: float = field(default=10.0, metadata={"in_yaml": False})
+    intermediate_refine_ratio: float = 10.0
     """Width-blowup threshold multiplier for intermediate_refine='auto'."""
 
     root_bounds_reuse: str = "none"
@@ -214,9 +210,7 @@ class BaBConfig:
     'plain' is the split-independent reference: it skips only the
     split-derived tightening, not the per-lane input override."""
 
-    per_subproblem_refine: str = field(
-        default=NO_REFINEMENT_MODE, metadata={"in_yaml": False}
-    )
+    per_subproblem_refine: str = NO_REFINEMENT_MODE
     """Per-subproblem sparse backward refinement of intermediate bounds in the
     BaB loop (requires root_bounds_reuse != 'none'): 'none' (off), 'tail' (last two
     unstable activation layers), 'all' (every unstable activation layer). For
@@ -225,23 +219,23 @@ class BaBConfig:
     exact, so refining them gains nothing), so splits propagate relationally
     downstream instead of only through the interval refresh."""
 
-    per_subproblem_refine_iters: int = field(default=0, metadata={"in_yaml": False})
+    per_subproblem_refine_iters: int = 0
     """Adam iterations for per-subproblem refine rows (0 = single fixed-slope
     backward, cheapest)."""
 
-    per_subproblem_refine_rows_cap: int = field(default=64, metadata={"in_yaml": False})
+    per_subproblem_refine_rows_cap: int = 64
     """Max refined neurons per layer per batch (top-cap by interval width);
     bounds the K x 2*cap backward cost."""
 
-    auto_batch_safety: float = field(default=0.55, metadata={"in_yaml": False})
+    auto_batch_safety: float = 0.55
     """Fraction of GPU memory the auto batch sizer (max_batch_size='auto') may
     target; lowered on a shared GPU. The sizer also never exceeds 90% of the
     currently-reclaimable memory (free + this process's reserved cache)."""
 
-    auto_batch_cap: int = field(default=2048, metadata={"in_yaml": False})
+    auto_batch_cap: int = 2048
     """Hard upper bound on the auto-sized batch (also the CPU fallback)."""
 
-    auto_batch_floor: int = field(default=8, metadata={"in_yaml": False})
+    auto_batch_floor: int = 8
     """Lower bound on the auto-sized batch."""
 
     multi_split_levels: int = 1
@@ -254,17 +248,17 @@ class BaBConfig:
 
     llm_probe_enabled: bool = False
     llm_probe_backend: str = "mock"
-    llm_probe_model: str = field(default="", metadata={"in_yaml": False})
-    llm_probe_base_url: str = field(default="", metadata={"in_yaml": False})
-    llm_probe_api_key_env: str = field(default="", metadata={"in_yaml": False})
-    llm_probe_temperature: float = field(default=0.0, metadata={"in_yaml": False})
-    llm_probe_timeout: float = field(default=30.0, metadata={"in_yaml": False})
-    llm_probe_max_candidates: int = field(default=8, metadata={"in_yaml": False})
-    llm_probe_max_candidates_total: int = field(default=1024, metadata={"in_yaml": False})
-    llm_probe_neuron_topk: int = field(default=512, metadata={"in_yaml": False})
+    llm_probe_model: str = ""
+    llm_probe_base_url: str = ""
+    llm_probe_api_key_env: str = ""
+    llm_probe_temperature: float = 0.0
+    llm_probe_timeout: float = 30.0
+    llm_probe_max_candidates: int = 8
+    llm_probe_max_candidates_total: int = 1024
+    llm_probe_neuron_topk: int = 512
     llm_probe_cadence: int = 1
-    llm_probe_history: int = field(default=8, metadata={"in_yaml": False})
-    llm_probe_max_failures: int = field(default=3, metadata={"in_yaml": False})
+    llm_probe_history: int = 8
+    llm_probe_max_failures: int = 3
     llm_probe_decisions: str = "split,frontier,refine"
     """Comma-separated decision types the LLM may steer: 'split' (joint neuron
     split depth), 'frontier' (wave width), 'refine' (per-subproblem refinement),
@@ -272,18 +266,18 @@ class BaBConfig:
     dimension to bisect and its fanout, input-domain-splitting BaB only)."""
     llm_probe_log: bool = False
 
-    verbose: bool = field(default=False, metadata={"in_yaml": False})
+    verbose: bool = False
 
     method: Optional[str] = None
-    baf: bool = field(default=True, metadata={"in_yaml": False})
-    alpha_mode: str = field(default="fixed", metadata={"in_yaml": False})
+    baf: bool = True
+    alpha_mode: str = "fixed"
     p: float = 2.0
-    perturbed_words: int = field(default=1, metadata={"in_yaml": False})
+    perturbed_words: int = 1
     eps: float = 1e-5
     max_eps: float = 0.01
-    num_verify_iters: int = field(default=5, metadata={"in_yaml": False})
+    num_verify_iters: int = 5
     k: int = 1
-    alpha_opt_steps: int = field(default=1000, metadata={"in_yaml": False})
+    alpha_opt_steps: int = 1000
 
     def __post_init__(self) -> None:
         if self.solver_tier not in VALID_SOLVER_TIERS:
@@ -315,8 +309,6 @@ class BaBConfig:
         if self.method is not None:
             selection = select_bert_method(self.method)
             self.method = selection.method
-            self.baf = selection.baf
-            self.alpha_mode = selection.alpha_mode
             if self.solver_tier == "lp":
                 self.solver_tier = selection.solver_tier
         if self.perturbed_words not in (1, 2):
@@ -368,6 +360,65 @@ class BaBConfig:
             )
 
         return path
+
+
+def _validate_bab_presets(
+    raw_presets: Any,
+    config_path: Path,
+) -> dict[str, dict[str, Any]]:
+    """Validate and copy named sparse ``BaBConfig`` presets."""
+    if raw_presets is None:
+        return {}
+    if not isinstance(raw_presets, dict):
+        raise ValueError(f"bab_presets in {config_path} must be a YAML mapping")
+
+    valid_keys = {fld.name for fld in fields(BaBConfig)}
+    presets: dict[str, dict[str, Any]] = {}
+    for name, values in raw_presets.items():
+        if not isinstance(name, str) or not isinstance(values, dict):
+            raise ValueError(
+                f"BaB preset {name!r} in {config_path} must be a YAML mapping"
+            )
+        unknown = set(values) - valid_keys
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(
+                f"Unknown BaB preset key(s) in {config_path} preset {name!r}: {names}"
+            )
+        copied = deepcopy(values)
+        BaBConfig(**copied)
+        presets[name] = copied
+    return presets
+
+
+def load_bab_presets(
+    config_path: Optional[Union[str, Path]] = None,
+) -> dict[str, dict[str, Any]]:
+    """Load and validate named BaB presets from a backend YAML file."""
+    path = Path(config_path) if config_path else _BACKEND_YAML
+    if not path.exists():
+        raise FileNotFoundError(f"Backend config not found: {path}")
+    return _validate_bab_presets(_load_yaml(path).get("bab_presets"), path)
+
+
+def _select_bab_preset(
+    name: str,
+    presets: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    if name not in presets:
+        available = ", ".join(sorted(presets)) or "(none)"
+        raise ValueError(
+            f"Unknown BaB preset {name!r}; available presets: {available}"
+        )
+    return deepcopy(presets[name])
+
+
+def load_bab_preset(
+    name: str,
+    config_path: Optional[Union[str, Path]] = None,
+) -> dict[str, Any]:
+    """Load one named BaB preset, listing available names on failure."""
+    return _select_bab_preset(name, load_bab_presets(config_path))
 
 
 # ---------------------------------------------------------------------------
@@ -432,10 +483,10 @@ class DualConfig:
     lr_alpha: float = 0.1
     """Adam learning rate for α (slope) variables."""
 
-    lr_beta: float = field(default=0.1, metadata={"in_yaml": False})
+    lr_beta: float = 0.1
     """Adam learning rate for η (split-constraint KKT multipliers)."""
 
-    lr_decay: float = field(default=0.98, metadata={"in_yaml": False})
+    lr_decay: float = 0.98
     """Multiplicative learning-rate decay applied each Adam iteration."""
 
     per_class_alpha: bool = True
@@ -448,20 +499,11 @@ class DualConfig:
     """Cap on the number of perturbed input dims for which the forward pass
     keeps an explicit linear bound; above it, interval-only."""
 
-    outward_rounding: str = "none"
-    """Rounding discipline of the forward concretization.
-    Valid: 'none', 'float64_last_pass'."""
-
     def __post_init__(self) -> None:
         if self.forward_lin_max_perturbed < 0:
             raise ValueError(
                 "forward_lin_max_perturbed must be non-negative, got "
                 f"{self.forward_lin_max_perturbed}"
-            )
-        if self.outward_rounding not in VALID_OUTWARD_ROUNDING:
-            raise ValueError(
-                f"Invalid outward_rounding {self.outward_rounding!r}; "
-                f"expected {VALID_OUTWARD_ROUNDING}"
             )
 
 
@@ -509,6 +551,8 @@ class BackendConfig:
     verbose: bool = False
     timeout: float = 300.0
 
+    bab_preset: Optional[str] = None
+
     bab_enabled: bool = False
     bab: BaBConfig = field(default_factory=BaBConfig)
 
@@ -535,14 +579,14 @@ class BackendConfig:
     torchlp: TorchLPConfig = field(default_factory=TorchLPConfig)
     dual: DualConfig = field(default_factory=DualConfig)
 
-    method: Optional[str] = field(default=None, metadata={"in_yaml": False})
-    p: float = field(default=2.0, metadata={"in_yaml": False})
-    perturbed_words: int = field(default=1, metadata={"in_yaml": False})
-    eps: float = field(default=1e-5, metadata={"in_yaml": False})
-    max_eps: float = field(default=0.01, metadata={"in_yaml": False})
-    num_verify_iters: int = field(default=5, metadata={"in_yaml": False})
-    k: int = field(default=1, metadata={"in_yaml": False})
-    alpha_opt_steps: int = field(default=1000, metadata={"in_yaml": False})
+    method: Optional[str] = None
+    p: float = 2.0
+    perturbed_words: int = 1
+    eps: float = 1e-5
+    max_eps: float = 0.01
+    num_verify_iters: int = 5
+    k: int = 1
+    alpha_opt_steps: int = 1000
 
     # -- validation ---------------------------------------------------------
 
@@ -563,8 +607,6 @@ class BackendConfig:
             selection = select_bert_method(self.method)
             self.method = selection.method
             self.bab.method = selection.method
-            self.bab.baf = selection.baf
-            self.bab.alpha_mode = selection.alpha_mode
             self.bab.solver_tier = selection.solver_tier
             self.bab.p = float(self.p)
             self.bab.perturbed_words = int(self.perturbed_words)
@@ -600,7 +642,7 @@ class BackendConfig:
         config_path: Optional[Union[str, Path]] = None,
         **overrides,
     ) -> BackendConfig:
-        """Load config from YAML with optional keyword overrides.
+        """Load backend YAML and apply keyword overrides.
 
         YAML layout::
 
@@ -626,6 +668,7 @@ class BackendConfig:
             raise FileNotFoundError(f"Backend config not found: {path}")
 
         raw = _load_yaml(path)
+        bab_presets = load_bab_presets()
 
         backend_raw: dict[str, Any] = raw.get("backend", {})
         bab_raw: dict[str, Any] = backend_raw.pop("bab", {})
@@ -669,12 +712,7 @@ class BackendConfig:
                 top_overrides[k] = v
 
         # Build BaBConfig
-        bab_in_yaml = {
-            fld.name for fld in fields(BaBConfig) if fld.metadata.get("in_yaml", True)
-        }
-        bab_merged = {
-            k: v for k, v in bab_raw.items() if k in bab_fields and k in bab_in_yaml
-        }
+        bab_merged = {k: v for k, v in bab_raw.items() if k in bab_fields}
         bab_merged.update(bab_overrides)
         bab_config = BaBConfig(**bab_merged)
 
@@ -695,12 +733,7 @@ class BackendConfig:
         torchlp_merged.update(torchlp_overrides)
         torchlp_config = TorchLPConfig(**torchlp_merged)
 
-        dual_in_yaml = {
-            fld.name for fld in fields(DualConfig) if fld.metadata.get("in_yaml", True)
-        }
-        dual_merged = {
-            k: v for k, v in dual_raw.items() if k in dual_fields and k in dual_in_yaml
-        }
+        dual_merged = {k: v for k, v in dual_raw.items() if k in dual_fields}
         dual_merged.update(dual_overrides)
         dual_config = DualConfig(**dual_merged)
 
@@ -723,7 +756,7 @@ class BackendConfig:
 
         top_merged.update({k: v for k, v in top_overrides.items() if k in top_fields})
 
-        return cls(
+        config = cls(
             bab=bab_config,
             generation=gen_config,
             hybridz=hz_config,
@@ -732,6 +765,13 @@ class BackendConfig:
             dual=dual_config,
             **top_merged,
         )
+        if config.bab_preset is not None:
+            _select_bab_preset(config.bab_preset, bab_presets)
+        return config
+
+    def bab_preset_values(self, name: str) -> dict[str, Any]:
+        """Return a validated named preset from the canonical backend YAML."""
+        return load_bab_preset(name)
 
     def to_yaml(self, path: Union[str, Path]) -> Path:
         path = Path(path)

@@ -4,12 +4,40 @@
 # Canonical source for ALL back-end settings (runtime, verification, generation).
 # CI (.github/workflows/act-bab.yml) relies on these defaults.
 #
-# Precedence:  CLI flag  >  environment variable  >  this file  >  code default
+# Precedence:  CLI flag > env var > BaB preset > this file > code default
 # Env vars:    ACT_SOLVER / ACT_DEVICE / ACT_DTYPE
 #
-# Layout (all under the single top-level `backend:` mapping):
-#   runtime selectors → verification cascade → torchlp → tf → hybridz
-#   → bab (branch-and-bound)
+# Layout:
+#   bab_presets – named sparse BaB configurations
+#   backend     – runtime selectors → verification cascade → solver tuning
+#                 → bab (branch-and-bound)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Branch-and-Bound presets
+# ─────────────────────────────────────────────────────────────────────────────
+# Select a preset with backend.bab_preset / --bab-preset. Each preset is a
+# sparse mapping of keys from backend.bab; explicit BaB CLI flags still win.
+bab_presets:
+  dual:
+    solver_tier: "dual_alpha_eta"
+    branching_method: "gain"
+    root_bounds_reuse: "split_refresh"
+    intermediate_refine: "all"
+    multi_split_levels: 4
+
+  climb:
+    # TopK bounding and no reuse/refine are CLIMB soundness prerequisites;
+    # one split level lets small nets learn cores.
+    solver_tier: "dual_alpha_eta"
+    branching_method: "babsr"
+    bounding: "depth_bound_blend"
+    root_bounds_reuse: "none"
+    intermediate_refine: "none"
+    per_subproblem_refine: "none"
+    climb_enabled: true
+    climb_theta: 0.5
+    climb_recheck_k: 2
+    multi_split_levels: 1
 
 backend:
 
@@ -49,6 +77,9 @@ backend:
   # Wall-clock budget in seconds for both single execution and BaB verification.
   timeout: 60.0
 
+  # Named bab_presets entry; null auto-selects "dual" when solver = "dual".
+  bab_preset: null
+
   # Enable the batched LP cascade tier (tier 2) before BaB.
   # Must be false when solver = "gurobi" (Gurobi solve_batch is N=1 only).
   lp_enabled: true
@@ -56,6 +87,18 @@ backend:
   # Maximum BaB subproblems solved in one batch (tier 3).
   # Must be 1 when solver = "gurobi" (same N=1 restriction as lp_enabled).
   bab_max_batch_size: 8
+
+  # Text-verification settings. When `method` is set, these overwrite the
+  # corresponding bab.* values (bab.method/p/perturbed_words/eps/max_eps/
+  # num_verify_iters/k/alpha_opt_steps) and bab.solver_tier.
+  method: null
+  p: 2.0
+  perturbed_words: 1
+  eps: 0.00001
+  max_eps: 0.01
+  num_verify_iters: 5
+  k: 1
+  alpha_opt_steps: 1000
 
   # ─────────────────────────────────────────────────────────────────────────
   # TorchLP solver tuning  (torchlp)
@@ -110,10 +153,11 @@ backend:
   dual:
     n_iters: 50
     lr_alpha: 0.1
+    lr_beta: 0.1
+    lr_decay: 0.98
     per_class_alpha: true
     incremental_start_enabled: true
     forward_lin_max_perturbed: 100
-    outward_rounding: "none"
 
   # ═════════════════════════════════════════════════════════════════════════
   # Branch-and-Bound refinement  (bab)
@@ -164,6 +208,8 @@ backend:
     # greedy and annealed are the Oliva order-leading strategies (ECOOP 2025,
     # arXiv:2507.17453); mcts is specified in docs/design/mcts_bab.md.
     bounding: "random"
+    bounding_depth_weight: 0.5
+    bounding_bound_weight: 0.5
 
     # Cap on subproblems popped per wave, independent of the batch size.
     # 0 = unbounded. Honoured by the four TopKBounding-family strategies above;
@@ -178,7 +224,18 @@ backend:
     mcts_lambda: 0.5
     mcts_virtual_loss: 1.0
     intermediate_refine: "none"
+    intermediate_refine_ratio: 10.0
     root_bounds_reuse: "none"
+    eta_only_children: false
+    presplit_levels: 0
+    per_subproblem_refine: "none"
+    per_subproblem_refine_iters: 0
+    per_subproblem_refine_rows_cap: 64
+
+    # Automatic BaB batch sizing.
+    auto_batch_safety: 0.55
+    auto_batch_cap: 2048
+    auto_batch_floor: 8
 
     # Neurons split jointly per branching step; each lane fans out into all 2^k
     # sign combinations (verdict-boundary joint splitting). 1 = single split.
@@ -205,13 +262,31 @@ backend:
     # -- LLM-probe controller ----------------------------------------------
     llm_probe_enabled: false
     llm_probe_backend: "mock"
+    llm_probe_model: ""
+    llm_probe_base_url: ""
+    llm_probe_api_key_env: ""
+    llm_probe_temperature: 0.0
+    llm_probe_timeout: 30.0
+    llm_probe_max_candidates: 8
+    llm_probe_max_candidates_total: 1024
+    llm_probe_neuron_topk: 512
     llm_probe_cadence: 1
+    llm_probe_history: 8
+    llm_probe_max_failures: 3
     llm_probe_decisions: "split,frontier,refine"
     llm_probe_log: false
 
+    # Emit BaB-specific diagnostics.
+    verbose: false
+
     # -- BERT/text method ---------------------------------------------------
     method: null
+    baf: true
+    alpha_mode: "fixed"
     p: 2.0
+    perturbed_words: 1
     eps: 0.00001
     max_eps: 0.01
+    num_verify_iters: 5
     k: 1
+    alpha_opt_steps: 1000

@@ -221,6 +221,16 @@ def forward_maxpool2d(
         lin, frame = _reset_forward_box(lb, ub, device, dtype)
         return stored, out, lin, frame
     lin, idx_flat, dominant, box_lb, box_ub = result
+    # Exact comparisons that tolerate NaN bounds, which degrade to UNKNOWN downstream.
+    assert torch.isclose(
+        parent_box.lb.flatten(start_dim=1).gather(1, idx_flat), box_lb,
+        rtol=0.0, atol=0.0, equal_nan=True,
+    ).all(), f"MAXPOOL2D layer {L.id}: argmax index does not select the pooled lower bound"
+    assert torch.isclose(
+        parent_box.ub.flatten(start_dim=1).gather(1, idx_flat)[dominant], box_ub[dominant],
+        rtol=0.0, atol=0.0, equal_nan=True,
+    ).all(), f"MAXPOOL2D layer {L.id}: a dominant window's max upper bound is not at its argmax"
+
     x_L, x_U = parent_frame
     lin_lb, lin_ub = _concretize(lin, x_L, x_U)
     lb, ub = _intersect_boxes(lin_lb, lin_ub, box_lb, box_ub)
@@ -324,13 +334,15 @@ def backward_maxpool2d(L, nu, bounds_dict, preds, M: int = 1, alpha=None):
 
     idx_flat = L.cache.get("maxpool_argmax_flat")
     dominant = L.cache.get("maxpool_dominant")
+    cached_lb = L.cache.get("maxpool_lb")
+    cached_ub = L.cache.get("maxpool_ub")
     cache_ok = (
         isinstance(idx_flat, torch.Tensor)
         and isinstance(dominant, torch.Tensor)
         and idx_flat.shape == (B_actual, n)
         and dominant.shape == (B_actual, n)
-        and _cache_box_matches(L.cache.get("maxpool_lb"), bounds.lb.flatten(start_dim=1))
-        and _cache_box_matches(L.cache.get("maxpool_ub"), bounds.ub.flatten(start_dim=1))
+        and _cache_box_matches(cached_lb, bounds.lb.flatten(start_dim=1))
+        and _cache_box_matches(cached_ub, bounds.ub.flatten(start_dim=1))
     )
     if cache_ok:
         dom = dominant.to(device=nu.device).unsqueeze(1)              # [B, 1, n]
@@ -340,6 +352,7 @@ def backward_maxpool2d(L, nu, bounds_dict, preds, M: int = 1, alpha=None):
         contrib_BMn = torch.where(dom, torch.zeros_like(v), v.clamp(max=0)) * ub_b
         contrib = contrib_BMn.sum(dim=-1).view(BM)
     else:
+        # A missing or stale cache is legitimate (lazy forward, root_bounds_reuse): no assert.
         nu_pos = v.clamp(min=0)
         nu_neg = v.clamp(max=0)
         contrib_BMn = nu_pos * lb_b + nu_neg * ub_b

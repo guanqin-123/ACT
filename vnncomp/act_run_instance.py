@@ -50,7 +50,8 @@ def run_vnncomp_instance(args) -> None:
     t0 = time.time()
     initialize_device(args.device, args.dtype)
 
-    from act.back_end.bab.bab import clear_violation_check_module_cache, verify_bab_batched
+    from act.back_end.bab.bab import verify_bab_batched
+    from act.back_end.bab.violation import clear_violation_check_module_cache
     from act.config.config import build_vnncomp_bab_config
     from act.back_end.solver.solver_torchlp import TorchLPSolver
     from act.front_end.model_synthesis import merge_split_relus

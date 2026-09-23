@@ -13,11 +13,10 @@
 #   with leading batch dimension (N, …) so that branching, bounding, and
 #   (future) batched solving operate in pure tensor arithmetic.
 #
-#   BabNode is a thin single-subproblem wrapper that carries one priority
-#   score and one optional candidate counterexample. ``BabNode.to_batch``
-#   converts a single node into a ``SubproblemBatch`` of size 1 so that
-#   call sites holding a single node can dispatch through the batched
-#   code path.
+#   ``SubproblemBatch.select`` and ``SubproblemBatch.concat`` are the lane
+#   gather / stack primitives shared by the BaB loop and the branchers;
+#   ``split_input``, ``split_input_nary`` and ``split_subproblems`` derive
+#   input-split children.
 #
 # ===---------------------------------------------------------------------====#
 
@@ -27,10 +26,11 @@ from dataclasses import dataclass
 import math
 from typing import Dict, Optional
 
-import numpy as np
 import torch
 
-from act.back_end.core import Bounds
+from act.back_end.core import Bounds, Layer, Net, ParamValue
+from act.back_end.layer_schema import LayerKind
+from act.front_end.specs import InKind
 
 
 # ---------------------------------------------------------------------------
@@ -101,11 +101,52 @@ class SubproblemBatch:
         depths = torch.full((b,), depth, dtype=torch.long, device=lb.device)
         return SubproblemBatch(lb=lb, ub=ub, depths=depths)
 
-    # -- conversions --------------------------------------------------------
+    # -- lane selection / concatenation -------------------------------------
 
-    def to_bounds_list(self) -> list[Bounds]:
-        """Convert back to a list of ``Bounds`` for solver compatibility."""
-        return [Bounds(self.lb[i], self.ub[i]) for i in range(self.batch_size)]
+    def select(self, indices: torch.Tensor) -> SubproblemBatch:
+        """Return the lanes at ``indices`` with every per-lane field preserved."""
+        return SubproblemBatch(
+            lb=self.lb.index_select(0, indices.to(self.lb.device)),
+            ub=self.ub.index_select(0, indices.to(self.ub.device)),
+            depths=self.depths.index_select(0, indices.to(self.depths.device)),
+            incremental_alpha=_gather_optional_dict(self.incremental_alpha, indices),
+            incremental_eta=_gather_optional_dict(self.incremental_eta, indices),
+            split_signs=_gather_optional_dict(self.split_signs, indices),
+            parent_margins=_gather_optional_tensor(self.parent_margins, indices),
+            lower_bound=_gather_optional_tensor(self.lower_bound, indices),
+            node_id=_gather_optional_tensor(self.node_id, indices),
+            parent_id=_gather_optional_tensor(self.parent_id, indices),
+        )
+
+    def concat(self, other: SubproblemBatch) -> SubproblemBatch:
+        """Stack ``other``'s lanes after this batch's lanes.
+
+        ``other`` is moved to this batch's device (optional per-lane tensors
+        also to its dtype). The per-layer state dicts may disagree on their key
+        sets: a layer touched only by one side's splits exists there and not in
+        the other. Zero padding is exact for ``split_signs`` and
+        ``incremental_eta`` (0 = unconstrained / no multiplier), so it
+        preserves each side's feasible region. ``incremental_alpha`` is only
+        ever concatenated between children of the same parent batch, whose key
+        sets agree.
+        """
+        n_self, n_other = self.batch_size, other.batch_size
+        return SubproblemBatch(
+            lb=torch.cat([self.lb, other.lb.to(self.lb.device)], dim=0),
+            ub=torch.cat([self.ub, other.ub.to(self.ub.device)], dim=0),
+            depths=torch.cat([self.depths, other.depths.to(self.depths.device)], dim=0),
+            incremental_alpha=_concat_padded_dict(
+                self.incremental_alpha, other.incremental_alpha, n_self, n_other
+            ),
+            incremental_eta=_concat_padded_dict(
+                self.incremental_eta, other.incremental_eta, n_self, n_other
+            ),
+            split_signs=_concat_padded_dict(self.split_signs, other.split_signs, n_self, n_other),
+            parent_margins=_concat_optional_tensor(self.parent_margins, other.parent_margins),
+            lower_bound=_concat_optional_tensor(self.lower_bound, other.lower_bound),
+            node_id=_concat_optional_tensor(self.node_id, other.node_id),
+            parent_id=_concat_optional_tensor(self.parent_id, other.parent_id),
+        )
 
     # -- geometry -----------------------------------------------------------
 
@@ -113,23 +154,83 @@ class SubproblemBatch:
         """Per-dimension widths: ``(N, D)``."""
         return self.ub - self.lb
 
-    def total_width(self) -> torch.Tensor:
-        """Sum of widths per subproblem: ``(N,)``."""
-        return self.widths().sum(dim=-1)
-
 
 # ---------------------------------------------------------------------------
-# Batch splitting (tensor-native)
+# Lane gather / bounds slicing / concat helpers
 # ---------------------------------------------------------------------------
+
+
+def slice_bounds_dict(
+    bounds_dict: Dict[int, Bounds], rows: torch.Tensor
+) -> Dict[int, Bounds]:
+    """Select lanes from a batched bounds dictionary without mutating it."""
+    return {
+        layer_id: Bounds(
+            bounds.lb.index_select(0, rows.to(bounds.lb.device)),
+            bounds.ub.index_select(0, rows.to(bounds.ub.device)),
+        )
+        for layer_id, bounds in bounds_dict.items()
+    }
 
 
 def _gather_optional_dict(
     d: Optional[Dict[int, torch.Tensor]],
     idx: torch.Tensor,
 ) -> Optional[Dict[int, torch.Tensor]]:
+    """Gather rows ``idx`` from every tensor of an optional per-layer dict."""
     if d is None:
         return None
     return {k: t.index_select(0, idx.to(t.device)) for k, t in d.items()}
+
+
+def _gather_optional_tensor(
+    t: Optional[torch.Tensor],
+    idx: torch.Tensor,
+) -> Optional[torch.Tensor]:
+    """Gather rows ``idx`` from an optional per-lane tensor."""
+    return None if t is None else t.index_select(0, idx.to(t.device))
+
+
+def _concat_optional_tensor(
+    x: Optional[torch.Tensor],
+    y: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    """Stack two optional per-lane tensors; ``None`` unless both are present."""
+    if x is None or y is None:
+        return None
+    return torch.cat([x, y.to(device=x.device, dtype=x.dtype)], dim=0)
+
+
+def _concat_padded_dict(
+    x: Optional[Dict[int, torch.Tensor]],
+    y: Optional[Dict[int, torch.Tensor]],
+    n_x: int,
+    n_y: int,
+) -> Optional[Dict[int, torch.Tensor]]:
+    """Stack two per-layer dicts, zero-filling a layer block missing on one side."""
+    if not x and not y:
+        return None
+    x = x or {}
+    y = y or {}
+    out: Dict[int, torch.Tensor] = {}
+    for lid in sorted(set(x) | set(y)):
+        present = x.get(lid)
+        if present is None:
+            present = y[lid]
+        trailing = present.shape[1:]
+        left = x.get(lid)
+        if left is None:
+            left = torch.zeros((n_x, *trailing), dtype=present.dtype, device=present.device)
+        right = y.get(lid)
+        if right is None:
+            right = torch.zeros((n_y, *trailing), dtype=present.dtype, device=present.device)
+        out[lid] = torch.cat([left, right.to(device=left.device)], dim=0)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Batch splitting (tensor-native)
+# ---------------------------------------------------------------------------
 
 
 def _assert_splittable(batch: SubproblemBatch, dims2: torch.Tensor) -> None:
@@ -167,16 +268,8 @@ def split_input(
         incremental_alpha=_gather_optional_dict(batch.incremental_alpha, parent_index),
         incremental_eta=_gather_optional_dict(batch.incremental_eta, parent_index),
         split_signs=_gather_optional_dict(batch.split_signs, parent_index),
-        parent_margins=(
-            batch.parent_margins.index_select(0, parent_index.to(batch.parent_margins.device))
-            if batch.parent_margins is not None
-            else None
-        ),
-        lower_bound=(
-            batch.lower_bound.index_select(0, parent_index.to(batch.lower_bound.device))
-            if batch.lower_bound is not None
-            else None
-        ),
+        parent_margins=_gather_optional_tensor(batch.parent_margins, parent_index),
+        lower_bound=_gather_optional_tensor(batch.lower_bound, parent_index),
     )
     return children, parent_index
 
@@ -227,6 +320,74 @@ def rederive_embedding_block_eps(
     return torch.where(mask, radii, torch.zeros_like(radii))
 
 
+def _finite_embedding_spec(net: Net) -> Optional[Layer]:
+    for layer in net.layers:
+        if (
+            layer.kind == LayerKind.INPUT_SPEC.value
+            and layer.params.get("kind") == InKind.LP_EMBEDDING
+        ):
+            p_norm = layer.params.get("p_norm", float("inf"))
+            if isinstance(p_norm, torch.Tensor):
+                p_value = float(p_norm.reshape(-1)[0].item())
+            elif isinstance(p_norm, (int, float, bool)):
+                p_value = float(p_norm)
+            else:
+                continue
+            if p_value != float("inf"):
+                return layer
+    return None
+
+
+def _install_embedding_child_block_eps(
+    net: Net,
+    batched_bounds: Bounds,
+    batch: SubproblemBatch,
+) -> list[tuple[Layer, ParamValue]]:
+    """Install finite-p embedding radii derived from a split child box."""
+    spec = _finite_embedding_spec(net)
+    if (
+        spec is None
+        or batch.depths.numel() == 0
+        or int(batch.depths.max().item()) == 0
+    ):
+        return []
+    p_raw = spec.params.get("p_norm", float("inf"))
+    if isinstance(p_raw, torch.Tensor):
+        p_norm = float(p_raw.reshape(-1)[0].item())
+    elif isinstance(p_raw, (int, float, bool)):
+        p_norm = float(p_raw)
+    else:
+        return []
+    input_shape = tuple(batched_bounds.lb.shape[1:])
+    positions_raw = spec.params.get("perturbed_positions")
+    positions = positions_raw if isinstance(positions_raw, torch.Tensor) else None
+    block_eps = rederive_embedding_block_eps(
+        batched_bounds.lb.flatten(start_dim=1),
+        batched_bounds.ub.flatten(start_dim=1),
+        input_shape,
+        positions,
+        p_norm,
+    )
+    old_values: list[tuple[Layer, ParamValue]] = []
+    for layer in net.layers:
+        kind = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
+        if kind in (LayerKind.INPUT.value, LayerKind.INPUT_SPEC.value):
+            old_values.append((layer, layer.params.get("bab_block_eps", None)))
+            layer.params["bab_block_eps"] = block_eps
+    return old_values
+
+
+def _restore_embedding_child_block_eps(
+    updates: list[tuple[Layer, ParamValue]],
+) -> None:
+    """Restore input-layer embedding radii after a child solve."""
+    for layer, old in updates:
+        if old is None:
+            layer.params.pop("bab_block_eps", None)
+        else:
+            layer.params["bab_block_eps"] = old
+
+
 def split_input_nary(
     batch: SubproblemBatch,
     cut_dim: torch.Tensor,
@@ -269,51 +430,10 @@ def split_input_nary(
         incremental_alpha=_gather_optional_dict(batch.incremental_alpha, parent_index),
         incremental_eta=_gather_optional_dict(batch.incremental_eta, parent_index),
         split_signs=_gather_optional_dict(batch.split_signs, parent_index),
-        parent_margins=(
-            batch.parent_margins.index_select(0, parent_index.to(batch.parent_margins.device))
-            if batch.parent_margins is not None
-            else None
-        ),
-        lower_bound=(
-            batch.lower_bound.index_select(0, parent_index.to(batch.lower_bound.device))
-            if batch.lower_bound is not None
-            else None
-        ),
+        parent_margins=_gather_optional_tensor(batch.parent_margins, parent_index),
+        lower_bound=_gather_optional_tensor(batch.lower_bound, parent_index),
     )
     return children, parent_index
-
-
-def concat_children(a: SubproblemBatch, b: SubproblemBatch) -> SubproblemBatch:
-    def _concat_optional_dicts(
-        da: Optional[Dict[int, torch.Tensor]],
-        db: Optional[Dict[int, torch.Tensor]],
-    ) -> Optional[Dict[int, torch.Tensor]]:
-        if da is None or db is None:
-            assert da is None and db is None, "child dict fields must both be present or absent"
-            return None
-        assert set(da) == set(db), "child dict fields must have equal keys"
-        return {key: torch.cat([da[key], db[key]], dim=0) for key in sorted(da)}
-
-    def _concat_optional_tensor(
-        ta: Optional[torch.Tensor],
-        tb: Optional[torch.Tensor],
-        name: str,
-    ) -> Optional[torch.Tensor]:
-        if ta is None or tb is None:
-            assert ta is None and tb is None, f"{name} must be present in both children or neither"
-            return None
-        return torch.cat([ta, tb], dim=0)
-
-    return SubproblemBatch(
-        lb=torch.cat([a.lb, b.lb], dim=0),
-        ub=torch.cat([a.ub, b.ub], dim=0),
-        depths=torch.cat([a.depths, b.depths], dim=0),
-        incremental_alpha=_concat_optional_dicts(a.incremental_alpha, b.incremental_alpha),
-        incremental_eta=_concat_optional_dicts(a.incremental_eta, b.incremental_eta),
-        split_signs=_concat_optional_dicts(a.split_signs, b.split_signs),
-        parent_margins=_concat_optional_tensor(a.parent_margins, b.parent_margins, "parent_margins"),
-        lower_bound=_concat_optional_tensor(a.lower_bound, b.lower_bound, "lower_bound"),
-    )
 
 
 def split_subproblems(
@@ -391,83 +511,3 @@ def split_subproblems(
         lower_bound=(batch.lower_bound.clone() if batch.lower_bound is not None else None),
     )
     return left, right
-
-
-def split_neuron_subproblems(
-    batch: SubproblemBatch,
-    *,
-    layer_id: int,
-    neuron_idx: int,
-    n_neurons: int,
-    n_specs: int,
-) -> tuple[SubproblemBatch, SubproblemBatch]:
-    if neuron_idx < 0 or neuron_idx >= n_neurons:
-        raise IndexError(f"neuron_idx {neuron_idx} out of range for n_neurons={n_neurons}")
-
-    def _clone_dict_tensors(
-        tensors: Optional[Dict[int, torch.Tensor]],
-    ) -> Optional[Dict[int, torch.Tensor]]:
-        return {key: tensor.clone() for key, tensor in tensors.items()} if tensors is not None else None
-
-    def _clone_signs(sign: float) -> Dict[int, torch.Tensor]:
-        signs = _clone_dict_tensors(batch.split_signs) or {}
-        if layer_id not in signs:
-            signs[layer_id] = torch.zeros(
-                (batch.batch_size, n_specs, n_neurons),
-                dtype=batch.lb.dtype,
-                device=batch.lb.device,
-            )
-        signs[layer_id][:, :, neuron_idx] = sign
-        return signs
-
-    new_depths = batch.depths + 1
-    on = SubproblemBatch(
-        lb=batch.lb.clone(),
-        ub=batch.ub.clone(),
-        depths=new_depths.clone(),
-        incremental_alpha=_clone_dict_tensors(batch.incremental_alpha),
-        incremental_eta=_clone_dict_tensors(batch.incremental_eta),
-        split_signs=_clone_signs(+1.0),
-        parent_margins=batch.parent_margins.clone() if batch.parent_margins is not None else None,
-        lower_bound=batch.lower_bound.clone() if batch.lower_bound is not None else None,
-    )
-    off = SubproblemBatch(
-        lb=batch.lb.clone(),
-        ub=batch.ub.clone(),
-        depths=new_depths.clone(),
-        incremental_alpha=_clone_dict_tensors(batch.incremental_alpha),
-        incremental_eta=_clone_dict_tensors(batch.incremental_eta),
-        split_signs=_clone_signs(-1.0),
-        parent_margins=batch.parent_margins.clone() if batch.parent_margins is not None else None,
-        lower_bound=batch.lower_bound.clone() if batch.lower_bound is not None else None,
-    )
-    return on, off
-
-
-# ---------------------------------------------------------------------------
-# Single-subproblem wrapper
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class BabNode:
-    """Single-subproblem record: one bounds box, one priority score, one
-    optional candidate counterexample.
-
-    Prefer :class:`SubproblemBatch` for batch-parallel processing; use this
-    record when a call site only ever holds one subproblem at a time and
-    wants priority-queue ordering. ``to_batch`` lifts a single node into a
-    ``SubproblemBatch`` of size 1 for dispatch through the batched path.
-    """
-
-    box: Bounds
-    depth: int
-    score: float
-    candidate_ce: Optional[np.ndarray] = None
-
-    def __lt__(self, other: BabNode) -> bool:  # max-heap by score
-        return self.score > other.score
-
-    def to_batch(self) -> SubproblemBatch:
-        """Upgrade to tensor batch of size 1."""
-        return SubproblemBatch.from_bounds(self.box, depth=self.depth)

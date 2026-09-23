@@ -223,13 +223,17 @@ act/back_end/
   layer_schema.py
   bab/
     bab.py
+    climb.py
+    violation.py
+    splitting.py
     node.py
     branching/
+      multi_split.py
   solver/
     solver_base.py
     solver_gurobi.py
     solver_torchlp.py
-    solver_dual.py
+    solver_dual.py  # DualSolver.solve_spec_batch() handles K-lane dual solves
     solver_hz.py
   interval_tf/
     interval_tf.py
@@ -286,7 +290,7 @@ Config (`BaBConfig`) / CLI flags:
 | `llm_probe_model` | `--bab-llm-probe-model` | `""` |
 | `llm_probe_base_url` | `--bab-llm-probe-base-url` | `""` |
 | `llm_probe_cadence` | `--bab-llm-probe-cadence` | `1` |
-| `llm_probe_decisions` (e.g. `split,frontier,refine,neuron`) / `llm_probe_max_candidates_total` / `llm_probe_api_key_env` / `_temperature` / `_max_candidates` / `_history` / `_max_failures` / `_log` | (config/YAML only) | see `act/config/config.py` |
+| `llm_probe_decisions` (e.g. `split,frontier,refine,neuron`) / `llm_probe_max_candidates_total` / `llm_probe_api_key_env` / `_temperature` / `_max_candidates` / `_history` / `_max_failures` / `_log` | `--bab-llm-probe-<field>` (e.g. `--bab-llm-probe-decisions`); also YAML | see `act/config/config.py` |
 
 Implementation lives in `act/pipeline/verification/llm_probe.py`. That file has two independent
 sections: the legacy TinyLlama input/output probe (Section A) and this BaB controller (Section B);
