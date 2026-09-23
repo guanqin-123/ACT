@@ -32,7 +32,7 @@
 #       Decomposition", De Palma et al., 2021.
 #
 #   Result types: ``BranchingScores`` (per-dim / per-neuron scores) and
-#   ``SplitDecision`` (``input_axis`` / ``cut_dim`` + ``fanout`` for input splits;
+#   ``SplitDecision`` (``input_axis`` + ``fanout`` for input splits;
 #   ``layer_id`` / ``neuron_idx`` for neuron splits). Factory:
 #   ``_build_branching_strategy``.
 #
@@ -44,12 +44,21 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from act.back_end.bab.node import SubproblemBatch
+from act.config.config import DualConfig
+from act.back_end.bab.node import (
+    SubproblemBatch,
+    _layer_neuron_count,
+    split_input,
+    split_input_nary,
+    split_neurons,
+)
 from act.back_end.core import Bounds, Layer, Net
+from act.back_end.dual_tf.tf_forward import compute_forward_bounds
 from act.back_end.layer_schema import LayerKind
 from act.front_end.specs import InKind
 from act.util.device_manager import get_default_device, get_default_dtype
@@ -75,10 +84,81 @@ class BranchingScores:
 class SplitDecision:
     kind: str
     input_axis: Optional[torch.Tensor | int] = None
-    cut_dim: Optional[torch.Tensor] = None
     fanout: int = 2
     layer_id: Optional[torch.Tensor] = None
     neuron_idx: Optional[torch.Tensor] = None
+
+    def input_axes(self, batch: SubproblemBatch) -> torch.Tensor:
+        if self.input_axis is None:
+            raise ValueError("input-axis decision missing input_axis")
+        input_axis = torch.as_tensor(
+            self.input_axis, device=batch.lb.device, dtype=torch.long
+        ).reshape(-1)
+        if input_axis.numel() == 1:
+            input_axis = input_axis.expand(batch.batch_size)
+        if input_axis.numel() != batch.batch_size:
+            raise ValueError(
+                f"input-axis decision has {input_axis.numel()} lanes for batch size "
+                f"{batch.batch_size}"
+            )
+        return input_axis.contiguous()
+
+    def apply(
+        self,
+        batch: SubproblemBatch,
+        net: Net,
+    ) -> tuple[SubproblemBatch, torch.Tensor]:
+        fanout = max(2, int(self.fanout))
+        if self.kind == "input_axis":
+            dims = self.input_axes(batch)
+            if fanout == 2:
+                return split_input(batch, dims)
+            return split_input_nary(batch, dims, fanout)
+
+        if self.kind == "neuron":
+            if self.layer_id is None or self.neuron_idx is None:
+                raise ValueError("neuron decision missing layer_id or neuron_idx")
+
+            layer_id_tensor = self.layer_id.reshape(-1)
+            neuron_idx_tensor = self.neuron_idx.reshape(-1)
+            if layer_id_tensor.numel() == 0 or neuron_idx_tensor.numel() == 0:
+                raise ValueError("neuron decision tensors must be non-empty")
+
+            representative_layer_id = int(layer_id_tensor[0].item())
+            if representative_layer_id < 0:
+                raise ValueError(
+                    f"neuron decision has negative layer_id {representative_layer_id}; "
+                    "input-axis splits must be emitted as "
+                    "SplitDecision(kind='input_axis')"
+                )
+
+            n_lanes = batch.batch_size
+            layer_ids = (
+                layer_id_tensor.expand(n_lanes)
+                if layer_id_tensor.numel() == 1
+                else layer_id_tensor
+            )
+            neuron_indices = (
+                neuron_idx_tensor.expand(n_lanes)
+                if neuron_idx_tensor.numel() == 1
+                else neuron_idx_tensor
+            )
+            if layer_ids.numel() != n_lanes or neuron_indices.numel() != n_lanes:
+                raise ValueError(
+                    f"neuron decision has {layer_ids.numel()}/{neuron_indices.numel()} "
+                    f"entries for batch size {n_lanes}"
+                )
+
+            return split_neurons(
+                batch,
+                net,
+                layer_ids.unsqueeze(1),
+                neuron_indices.unsqueeze(1),
+                1,
+                first_sign=+1.0,
+            )
+
+        raise ValueError(f"Unknown SplitDecision.kind: {self.kind!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -91,9 +171,9 @@ class BranchingStrategy(ABC):
 
     Lifecycle (called by the BaB engine per iteration)::
 
-        scores     = strategy.compute_scores(batch, net, unstable_mask)
-        split_dims = strategy.select(scores)
-        left, right = split_subproblems(batch, split_dims)
+        scores   = strategy.compute_scores(batch, net, unstable_mask)
+        decision = strategy.select(scores)
+        children, parent_index = decision.apply(batch, net)
 
     Subclass contract
     ~~~~~~~~~~~~~~~~~
@@ -434,6 +514,41 @@ class BaBSRBranching(BranchingStrategy):
 
 
 _WITNESS_GAP_TOL = 1e-6
+
+
+def witness_relu_preactivations(
+    net: Net,
+    witness_input: torch.Tensor,
+    input_shape: tuple[int, ...],
+    dual_config: DualConfig,
+) -> Optional[Dict[int, torch.Tensor]]:
+    """Return concrete per-ReLU pre-activations at a dual witness."""
+    if witness_input.numel() == 0:
+        return None
+    x = witness_input
+    if input_shape and x.dim() == 2 and x.shape[1] == int(math.prod(input_shape)):
+        x = x.reshape(x.shape[0], *input_shape)
+    try:
+        bounds_dict = compute_forward_bounds(
+            net,
+            x,
+            x,
+            forward_lin_max_perturbed=dual_config.forward_lin_max_perturbed,
+        )
+    except (ValueError, RuntimeError, KeyError, IndexError):
+        # An unsupported layer or witness shape falls back to BaBSR scoring.
+        return None
+    preactivations = {
+        layer_id: bounds.lb.flatten(start_dim=1)
+        for layer_id, bounds in bounds_dict.items()
+        if _layer_kind_upper(net.by_id[layer_id]) == LayerKind.RELU.value
+    }
+    return preactivations or None
+
+
+def _layer_kind_upper(layer: Layer) -> str:
+    kind = layer.kind
+    return kind.value if isinstance(kind, LayerKind) else kind.upper()
 
 
 class WitnessResidualBranching(BaBSRBranching):
@@ -865,6 +980,7 @@ class FSBBranching(BaBSRBranching):
         neuron_idx_per_lane: torch.Tensor,
         net: Net,
     ) -> Dict[int, torch.Tensor]:
+        # This is a one-sided +1 scoring hypothesis, not a partition into children.
         hypo: Dict[int, torch.Tensor] = {}
         if batch.split_signs is not None:
             for key, value in batch.split_signs.items():
@@ -913,18 +1029,3 @@ def _build_branching_strategy(
             raise ValueError("FSB branching requires a dual_solver instance (inject via factory).")
         return FSBBranching(dual_solver=dual_solver, branching_candidates=branching_candidates)
     raise ValueError(f"Unknown branching method: {method!r}")
-
-
-def _layer_neuron_count(layer: Layer) -> int:
-    """Width of a layer's output block.
-
-    Derived from the variable-id span rather than ``len(out_vars)`` so that the
-    sign tensors stay aligned with the solver's flat variable indexing even if a
-    layer ever declares a non-contiguous ``out_vars`` list.
-    """
-    span = int(layer.out_vars[-1] - layer.out_vars[0] + 1)
-    assert span == len(layer.out_vars), (
-        f"layer {layer.id} has non-contiguous out_vars: span {span} != "
-        f"{len(layer.out_vars)} declared variables"
-    )
-    return span

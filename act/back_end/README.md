@@ -222,13 +222,13 @@ act/back_end/
   verifier.py
   layer_schema.py
   bab/
-    bab.py
+    bab.py          # BaB engine wiring and orchestration
     climb.py
     violation.py
-    splitting.py
-    node.py
+    node.py         # Subproblem batches and all child construction
     branching/
-      multi_split.py
+      branching.py  # Split decisions and branching heuristics
+      multi_split.py # Multi-neuron selection and gain testing
   solver/
     solver_base.py
     solver_gurobi.py

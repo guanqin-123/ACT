@@ -10,8 +10,8 @@
 #   BaB loop on a single-spec instance. Subproblems are explored in K-batched
 #   waves via solve_batch with CE validation per SAT lane; optional certificate
 #   reuse is delegated to ``act.back_end.bab.climb.ClimbSession``. Dual-tier
-#   bound policy lives here, concrete CE checks in ``violation``, and branching
-#   decisions / split construction in ``splitting``.
+#   bound policy lives here, concrete CE checks in ``violation``, branching
+#   decisions in ``branching/``, and child construction in ``node.py``.
 #
 # ===---------------------------------------------------------------------====#
 
@@ -37,19 +37,22 @@ from act.back_end.bab.node import (
     SubproblemBatch,
     _install_embedding_child_block_eps,
     _restore_embedding_child_block_eps,
-    split_input,
-    split_input_nary,
+    slice_branching_state,
+    split_neurons,
 )
 from act.back_end.bab.climb import ClimbSession
 from act.back_end.bab.branching.branching import (
     BranchingStrategy,
     SplitDecision,
     _build_branching_strategy as _build_branching_strategy_impl,
+    witness_relu_preactivations,
 )
 from act.back_end.bab.branching.multi_split import (
     _multi_split_from_decision,
-    _multi_split_from_groups,
     enumerate_unstable_candidates,
+    gain_tested_decision,
+    groups_to_tensors,
+    presplit_root,
 )
 from act.back_end.bab.branching.bounding import (
     BoundingStrategy,
@@ -66,16 +69,6 @@ from act.back_end.bab.branching.bounding import (
 from act.back_end.core import Bounds, Layer, Net
 from act.back_end.dual_tf.tf_forward import compute_forward_bounds
 from act.back_end.layer_schema import LayerKind
-from act.back_end.bab.splitting import (
-    _gain_tested_decision,
-    _groups_to_tensors,
-    _input_axis_decision_tensor,
-    _presplit_root,
-    _slice_branching_state,
-    _split_from_decision,
-    _witness_relu_preactivations,
-    _witness_residual_branching_active,
-)
 from act.back_end.bab.violation import _check_input_specs_batched, check_violations_batched
 from act.back_end.solver.solver_base import Solver, SolveStatus
 from act.back_end.solver.solver_dual import (
@@ -94,9 +87,6 @@ from act.front_end.specs import OutKind, OutputSpec
 from act.util.stats import VerifyStatus, VerifyResult
 
 log = logging.getLogger(__name__)
-
-# K cap per wave when verify_bab_batched is given no max_batch_size.
-DEFAULT_MAX_BATCH_SIZE = 8
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +177,10 @@ def _neuron_branching_supported(config: BaBConfig) -> bool:
         config.branching_method in NEURON_BRANCHING_METHODS
         and config.solver_tier in ("dual_alpha", "dual_alpha_eta")
     )
+
+
+def _witness_residual_branching_active(config: BaBConfig) -> bool:
+    return config.branching_method == "witness_residual"
 
 
 def _solve_dual_batch(
@@ -367,7 +361,7 @@ def verify_bab_batched(
     solver_factory: Callable[[], Solver],
     config: Optional[BaBConfig] = None,
     *,
-    max_batch_size: Optional[Union[int, str]] = None,
+    max_batch_size: Union[int, str],
     time_budget_s: Optional[float] = None,
     dual_config: Optional[DualConfig] = None,
     verbose: bool = False,
@@ -398,9 +392,10 @@ def verify_bab_batched(
             (no state leakage across iterations).
         config: ``BaBConfig``; ``max_depth`` and ``max_nodes`` cap the search
             tree.
-        max_batch_size: caps K; ``None`` uses ``DEFAULT_MAX_BATCH_SIZE`` and
-            ``"auto"`` sizes K from GPU memory (``config.auto_batch_cap`` on
-            CPU).
+        max_batch_size: required cap on K, an int >= 1 or ``"auto"`` (sizes K
+            from GPU memory; ``config.auto_batch_cap`` on CPU). There is no
+            implicit default: callers pass the central
+            ``BackendConfig.bab_max_batch_size`` or an explicit value.
         time_budget_s: wall-clock budget (default 300 s).
         verbose: reserved.
         _k_log: diagnostic only — if supplied, the actual K used per iteration
@@ -421,10 +416,8 @@ def verify_bab_batched(
             if torch.cuda.is_available()
             else int(config.auto_batch_cap)
         )
-    elif max_batch_size is None:
-        effective_batch = DEFAULT_MAX_BATCH_SIZE
     else:
-        effective_batch = int(cast(int, max_batch_size))
+        effective_batch = int(max_batch_size)
     if effective_batch < 1:
         raise ValueError(f"max_batch_size must be >= 1, got {effective_batch}")
     max_k_seen = 0
@@ -606,8 +599,12 @@ def verify_bab_batched(
             and presolve.bounds_dict is not None
             and presolve.nu_per_layer is not None
         ):
-            presplit = _presplit_root(
-                root_batch, presolve.bounds_dict, presolve.nu_per_layer, presplit_k,
+            presplit = presplit_root(
+                root_batch,
+                net,
+                presolve.bounds_dict,
+                presolve.nu_per_layer,
+                presplit_k,
             )
             if presplit is not None:
                 root_batch = presplit
@@ -815,7 +812,7 @@ def verify_bab_batched(
                     full_branch_idx = unresolved_idx.index_select(
                         0, branch_idx.to(unresolved_idx.device)
                     )
-                    bd_branch, nu_branch = _slice_branching_state(
+                    bd_branch, nu_branch = slice_branching_state(
                         bounds_dict_for_branching,
                         nu_per_layer_for_branching,
                         full_branch_idx,
@@ -827,7 +824,7 @@ def verify_bab_batched(
                             0,
                             full_branch_idx.to(witness_input_for_branching.device),
                         )
-                        witness_preact_branch = _witness_relu_preactivations(
+                        witness_preact_branch = witness_relu_preactivations(
                             net,
                             witness_branch,
                             input_shape,
@@ -858,9 +855,9 @@ def verify_bab_batched(
                                 candidates=[_llm.CandidateSummary(**_d) for _d in _cand_dicts],
                             ))
                             if _ngroups is not None:
-                                _tl, _tn, _keff = _groups_to_tensors(_ngroups, branch_batch)
+                                _tl, _tn, _keff = groups_to_tensors(_ngroups, branch_batch)
                                 if _tl is not None and _tn is not None:
-                                    multi = _multi_split_from_groups(branch_batch, net, _tl, _tn, _keff)
+                                    multi = split_neurons(branch_batch, net, _tl, _tn, _keff)
                                     _wave_split_used = _keff
                     # Joint splitting is orthogonal to how a split is SCORED, so
                     # it is no longer keyed on branching_method == "gain": the k
@@ -920,7 +917,7 @@ def verify_bab_batched(
                     else:
                         decision = None
                         if config.branching_method == "gain":
-                            decision = _gain_tested_decision(
+                            decision = gain_tested_decision(
                                 branch_batch,
                                 net,
                                 assert_layer,
@@ -951,31 +948,24 @@ def verify_bab_batched(
                             if climb is not None:
                                 climb.reject_input_axis_split()
                             decision.fanout = fanout
-                        children, parent_index = _split_from_decision(branch_batch, decision, net)
+                        children, parent_index = decision.apply(branch_batch, net)
                 else:
                     scores = brancher.compute_scores(branch_batch, net)
                     legacy_decision = cast(Any, brancher).select(scores)
-                    split_fanout = fanout
                     if isinstance(legacy_decision, SplitDecision):
-                        if legacy_decision.cut_dim is not None:
-                            split_dims = _input_axis_decision_tensor(
-                                SplitDecision(kind="input_axis", input_axis=legacy_decision.cut_dim),
-                                branch_batch,
-                            )
-                        else:
-                            if legacy_decision.input_axis is None:
-                                raise ValueError("input-axis decision missing input_axis")
-                            split_dims = _input_axis_decision_tensor(
-                                legacy_decision,
-                                branch_batch,
-                            )
-                        split_fanout = max(2, int(legacy_decision.fanout))
+                        decision = legacy_decision
+                        split_dims = decision.input_axes(branch_batch)
                     else:
                         split_dims = torch.as_tensor(
                             legacy_decision,
                             device=branch_batch.lb.device,
                             dtype=torch.long,
                         ).reshape(-1)
+                        decision = SplitDecision(
+                            kind="input_axis",
+                            input_axis=split_dims,
+                            fanout=fanout,
+                        )
                     widths = branch_batch.widths()
                     _last_input_widths = (
                         widths.mean(dim=0).tolist() if widths.shape[1] <= 32 else None
@@ -987,12 +977,10 @@ def verify_bab_batched(
                         advised = torch.full_like(split_dims, int(_wave_policy.input_split_dim))
                         has_width = widths.gather(1, advised.unsqueeze(1)).squeeze(1) > 0
                         split_dims = torch.where(has_width, advised, split_dims)
+                    decision.input_axis = split_dims
                     if _wave_policy is not None and _wave_policy.input_split_fanout is not None:
-                        split_fanout = int(_wave_policy.input_split_fanout)
-                    if split_fanout == 2:
-                        children, parent_index = split_input(branch_batch, split_dims)
-                    else:
-                        children, parent_index = split_input_nary(branch_batch, split_dims, split_fanout)
+                        decision.fanout = int(_wave_policy.input_split_fanout)
+                    children, parent_index = decision.apply(branch_batch, net)
 
                 if provenance:
                     pid = branch_batch.node_id

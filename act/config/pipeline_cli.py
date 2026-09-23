@@ -34,7 +34,7 @@ from act.front_end.torchvision_loader import data_model_mapping as tv_mapping
 from act.front_end.model_synthesis import synthesize_models_and_seeds_from_specs
 from act.pipeline.fuzzing.actfuzzer import ACTFuzzer, FuzzingConfig
 from act.pipeline.verification.per_neuron_bounds import PerNeuronCheckConfig
-from act.config.config import PipelineConfig
+from act.config.config import BackendConfig, PipelineConfig
 
 
 _FUZZ_MUTATION_WEIGHT_KEYS = frozenset(
@@ -1023,6 +1023,7 @@ def _run_bab_on_net(net, args, bab_first_sample_only: bool = False):
     pipeline_config = PipelineConfig.from_yaml(**_collect_pipeline_config_overrides(args))
     config = pipeline_config.bab
     dual_config = pipeline_config.dual
+    max_batch_size = BackendConfig.from_yaml().bab_max_batch_size
     budget = float(getattr(args, "timeout", 60.0) or 60.0)
 
     spec_layers = gather_input_spec_layers(net)
@@ -1034,7 +1035,7 @@ def _run_bab_on_net(net, args, bab_first_sample_only: bool = False):
             net=net,
             solver_factory=TorchLPSolver,
             config=config,
-            max_batch_size=None,
+            max_batch_size=max_batch_size,
             time_budget_s=budget,
             dual_config=dual_config,
         )
@@ -1049,7 +1050,7 @@ def _run_bab_on_net(net, args, bab_first_sample_only: bool = False):
                 net=sliced_net,
                 solver_factory=TorchLPSolver,
                 config=config,
-                max_batch_size=None,
+                max_batch_size=max_batch_size,
                 time_budget_s=budget,
                 dual_config=dual_config,
             )

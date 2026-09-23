@@ -162,10 +162,16 @@ class BaBConfig:
     """Enable query-local CLIMB certificate replay and core propagation."""
     climb_theta: float = 0.0
     """Fraction of replay slack available to the vector deletion budget."""
+    climb_delta_abs: float = 1e-9
+    """Absolute deletion-budget margin: delta = climb_delta_abs + climb_delta_rel * |slack|."""
+    climb_delta_rel: float = 1e-7
+    """Relative deletion-budget margin: delta = climb_delta_abs + climb_delta_rel * |slack|."""
     climb_recheck_k: int = 0
     """Maximum lanes given one extra direct replay after budget coarsening."""
     climb_max_cores: int = 1024
     """Maximum retained cores after subsumption and deterministic eviction."""
+    climb_propagate_core_chunk: int = 4096
+    """Cores per propagate matmul chunk (memory only; the fixpoint is chunk-independent)."""
 
     provenance_enabled: bool = False
     """Track logical BaB node ids and parent ids in TopKBounding."""
@@ -297,10 +303,16 @@ class BaBConfig:
             raise ValueError(f"top_k must be non-negative, got {self.top_k}")
         if not math.isfinite(self.climb_theta) or not 0.0 <= self.climb_theta <= 1.0:
             raise ValueError("climb_theta must be finite and in [0, 1]")
+        if not math.isfinite(self.climb_delta_abs) or self.climb_delta_abs < 0.0:
+            raise ValueError("climb_delta_abs must be finite and non-negative")
+        if not math.isfinite(self.climb_delta_rel) or self.climb_delta_rel < 0.0:
+            raise ValueError("climb_delta_rel must be finite and non-negative")
         if self.climb_recheck_k < 0:
             raise ValueError("climb_recheck_k must be non-negative")
         if self.climb_max_cores < 1:
             raise ValueError("climb_max_cores must be positive")
+        if self.climb_propagate_core_chunk < 1:
+            raise ValueError("climb_propagate_core_chunk must be positive")
         if self.top_k > 0 and self.bounding in TOP_K_INCOMPATIBLE_BOUNDINGS:
             raise ValueError(
                 f"top_k={self.top_k} is not supported by bounding={self.bounding!r}; "

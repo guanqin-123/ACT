@@ -144,7 +144,7 @@ jobs:
 
       # ===================================================================
       # Gain branching + joint multi-neuron splitting: _multi_split_from_decision
-      # / _multi_split_from_groups and the gain-tier bab loop (2^k child cubes).
+      # / node.split_neurons and the gain-tier bab loop (2^k child cubes).
       # ===================================================================
       - name: BaB gain branching + multi-split
         run: |

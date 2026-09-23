@@ -8,7 +8,7 @@
 
 from act.config.config import BaBConfig
 from act.back_end.bab.bab import verify_bab, verify_bab_batched
-from act.back_end.bab.node import SubproblemBatch, split_subproblems
+from act.back_end.bab.node import SubproblemBatch
 from act.back_end.bab.branching.branching import BranchingStrategy
 from act.back_end.bab.branching.bounding import BoundingStrategy
 
@@ -17,7 +17,6 @@ __all__ = [
     "verify_bab",
     "verify_bab_batched",
     "SubproblemBatch",
-    "split_subproblems",
     "BranchingStrategy",
     "BoundingStrategy",
 ]

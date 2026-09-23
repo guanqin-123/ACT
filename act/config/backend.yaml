@@ -256,8 +256,13 @@ backend:
     # -- CLIMB certificate reuse (ReLU neuron branching only) ---------------
     climb_enabled: false
     climb_theta: 0.0
+    # Deletion-budget safety margin: delta = climb_delta_abs + climb_delta_rel * |slack|.
+    climb_delta_abs: 0.000000001
+    climb_delta_rel: 0.0000001
     climb_recheck_k: 0
     climb_max_cores: 1024
+    # Cores per propagate matmul chunk (memory only; fixpoint is chunk-independent).
+    climb_propagate_core_chunk: 4096
 
     # -- LLM-probe controller ----------------------------------------------
     llm_probe_enabled: false

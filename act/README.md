@@ -69,10 +69,10 @@ act/
 │   │   ├── bab.py                  # BaB engine: verify_bab(), verify_bab_batched()
 │   │   ├── climb.py                # CLIMB certificate replay, core learning, propagation
 │   │   ├── violation.py            # Concrete counterexample checks for BaB candidates
-│   │   ├── splitting.py            # Branching decisions and child split construction
-│   │   ├── node.py                 # BaB tree node representation
+│   │   ├── node.py                 # Subproblem batches and all child construction
 │   │   └── branching/              # Branching and bounding strategies
-│   │       └── multi_split.py      # Joint multi-neuron 2^k splitting
+│   │       ├── branching.py        # Split decisions and branching heuristics
+│   │       └── multi_split.py      # Multi-neuron selection and gain testing
 │   ├── utils.py                    # Backend utilities (affine_bounds, validate_constraints)
 │   ├── analyze.py                  # Network analysis and bounds propagation
 │   ├── cons_exportor.py            # Constraint export to solvers
