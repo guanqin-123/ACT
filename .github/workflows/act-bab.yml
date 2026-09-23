@@ -391,6 +391,66 @@ jobs:
             --bab-bounding depth_bound_blend --bab-provenance \
             --bab-max-depth 3 --bab-max-nodes 10 --device cpu --dtype float64
 
+      # CLIMB must learn a replayable phase core and then revisit the pending
+      # frontier. The greps reject a run that only enables CLIMB metadata; the
+      # single-neuron split is required for this net to certify a child lane.
+      - name: BaB CLIMB — certificate replay and propagation
+        run: |
+          cd ${{ github.workspace }}
+          out=$(coverage run -p -m act.back_end --verify \
+            --network "$ACT_NETS_DIR/mlp_plain_3x8_64x64_3962224133.json" \
+            --solver dual --bab --bab-solver-tier dual_alpha_eta \
+            --bab-branching babsr --bab-bounding depth_bound_blend \
+            --bab-root-bounds-reuse none --bab-intermediate-refine none \
+            --bab-per-subproblem-refine none --bab-climb-enabled \
+            --bab-climb-theta 0.5 --bab-climb-recheck-k 2 \
+            --bab-multi-split-levels 1 --bab-max-batch-size 16 \
+            --bab-max-depth 10 --bab-max-subproblems 90 --timeout 80 \
+            --device cpu --dtype float64 --verbose 2>&1)
+          echo "$out"
+          grep -qE "climb_cores_inserted: [1-9]" <<<"$out"
+          grep -qE "climb_main_bound_calls: [1-9]" <<<"$out"
+          grep -qE "climb_propagate_time_s: (0\.[0-9]*[1-9]|[1-9])" <<<"$out"
+
+      # CLIMB rejects non-TopK bounding before solving. The status and message
+      # checks make this an asserted error path rather than an ignored failure.
+      - name: BaB CLIMB — reject incompatible bounding
+        run: |
+          cd ${{ github.workspace }}
+          set +e
+          out=$(coverage run -p -m act.back_end --verify \
+            --network "$ACT_NETS_DIR/mlp_plain_3x8_64x64_3962224133.json" \
+            --solver dual --bab --bab-solver-tier dual_alpha_eta \
+            --bab-branching babsr --bab-bounding random \
+            --bab-root-bounds-reuse none --bab-intermediate-refine none \
+            --bab-per-subproblem-refine none --bab-climb-enabled \
+            --bab-max-depth 1 --bab-max-subproblems 1 \
+            --device cpu --dtype float64 2>&1)
+          status=$?
+          set -e
+          echo "$out"
+          test "$status" -ne 0
+          grep -qE "CLIMB configuration error:.*bounding" <<<"$out"
+
+      # These two pool nets keep explicit symbolic input columns, exercising the
+      # DeepPoly MaxPool forward and cached one-hot dual backward. The check is
+      # verdict-agnostic (CI regenerates the nets, so a root certificate is not
+      # guaranteed): each net must report a verdict and no verifier error.
+      - name: Dual MaxPool — symbolic forward and one-hot backward
+        run: |
+          cd ${{ github.workspace }}
+          for net in layer_testing_cnn_pool cnn2d_plain_4x1x8x8_32x8x16_4023708073; do
+            out=$(coverage run -p -m act.back_end --verify \
+              --network "$ACT_NETS_DIR/$net.json" --solver dual --bab \
+              --bab-solver-tier dual_alpha_eta --bab-branching babsr \
+              --bab-multi-split-levels 1 --bab-max-depth 3 \
+              --bab-max-subproblems 10 --dual-forward-lin-max-perturbed 100 \
+              --timeout 60 --device cpu --dtype float64 --verbose 2>&1)
+            echo "$out"
+            grep -qE "^(Lane|Sample) [0-9]+: VerifyStatus\.(CERTIFIED|FALSIFIED|UNKNOWN)" <<<"$out"
+            if grep -qE "VERIFIER_ERROR|Traceback" <<<"$out"; then exit 1; fi
+          done
+
       # ── Coverage ───────────────────────────────────────────────────────
       - name: Combine coverage data
         if: always()
