@@ -132,19 +132,30 @@ def _gather_optional_dict(
     return {k: t.index_select(0, idx.to(t.device)) for k, t in d.items()}
 
 
+def _assert_splittable(batch: SubproblemBatch, dims2: torch.Tensor) -> None:
+    """Refuse a zero-width cut: its children are copies of the parent."""
+    widths_at = batch.widths().gather(1, dims2)
+    if not bool((widths_at > 0).all().item()):
+        raise ValueError(
+            f"split dimension has zero width (min {float(widths_at.min().item()):g}); "
+            "bisecting it returns two children identical to the parent"
+        )
+
+
 def split_input(
     batch: SubproblemBatch,
     split_dims: torch.Tensor,
 ) -> tuple[SubproblemBatch, torch.Tensor]:
     n = batch.batch_size
     device = batch.lb.device
+    dims2 = split_dims.unsqueeze(1)
+    _assert_splittable(batch, dims2)
     mid = (batch.lb + batch.ub) / 2
-    split_vals = mid.gather(1, split_dims.unsqueeze(1))
+    split_vals = mid.gather(1, dims2)
     parent_index = torch.arange(n, device=device).repeat(2)
 
     child_lb = batch.lb.index_select(0, parent_index)
     child_ub = batch.ub.index_select(0, parent_index)
-    dims2 = split_dims.unsqueeze(1)
     child_ub[:n].scatter_(1, dims2, split_vals)
     child_lb[n:].scatter_(1, dims2, split_vals)
     child_depths = batch.depths.index_select(0, parent_index) + 1
@@ -225,6 +236,9 @@ def split_input_nary(
         raise ValueError(f"fanout must be >= 2, got {k}")
     n = batch.batch_size
     device = batch.lb.device
+    _assert_splittable(
+        batch, cut_dim.to(device=device, dtype=torch.long).reshape(-1).unsqueeze(1)
+    )
     parent_index = torch.arange(n, device=device).repeat(k)
     section = torch.arange(k, device=device).repeat_interleave(n)
 

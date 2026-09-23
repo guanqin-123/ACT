@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Union, cast, get_args, get_origin, get_type_hints
 
-from act.config.config import DualConfig, GurobiConfig, TorchLPConfig, VALID_BERT_METHODS, VALID_BOUNDINGS, VALID_SOLVER_TIERS, _VALID_SOLVERS
+from act.config.config import DualConfig, GurobiConfig, TorchLPConfig, VALID_BERT_METHODS, VALID_BOUNDINGS, VALID_OUTWARD_ROUNDING, VALID_ROOT_BOUNDS_REUSE, VALID_SOLVER_TIERS, _VALID_SOLVERS
 from act.back_end.layer_schema import LayerKind
 from act.front_end.specs import OutKind
 from act.util.cli_utils import add_device_args, initialize_from_args
@@ -208,7 +208,7 @@ def _make_solver(
 _DUAL_BAB_PRESET: dict[str, Any] = {
     "solver_tier": "dual_alpha_eta",
     "branching_method": "gain",
-    "reuse_root_bounds": True,
+    "root_bounds_reuse": "split_refresh",
     "intermediate_refine": "all",
     "multi_split_levels": 4,
 }
@@ -216,7 +216,7 @@ _DUAL_BAB_PRESET: dict[str, Any] = {
 _DUAL_PRESET_ARG_DESTS: dict[str, str] = {
     "solver_tier": "bab_solver_tier",
     "branching_method": "bab_branching",
-    "reuse_root_bounds": "bab_reuse_root_bounds",
+    "root_bounds_reuse": "bab_root_bounds_reuse",
     "intermediate_refine": "bab_intermediate_refine",
     "multi_split_levels": "bab_multi_split_levels",
 }
@@ -1172,6 +1172,35 @@ Examples:
         choices=VALID_SOLVER_TIERS,
         dest="bab_solver_tier",
         help="Solver tier for BaB bound computation (default: from config.yaml)",
+    )
+    verify_group.add_argument(
+        "--bab-root-bounds-reuse",
+        type=str,
+        default=None,
+        choices=VALID_ROOT_BOUNDS_REUSE,
+        dest="bab_root_bounds_reuse",
+        help=(
+            "Descendant reuse of the root box's forward bounds (dual tiers): "
+            "none = every node re-propagates; "
+            "plain = children get the root dict untouched; "
+            "split_refresh = root dict hardened by the split-derived interval "
+            "refresh and --bab-per-subproblem-refine "
+            "(default: from config.yaml)"
+        ),
+    )
+    verify_group.add_argument(
+        "--dual-outward-rounding",
+        type=str,
+        default=None,
+        choices=VALID_OUTWARD_ROUNDING,
+        dest="dual_outward_rounding",
+        help=(
+            "Rounding discipline of the forward concretization: "
+            "none = active dtype; "
+            "float64_last_pass = final pass in float64, lb rounded down and ub "
+            "rounded up before casting back "
+            "(default: from config.yaml)"
+        ),
     )
     verify_group.add_argument(
         "--bab-branching",

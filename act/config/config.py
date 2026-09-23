@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
 from importlib import import_module
+import math
 from pathlib import Path
 from typing import Any, Final, List, Optional, Union
 
@@ -19,6 +20,21 @@ _VALID_DTYPES = {"float32", "float64"}
 _VALID_REGISTRY_MODES = {"intersection", "union"}
 _VALID_COVERAGE_MODES = {"basic", "full"}
 VALID_SOLVER_TIERS: Final[tuple[str, ...]] = ("lp", "dual", "dual_alpha", "dual_alpha_eta")
+CLIMB_SOLVER_TIER: Final[str] = VALID_SOLVER_TIERS[-1]
+NO_REFINEMENT_MODE: Final[str] = "none"
+# Descendant reuse of the root box's forward bounds (``bab.root_bounds_reuse``).
+#
+#   value          | root dict passed to children | split-derived refresh
+#   ---------------|------------------------------|----------------------------
+#   none           | no (children re-propagate)   | n/a
+#   plain          | yes, untouched               | no
+#   split_refresh  | yes                          | _interval_refresh_bounds +
+#                  |                              | per_subproblem_refine
+VALID_ROOT_BOUNDS_REUSE: Final[tuple[str, ...]] = ("none", "plain", "split_refresh")
+# Rounding discipline of the forward concretization (``dual.outward_rounding``).
+# 'none' concretizes in the active dtype; 'float64_last_pass' runs the final
+# pass in float64 and rounds lb down / ub up before casting back.
+VALID_OUTWARD_ROUNDING: Final[tuple[str, ...]] = ("none", "float64_last_pass")
 # BaB subproblem-pool selection strategies (``--bab-bounding``).
 #
 #   value                | pool class          | order function                       | --bab-top-k | reference
@@ -42,6 +58,12 @@ VALID_BOUNDINGS: Final[tuple[str, ...]] = (
     "mcts",
 )
 TOP_K_BOUNDINGS: Final[tuple[str, ...]] = VALID_BOUNDINGS[:4]
+CLIMB_BRANCHING_METHODS: Final[tuple[str, ...]] = (
+    "babsr",
+    "fsb",
+    "gain",
+    "witness_residual",
+)
 TOP_K_INCOMPATIBLE_BOUNDINGS: Final[tuple[str, ...]] = VALID_BOUNDINGS[4:]
 VALID_BERT_METHODS: Final[tuple[str, ...]] = (
     "planar",
@@ -137,7 +159,17 @@ class BaBConfig:
     # Dual-tier solver knobs — support solver_tier="dual_alpha_eta" with
     # Iterative slope + Lagrange-multiplier optimization for the dual backward pass.
     solver_tier: str = "lp"
-    f"""Solver tier for BaB bound computation. Valid: {VALID_SOLVER_TIERS}."""
+    """Solver tier for BaB bound computation.
+    Valid: 'lp', 'dual', 'dual_alpha', 'dual_alpha_eta'."""
+
+    climb_enabled: bool = False
+    """Enable query-local CLIMB certificate replay and core propagation."""
+    climb_theta: float = 0.0
+    """Fraction of replay slack available to the vector deletion budget."""
+    climb_recheck_k: int = 0
+    """Maximum lanes given one extra direct replay after budget coarsening."""
+    climb_max_cores: int = 1024
+    """Maximum retained cores after subsumption and deterministic eviction."""
 
     provenance_enabled: bool = False
     """Track logical BaB node ids and parent ids in TopKBounding."""
@@ -145,7 +177,7 @@ class BaBConfig:
     eta_only_children: bool = field(default=False, metadata={"in_yaml": False})
     """Freeze alpha in child subproblems (depth > 0): children inherit the
     parent's optimized alpha and refine only the split multipliers (eta).
-    Cuts the per-node Adam graph and, combined with reuse_root_bounds,
+    Cuts the per-node Adam graph and, combined with root_bounds_reuse,
     removes the per-iteration forward pass entirely."""
 
     presplit_levels: int = field(default=0, metadata={"in_yaml": False})
@@ -155,7 +187,7 @@ class BaBConfig:
     combinations exactly partition the root region, so soundness is
     unaffected. Requires a dual tier with neuron branching state."""
 
-    intermediate_refine: str = "none"
+    intermediate_refine: str = NO_REFINEMENT_MODE
     """Backward refinement of intermediate pre-activation bounds at the root:
     'none' (off), 'auto' (refine activation layers whose mean width exceeds
     intermediate_refine_ratio x the median - targets wide fan-in
@@ -164,19 +196,29 @@ class BaBConfig:
     intermediate_refine_ratio: float = field(default=10.0, metadata={"in_yaml": False})
     """Width-blowup threshold multiplier for intermediate_refine='auto'."""
 
-    reuse_root_bounds: bool = False
-    """Reuse the root box's forward bounds for every descendant (dual tiers).
+    root_bounds_reuse: str = "none"
+    """Reuse of the root box's forward bounds by descendants (dual tiers).
+    Valid: 'none', 'plain', 'split_refresh'.
 
     Sound by monotonicity: a child box is contained in the root box, so the
     root's per-layer bounds remain valid over-approximations. Children only
     override the INPUT/INPUT_SPEC bounds with their own sub-box; intermediate
     ReLU relaxations stay at root tightness, with branching gains recovered by
     the input-term concretization and the eta split multipliers. Eliminates
-    the per-node forward pass (the dominant time and memory cost)."""
+    the per-node forward pass (the dominant time and memory cost).
 
-    per_subproblem_refine: str = field(default="none", metadata={"in_yaml": False})
+    'none' re-propagates per node. Both reuse modes override the INPUT and
+    INPUT_SPEC entries of the reused dict with each lane's own sub-box;
+    'plain' stops there, while 'split_refresh' additionally hardens the dict
+    with the split-derived interval refresh plus per_subproblem_refine. So
+    'plain' is the split-independent reference: it skips only the
+    split-derived tightening, not the per-lane input override."""
+
+    per_subproblem_refine: str = field(
+        default=NO_REFINEMENT_MODE, metadata={"in_yaml": False}
+    )
     """Per-subproblem sparse backward refinement of intermediate bounds in the
-    BaB loop (requires reuse_root_bounds): 'none' (off), 'tail' (last two
+    BaB loop (requires root_bounds_reuse != 'none'): 'none' (off), 'tail' (last two
     unstable activation layers), 'all' (every unstable activation layer). For
     each child batch, the split-hardened bounds are re-tightened by a K-lane
     backward pass over the unstable-neuron union only (stable phases are
@@ -252,8 +294,19 @@ class BaBConfig:
             raise ValueError(
                 f"Invalid bounding {self.bounding!r}; expected {VALID_BOUNDINGS}"
             )
+        if self.root_bounds_reuse not in VALID_ROOT_BOUNDS_REUSE:
+            raise ValueError(
+                f"Invalid root_bounds_reuse {self.root_bounds_reuse!r}; "
+                f"expected {VALID_ROOT_BOUNDS_REUSE}"
+            )
         if self.top_k < 0:
             raise ValueError(f"top_k must be non-negative, got {self.top_k}")
+        if not math.isfinite(self.climb_theta) or not 0.0 <= self.climb_theta <= 1.0:
+            raise ValueError("climb_theta must be finite and in [0, 1]")
+        if self.climb_recheck_k < 0:
+            raise ValueError("climb_recheck_k must be non-negative")
+        if self.climb_max_cores < 1:
+            raise ValueError("climb_max_cores must be positive")
         if self.top_k > 0 and self.bounding in TOP_K_INCOMPATIBLE_BOUNDINGS:
             raise ValueError(
                 f"top_k={self.top_k} is not supported by bounding={self.bounding!r}; "
@@ -390,6 +443,26 @@ class DualConfig:
 
     incremental_start_enabled: bool = True
     """Reuse α/η tensors from the parent subproblem as the child initialization."""
+
+    forward_lin_max_perturbed: int = 100
+    """Cap on the number of perturbed input dims for which the forward pass
+    keeps an explicit linear bound; above it, interval-only."""
+
+    outward_rounding: str = "none"
+    """Rounding discipline of the forward concretization.
+    Valid: 'none', 'float64_last_pass'."""
+
+    def __post_init__(self) -> None:
+        if self.forward_lin_max_perturbed < 0:
+            raise ValueError(
+                "forward_lin_max_perturbed must be non-negative, got "
+                f"{self.forward_lin_max_perturbed}"
+            )
+        if self.outward_rounding not in VALID_OUTWARD_ROUNDING:
+            raise ValueError(
+                f"Invalid outward_rounding {self.outward_rounding!r}; "
+                f"expected {VALID_OUTWARD_ROUNDING}"
+            )
 
 
 @dataclass
@@ -772,7 +845,7 @@ def build_vnncomp_bab_config(
         frontier_cap=25000,
         max_depth=max_depth,
         max_nodes=max_nodes,
-        reuse_root_bounds=True,
+        root_bounds_reuse="split_refresh",
         intermediate_refine="all",
         presplit_levels=0,
         eta_only_children=False,

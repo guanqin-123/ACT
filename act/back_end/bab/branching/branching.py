@@ -45,15 +45,20 @@
 
 from __future__ import annotations
 
+import bisect
+import math
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
 from act.back_end.bab.node import SubproblemBatch
 from act.back_end.core import Bounds, Layer, Net
-from act.front_end.specs import InKind
+from act.back_end.layer_schema import LayerKind
+from act.front_end.specs import InKind, OutKind
+from act.util.device_manager import get_default_device, get_default_dtype
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +71,10 @@ class BranchingScores:
     flat: Optional[torch.Tensor] = None
     per_layer: Optional[Dict[int, torch.Tensor]] = None
     intercept_per_layer: Optional[Dict[int, torch.Tensor]] = None
+    input_fallback: Optional[torch.Tensor] = None
+    """Width-masked input-axis scores kept alongside neuron scores, so a lane
+    with no splittable neuron falls back to a *wide* input dimension instead of
+    a hard-coded dim 0 (zero width on any sparse-perturbation benchmark)."""
 
 
 @dataclass
@@ -139,7 +148,27 @@ class BranchingStrategy(ABC):
             if scores.flat is None:
                 raise ValueError("Base BranchingStrategy requires flat scores")
             scores = scores.flat
-        return scores.argmax(dim=-1)
+        return _argmax_splittable(scores)
+
+
+def _argmax_splittable(scores: torch.Tensor) -> torch.Tensor:
+    """Row-wise ``argmax`` that refuses a masked-out (``-inf``) winner.
+
+    Input-axis scorers mask zero-width dimensions to ``-inf``. A lane whose best
+    score is still ``-inf`` has nothing to split: bisecting a zero-width
+    dimension yields two children identical to the parent, so the frontier keeps
+    re-expanding them and BaB livelocks. Failing loudly is the sound option —
+    silently emitting no children would let ``bab.py`` drain the pool and report
+    CERTIFIED.
+    """
+    best = scores.argmax(dim=-1)
+    best_score = scores.gather(-1, best.unsqueeze(-1)).squeeze(-1)
+    if not bool(torch.isfinite(best_score).all().item()):
+        raise ValueError(
+            "no splittable input dimension: every candidate dimension is "
+            "zero-width or masked out in at least one lane"
+        )
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -181,10 +210,11 @@ class RandomBranching(BranchingStrategy):
             embedding_mask = _perturbed_embedding_input_mask(net, batch)
             widths = batch.widths()  # (N, D)
             if embedding_mask is None:
-                scores = torch.rand(N, D, device=device) * (widths > 0).float()
+                scores = torch.rand(N, D, device=device)
             else:
                 mask = embedding_mask.unsqueeze(0).expand(N, -1)
                 scores = widths.masked_fill(~mask, float("-inf"))
+            scores = scores.masked_fill(widths <= 0, float("-inf"))
 
         return scores
 
@@ -205,11 +235,12 @@ class InputBranching(BranchingStrategy):
         unstable_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         widths = batch.widths()
+        scores = widths.masked_fill(widths <= 0, float("-inf"))
         embedding_mask = _perturbed_embedding_input_mask(net, batch)
         if embedding_mask is not None:
             mask = embedding_mask.unsqueeze(0).expand_as(widths)
-            return widths.masked_fill(~mask, float("-inf"))
-        return widths
+            return scores.masked_fill(~mask, float("-inf"))
+        return scores
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +331,7 @@ class BaBSRBranching(BranchingStrategy):
             flat=None,
             per_layer=per_layer,
             intercept_per_layer=intercept_per_layer,
+            input_fallback=self._baseline_scores(batch, None, net),
         )
 
     def _baseline_scores(
@@ -324,7 +356,8 @@ class BaBSRBranching(BranchingStrategy):
                 mask = mask.unsqueeze(0).expand(batch.batch_size, -1)
             scores = scores * mask
 
-        return scores
+        # Masked last: -inf * 0 from the unstable mask would be NaN.
+        return scores.masked_fill(widths <= 0, float("-inf"))
 
     def _already_split_mask(
         self,
@@ -341,14 +374,25 @@ class BaBSRBranching(BranchingStrategy):
         signs = batch.split_signs[lid]
         return (signs != 0).any(dim=1)
 
+    @staticmethod
+    def _input_axis_fallback(scores: BranchingScores) -> SplitDecision:
+        if scores.input_fallback is None:
+            raise ValueError(
+                "no splittable input dimension: neuron branching fell back to an "
+                "input-axis split but no width scores were recorded"
+            )
+        return SplitDecision(
+            kind="input_axis", input_axis=_argmax_splittable(scores.input_fallback)
+        )
+
     def select(self, scores: torch.Tensor | BranchingScores) -> torch.Tensor | SplitDecision:
         if isinstance(scores, torch.Tensor):
-            return scores.argmax(dim=-1)
+            return _argmax_splittable(scores)
         if scores.flat is not None:
-            return SplitDecision(kind="input_axis", input_axis=scores.flat.argmax(dim=-1))
+            return SplitDecision(kind="input_axis", input_axis=_argmax_splittable(scores.flat))
         per_layer = scores.per_layer
         if not per_layer:
-            return SplitDecision(kind="input_axis", input_axis=0)
+            return self._input_axis_fallback(scores)
 
         N = next(iter(per_layer.values())).shape[0]
         device = next(iter(per_layer.values())).device
@@ -390,7 +434,7 @@ class BaBSRBranching(BranchingStrategy):
                     continue
 
             self.icp_score_counter = 0
-            return SplitDecision(kind="input_axis", input_axis=0)
+            return self._input_axis_fallback(scores)
 
         return SplitDecision(kind="neuron", layer_id=decisions_layer, neuron_idx=decisions_neuron)
 
@@ -489,7 +533,12 @@ class WitnessResidualBranching(BaBSRBranching):
             self._record_babsr_disagreement(
                 batch, net, unstable_mask, bounds_dict, nu_per_layer, per_layer
             )
-        return BranchingScores(flat=None, per_layer=per_layer, intercept_per_layer=None)
+        return BranchingScores(
+            flat=None,
+            per_layer=per_layer,
+            intercept_per_layer=None,
+            input_fallback=self._baseline_scores(batch, None, net),
+        )
 
     def _record_babsr_disagreement(
         self,
@@ -560,8 +609,8 @@ def _preact_bias_of(net: Net, lid: int) -> torch.Tensor:
         for value in pred.params.values():
             if isinstance(value, torch.Tensor):
                 return torch.zeros(n_neurons, dtype=value.dtype, device=value.device)
-    dtype = torch.float32
-    device = torch.device("cpu")
+    dtype = get_default_dtype()
+    device = get_default_device()
     for value in layer.params.values():
         if isinstance(value, torch.Tensor):
             dtype = value.dtype
@@ -582,7 +631,10 @@ def _perturbed_embedding_input_mask(net: Optional[Net], batch: SubproblemBatch) 
     if net is None:
         return None
     for layer in net.layers:
-        if layer.kind != "INPUT_SPEC" or layer.params.get("kind") != InKind.LP_EMBEDDING:
+        if (
+            layer.kind != LayerKind.INPUT_SPEC.value
+            or layer.params.get("kind") != InKind.LP_EMBEDDING
+        ):
             continue
         center = layer.params.get("center")
         if not isinstance(center, torch.Tensor) or center.dim() < 2:
@@ -742,7 +794,12 @@ class FSBBranching(BaBSRBranching):
                 final_per_layer[lid] = torch.full_like(source, float("-inf"))
             final_per_layer[lid][lane, neuron_idx] = improvements[ci, lane]
 
-        return BranchingScores(flat=None, per_layer=final_per_layer, intercept_per_layer=bsr.intercept_per_layer)
+        return BranchingScores(
+            flat=None,
+            per_layer=final_per_layer,
+            intercept_per_layer=bsr.intercept_per_layer,
+            input_fallback=bsr.input_fallback,
+        )
 
     def _evaluate_hypotheses(
         self,
@@ -809,7 +866,9 @@ class FSBBranching(BaBSRBranching):
         net: Net,
         bounds_dict: Dict[int, Bounds],
     ) -> torch.Tensor:
-        assert_layers = [layer for layer in net.layers if layer.kind == "ASSERT"]
+        assert_layers = [
+            layer for layer in net.layers if layer.kind == LayerKind.ASSERT.value
+        ]
         if assert_layers:
             assert_layer = assert_layers[-1]
             preds = net.preds.get(assert_layer.id, [])
@@ -1215,3 +1274,613 @@ def _multi_split_from_decision(
         _concat_subproblem_batches(joint_children, single_children),
         torch.cat([joint_parent, single_parent]),
     )
+
+
+# ---------------------------------------------------------------------------
+# CLIMB certificate reuse
+# ---------------------------------------------------------------------------
+
+
+LiteralKey = Tuple[int, int]
+
+# Eq. 12 accounting runs in float64 regardless of the solver dtype: the
+# deletion budget is a rounding-sensitive prefix sum against a slack that can
+# be orders of magnitude smaller than the bound itself.
+CLIMB_DTYPE = torch.float64
+CLIMB_DELTA_ABS = 1e-9
+CLIMB_DELTA_REL = 1e-7
+CLIMB_PROPAGATE_CORE_CHUNK = 4096
+
+
+class LiteralVocabulary:
+    """Lexicographically ordered ``(ReLU layer, neuron)`` -> dense column map."""
+
+    def __init__(self) -> None:
+        self._keys: List[LiteralKey] = []
+        self._index: Dict[LiteralKey, int] = {}
+        self._widths: Dict[int, int] = {}
+
+    def register_layer(self, layer_id: int, width: int) -> None:
+        self._widths[layer_id] = max(width, self._widths.get(layer_id, 0))
+
+    def add(self, key: LiteralKey) -> int:
+        if key not in self._index:
+            bisect.insort(self._keys, key)
+            self._index = {existing: column for column, existing in enumerate(self._keys)}
+        return self._index[key]
+
+    def column(self, key: LiteralKey) -> int:
+        return self._index[key]
+
+    def key(self, index: int) -> LiteralKey:
+        return self._keys[index]
+
+    def width(self, layer_id: int) -> int:
+        return self._widths[layer_id]
+
+    def __len__(self) -> int:
+        return len(self._keys)
+
+
+@dataclass(frozen=True)
+class PackedLiterals:
+    indices: torch.Tensor
+    signs: torch.Tensor
+    mask: torch.Tensor
+    vocabulary: LiteralVocabulary
+
+
+@dataclass(frozen=True)
+class Core:
+    literals: frozenset[Tuple[LiteralKey, int]]
+    sequence: int
+
+
+@dataclass
+class ClimbMetrics:
+    enabled: bool = False
+    generated_children: int = 0
+    main_bound_row_passes: int = 0
+    main_bound_calls: int = 0
+    peak_frontier_rows: int = 0
+    prebound_discharged: int = 0
+    presplit_discharged: int = 0
+    recheck_row_passes: int = 0
+    recheck_calls: int = 0
+    recheck_time_s: float = 0.0
+    coarsen_time_s: float = 0.0
+    propagate_time_s: float = 0.0
+    cores_inserted: int = 0
+    core_literals_original: int = 0
+    core_literals_retained: int = 0
+    library: Optional[CoreLibrary] = None
+
+    def observe_frontier(self, pending_plus_active_rows: int) -> None:
+        self.peak_frontier_rows = max(self.peak_frontier_rows, pending_plus_active_rows)
+
+    def metadata(self) -> Dict[str, int | float]:
+        if not self.enabled:
+            return {}
+        return {
+            "climb_generated_children": self.generated_children,
+            "climb_main_bound_row_passes": self.main_bound_row_passes,
+            "climb_main_bound_calls": self.main_bound_calls,
+            "climb_peak_frontier_rows": self.peak_frontier_rows,
+            "climb_prebound_discharged": self.prebound_discharged,
+            "climb_presplit_discharged": self.presplit_discharged,
+            "climb_recheck_row_passes": self.recheck_row_passes,
+            "climb_recheck_calls": self.recheck_calls,
+            "climb_recheck_time_s": self.recheck_time_s,
+            "climb_coarsen_time_s": self.coarsen_time_s,
+            "climb_propagate_time_s": self.propagate_time_s,
+            "climb_cores_inserted": self.cores_inserted,
+            "climb_cores_subsumed": self.library.subsumed if self.library is not None else 0,
+            "climb_cores_resolved": self.library.resolved if self.library is not None else 0,
+            "climb_cores_evicted": self.library.evicted if self.library is not None else 0,
+            "climb_core_literals_original": self.core_literals_original,
+            "climb_core_literals_retained": self.core_literals_retained,
+        }
+
+
+def pack_split_matrix(
+    split_signs: Optional[Dict[int, torch.Tensor]],
+    n_rows: int,
+    vocabulary: LiteralVocabulary,
+    *,
+    device: Optional[torch.device] = None,
+) -> Tuple[torch.Tensor, PackedLiterals]:
+    """Pack split-state dictionaries into dense assignments and row literals."""
+    target_device = (
+        next(iter(split_signs.values())).device
+        if split_signs
+        else (device if device is not None else get_default_device())
+    )
+    keyed_rows: List[List[Tuple[LiteralKey, int]]] = [[] for _ in range(n_rows)]
+    if split_signs:
+        for layer_id in sorted(split_signs):
+            values = split_signs[layer_id]
+            if values.shape[0] != n_rows:
+                raise ValueError("split_signs leading dimension mismatch")
+            flattened = values.reshape(n_rows, values.shape[1], -1)
+            first = flattened[:, :1, :]
+            if not torch.equal(flattened, first.expand_as(flattened)):
+                raise ValueError("CLIMB requires spec-invariant split signs")
+            width = flattened.shape[-1]
+            vocabulary.register_layer(layer_id, width)
+            lane_values = first[:, 0, :].cpu()
+            for neuron in torch.where((lane_values != 0).any(dim=0))[0].tolist():
+                key = (layer_id, neuron)
+                vocabulary.add(key)
+                for lane in torch.where(lane_values[:, neuron] != 0)[0].tolist():
+                    keyed_rows[lane].append((key, int(lane_values[lane, neuron].item())))
+    # Columns are resolved only after every key is registered: adding a key
+    # re-sorts the vocabulary, so earlier column numbers would go stale.
+    row_literals = [
+        [(vocabulary.column(key), sign) for key, sign in literals]
+        for literals in keyed_rows
+    ]
+
+    dense = torch.zeros((n_rows, len(vocabulary)), dtype=torch.int8, device=target_device)
+    width = max((len(row) for row in row_literals), default=0)
+    indices = torch.zeros((n_rows, width), dtype=torch.long, device=target_device)
+    signs = torch.zeros((n_rows, width), dtype=torch.int8, device=target_device)
+    mask = torch.zeros((n_rows, width), dtype=torch.bool, device=target_device)
+    for lane, literals in enumerate(row_literals):
+        for slot, (column, sign) in enumerate(literals):
+            dense[lane, column] = sign
+            indices[lane, slot] = column
+            signs[lane, slot] = sign
+            mask[lane, slot] = True
+    return dense, PackedLiterals(indices, signs, mask, vocabulary)
+
+
+class CoreLibrary:
+    """Query-local certified phase cores with subsumption and resolution."""
+
+    def __init__(
+        self, max_cores: int, vocabulary: Optional[LiteralVocabulary] = None
+    ) -> None:
+        if max_cores < 1:
+            raise ValueError("max_cores must be positive")
+        self.max_cores = max_cores
+        self.vocabulary = vocabulary if vocabulary is not None else LiteralVocabulary()
+        self.subsumed = 0
+        self.resolved = 0
+        self.evicted = 0
+        # Cores are keyed by (layer, neuron), not by column, so they survive
+        # the vocabulary re-sorting that happens whenever a new literal appears.
+        self._cores: List[Core] = []
+        self._next_sequence = 0
+
+    @property
+    def core_count(self) -> int:
+        return len(self._cores)
+
+    @property
+    def cores(self) -> Tuple[Core, ...]:
+        return tuple(self._cores)
+
+    def _admit(self, literals: frozenset[Tuple[LiteralKey, int]]) -> int:
+        """Insert unless subsumed; drop strict supersets. Returns removed count."""
+        before = len(self._cores)
+        self._cores = [core for core in self._cores if not literals < core.literals]
+        self._cores.append(Core(literals, self._next_sequence))
+        self._next_sequence += 1
+        return before + 1 - len(self._cores)
+
+    def _is_subsumed(self, literals: frozenset[Tuple[LiteralKey, int]]) -> bool:
+        return any(core.literals <= literals for core in self._cores)
+
+    def insert(self, packed: PackedLiterals) -> int:
+        inserted = 0
+        for lane in range(packed.mask.shape[0]):
+            literals = frozenset(
+                (
+                    packed.vocabulary.key(int(packed.indices[lane, slot].item())),
+                    int(packed.signs[lane, slot].item()),
+                )
+                for slot in torch.where(packed.mask[lane])[0].tolist()
+            )
+            if self._is_subsumed(literals):
+                self.subsumed += 1
+                continue
+            self.subsumed += self._admit(literals)
+            inserted += 1
+
+        while (resolvent := self._find_resolvent()) is not None:
+            self._admit(resolvent)
+            self.resolved += 1
+
+        ordered = sorted(self._cores, key=lambda core: (len(core.literals), core.sequence))
+        self.evicted += max(0, len(ordered) - self.max_cores)
+        self._cores = ordered[: self.max_cores]
+        return inserted
+
+    def _find_resolvent(self) -> Optional[frozenset[Tuple[LiteralKey, int]]]:
+        """First pair differing only by one opposite pivot sign, if any."""
+        snapshot = list(self._cores)
+        for left_index, left in enumerate(snapshot):
+            left_map = dict(left.literals)
+            for right in snapshot[left_index + 1 :]:
+                right_map = dict(right.literals)
+                if left_map.keys() != right_map.keys():
+                    continue
+                pivots = [key for key in left_map if left_map[key] == -right_map[key]]
+                if len(pivots) != 1:
+                    continue
+                resolvent = frozenset(
+                    (key, sign) for key, sign in left_map.items() if key != pivots[0]
+                )
+                if not self._is_subsumed(resolvent):
+                    return resolvent
+        return None
+
+    def tensors(self, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        width = max((len(core.literals) for core in self._cores), default=0)
+        indices = torch.zeros((len(self._cores), width), dtype=torch.long, device=device)
+        signs = torch.zeros((len(self._cores), width), dtype=torch.int8, device=device)
+        mask = torch.zeros((len(self._cores), width), dtype=torch.bool, device=device)
+        for row, core in enumerate(self._cores):
+            for slot, (key, sign) in enumerate(sorted(core.literals)):
+                indices[row, slot] = self.vocabulary.column(key)
+                signs[row, slot] = sign
+                mask[row, slot] = True
+        return indices, signs, mask
+
+
+def apply_literal_assignments(
+    batch: SubproblemBatch,
+    assignments: torch.Tensor,
+    vocabulary: LiteralVocabulary,
+) -> SubproblemBatch:
+    """Write dense inferred phases back to a lossless subproblem batch."""
+    signs = {key: value.clone() for key, value in (batch.split_signs or {}).items()}
+    specs = 1
+    if signs:
+        specs = next(iter(signs.values())).shape[1]
+    elif batch.incremental_alpha:
+        specs = next(iter(batch.incremental_alpha.values())).shape[1]
+    elif batch.incremental_eta:
+        specs = next(iter(batch.incremental_eta.values())).shape[1]
+    for column in range(assignments.shape[1]):
+        layer_id, neuron = vocabulary.key(column)
+        values = assignments[:, column]
+        if not bool((values != 0).any().item()):
+            continue
+        if layer_id not in signs:
+            signs[layer_id] = torch.zeros(
+                batch.batch_size,
+                specs,
+                vocabulary.width(layer_id),
+                dtype=batch.lb.dtype,
+                device=batch.lb.device,
+            )
+        signs[layer_id][:, :, neuron] = values.to(signs[layer_id]).unsqueeze(1)
+    batch.split_signs = signs or None
+    return batch
+
+
+@torch.no_grad()
+def propagate(
+    batches: Sequence[SubproblemBatch], library: CoreLibrary
+) -> Tuple[SubproblemBatch, ...]:
+    """Apply certified cores jointly to pending and active groups to fixpoint."""
+    if not batches:
+        return ()
+    group_sizes = [batch.batch_size for batch in batches]
+    for batch in batches:
+        for layer_id, values in (batch.split_signs or {}).items():
+            library.vocabulary.register_layer(layer_id, values.shape[-1])
+            # torch.where yields ascending indices, so vocabulary ids are
+            # assigned in the same order as a per-neuron range() scan.
+            split_neurons = torch.where(
+                (values != 0).reshape(-1, values.shape[-1]).any(dim=0)
+            )[0].tolist()
+            for neuron in split_neurons:
+                library.vocabulary.add((layer_id, neuron))
+    dense_parts = [
+        pack_split_matrix(
+            batch.split_signs,
+            batch.batch_size,
+            library.vocabulary,
+            device=batch.lb.device,
+        )[0]
+        for batch in batches
+    ]
+    assignments = torch.cat(dense_parts, dim=0)
+    if library.core_count == 0:
+        return tuple(batches)
+
+    core_indices, core_signs, core_mask = library.tensors(assignments.device)
+    core_dense = torch.zeros(
+        library.core_count, len(library.vocabulary), dtype=torch.int8, device=assignments.device
+    )
+    for row in range(core_indices.shape[0]):
+        valid = core_mask[row]
+        if bool(valid.any().item()):
+            core_dense[row, core_indices[row, valid]] = core_signs[row, valid]
+    active = torch.ones(assignments.shape[0], dtype=torch.bool, device=assignments.device)
+    compute_dtype = get_default_dtype()
+    core_abs = core_dense.abs()
+    lengths = core_abs.sum(dim=1).to(compute_dtype)
+    while bool(active.any().item()):
+        active_rows = torch.where(active)[0]
+        work = assignments[active]
+        work_f = work.to(compute_dtype)
+        work_abs_f = work.abs().to(compute_dtype)
+        # One snapshot per round: every chunk reads the same `work`, so the
+        # fixpoint is independent of chunk size (memory is O(N * chunk * W)).
+        discharge_local = torch.zeros(work.shape[0], dtype=torch.bool, device=work.device)
+        positive = torch.zeros_like(work, dtype=torch.bool)
+        negative = torch.zeros_like(positive)
+        for start in range(0, core_dense.shape[0], CLIMB_PROPAGATE_CORE_CHUNK):
+            chunk = core_dense[start : start + CLIMB_PROPAGATE_CORE_CHUNK]
+            chunk_lengths = lengths[start : start + CLIMB_PROPAGATE_CORE_CHUNK]
+            product = work_f @ chunk.to(compute_dtype).T
+            overlap = work_abs_f @ core_abs[start : start + CLIMB_PROPAGATE_CORE_CHUNK].to(compute_dtype).T
+            discharge_local |= (product == chunk_lengths.unsqueeze(0)).any(dim=1)
+            unit = (product == overlap) & (overlap == chunk_lengths.unsqueeze(0) - 1)
+            for lane_local, core_local in torch.nonzero(unit, as_tuple=False).tolist():
+                missing = (chunk[core_local] != 0) & (work[lane_local] == 0)
+                if int(missing.sum().item()) != 1:
+                    continue
+                column = int(torch.where(missing)[0].item())
+                proposed = -int(chunk[core_local, column].item())
+                (positive if proposed > 0 else negative)[lane_local, column] = True
+        if bool(discharge_local.any().item()):
+            active[active_rows[discharge_local]] = False
+
+        survivor_local = ~discharge_local
+        if not bool(survivor_local.any().item()):
+            continue
+        survivor_rows = active_rows[survivor_local]
+        positive = positive[survivor_local]
+        negative = negative[survivor_local]
+        conflict = (positive & negative).any(dim=1)
+        if bool(conflict.any().item()):
+            active[survivor_rows[conflict]] = False
+        writable = ~conflict
+        changed = False
+        if bool(writable.any().item()):
+            rows = survivor_rows[writable]
+            proposals = positive[writable].to(torch.int8) - negative[writable].to(torch.int8)
+            write = (assignments[rows] == 0) & (proposals != 0)
+            if bool(write.any().item()):
+                assignments[rows] = torch.where(write, proposals, assignments[rows])
+                changed = True
+        if not changed and not bool(discharge_local.any().item()) and not bool(conflict.any().item()):
+            break
+
+    result_batches: List[SubproblemBatch] = []
+    offset = 0
+    for batch, size in zip(batches, group_sizes):
+        group_active = active[offset : offset + size]
+        keep = torch.where(group_active)[0]
+        restricted = _index_subproblem_batch(batch, keep)
+        restricted_assignments = assignments[offset : offset + size].index_select(0, keep)
+        result_batches.append(
+            apply_literal_assignments(
+                restricted, restricted_assignments, library.vocabulary
+            )
+        )
+        offset += size
+    return tuple(result_batches)
+
+
+def is_certified(slack: torch.Tensor, out_kind: str) -> torch.Tensor:
+    """Per-lane certification mask over ``[N, M]`` slack rows.
+
+    Byte-consistent with the ``_dispatch_dual_solve`` lane statuses: an
+    ``UNSAFE_LINEAR`` lane certifies when any finite row is strictly positive;
+    every other kind certifies only when all rows are finite and non-negative.
+    """
+    if out_kind == OutKind.UNSAFE_LINEAR:
+        return (torch.isfinite(slack) & (slack > 0)).any(dim=1)
+    return torch.isfinite(slack).all(dim=1) & (slack >= 0).all(dim=1)
+
+
+@torch.no_grad()
+def certificate_replay(
+    *,
+    net: Net,
+    batch: SubproblemBatch,
+    reference_bounds: Dict[int, Bounds],
+    c_rows: torch.Tensor,
+    thresholds: torch.Tensor,
+    m_specs: int,
+    out_kind: str,
+    literals: Optional[PackedLiterals] = None,
+    with_costs: bool = True,
+) -> Optional[tuple[torch.Tensor, Optional[torch.Tensor]]]:
+    """Replay a frozen alpha/eta certificate directly through ``DualSolver``.
+
+    Returns ``(slack, costs)`` — for ``UNSAFE_LINEAR`` both are gathered on the
+    pinned strict row (``slack [N, 1]``, ``costs [N, 1, W]``); otherwise
+    ``slack`` is ``[N, M]`` and ``costs`` is ``[N, M, W]``. ``costs`` is
+    ``None`` when ``with_costs=False``. Returns ``None`` when the batch lacks
+    replayable state or the solver emits no usable per-layer nu.
+    """
+    if with_costs and literals is None:
+        raise ValueError("with_costs=True requires packed literals")
+    if (
+        batch.incremental_alpha is None
+        or batch.incremental_eta is None
+        or batch.split_signs is None
+        or m_specs < 1
+    ):
+        return None
+    from act.back_end.solver.solver_dual import DualSolver
+
+    eta = {
+        layer_id: value.detach().clone().clamp(min=0)
+        for layer_id, value in batch.incremental_eta.items()
+    }
+    result = DualSolver().compute_certified_bound(
+        net,
+        reference_bounds,
+        c_rows,
+        M=m_specs,
+        alpha=batch.incremental_alpha,
+        eta=eta,
+        split_signs=batch.split_signs,
+        optimize=False,
+        return_nu_per_layer=True,
+        local_phase_clamp=True,
+    )
+    n_lanes = batch.batch_size
+    slack = result.margins.reshape(n_lanes, m_specs).to(CLIMB_DTYPE)
+    slack = slack - thresholds.reshape(n_lanes, m_specs).to(slack)
+    pinned_rows: Optional[torch.Tensor] = None
+    if out_kind == OutKind.UNSAFE_LINEAR:
+        passing = torch.isfinite(slack) & (slack > 0)
+        pinned_rows = passing.to(torch.int64).argmax(dim=1)
+    if result.nu_per_layer is None:
+        return None
+    nu: Dict[int, torch.Tensor] = {}
+    for layer_id, value in result.nu_per_layer.items():
+        if value.shape[0] == n_lanes * m_specs:
+            nu[layer_id] = value.reshape(n_lanes, m_specs, -1)
+        elif value.shape[0] == n_lanes:
+            nu[layer_id] = value.reshape(n_lanes, -1, value.shape[-1])
+        else:
+            return None
+    costs: Optional[torch.Tensor] = None
+    if with_costs:
+        assert literals is not None
+        costs = _literal_costs(
+            literals, slack.shape, eta, nu, reference_bounds, pinned_rows
+        )
+    if pinned_rows is not None:
+        slack = slack.gather(1, pinned_rows[:, None])
+    return slack, costs
+
+
+@torch.no_grad()
+def _literal_costs(
+    literals: PackedLiterals,
+    slack_shape: torch.Size,
+    eta: Dict[int, torch.Tensor],
+    nu: Dict[int, torch.Tensor],
+    bounds: Dict[int, Bounds],
+    pinned_rows: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Full ReLU Eq. 12 costs ``(eta + relu(-nu)) * m`` in float64, ``[N, M, W]``."""
+    n_lanes, width = literals.mask.shape
+    m_specs = slack_shape[1]
+    compute_dtype = CLIMB_DTYPE
+    costs = torch.zeros(
+        (n_lanes, m_specs, width),
+        dtype=compute_dtype,
+        device=literals.mask.device,
+    )
+    for lane in range(n_lanes):
+        for slot in torch.where(literals.mask[lane])[0].tolist():
+            column = int(literals.indices[lane, slot].item())
+            layer_id, neuron = literals.vocabulary.key(column)
+            if layer_id not in eta or layer_id not in nu or layer_id not in bounds:
+                costs[lane, :, slot] = torch.inf
+                continue
+            lane_eta = eta[layer_id][lane, :, neuron].to(compute_dtype).clamp(min=0)
+            lane_nu = nu[layer_id][lane, :, neuron].to(compute_dtype)
+            layer_bounds = bounds[layer_id]
+            lower = layer_bounds.lb.flatten(start_dim=1)[lane, neuron].to(compute_dtype)
+            upper = layer_bounds.ub.flatten(start_dim=1)[lane, neuron].to(compute_dtype)
+            sign = int(literals.signs[lane, slot].item())
+            magnitude = (-lower).clamp(min=0) if sign > 0 else upper.clamp(min=0)
+            costs[lane, :, slot] = (lane_eta + (-lane_nu).clamp(min=0)) * magnitude
+    if pinned_rows is not None:
+        rows = pinned_rows.to(device=costs.device, dtype=torch.long)
+        costs = costs.gather(1, rows[:, None, None].expand(-1, 1, width))
+    return costs
+
+
+@torch.no_grad()
+def coarsen(
+    literals: PackedLiterals,
+    costs: torch.Tensor,
+    slack: torch.Tensor,
+    *,
+    theta: float,
+    recheck_k: int,
+    recheck: Callable[[PackedLiterals, torch.Tensor], torch.Tensor],
+) -> PackedLiterals:
+    """Alg. 2 vector-budget deletion plus at most ``recheck_k`` one-step rechecks.
+
+    Per row ``m`` the budget is ``theta * slack_m - delta_m`` with
+    ``delta_m = 1e-9 + 1e-7 * |slack_m|``; rows with ``slack_m <= delta_m`` never
+    fund a deletion. Literals are ordered by ``(max_m cost_m / budget_m, column,
+    slot)`` and the longest feasible prefix is deleted. A recheck retries the
+    next literal in that same order for the first ``recheck_k`` lanes;
+    ``recheck`` returns the ``BoolTensor[K]`` certification mask that confirms
+    each candidate deletion.
+    """
+    if not 0.0 <= theta <= 1.0:
+        raise ValueError("theta must be in [0, 1]")
+    if recheck_k < 0:
+        raise ValueError("recheck_k must be non-negative")
+    n_lanes, width = literals.mask.shape
+    if costs.shape[0] != n_lanes or costs.shape[2] != width:
+        raise ValueError("cost tensor shape must be [N, M, W]")
+    if slack.shape != costs.shape[:2]:
+        raise ValueError("slack tensor shape must be [N, M]")
+    retained = literals.mask.clone()
+    next_in_cost_order: Dict[int, int] = {}
+    for lane in range(n_lanes):
+        valid_slots = torch.where(literals.mask[lane])[0]
+        if valid_slots.numel() == 0:
+            continue
+        lane_costs = costs[lane].index_select(1, valid_slots).to(CLIMB_DTYPE)
+        lane_slack = slack[lane].to(CLIMB_DTYPE)
+        if not bool(torch.isfinite(lane_costs).all().item()) or not bool(
+            torch.isfinite(lane_slack).all().item()
+        ):
+            continue
+        delta = CLIMB_DELTA_ABS + CLIMB_DELTA_REL * lane_slack.abs()
+        if bool((lane_slack <= delta).any().item()):
+            continue
+        budget = theta * lane_slack - delta
+        denominator = budget.clamp(min=torch.finfo(CLIMB_DTYPE).tiny)
+        ratios = (lane_costs / denominator[:, None]).amax(dim=0)
+        ordered = sorted(
+            range(valid_slots.numel()),
+            key=lambda pos: (
+                float(ratios[pos].item()),
+                int(literals.indices[lane, valid_slots[pos]].item()),
+                int(valid_slots[pos].item()),
+            ),
+        )
+        running = torch.zeros_like(lane_slack)
+        for position in ordered:
+            candidate = running + lane_costs[:, position]
+            slot = int(valid_slots[position].item())
+            if not bool((candidate <= budget).all().item()):
+                next_in_cost_order[lane] = slot
+                break
+            retained[lane, slot] = False
+            running = candidate
+
+    candidates: List[int] = []
+    next_slots: List[int] = []
+    if recheck_k > 0:
+        for lane, slot in next_in_cost_order.items():
+            candidates.append(lane)
+            next_slots.append(slot)
+            if len(candidates) == recheck_k:
+                break
+    if candidates:
+        rows = torch.tensor(candidates, dtype=torch.long, device=literals.mask.device)
+        candidate_mask = retained.index_select(0, rows).clone()
+        for local, slot in enumerate(next_slots):
+            candidate_mask[local, slot] = False
+        candidate = PackedLiterals(
+            literals.indices.index_select(0, rows),
+            literals.signs.index_select(0, rows),
+            candidate_mask,
+            literals.vocabulary,
+        )
+        passing = recheck(candidate, rows)
+        for local, passed in enumerate(passing.tolist()):
+            if passed:
+                retained[candidates[local], next_slots[local]] = False
+
+    return PackedLiterals(literals.indices, literals.signs, retained, literals.vocabulary)

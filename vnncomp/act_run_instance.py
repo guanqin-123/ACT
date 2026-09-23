@@ -149,7 +149,7 @@ def run_vnncomp_instance(args) -> None:
                 # certification permanently impossible for the run.
                 cfg.branching_method = "width"
                 cfg.multi_split_levels = 1
-                cfg.reuse_root_bounds = False
+                cfg.root_bounds_reuse = "none"
                 cfg.intermediate_refine = "none"
                 cfg.frontier_cap = 0
             clear_violation_check_module_cache()

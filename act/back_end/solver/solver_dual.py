@@ -18,6 +18,7 @@ import torch
 from act.back_end.core import Bounds, Layer, Net, get_topo_order
 from act.back_end.layer_schema import LayerKind
 from act.back_end.dual_tf.tf_forward import _intersect_boxes
+from act.config.config import DualConfig
 from act.back_end.solver.solver_base import Solver, SolverCaps
 from act.front_end.specs import OutputSpec, OutKind
 from act.util.device_manager import get_default_device, get_default_dtype
@@ -191,6 +192,8 @@ class DualSolver(Solver):
         optimize_alpha: bool = True,
         refresh_forward: bool = True,
         start_lid: Optional[int] = None,
+        local_phase_clamp: bool = False,
+        forward_lin_max_perturbed: Optional[int] = None,
     ) -> DualResult:
         """Batched certified lower bound on c^T @ output (DAG-aware).
 
@@ -227,6 +230,9 @@ class DualSolver(Solver):
             (RELU, LRELU, SIGMOID, TANH, GELU). η ≥ 0 invariant (enforced by clamp).
         split_signs: Per-layer split direction. {-1: inactive, +1: active, 0: unsplit}.
             Same key set as eta.
+        local_phase_clamp: For fixed-parameter replay, shallow-copy and clamp only
+            the current ReLU handler's bounds. Reference bounds remain immutable;
+            optimization is rejected because it requires globally hardened bounds.
         η is applied to the TRUE pre-activation variable (immediately AFTER the
         activation handler in the reverse-topological backward loop):
         nu_pre = slope · nu_post − η · sign, so the multiplier acts on the
@@ -234,7 +240,12 @@ class DualSolver(Solver):
         scale η by the relaxation slope, forcing the effective multiplier to 0
         on inactive-split (slope = 0) neurons and discarding the z ≤ 0
         constraint's input-region information. Sound for any η ≥ 0.
+
+        forward_lin_max_perturbed: ``None`` resolves to the DualConfig default
+            at call time rather than being frozen at import time.
         """
+        if forward_lin_max_perturbed is None:
+            forward_lin_max_perturbed = DualConfig().forward_lin_max_perturbed
         if isinstance(split_signs, list):
             # KFSB path: accept K split hypotheses and return stacked margins
             # [K, N, ...], evaluating each hypothesis through the single-hypothesis
@@ -270,6 +281,8 @@ class DualSolver(Solver):
                     return_optimized=False,
                     per_class_alpha=per_class_alpha,
                     return_nu_per_layer=False,
+                    local_phase_clamp=local_phase_clamp,
+                    forward_lin_max_perturbed=forward_lin_max_perturbed,
                 )
                 margins.append(result.margins)
                 if return_sce:
@@ -279,7 +292,10 @@ class DualSolver(Solver):
                 stacked_sce = torch.stack(cast(List[torch.Tensor], sce_values), dim=0)
             return DualResult(margins=torch.stack(margins, dim=0), sce=stacked_sce)
 
-        bounds_dict = self._harden_split_bounds(bounds_dict, split_signs)
+        if optimize and local_phase_clamp:
+            raise ValueError("local_phase_clamp is only valid for fixed-parameter replay")
+        if not local_phase_clamp:
+            bounds_dict = self._harden_split_bounds(bounds_dict, split_signs)
 
         if optimize:
             bound, sce, alpha_state, eta_state = self._optimize_alpha_eta(
@@ -299,6 +315,7 @@ class DualSolver(Solver):
                 optimize_alpha=optimize_alpha,
                 refresh_forward=refresh_forward,
                 start_lid=start_lid,
+                forward_lin_max_perturbed=forward_lin_max_perturbed,
             )
             if return_optimized:
                 return DualResult(
@@ -384,11 +401,21 @@ class DualSolver(Solver):
                     nu_snapshot[lid] = nu_here.detach().clone()
 
                 preds = list(net.preds.get(lid, []))
+                handler_bounds = bounds_dict
+                if (
+                    local_phase_clamp
+                    and k == LayerKind.RELU.value
+                    and split_signs is not None
+                    and lid in split_signs
+                ):
+                    handler_bounds = self._local_phase_bounds(
+                        bounds_dict, lid, split_signs[lid]
+                    )
                 if alpha is None:
-                    pred_nus, contrib = handler(layer, nu_here, bounds_dict, preds, M)
+                    pred_nus, contrib = handler(layer, nu_here, handler_bounds, preds, M)
                 else:
                     pred_nus, contrib = handler(
-                        layer, nu_here, bounds_dict, preds, M, alpha=alpha.get(lid)
+                        layer, nu_here, handler_bounds, preds, M, alpha=alpha.get(lid)
                     )
 
                 if eta is not None and split_signs is not None and lid in eta:
@@ -611,6 +638,7 @@ class DualSolver(Solver):
         optimize_alpha: bool = True,
         refresh_forward: bool = True,
         start_lid: Optional[int] = None,
+        forward_lin_max_perturbed: Optional[int] = None,
     ) -> Tuple[
         torch.Tensor,
         Optional[torch.Tensor],
@@ -628,7 +656,12 @@ class DualSolver(Solver):
             ``best_bounds`` has shape ``[B*M]``, ``best_sce`` is optional,
             ``alpha_state`` maps ReLU layer id to optimized α, and ``eta_state``
             maps split layer id to optimized η.
+
+        ``forward_lin_max_perturbed=None`` resolves to the DualConfig default
+        at call time rather than being frozen at import time.
         """
+        if forward_lin_max_perturbed is None:
+            forward_lin_max_perturbed = DualConfig().forward_lin_max_perturbed
         if c.dim() != 2:
             raise ValueError(
                 f"c must be 2-D [B*M, n_out], got shape {tuple(c.shape)}"
@@ -773,6 +806,7 @@ class DualSolver(Solver):
                         input_ub,
                         post_activation=False,
                         alphas=forward_alphas,
+                        forward_lin_max_perturbed=forward_lin_max_perturbed,
                     )
                 else:
                     # Fixed intermediate bounds (root-reuse mode): alpha/eta
@@ -793,6 +827,21 @@ class DualSolver(Solver):
                 )
                 bound_bm = result.margins
                 sce = result.sce
+
+                if not bound_bm.requires_grad:
+                    # No autograd path reaches any α/η parameter (every ReLU
+                    # stable and every pool window dominant): gradient steps
+                    # cannot move the bound, and backward() would raise.
+                    # Return the fixed-slope bound as optimize=False would.
+                    detached = bound_bm.detach()
+                    improved = detached > best_bounds
+                    best_bounds = torch.where(improved, detached, best_bounds)
+                    if return_sce and sce is not None:
+                        if best_sce is None:
+                            best_sce = sce.detach().clone()
+                        else:
+                            best_sce[improved] = sce[improved].detach()
+                    return best_bounds, best_sce, best_alpha_state, best_eta_state
 
                 (-bound_bm.sum()).backward()
                 optimizer.step()
@@ -874,6 +923,34 @@ class DualSolver(Solver):
             ub[..., :n] = torch.maximum(ub[..., :n], lb[..., :n])
             out[lid] = Bounds(lb.view_as(b.lb), ub.view_as(b.ub))
         return out
+
+    def _local_phase_bounds(
+        self,
+        bounds_dict: Dict[int, Bounds],
+        lid: int,
+        signs: torch.Tensor,
+    ) -> Dict[int, Bounds]:
+        """Clamp one ReLU entry for its handler without mutating reference bounds."""
+        bounds = bounds_dict.get(lid)
+        if bounds is None:
+            return bounds_dict
+        phase = signs[:, 0, :] if signs.dim() == 3 else signs
+        if not bool((phase != 0).any().item()):
+            return bounds_dict
+        lb = bounds.lb.flatten(start_dim=1).clone()
+        ub = bounds.ub.flatten(start_dim=1).clone()
+        n = min(lb.shape[-1], phase.shape[-1])
+        phase = phase[..., :n].to(device=lb.device)
+        lb[..., :n] = torch.where(
+            phase > 0, lb[..., :n].clamp(min=0.0), lb[..., :n]
+        )
+        ub[..., :n] = torch.where(
+            phase < 0, ub[..., :n].clamp(max=0.0), ub[..., :n]
+        )
+        ub[..., :n] = torch.maximum(ub[..., :n], lb[..., :n])
+        local = dict(bounds_dict)
+        local[lid] = Bounds(lb.view_as(bounds.lb), ub.view_as(bounds.ub))
+        return local
 
     def refine_intermediate_bounds(
         self,

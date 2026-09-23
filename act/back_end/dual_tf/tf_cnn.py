@@ -20,8 +20,8 @@ from act.back_end.utils import avgpool2d_denominators, avgpool2d_output_hw, pair
 
 from .tf_forward import (
     LinearBound, Frame,
-    _fwd_conv2d, _fwd_conv2d_interval, _fwd_maxpool2d, _fwd_avgpool2d,
-    _reset_forward_box, _concretize,
+    _fwd_conv2d, _fwd_conv2d_interval, _fwd_maxpool2d, _fwd_maxpool2d_lin,
+    _fwd_avgpool2d, _reset_forward_box, _concretize, _intersect_boxes,
 )
 
 
@@ -46,8 +46,15 @@ def forward_conv2d(
     Tries linear-relaxation conv via ``_fwd_conv2d``; when it returns ``None``
     (kernel/stride shape unsupported), falls back to the interval conv
     ``_fwd_conv2d_interval`` and resets the dual-track state at the new
-    concrete box via ``_reset_forward_box``. ``stored`` equals ``out``
-    (CONV2D has no activation split).
+    concrete box via ``_reset_forward_box``. On the symbolic path the
+    concretized box is intersected with the centre-radius interval image
+    (mirroring :func:`~act.back_end.dual_tf.tf_mlp.forward_dense`): the raw
+    concretization's lb/ub are two independently rounded conv accumulations,
+    so at collapsed box widths they cross by a few ulps of the PARTIAL-sum
+    magnitude (vgg16 late convs: partials 1e5-1e7, results O(1-100)), which
+    the backward degenerate check rejects. ``_intersect_boxes`` both tightens
+    and degrades such crossings to the structurally ordered interval box.
+    ``stored`` equals ``out`` (CONV2D has no activation split).
     """
     assert len(parent_boxes) == 1, f"CONV2D expects 1 predecessor, got {len(parent_boxes)}"
     parent_box = parent_boxes[0]
@@ -63,7 +70,9 @@ def forward_conv2d(
         lin, frame = _reset_forward_box(lb, ub, device, dtype)
     else:
         lin = new_lin
-        lb, ub = _concretize(lin, x_L, x_U)
+        lin_lb, lin_ub = _concretize(lin, x_L, x_U)
+        int_lb, int_ub = _fwd_conv2d_interval(L, parent_box.lb, parent_box.ub)
+        lb, ub = _intersect_boxes(lin_lb, lin_ub, int_lb, int_ub)
         out = Bounds(lb, ub)
         stored = out
     return stored, out, lin, frame
@@ -190,48 +199,96 @@ def forward_maxpool2d(
     device: torch.device,
     dtype: torch.dtype,
 ) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
-    """MaxPool2D forward bounds (interval-only; dual-track resets).
+    """MaxPool2D forward bounds (DeepPoly dual-track when the parent is symbolic).
 
-    Source: tf_forward.py lines 448-452 (pre-refactor monolithic MAXPOOL2D
-    branch).
-
-    MaxPool has no linear relaxation here, so we compute interval bounds
-    via ``_fwd_maxpool2d`` and reset the dual-track state at the resulting
-    concrete box. ``stored`` equals ``out``.
+    When the parent carries an explicit linear bound, ``_fwd_maxpool2d_lin``
+    gathers each window's argmax-lb row (exact upper bound where that input
+    dominates, constant interval max elsewhere) and the frame survives the
+    pool. The argmax indices and dominance mask are cached on ``L.cache`` for
+    the dual backward pass. On the lazy-identity path (parent ``A`` is None)
+    the previous behaviour is kept: interval bounds via ``_fwd_maxpool2d``
+    and a dual-track reset at the concrete box. ``stored`` equals ``out``.
     """
     assert len(parent_boxes) == 1, f"MAXPOOL2D expects 1 predecessor, got {len(parent_boxes)}"
     parent_box = parent_boxes[0]
-    lb, ub = _fwd_maxpool2d(L, parent_box.lb, parent_box.ub)
+    parent_lin = parent_lins[0]
+    parent_frame = parent_frames[0]
+    result = _fwd_maxpool2d_lin(L, parent_lin, parent_box.lb, parent_box.ub, parent_frame)
+    if result is None:
+        lb, ub = _fwd_maxpool2d(L, parent_box.lb, parent_box.ub)
+        out = Bounds(lb, ub)
+        stored = out
+        lin, frame = _reset_forward_box(lb, ub, device, dtype)
+        return stored, out, lin, frame
+    lin, idx_flat, dominant, box_lb, box_ub = result
+    x_L, x_U = parent_frame
+    lin_lb, lin_ub = _concretize(lin, x_L, x_U)
+    lb, ub = _intersect_boxes(lin_lb, lin_ub, box_lb, box_ub)
+    L.cache["maxpool_argmax_flat"] = idx_flat
+    L.cache["maxpool_dominant"] = dominant
+    # The mask is only valid for the box it was computed on. Cache the pooled
+    # output box actually stored so the backward pass can reject a stale mask
+    # left by a later forward on a different box (root_bounds_reuse modes run
+    # backward with refresh_forward=False against earlier bounds_dicts).
+    L.cache["maxpool_lb"] = lb.clone()
+    L.cache["maxpool_ub"] = ub.clone()
     out = Bounds(lb, ub)
     stored = out
-    lin, frame = _reset_forward_box(lb, ub, device, dtype)
-    return stored, out, lin, frame
+    return stored, out, lin, parent_frame
+
+
+def _cache_box_matches(cached: Any, current: torch.Tensor) -> bool:
+    """True iff the forward-cached pooled box bit-matches the caller's bounds.
+
+    ``bounds_dict`` entries are ``stored.copy()`` clones, so identity checks
+    cannot work; ``torch.equal`` on the ``[B, n_out]`` box is cheap. Shape and
+    dtype are guarded first because ``torch.equal`` raises across devices and
+    dtypes on some builds.
+    """
+    if not isinstance(cached, torch.Tensor):
+        return False
+    if cached.dtype != current.dtype or cached.shape != current.shape:
+        return False
+    return bool(torch.equal(cached.to(device=current.device), current))
 
 
 def backward_maxpool2d(L, nu, bounds_dict, preds, M: int = 1, alpha=None):
-    """MaxPool2D backward — conservative constant-bound (sound but loose).
+    """MaxPool2D backward — one-hot pass-through at the argmax-lb input.
 
-    MaxPool is non-linear: ``y = max(x_window)``. For sound dual lower bound
-    on ``c @ output``, we use the dual decomposition ``nu @ y = nu_pos @ y +
-    nu_neg @ y >= nu_pos @ LB(y) + nu_neg @ UB(y)``, where:
+    Contract (shared by every dual backward handler, cf. the ReLU kernel):
+    returns ``(pred_nus, contrib)`` with ``nu @ y >= pred_nu @ x + contrib``
+    pointwise on the box, so the full backward pass yields a LOWER bound on
+    ``c @ output``.
 
-      - LB(y) = max over window of lb_in = bounds_dict[L].lb  (constant, sound: max(x) >= LB(max(x)) = max(lb))
-      - UB(y) = max over window of ub_in = bounds_dict[L].ub  (constant, sound: max(x) <= UB(max(x)) = max(ub))
+    Uses the cache written by :func:`forward_maxpool2d` via
+    ``_fwd_maxpool2d_lin``: ``maxpool_argmax_flat`` (long ``[B, n_out]``, flat
+    index into the pool input of each window's argmax-lb entry ``i*``) and
+    ``maxpool_dominant`` (bool ``[B, n_out]``, true where ``lb_{i*} >=
+    max_{j != i*} ub_j``). Per window and envelope side:
 
-    Both bounds are CONSTANT in x → ``nu_in = 0`` (no propagation), full
-    contribution to obj via ``contrib = nu_pos @ lb_out + nu_neg @ ub_out``.
+      - dominant: ``y = x_{i*}`` exactly, so ``nu`` (both signs) passes
+        through one-hot to ``i*``; zero contribution.
+      - non-dominant, ``nu >= 0`` (lower envelope): ``y >= x_{i*}`` pointwise
+        and ``nu >= 0`` give ``nu*y >= nu*x_{i*}`` — pass through to ``i*``,
+        zero contribution (matches the forward lower relaxation, which is the
+        argmax-lb input's own linear bound).
+      - non-dominant, ``nu < 0`` (upper envelope): the constant bound
+        ``y <= ub_out`` gives ``nu*y >= nu*ub_out`` — contribution only.
 
-    This is the LOOSEST sound approach. Tighter alternatives:
-      - Linear-in-x at argmax_LB (one-hot): tighter LB but needs cached argmax
-        indices in forward (future enhancement).
+    Each window feeds ``v_out`` OR ``contrib`` per envelope side, never both.
+    Overlapping windows may target the same ``i*``; ``scatter_add_``
+    accumulates them.
 
-    Sound because:
-      LB(y) is sound: max(x_window) >= max_{k in window} lb[k] = bounds.lb[output_position]
-      UB(y) is sound: max(x_window) <= max_{k in window} ub[k] = bounds.ub[output_position]
-      Both are computed by forward_maxpool2d via F.max_pool2d on lb_in / ub_in.
+    Fallback (cache absent — forward ran the lazy-identity/interval path —
+    cached shapes do not match ``[B, n_out]``, or the cached pooled box
+    ``maxpool_lb``/``maxpool_ub`` is not bit-equal to ``bounds_dict[L.id]``,
+    i.e. the mask is stale from a forward on a DIFFERENT box under
+    root_bounds_reuse): the constant relaxation ``nu @ y = nu_pos @ y +
+    nu_neg @ y >= nu_pos @ LB(y) + nu_neg @ UB(y)`` with ``contrib =
+    nu_pos @ lb_out + nu_neg @ ub_out`` and ``v_out = 0``.
 
-    Lazy M-broadcast: bounds_dict[L.id] is at [B, *shape]; nu is at
-    [B*M, *shape]. We broadcast the [B, 1, n] bounds against [B, M, n] nu.
+    Lazy M-broadcast: bounds_dict[L.id] and the cache are at [B, *shape]; nu
+    is at [B*M, *shape]. We broadcast the [B, 1, n] tensors against [B, M, n].
     """
     bounds = bounds_dict.get(L.id)
     if bounds is None:
@@ -254,11 +311,6 @@ def backward_maxpool2d(L, nu, bounds_dict, preds, M: int = 1, alpha=None):
     lb_b = lb_out_flat.unsqueeze(1)
     ub_b = ub_out_flat.unsqueeze(1)
 
-    nu_pos = v.clamp(min=0)
-    nu_neg = v.clamp(max=0)
-    contrib_BMn = nu_pos * lb_b + nu_neg * ub_b
-    contrib = contrib_BMn.sum(dim=-1).view(BM)
-
     input_shape = L.params.get("input_shape")
     if not isinstance(input_shape, (list, tuple)):
         raise ValueError(f"backward_maxpool2d: layer {L.id} missing/invalid 'input_shape' param")
@@ -269,6 +321,29 @@ def backward_maxpool2d(L, nu, bounds_dict, preds, M: int = 1, alpha=None):
         c_in, iH, iW = shape[-3:]
     n_in = int(c_in) * int(iH) * int(iW)
     v_out = torch.zeros(BM, n_in, dtype=nu.dtype, device=nu.device)
+
+    idx_flat = L.cache.get("maxpool_argmax_flat")
+    dominant = L.cache.get("maxpool_dominant")
+    cache_ok = (
+        isinstance(idx_flat, torch.Tensor)
+        and isinstance(dominant, torch.Tensor)
+        and idx_flat.shape == (B_actual, n)
+        and dominant.shape == (B_actual, n)
+        and _cache_box_matches(L.cache.get("maxpool_lb"), bounds.lb.flatten(start_dim=1))
+        and _cache_box_matches(L.cache.get("maxpool_ub"), bounds.ub.flatten(start_dim=1))
+    )
+    if cache_ok:
+        dom = dominant.to(device=nu.device).unsqueeze(1)              # [B, 1, n]
+        idx = idx_flat.to(device=nu.device).unsqueeze(1).expand(B_actual, M, n)
+        pass_nu = torch.where(dom, v, v.clamp(min=0))                 # [B, M, n]
+        v_out.view(B_actual, M, n_in).scatter_add_(2, idx, pass_nu)
+        contrib_BMn = torch.where(dom, torch.zeros_like(v), v.clamp(max=0)) * ub_b
+        contrib = contrib_BMn.sum(dim=-1).view(BM)
+    else:
+        nu_pos = v.clamp(min=0)
+        nu_neg = v.clamp(max=0)
+        contrib_BMn = nu_pos * lb_b + nu_neg * ub_b
+        contrib = contrib_BMn.sum(dim=-1).view(BM)
 
     assert len(preds) == 1, f"MAXPOOL2D expects 1 predecessor, got {len(preds)}"
     return [v_out], contrib

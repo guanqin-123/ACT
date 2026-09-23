@@ -112,6 +112,8 @@ backend:
     lr_alpha: 0.1
     per_class_alpha: true
     incremental_start_enabled: true
+    forward_lin_max_perturbed: 100
+    outward_rounding: "none"
 
   # ═════════════════════════════════════════════════════════════════════════
   # Branch-and-Bound refinement  (bab)
@@ -176,7 +178,7 @@ backend:
     mcts_lambda: 0.5
     mcts_virtual_loss: 1.0
     intermediate_refine: "none"
-    reuse_root_bounds: false
+    root_bounds_reuse: "none"
 
     # Neurons split jointly per branching step; each lane fans out into all 2^k
     # sign combinations (verdict-boundary joint splitting). 1 = single split.
@@ -193,6 +195,12 @@ backend:
 
     # -- Dual-tier selector (solver_tier != lp) ----------------------------
     solver_tier: "lp"
+
+    # -- CLIMB certificate reuse (ReLU neuron branching only) ---------------
+    climb_enabled: false
+    climb_theta: 0.0
+    climb_recheck_k: 0
+    climb_max_cores: 1024
 
     # -- LLM-probe controller ----------------------------------------------
     llm_probe_enabled: false

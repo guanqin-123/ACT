@@ -8,7 +8,8 @@
 #
 # Purpose:
 #   BaB loop on a single-spec instance.  Subproblems explored in K-batched
-#   waves via solve_batch; CE validation per SAT lane.  Solver-agnostic.
+#   waves via solve_batch; CE validation per SAT lane. Optional CLIMB replay
+#   reuses fixed dual certificates to prune and phase-propagate neuron branches.
 #
 # ===---------------------------------------------------------------------====#
 
@@ -16,17 +17,18 @@ from __future__ import annotations
 
 import logging
 import math
-import sys
 import time
-import inspect
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Dict, Final, List, Optional, Tuple, Union, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 import torch
 
 from act.config.config import (
     BaBConfig,
+    CLIMB_BRANCHING_METHODS,
+    CLIMB_SOLVER_TIER,
     DualConfig,
+    NO_REFINEMENT_MODE,
     TOP_K_BOUNDINGS,
     TOP_K_INCOMPATIBLE_BOUNDINGS,
     VALID_BOUNDINGS,
@@ -34,20 +36,27 @@ from act.config.config import (
 )
 from act.back_end.bab.node import (
     SubproblemBatch,
-    concat_children,
     rederive_embedding_block_eps,
     split_input,
     split_input_nary,
-    split_neuron_subproblems,
 )
 from act.back_end.bab.branching.branching import (
     BranchingStrategy,
+    ClimbMetrics,
+    CoreLibrary,
+    PackedLiterals,
     SplitDecision,
     _build_branching_strategy as _build_branching_strategy_impl,
     _collect_neuron_candidates,
     _multi_split_from_decision,
     _multi_split_from_groups,
     enumerate_unstable_candidates,
+    apply_literal_assignments,
+    certificate_replay,
+    coarsen,
+    is_certified,
+    pack_split_matrix,
+    propagate,
 )
 from act.back_end.bab.branching.bounding import (
     BoundingStrategy,
@@ -62,6 +71,8 @@ from act.back_end.bab.branching.bounding import (
 )
 
 from act.back_end.core import Bounds, Layer, Net, ParamValue
+from act.back_end.dual_tf.tf_forward import compute_forward_bounds
+from act.back_end.layer_schema import LayerKind
 from act.back_end.solver.solver_base import BatchLPSolution, Solver, SolveStatus
 from act.back_end.verifier import (
     gather_input_spec_layers,
@@ -75,10 +86,22 @@ from act.front_end.specs import InKind, normalize_position_mask
 from act.util.model_inference import infer_single_model
 from act.util.stats import VerifyStatus, VerifyResult
 
-if TYPE_CHECKING:
-    from act.back_end.interval_tf.tf_attention import LinearBounds
-
 log = logging.getLogger(__name__)
+
+
+def _compute_forward_bounds_configured(
+    net: Net,
+    input_lb: torch.Tensor,
+    input_ub: torch.Tensor,
+    dual_config: DualConfig,
+) -> Dict[int, Bounds]:
+    """Compute forward bounds with the configured perturbed-dimension cap."""
+    return compute_forward_bounds(
+        net,
+        input_lb,
+        input_ub,
+        forward_lin_max_perturbed=dual_config.forward_lin_max_perturbed,
+    )
 
 
 @dataclass
@@ -90,6 +113,12 @@ class DualSolveResult:
     row_slack: Optional[torch.Tensor] = None
     """Per-spec-row slack ``[K, m]``; ``slack >= 0`` means the row is certified
     (ALL-rows kinds). Consumed by the root spec-pruning presolve."""
+    c_rows: Optional[torch.Tensor] = None
+    thresholds: Optional[torch.Tensor] = None
+    m_specs: int = 0
+    reference_bounds: Optional[Dict[int, Bounds]] = None
+    """Immutable per-layer forward bounds the main solve consumed, before any
+    split hardening. CLIMB replay slices these by lane instead of recomputing."""
 
 
 def _select_spec_rows(
@@ -191,9 +220,9 @@ def _interval_refresh_bounds(
     for layer in net.layers:
         k = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
         lid = layer.id
-        if k == "ASSERT":
+        if k == LayerKind.ASSERT.value:
             continue
-        if k in ("INPUT", "INPUT_SPEC"):
+        if k in (LayerKind.INPUT.value, LayerKind.INPUT_SPEC.value):
             b = out.get(lid)
             if b is None:
                 return None
@@ -201,27 +230,30 @@ def _interval_refresh_bounds(
             continue
         preds = net.preds.get(lid, [])
         try:
-            if k == "CONV2D":
+            if k == LayerKind.CONV2D.value:
                 plb, pub = vals[preds[0]]
                 lb, ub = _fwd_conv2d_interval(layer, plb, pub)
                 lb, ub = lb.flatten(start_dim=1), ub.flatten(start_dim=1)
-            elif k == "DENSE":
+            elif k == LayerKind.DENSE.value:
                 w = layer.params["weight"]
                 bias = layer.params.get("bias")
                 if not isinstance(w, torch.Tensor):
                     return None
                 plb, pub = vals[preds[0]]
-                w_pos, w_neg = w.clamp(min=0), w.clamp(max=0)
-                lb = plb @ w_pos.T + pub @ w_neg.T
-                ub = pub @ w_pos.T + plb @ w_neg.T
+                c = (plb + pub) * 0.5
+                r = (pub - plb) * 0.5
+                m = c @ w.T
+                rho = r @ w.abs().T
+                lb = m - rho
+                ub = m + rho
                 if isinstance(bias, torch.Tensor):
                     lb, ub = lb + bias, ub + bias
-            elif k == "ADD":
+            elif k == LayerKind.ADD.value:
                 (alb, aub), (blb, bub) = vals[preds[0]], vals[preds[1]]
                 lb, ub = alb + blb, aub + bub
-            elif k in ("FLATTEN", "RESHAPE"):
+            elif k in (LayerKind.FLATTEN.value, LayerKind.RESHAPE.value):
                 lb, ub = vals[preds[0]]
-            elif k == "RELU":
+            elif k == LayerKind.RELU.value:
                 lb, ub = vals[preds[0]]
             else:
                 return None
@@ -233,7 +265,7 @@ def _interval_refresh_bounds(
             lb = torch.maximum(lb, b.lb.flatten(start_dim=1))
             ub = torch.minimum(ub, b.ub.flatten(start_dim=1))
             ub = torch.maximum(ub, lb)
-        if k == "RELU":
+        if k == LayerKind.RELU.value:
             s = split_signs.get(lid)
             if s is not None:
                 sl = s[:, 0, :] if s.dim() == 3 else s
@@ -245,7 +277,7 @@ def _interval_refresh_bounds(
                 ub[..., :n] = torch.maximum(ub[..., :n], lb[..., :n])
         if b is not None:
             out[lid] = Bounds(lb.view_as(b.lb).clone(), ub.view_as(b.ub).clone())
-        if k == "RELU":
+        if k == LayerKind.RELU.value:
             vals[lid] = (lb.clamp(min=0.0), ub.clamp(min=0.0))
         else:
             vals[lid] = (lb, ub)
@@ -254,9 +286,72 @@ def _interval_refresh_bounds(
 
 def _neuron_branching_supported(config: BaBConfig) -> bool:
     return (
-        getattr(config, "branching_method", "random") in ("babsr", "fsb", "gain", "witness_residual")
+        getattr(config, "branching_method", "random") in CLIMB_BRANCHING_METHODS
         and getattr(config, "solver_tier", "lp") in ("dual_alpha", "dual_alpha_eta")
     )
+
+
+def _validate_climb_config(config: BaBConfig) -> None:
+    """Fail before solving when CLIMB's soundness prerequisites are absent."""
+    if not config.climb_enabled:
+        return
+    failures: List[str] = []
+    if config.solver_tier != CLIMB_SOLVER_TIER:
+        failures.append(f"solver_tier must be {CLIMB_SOLVER_TIER!r}")
+    if config.bounding not in TOP_K_BOUNDINGS:
+        failures.append(f"bounding must be one of {TOP_K_BOUNDINGS}")
+    if config.branching_method not in CLIMB_BRANCHING_METHODS:
+        failures.append(f"branching_method must be one of {CLIMB_BRANCHING_METHODS}")
+    if config.root_bounds_reuse != "none":
+        failures.append("root_bounds_reuse must be 'none'")
+    if config.intermediate_refine != NO_REFINEMENT_MODE:
+        failures.append(f"intermediate_refine must be {NO_REFINEMENT_MODE!r}")
+    if config.per_subproblem_refine != NO_REFINEMENT_MODE:
+        failures.append(f"per_subproblem_refine must be {NO_REFINEMENT_MODE!r}")
+    if failures:
+        raise ValueError("CLIMB configuration error: " + "; ".join(failures))
+
+
+def _select_subproblem_batch(batch: SubproblemBatch, indices: torch.Tensor) -> SubproblemBatch:
+    """Select lanes while preserving all incremental certificate state."""
+    def select_state(
+        state: Optional[Dict[int, torch.Tensor]],
+    ) -> Optional[Dict[int, torch.Tensor]]:
+        if state is None:
+            return None
+        return {
+            layer_id: value.index_select(0, indices.to(value.device))
+            for layer_id, value in state.items()
+        }
+
+    def select_optional(value: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        return None if value is None else value.index_select(0, indices.to(value.device))
+
+    return SubproblemBatch(
+        lb=batch.lb.index_select(0, indices.to(batch.lb.device)),
+        ub=batch.ub.index_select(0, indices.to(batch.ub.device)),
+        depths=batch.depths.index_select(0, indices.to(batch.depths.device)),
+        incremental_alpha=select_state(batch.incremental_alpha),
+        incremental_eta=select_state(batch.incremental_eta),
+        split_signs=select_state(batch.split_signs),
+        parent_margins=select_optional(batch.parent_margins),
+        lower_bound=select_optional(batch.lower_bound),
+        node_id=select_optional(batch.node_id),
+        parent_id=select_optional(batch.parent_id),
+    )
+
+
+def _slice_bounds_dict(
+    bounds_dict: Dict[int, Bounds], rows: torch.Tensor
+) -> Dict[int, Bounds]:
+    """Select lanes from a batched bounds dictionary without mutating it."""
+    return {
+        layer_id: Bounds(
+            bounds.lb.index_select(0, rows.to(bounds.lb.device)),
+            bounds.ub.index_select(0, rows.to(bounds.ub.device)),
+        )
+        for layer_id, bounds in bounds_dict.items()
+    }
 
 
 def _witness_residual_branching_active(config: BaBConfig) -> bool:
@@ -267,6 +362,7 @@ def _witness_relu_preactivations(
     net: Net,
     witness_input: torch.Tensor,
     input_shape: tuple[int, ...],
+    dual_config: DualConfig,
 ) -> Optional[Dict[int, torch.Tensor]]:
     """Concrete per-ReLU pre-activations at the dual solver's spurious CE.
 
@@ -277,15 +373,15 @@ def _witness_relu_preactivations(
     supplies it — already keyed by layer id, already storing ReLU boxes
     pre-activation.
     """
-    from act.back_end.dual_tf.tf_forward import compute_forward_bounds
-
     if witness_input.numel() == 0:
         return None
     x = witness_input
     if input_shape and x.dim() == 2 and x.shape[1] == int(math.prod(input_shape)):
         x = x.reshape(x.shape[0], *input_shape)
     try:
-        bounds_dict = compute_forward_bounds(net, x, x)
+        bounds_dict = _compute_forward_bounds_configured(
+            net, x, x, dual_config
+        )
     except (ValueError, RuntimeError, KeyError, IndexError):
         # Unregistered layer kind, or a shape/device mismatch in the witness.
         # Both are recoverable: the caller falls back to BaBSR scoring.
@@ -293,14 +389,14 @@ def _witness_relu_preactivations(
     preacts = {
         lid: bounds.lb.flatten(start_dim=1)
         for lid, bounds in bounds_dict.items()
-        if _layer_kind_upper(net.by_id[lid]) == "RELU"
+        if _layer_kind_upper(net.by_id[lid]) == LayerKind.RELU.value
     }
     return preacts or None
 
 
 def _layer_kind_upper(layer: Layer) -> str:
     kind = layer.kind
-    return kind.upper() if isinstance(kind, str) else str(kind)
+    return kind.value if isinstance(kind, LayerKind) else kind.upper()
 
 
 def _gain_tested_decision(
@@ -982,23 +1078,31 @@ def _dispatch_dual_solve(
 
     ``keep_rows`` restricts the encoded spec to the given row indices
     (ALL-rows kinds only). ``root_bounds_dict`` replaces the per-node forward
-    pass with the root box's bounds (input-layer entries overridden by each
-    lane's sub-box). Both are sound by bound monotonicity: certified rows and
-    per-layer bounds of an ancestor box remain valid on every descendant.
+    pass for the root and neuron-split descendants; input-split children
+    re-propagate their smaller boxes. Reused dictionaries override input-layer
+    entries by lane, and only ``split_refresh`` applies split-derived refresh
+    and per-subproblem refinement. Ancestor bounds remain sound on descendants
+    by bound monotonicity.
     """
-    from act.back_end.dual_tf.tf_forward import compute_forward_bounds
     from act.back_end.solver.solver_dual import DualSolver, expand_bounds_dict
 
     solver_tier = getattr(config, "solver_tier", "lp")
     block_eps_updates = _install_embedding_child_block_eps(net, batched_bounds, batch)
-    if root_bounds_dict is not None:
+    input_split_child = (
+        batch.depths.numel() > 0
+        and bool((batch.depths.max() > 0).item())
+        and not batch.split_signs
+    )
+    use_root_dict = root_bounds_dict is not None and not input_split_child
+    if use_root_dict:
+        assert root_bounds_dict is not None
         bounds_dict_dual = expand_bounds_dict(root_bounds_dict, k_actual)
         lane_box = Bounds(batched_bounds.lb, batched_bounds.ub)
         for layer in net.layers:
             kind_up = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
-            if kind_up in ("INPUT", "INPUT_SPEC") and layer.id in bounds_dict_dual:
+            if kind_up in (LayerKind.INPUT.value, LayerKind.INPUT_SPEC.value) and layer.id in bounds_dict_dual:
                 bounds_dict_dual[layer.id] = lane_box
-        if batch.split_signs:
+        if config.root_bounds_reuse == "split_refresh" and batch.split_signs:
             refreshed = _interval_refresh_bounds(net, bounds_dict_dual, batch.split_signs)
             if refreshed is not None:
                 bounds_dict_dual = refreshed
@@ -1022,7 +1126,9 @@ def _dispatch_dual_solve(
                     optimize_iters=psr_iters,
                 )
     else:
-        bounds_dict_dual = compute_forward_bounds(net, batched_bounds.lb, batched_bounds.ub)
+        bounds_dict_dual = _compute_forward_bounds_configured(
+            net, batched_bounds.lb, batched_bounds.ub, dual_config
+        )
     out_kind_raw = assert_layer.params["kind"]
     if not isinstance(out_kind_raw, str):
         raise TypeError(f"ASSERT kind must be str, got {type(out_kind_raw).__name__}")
@@ -1081,9 +1187,6 @@ def _dispatch_dual_solve(
     active_mask = torch.ones(k_actual, m_specs, dtype=torch.bool, device=device)
 
     return_nu = _neuron_branching_supported(config)
-    supports_return_nu = "return_nu_per_layer" in inspect.signature(
-        dual.compute_certified_bound
-    ).parameters
 
     compute_certified_bound = cast(Any, dual.compute_certified_bound)
 
@@ -1098,7 +1201,8 @@ def _dispatch_dual_solve(
             optimize_alpha=not (
                 getattr(config, "eta_only_children", False) and is_child_batch
             ),
-            refresh_forward=root_bounds_dict is None,
+            refresh_forward=not use_root_dict,
+            forward_lin_max_perturbed=dual_config.forward_lin_max_perturbed,
             n_iters=dual_config.n_iters,
             lr_alpha=dual_config.lr_alpha,
             lr_beta=dual_config.lr_beta,
@@ -1115,7 +1219,7 @@ def _dispatch_dual_solve(
             return_optimized=True,
             return_sce=True,
             per_class_alpha=dual_config.per_class_alpha,
-            **({"return_nu_per_layer": True} if return_nu and supports_return_nu else {}),
+            **({"return_nu_per_layer": True} if return_nu else {}),
         )
         margins_flat = dual_result.margins
         sce = cast(Optional[torch.Tensor], dual_result.sce)
@@ -1129,7 +1233,7 @@ def _dispatch_dual_solve(
             c_rows,
             M=m_specs,
             return_sce=True,
-            **({"return_nu_per_layer": True} if return_nu and supports_return_nu else {}),
+            **({"return_nu_per_layer": True} if return_nu else {}),
         )
         margins_flat = dual_result.margins
         sce = cast(Optional[torch.Tensor], dual_result.sce)
@@ -1174,7 +1278,7 @@ def _dispatch_dual_solve(
     )
     branch_bounds: Optional[Dict[int, Bounds]] = None
     branch_nu: Optional[Dict[int, torch.Tensor]] = None
-    if return_nu and root_bounds_dict is not None:
+    if return_nu and use_root_dict:
         # Heuristic-only consumer (BaBSR/FSB scores). The optimize path does
         # not emit nu, and nu=None silently degrades neuron branching to
         # input-axis splits - so run one grad-free backward at the converged
@@ -1227,6 +1331,10 @@ def _dispatch_dual_solve(
             if sce is not None
             else None,
             row_slack=slack.detach(),
+            c_rows=c_rows.detach(),
+            thresholds=thresholds.detach(),
+            m_specs=m_specs,
+            reference_bounds=bounds_dict_dual,
         )
     finally:
         _restore_embedding_child_block_eps(block_eps_updates)
@@ -1234,7 +1342,10 @@ def _dispatch_dual_solve(
 
 def _finite_embedding_spec(net: Net) -> Optional[Layer]:
     for layer in net.layers:
-        if layer.kind == "INPUT_SPEC" and layer.params.get("kind") == InKind.LP_EMBEDDING:
+        if (
+            layer.kind == LayerKind.INPUT_SPEC.value
+            and layer.params.get("kind") == InKind.LP_EMBEDDING
+        ):
             p_norm = layer.params.get("p_norm", float("inf"))
             if isinstance(p_norm, torch.Tensor):
                 p_value = float(p_norm.reshape(-1)[0].item())
@@ -1275,7 +1386,7 @@ def _install_embedding_child_block_eps(
     old_values: list[tuple[Layer, ParamValue]] = []
     for layer in net.layers:
         kind_up = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
-        if kind_up in ("INPUT", "INPUT_SPEC"):
+        if kind_up in (LayerKind.INPUT.value, LayerKind.INPUT_SPEC.value):
             old_values.append((layer, layer.params.get("bab_block_eps", None)))
             layer.params["bab_block_eps"] = block_eps
     return old_values
@@ -1379,8 +1490,14 @@ def verify_bab_batched(
     """
     if config is None:
         config = BaBConfig()
+    _validate_climb_config(config)
     if dual_config is None:
         dual_config = DualConfig()
+    climb_metrics = ClimbMetrics(enabled=config.climb_enabled)
+    climb_library = (
+        CoreLibrary(config.climb_max_cores) if config.climb_enabled else None
+    )
+    climb_metrics.library = climb_library
     auto_batch = isinstance(max_batch_size, str) and max_batch_size == "auto"
     if auto_batch:
         effective_batch = (
@@ -1420,14 +1537,15 @@ def verify_bab_batched(
         "multi_split_lane_starved_count": 0,
     }
 
-    def _branching_metadata() -> Dict[str, int]:
-        meta: Dict[str, int] = dict(multi_split_stats)
+    def _branching_metadata() -> Dict[str, Any]:
+        meta: Dict[str, Any] = dict(multi_split_stats)
         meta["bounding_top_k_effective"] = int(getattr(pool, "k", 0))
         if _witness_residual_branching_active(config):
             meta["witness_residual_fallback_count"] = int(getattr(brancher, "fallback_count", 0))
             meta["witness_residual_diff_from_babsr_count"] = int(
                 getattr(brancher, "different_from_babsr_count", 0)
             )
+        meta.update(climb_metrics.metadata())
         return meta
 
     pool = _build_bounding(
@@ -1500,13 +1618,15 @@ def verify_bab_batched(
     presolve_tier = getattr(config, "solver_tier", "lp")
     root_fwd: Optional[Dict[int, Bounds]] = None
     refine_mode = getattr(config, "intermediate_refine", "none")
+    reuse_mode = getattr(config, "root_bounds_reuse", "none")
     if presolve_tier in ("dual", "dual_alpha", "dual_alpha_eta") and (
-        getattr(config, "reuse_root_bounds", False) or refine_mode != "none"
+        reuse_mode != "none" or refine_mode != "none"
     ):
-        from act.back_end.dual_tf.tf_forward import compute_forward_bounds
         from act.back_end.solver.solver_dual import DualSolver
 
-        root_fwd = compute_forward_bounds(net, root_bounds.lb, root_bounds.ub)
+        root_fwd = _compute_forward_bounds_configured(
+            net, root_bounds.lb, root_bounds.ub, dual_config
+        )
         if refine_mode != "none":
             root_fwd = DualSolver().refine_intermediate_bounds(
                 net,
@@ -1514,13 +1634,13 @@ def verify_bab_batched(
                 mode=refine_mode,
                 blowup_ratio=getattr(config, "intermediate_refine_ratio", 10.0),
             )
-    # Per-node bound reuse is governed solely by reuse_root_bounds: root_fwd may
+    # Per-node bound reuse is governed solely by root_bounds_reuse: root_fwd may
     # exist just for the root presolve/refine above, and passing it to descendant
     # solves would freeze every child's intermediate bounds at root tightness
     # (fatal for input-split BaB, where the whole gain comes from recomputing
     # intermediates on the smaller box).
     node_root_fwd: Optional[Dict[int, Bounds]] = (
-        root_fwd if getattr(config, "reuse_root_bounds", False) else None
+        root_fwd if reuse_mode != "none" else None
     )
     if (
         presolve_tier in ("dual", "dual_alpha", "dual_alpha_eta")
@@ -1549,6 +1669,7 @@ def verify_bab_batched(
                         "spec_rows_total": total_rows,
                         "spec_rows_kept": 0,
                         "resolved_by": "root_presolve",
+                        **climb_metrics.metadata(),
                     },
                 )
             keep = torch.where(unproven)[0]
@@ -1593,6 +1714,22 @@ def verify_bab_batched(
         if elapsed >= budget_s or processed >= config.max_nodes:
             break
 
+        if climb_library is not None and climb_library.core_count > 0:
+            # H1: eager discharge of the whole pending pool before any lane is
+            # bounded. view_all/replace_all never score, cool, or probe.
+            pending_before = cast(TopKBounding, pool).view_all()
+            propagate_started = time.perf_counter()
+            (pending_after,) = propagate([pending_before], climb_library)
+            climb_metrics.propagate_time_s += time.perf_counter() - propagate_started
+            climb_metrics.prebound_discharged += (
+                pending_before.batch_size - pending_after.batch_size
+            )
+            cast(TopKBounding, pool).replace_all(pending_after)
+            if pool.empty:
+                break
+        if climb_library is not None:
+            climb_metrics.observe_frontier(len(pool))
+
         remaining_nodes = config.max_nodes - processed
         k_requested = min(len(pool), effective_batch, remaining_nodes)
         if k_requested <= 0:
@@ -1619,6 +1756,8 @@ def verify_bab_batched(
         k_actual = batch.batch_size
         if _k_log is not None:
             _k_log.append(k_actual)
+        if climb_library is not None:
+            climb_metrics.observe_frontier(len(pool) + k_actual)
 
         if input_shape:
             k_lb = batch.lb.reshape(k_actual, *input_shape)
@@ -1633,6 +1772,7 @@ def verify_bab_batched(
         bounds_dict_for_branching: Optional[Dict[int, Bounds]] = None
         nu_per_layer_for_branching: Optional[Dict[int, torch.Tensor]] = None
         witness_input_for_branching: Optional[torch.Tensor] = None
+        dual_solve_result: Optional[DualSolveResult] = None
         if solver_tier == "lp":
             solver = solver_factory()
             solution = setup_and_solve_batch(
@@ -1675,6 +1815,10 @@ def verify_bab_batched(
             raise ValueError(
                 f"Unknown solver_tier={solver_tier!r}. Valid: {VALID_SOLVER_TIERS}."
             )
+
+        if climb_library is not None:
+            climb_metrics.main_bound_calls += 1
+            climb_metrics.main_bound_row_passes += k_actual
 
         node_lower_bound = (-solution.max_viol).detach()
         if batch.lower_bound is not None:
@@ -1747,77 +1891,182 @@ def verify_bab_batched(
             device=batch.lb.device,
             dtype=torch.long,
         )
-        if int(unresolved_idx.numel()) > 0:
-            def _select_incremental_state(
-                state: Optional[dict[int, torch.Tensor]],
-                indices: torch.Tensor,
-            ) -> Optional[dict[int, torch.Tensor]]:
-                if state is None:
-                    return None
-                return {
-                    layer_id: tensor.index_select(0, indices.to(tensor.device))
-                    for layer_id, tensor in state.items()
-                }
-
-            unresolved = SubproblemBatch(
-                lb=batch.lb.index_select(0, unresolved_idx.to(batch.lb.device)),
-                ub=batch.ub.index_select(0, unresolved_idx.to(batch.ub.device)),
-                depths=batch.depths.index_select(0, unresolved_idx.to(batch.depths.device)),
-                incremental_alpha=_select_incremental_state(batch.incremental_alpha, unresolved_idx),
-                incremental_eta=_select_incremental_state(batch.incremental_eta, unresolved_idx),
-                split_signs=_select_incremental_state(batch.split_signs, unresolved_idx),
-                parent_margins=(
-                    batch.parent_margins.index_select(0, unresolved_idx.to(batch.parent_margins.device))
-                    if batch.parent_margins is not None
-                    else None
-                ),
-                lower_bound=node_lower_bound.index_select(
-                    0, unresolved_idx.to(node_lower_bound.device)
-                ),
-                node_id=(
-                    batch.node_id.index_select(0, unresolved_idx.to(batch.node_id.device))
-                    if batch.node_id is not None
-                    else None
-                ),
-                parent_id=(
-                    batch.parent_id.index_select(0, unresolved_idx.to(batch.parent_id.device))
-                    if batch.parent_id is not None
-                    else None
-                ),
+        if climb_library is not None:
+            # H2: replay -> coarsen -> insert. Certified lanes only; replay
+            # reads the immutable forward snapshot, the theta budget coarsens
+            # the validated vector, and the survivor is inserted as a core.
+            assert dual_solve_result is not None
+            unsat_idx = torch.tensor(
+                [i for i, status in enumerate(solution.statuses) if status == SolveStatus.UNSAT],
+                device=batch.lb.device,
+                dtype=torch.long,
             )
+            if (
+                int(unsat_idx.numel()) > 0
+                and dual_solve_result.c_rows is not None
+                and dual_solve_result.thresholds is not None
+                and dual_solve_result.reference_bounds is not None
+                and dual_solve_result.m_specs > 0
+            ):
+                replay_batch = _select_subproblem_batch(batch, unsat_idx)
+                replay_m_specs = dual_solve_result.m_specs
+                # The replay reference is the exact unhardened forward snapshot
+                # the main solve consumed, sliced by certified lane; it is
+                # never recomputed so Eq. 12 magnitudes and the local clamps
+                # read the same immutable bounds.
+                replay_bounds = _slice_bounds_dict(
+                    dual_solve_result.reference_bounds, unsat_idx
+                )
+                replay_c_lanes = dual_solve_result.c_rows.reshape(
+                    k_actual, replay_m_specs, -1
+                ).index_select(
+                    0, unsat_idx.to(dual_solve_result.c_rows.device)
+                )
+                replay_c = replay_c_lanes.reshape(-1, replay_c_lanes.shape[-1])
+                replay_thresholds = dual_solve_result.thresholds.index_select(
+                    0, unsat_idx.to(dual_solve_result.thresholds.device)
+                )
+                _, packed = pack_split_matrix(
+                    replay_batch.split_signs,
+                    replay_batch.batch_size,
+                    climb_library.vocabulary,
+                    device=replay_batch.lb.device,
+                )
+                replay = certificate_replay(
+                    net=net,
+                    batch=replay_batch,
+                    reference_bounds=replay_bounds,
+                    c_rows=replay_c,
+                    thresholds=replay_thresholds,
+                    m_specs=replay_m_specs,
+                    out_kind=cast(str, assert_layer.params["kind"]),
+                    literals=packed,
+                )
+                if replay is not None:
+                    slack, costs = replay
+                    valid = is_certified(
+                        slack, cast(str, assert_layer.params["kind"])
+                    )
+                else:
+                    slack = costs = valid = None
+                if costs is not None and valid is not None and bool(valid.any().item()):
+                    budget_slack = cast(torch.Tensor, slack)
+                    costs[~valid] = torch.inf
+
+                    def _recheck_climb(
+                        candidate: PackedLiterals, rows: torch.Tensor
+                    ) -> torch.Tensor:
+                        candidate_batch = _select_subproblem_batch(replay_batch, rows)
+                        dense = torch.zeros(
+                            candidate.mask.shape[0],
+                            len(candidate.vocabulary),
+                            dtype=torch.int8,
+                            device=candidate.mask.device,
+                        )
+                        for candidate_row in range(candidate.mask.shape[0]):
+                            valid_slots = candidate.mask[candidate_row]
+                            dense[candidate_row, candidate.indices[candidate_row, valid_slots]] = (
+                                candidate.signs[candidate_row, valid_slots]
+                            )
+                        candidate_batch.split_signs = None
+                        apply_literal_assignments(
+                            candidate_batch, dense, candidate.vocabulary
+                        )
+                        row_bounds = _slice_bounds_dict(replay_bounds, rows)
+                        row_c_lanes = replay_c_lanes.index_select(
+                            0, rows.to(replay_c_lanes.device)
+                        )
+                        row_c = row_c_lanes.reshape(-1, row_c_lanes.shape[-1])
+                        row_thresholds = replay_thresholds.index_select(
+                            0, rows.to(replay_thresholds.device)
+                        )
+                        replayed = certificate_replay(
+                            net=net,
+                            batch=candidate_batch,
+                            reference_bounds=row_bounds,
+                            c_rows=row_c,
+                            thresholds=row_thresholds,
+                            m_specs=replay_m_specs,
+                            out_kind=cast(str, assert_layer.params["kind"]),
+                            with_costs=False,
+                        )
+                        if replayed is None:
+                            return torch.zeros(
+                                int(rows.numel()), dtype=torch.bool, device=rows.device
+                            )
+                        replayed_slack, _ = replayed
+                        return is_certified(
+                            replayed_slack, cast(str, assert_layer.params["kind"])
+                        )
+
+                    def _instrumented_recheck(
+                        candidate: PackedLiterals, rows: torch.Tensor
+                    ) -> torch.Tensor:
+                        recheck_started = time.perf_counter()
+                        passing = _recheck_climb(candidate, rows)
+                        climb_metrics.recheck_time_s += (
+                            time.perf_counter() - recheck_started
+                        )
+                        climb_metrics.recheck_calls += 1
+                        climb_metrics.recheck_row_passes += int(rows.numel())
+                        return passing
+
+                    coarsen_started = time.perf_counter()
+                    retained = coarsen(
+                        packed,
+                        costs,
+                        budget_slack,
+                        theta=config.climb_theta,
+                        recheck_k=config.climb_recheck_k,
+                        recheck=_instrumented_recheck,
+                    )
+                    climb_metrics.coarsen_time_s += time.perf_counter() - coarsen_started
+                    climb_metrics.core_literals_original += int(packed.mask.sum())
+                    climb_metrics.core_literals_retained += int(retained.mask.sum())
+                    valid_rows = torch.where(valid)[0]
+                    valid_cores = PackedLiterals(
+                        retained.indices.index_select(0, valid_rows),
+                        retained.signs.index_select(0, valid_rows),
+                        retained.mask.index_select(0, valid_rows),
+                        retained.vocabulary,
+                    )
+                    climb_metrics.cores_inserted += climb_library.insert(valid_cores)
+
+        if int(unresolved_idx.numel()) > 0:
+            unresolved = _select_subproblem_batch(batch, unresolved_idx)
+            unresolved.lower_bound = node_lower_bound.index_select(
+                0, unresolved_idx.to(node_lower_bound.device)
+            )
+            if climb_library is not None and climb_library.core_count > 0:
+                # H3: one joint fixpoint over (pending, active); pending
+                # removals were never bounded (pre-bound), active removals are
+                # parents spared a split (pre-split).
+                climb_metrics.observe_frontier(len(pool) + unresolved.batch_size)
+                propagation_groups: List[SubproblemBatch] = []
+                has_pool = len(pool) > 0
+                if has_pool:
+                    propagation_groups.append(cast(TopKBounding, pool).view_all())
+                propagation_groups.append(unresolved)
+                presplit_before = unresolved.batch_size
+                propagate_started = time.perf_counter()
+                propagation = propagate(propagation_groups, climb_library)
+                climb_metrics.propagate_time_s += time.perf_counter() - propagate_started
+                if has_pool:
+                    cast(TopKBounding, pool).replace_all(propagation[0])
+                    climb_metrics.prebound_discharged += (
+                        propagation_groups[0].batch_size - propagation[0].batch_size
+                    )
+                unresolved = propagation[-1]
+                climb_metrics.presplit_discharged += (
+                    presplit_before - unresolved.batch_size
+                )
+                climb_metrics.observe_frontier(len(pool) + unresolved.batch_size)
             branch_mask = unresolved.depths < int(config.max_depth)
             if bool((~branch_mask).any().item()):
                 any_dropped_max_depth = True
             branch_idx = torch.where(branch_mask)[0]
             if int(branch_idx.numel()) > 0:
-                branch_batch = SubproblemBatch(
-                    lb=unresolved.lb.index_select(0, branch_idx.to(unresolved.lb.device)),
-                    ub=unresolved.ub.index_select(0, branch_idx.to(unresolved.ub.device)),
-                    depths=unresolved.depths.index_select(0, branch_idx),
-                    incremental_alpha=_select_incremental_state(unresolved.incremental_alpha, branch_idx),
-                    incremental_eta=_select_incremental_state(unresolved.incremental_eta, branch_idx),
-                    split_signs=_select_incremental_state(unresolved.split_signs, branch_idx),
-                    parent_margins=(
-                        unresolved.parent_margins.index_select(0, branch_idx)
-                        if unresolved.parent_margins is not None
-                        else None
-                    ),
-                    lower_bound=(
-                        unresolved.lower_bound.index_select(0, branch_idx)
-                        if unresolved.lower_bound is not None
-                        else None
-                    ),
-                    node_id=(
-                        unresolved.node_id.index_select(0, branch_idx.to(unresolved.node_id.device))
-                        if unresolved.node_id is not None
-                        else None
-                    ),
-                    parent_id=(
-                        unresolved.parent_id.index_select(0, branch_idx.to(unresolved.parent_id.device))
-                        if unresolved.parent_id is not None
-                        else None
-                    ),
-                )
+                branch_batch = _select_subproblem_batch(unresolved, branch_idx)
                 if neuron_branching_supported:
                     full_branch_idx = unresolved_idx.index_select(
                         0, branch_idx.to(unresolved_idx.device)
@@ -1838,6 +2087,7 @@ def verify_bab_batched(
                             net,
                             witness_branch,
                             input_shape,
+                            dual_config,
                         )
                     multi = None
                     multi_k = int(getattr(config, "multi_split_levels", 1))
@@ -1953,6 +2203,12 @@ def verify_bab_batched(
                             )
                             decision = cast(SplitDecision, cast(Any, brancher).select(scores))
                         if decision.kind == "input_axis":
+                            if climb_library is not None:
+                                raise ValueError(
+                                    "CLIMB requires ReLU phase literals only: the "
+                                    "brancher fell back to an input-axis split, which "
+                                    "would break the shared-box premise of core reuse"
+                                )
                             decision.fanout = fanout
                         children, parent_index = _split_from_decision(branch_batch, decision, net)
                 else:
@@ -2010,6 +2266,9 @@ def verify_bab_batched(
                     )
                     node_counter += nc
                 pool.push(children)
+                if climb_library is not None:
+                    climb_metrics.generated_children += children.batch_size
+                    climb_metrics.observe_frontier(len(pool))
                 if frontier_cap > 0 and len(pool) > frontier_cap:
                     if pool.evict_to(frontier_cap) > 0:
                         any_dropped_frontier_cap = True
@@ -2132,60 +2391,4 @@ def verify_bab(
         time_budget_s=budget,
         verbose=verbose,
         dual_config=dual_config,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Module tests
-# ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-class _IdentityOutput(torch.nn.Module):  # pragma: no cover
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x.reshape(x.shape[0], -1)
-
-
-def _make_assert_layer(kind: str, params: dict[str, ParamValue], n_out: int) -> Layer:  # pragma: no cover
-    from act.back_end.layer_schema import LayerKind
-
-    merged: dict[str, ParamValue] = {"kind": kind}
-    merged.update(params)
-    if "C" not in merged or "thresholds" not in merged or "M" not in merged:
-        batch_size = 1
-        for key in ("y_true", "margin", "c", "d", "lb", "ub"):
-            value = merged.get(key)
-            if isinstance(value, torch.Tensor) and value.dim() > 0:
-                batch_size = max(batch_size, int(value.shape[0]))
-        if kind == OutKind.UNSAFE_LINEAR:
-            c_value = merged.get("c")
-            d_value = merged.get("d")
-            if not isinstance(c_value, torch.Tensor) or not isinstance(d_value, torch.Tensor):
-                raise ValueError("UNSAFE_LINEAR test layer requires tensor c and d")
-            if c_value.dim() == 3:
-                batch_size = int(c_value.shape[0])
-                m_rows = int(c_value.shape[1])
-                merged["C"] = c_value.reshape(batch_size * m_rows, n_out)
-            elif c_value.dim() == 2:
-                m_rows = int(c_value.shape[0])
-                merged["C"] = c_value
-            else:
-                raise ValueError(f"UNSAFE_LINEAR test c dim {c_value.dim()} unsupported")
-            merged["thresholds"] = d_value.reshape(batch_size, m_rows)
-            merged["M"] = m_rows
-        else:
-            merged["C"] = torch.zeros(batch_size, n_out)
-            merged["thresholds"] = torch.zeros(batch_size, 1)
-            merged["M"] = 1
-    return Layer(
-        id=99,
-        kind=LayerKind.ASSERT.value,
-        params=merged,
-        in_vars=list(range(n_out)),
-        out_vars=list(range(n_out)),
     )

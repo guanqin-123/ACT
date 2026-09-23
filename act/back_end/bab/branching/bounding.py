@@ -69,6 +69,7 @@ import torch
 
 from act.back_end.bab.node import SubproblemBatch
 from act.back_end.solver.solver_base import SolveStatus
+from act.util.device_manager import get_default_dtype
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +458,19 @@ class TopKBounding(BoundingStrategy):
             self._restrict(remaining)
         return result
 
+    def view_all(self) -> SubproblemBatch:
+        """Return a lossless, non-destructive view of the full frontier."""
+        if self._lb is None:
+            raise IndexError("view of empty pool")
+        indices = torch.arange(self._lb.shape[0], device=self._lb.device)
+        return self._build(indices)
+
+    def replace_all(self, batch: SubproblemBatch) -> None:
+        """Replace the full frontier without scoring or advancing schedules."""
+        self._clear()
+        if batch.batch_size > 0:
+            self.push(batch)
+
     def _priority_scores(self) -> torch.Tensor:
         depths_t, lb = self._depths, self._lower_bound
         assert depths_t is not None and lb is not None
@@ -688,7 +702,9 @@ class DiverseTopKBounding(TopKBounding):
             value = split_signs[layer_id]
             if value.shape[0] == 0:
                 continue
-            pieces.append(value.detach().reshape(value.shape[0], -1).to(dtype=torch.float32))
+            pieces.append(
+                value.detach().reshape(value.shape[0], -1).to(dtype=get_default_dtype())
+            )
         if not pieces:
             return None
         features = torch.cat(pieces, dim=1)
@@ -699,7 +715,11 @@ class DiverseTopKBounding(TopKBounding):
     def _box_center_features(self) -> Optional[torch.Tensor]:
         if self._lb is None or self._ub is None:
             return None
-        centers = ((self._lb + self._ub) / 2.0).detach().to(dtype=torch.float32)
+        centers = (
+            ((self._lb + self._ub) / 2.0)
+            .detach()
+            .to(dtype=get_default_dtype())
+        )
         if centers.ndim > 2:
             centers = centers.reshape(centers.shape[0], -1)
         if centers.shape[1] == 0:
@@ -896,8 +916,8 @@ class MCTSBounding(BoundingStrategy):
         ``SAT`` status here always denotes a spurious, still-unresolved lane.
         """
         ids = node_ids.detach().cpu()
-        lb = lower_bounds.detach().to(device="cpu", dtype=torch.float64)
-        depth = depths.detach().to(device="cpu", dtype=torch.float64)
+        lb = lower_bounds.detach().cpu().to(dtype=get_default_dtype())
+        depth = depths.detach().cpu().to(dtype=get_default_dtype())
         blended = self.lambda_ * depth / max(n_unstable, 1) + (
             1.0 - self.lambda_
         ) * self._rank01(ids, lb)
