@@ -530,7 +530,7 @@ def cmd_list_downloaded(creator: str):
 # ============================================================================
 
 
-def cmd_fuzz(args):
+def cmd_fuzz(args) -> int:
     """Run ACTFuzzer."""
     print_header()
 
@@ -566,7 +566,7 @@ def cmd_fuzz(args):
                 if not downloaded:
                     print("❌ No VNNLIB categories downloaded!")
                     print("Use: python -m act.pipeline --download <category>")
-                    return
+                    return 1
                 categories = list(set(p["category"] for p in downloaded))
 
             print(f"Loading {len(categories)} VNNLIB category(ies):")
@@ -592,7 +592,7 @@ def cmd_fuzz(args):
                     print(
                         "Use: python -m act.pipeline --download <dataset> --creator torchvision"
                     )
-                    return
+                    return 1
                 datasets = list(set(p["dataset"] for p in downloaded))
 
             print(f"Loading {len(datasets)} TorchVision dataset(s):")
@@ -615,7 +615,7 @@ def cmd_fuzz(args):
 
             if not model_names:
                 print("❌ No models found for selected datasets!")
-                return
+                return 1
 
             spec_results = spec_creator.create_specs_for_data_model_pairs(
                 dataset_names=datasets,
@@ -644,11 +644,11 @@ def cmd_fuzz(args):
         import traceback
 
         traceback.print_exc()
-        return
+        return 1
 
     if not spec_results:
         print("❌ No spec results generated!")
-        return
+        return 1
 
     print(f"✓ Generated {len(spec_results)} spec result(s)\n")
 
@@ -671,11 +671,11 @@ def cmd_fuzz(args):
         import traceback
 
         traceback.print_exc()
-        return
+        return 1
 
     if not wrapped_models:
         print("❌ No models synthesized!")
-        return
+        return 1
 
     print(f"✓ Synthesized {len(wrapped_models)} wrapped model(s)\n")
 
@@ -689,7 +689,7 @@ def cmd_fuzz(args):
 
     if not initial_seeds:
         print("❌ No initial seeds extracted!")
-        return
+        return 1
 
     print(f"✓ Extracted {len(initial_seeds)} initial seeds\n")
 
@@ -722,15 +722,12 @@ def cmd_fuzz(args):
 
         if report.counterexamples and config.save_counterexamples:
             import os
-            import torch as _torch
             from act.front_end.vnnlib_loader.vnnlib_parser import write_vnncomp_result
 
             os.makedirs(config.output_dir, exist_ok=True)
             ce0 = report.counterexamples[0]
-            x = cast(Any, getattr(ce0, "input", ce0))
-            with _torch.no_grad():
-                y_raw = wrapped_model(x)
-            y = cast(Any, y_raw["output"] if isinstance(y_raw, dict) else y_raw)
+            x = ce0.input.unsqueeze(0)
+            y = ce0.output.unsqueeze(0)
             fname = "_".join(map(str, model_id)) if isinstance(model_id, tuple) else str(model_id)
             write_vnncomp_result(
                 os.path.join(config.output_dir, f"{fname}_result.txt"),
@@ -745,7 +742,9 @@ def cmd_fuzz(args):
         import traceback
 
         traceback.print_exc()
-        return
+        return 1
+
+    return 0
 
 
 # ============================================================================
@@ -1795,7 +1794,7 @@ Examples:
         elif args.list_downloaded:
             cmd_list_downloaded(args.creator)
         elif args.fuzz:
-            cmd_fuzz(args)
+            sys.exit(cmd_fuzz(args))
         elif args.verify:
             cmd_verify(args.verify, args)
     except KeyboardInterrupt:
