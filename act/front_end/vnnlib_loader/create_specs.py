@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 from pathlib import Path
-from typing import Any, List, Tuple, Dict, Optional
+from typing import Any, List, Tuple, Dict, Optional, override
 import logging
 import torch.nn as nn
 
@@ -57,7 +57,7 @@ class VNNLibSpecCreator(BaseSpecCreator):
     def __init__(
         self,
         config_name: Optional[str] = "vnnlib_default",
-        config_dict: Optional[Dict] = None
+        config_dict: Optional[Dict[str, Any]] = None
     ):
         """
         Initialize VNNLIB spec creator.
@@ -68,6 +68,7 @@ class VNNLibSpecCreator(BaseSpecCreator):
         """
         super().__init__(config_name, config_dict)
         
+    @override
     def create_specs_for_data_model_pairs(
         self,
         categories: Optional[List[str]] = None,
@@ -196,6 +197,8 @@ class VNNLibSpecCreator(BaseSpecCreator):
                 if result is not None:
                     results.append(result)
                 
+            except UnsupportedSpecError:
+                raise
             except Exception as e:
                 logger.error(
                     f"Failed to create specs for {category}/{instance_id}: {e}"
@@ -208,7 +211,7 @@ class VNNLibSpecCreator(BaseSpecCreator):
         self,
         category: str,
         instance_id: str,
-        instance_data: Dict,
+        instance_data: Dict[str, Any],
         validate_shapes: bool
     ) -> Optional[Tuple[str, str, nn.Module, List[LabeledInputTensor], List[Tuple[InputSpec, OutputSpec]]]]:
         """
@@ -238,9 +241,8 @@ class VNNLibSpecCreator(BaseSpecCreator):
                 f"Parsed VNNLIB specs: {len(queries)} queries, "
                 f"first kind=({queries[0][0].kind}, {queries[0][1].kind})"
             )
-        except UnsupportedSpecError as e:
-            logger.warning("UNSUPPORTED spec %s: %s", instance_id, e)
-            return None
+        except UnsupportedSpecError:
+            raise
         except Exception as e:
             logger.error(f"Failed to parse VNNLIB specs: {e}")
             return None

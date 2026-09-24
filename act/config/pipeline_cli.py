@@ -2,6 +2,11 @@
 """
 ACT Pipeline Command-Line Interface.
 
+Exit statuses:
+- 0: command completed successfully
+- 1: runtime, verification, or unexpected error
+- 3: unsupported model/specification
+
 Provides fuzzing capabilities for neural network verification with support for:
 - VNNLib verification benchmarks (default)
 - TorchVision datasets (alternative)
@@ -26,6 +31,7 @@ from act.config.config import VALID_BOUNDINGS, VALID_SOLVER_TIERS
 logger = logging.getLogger(__name__)
 from act.front_end.specs import OutputSpec
 from act.front_end.vnnlib_loader.create_specs import VNNLibSpecCreator
+from act.front_end.vnnlib_loader.vnnlib_parser import UnsupportedSpecError
 from act.front_end.vnnlib_loader import data_model_loader as vnnlib_loader
 from act.front_end.vnnlib_loader import category_mapping as vnnlib_mapping
 from act.front_end.torchvision_loader.create_specs import TorchVisionSpecCreator
@@ -1285,6 +1291,8 @@ def cmd_verify(target: str, args):
             try:
                 soundness_failed = _run_vnnlib_verify(args)
                 results[test_name] = "FAILED" if soundness_failed else "PASSED"
+            except UnsupportedSpecError:
+                raise
             except Exception as e:
                 print(f"\n❌ Test failed: {e}")
                 import traceback
@@ -1391,6 +1399,11 @@ Examples:
   python -m act.pipeline --verify netfactory --solvers torchlp --tf-modes interval --validate-soundness
   python -m act.pipeline --verify vnnlib --category acasxu_2023 --max-instances 3 --validate-soundness
   python -m act.pipeline --verify torchvision --dataset MNIST --model simple_cnn --num-samples 2 --validate-soundness
+
+Exit statuses:
+  0  Command completed successfully
+  1  Runtime, verification, or unexpected error
+  3  Unsupported model/specification
         """,
     )
 
@@ -1800,6 +1813,9 @@ Examples:
     except KeyboardInterrupt:
         print("\n\n⚠️  Interrupted by user")
         sys.exit(1)
+    except UnsupportedSpecError as e:
+        print(f"\n❌ Unsupported model/specification: {e}")
+        sys.exit(3)
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback

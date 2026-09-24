@@ -32,9 +32,87 @@ class VNNLibParseError(Exception):
     pass
 
 
-class UnsupportedSpecError(Exception):
+class UnsupportedSpecError(ValueError):
     """Exception raised for soundly unsupported VNNLIB features."""
     pass
+
+
+_DECLARE_NETWORK_RE = re.compile(r"\(\s*declare-network\s+([A-Za-z_]\w*)\b")
+_DECLARE_INPUT_RE = re.compile(
+    r"\(\s*declare-input\s+([A-Za-z_]\w*)\s+\S+\s+\[([^\]]+)\]\s*\)",
+    re.MULTILINE,
+)
+_ASSERT_RE = re.compile(r"\(\s*assert\b")
+
+
+def _declaration_prefix(vnnlib_path: Path) -> str:
+    """Read only the declarations preceding the first VNNLIB assertion."""
+    lines: List[str] = []
+    try:
+        with open(vnnlib_path, "r") as source:
+            for line in source:
+                assert_match = _ASSERT_RE.search(line)
+                lines.append(line if assert_match is None else line[:assert_match.start()])
+                if assert_match is not None:
+                    break
+    except OSError as exc:
+        raise VNNLibParseError(f"Failed to read {vnnlib_path}: {exc}") from exc
+    return "".join(lines)
+
+
+def _network_declaration_blocks(prefix: str) -> List[Tuple[str, str]]:
+    """Return complete ``declare-network`` forms from a declaration prefix."""
+    uncommented = re.sub(r";[^\n]*", "", prefix)
+    blocks: List[Tuple[str, str]] = []
+    for match in _DECLARE_NETWORK_RE.finditer(uncommented):
+        depth = 0
+        for index in range(match.start(), len(uncommented)):
+            char = uncommented[index]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    blocks.append((match.group(1), uncommented[match.start():index + 1]))
+                    break
+    return blocks
+
+
+def reject_multi_input_vnnlib(vnnlib_path: Path) -> None:
+    """Reject VNNLIB 2.0 networks declaring multiple input tensors.
+
+    The scan stops at the first assertion, so even very large properties are
+    rejected without tokenizing or constructing their assertion AST. Separate
+    one-input ``declare-network`` blocks remain supported for isomorphic specs.
+    Legacy VNNLIB 1.0 ``declare-const X_i`` declarations denote one flat input
+    tensor and therefore do not trigger this check.
+    """
+    prefix = _declaration_prefix(vnnlib_path)
+    network_blocks = _network_declaration_blocks(prefix)
+    if not network_blocks:
+        network_blocks = [("<unnamed>", prefix)]
+
+    for network_name, block in network_blocks:
+        declarations = []
+        for match in _DECLARE_INPUT_RE.finditer(block):
+            raw_shape = match.group(2)
+            try:
+                shape = tuple(int(part.strip()) for part in raw_shape.split(",") if part.strip())
+            except ValueError as exc:
+                raise VNNLibParseError(
+                    f"Invalid VNNLIB 2.0 declare-input shape: {raw_shape}"
+                ) from exc
+            declarations.append((match.group(1), shape))
+
+        if len(declarations) > 1:
+            rendered = ", ".join(
+                f"{name} [{', '.join(str(dim) for dim in shape)}]"
+                for name, shape in declarations
+            )
+            raise UnsupportedSpecError(
+                f"{vnnlib_path}: multiple input tensors are unsupported; "
+                f"network {network_name!r} declares {len(declarations)} inputs: {rendered}"
+            )
 
 
 # -------------------------------------------------------------------------
@@ -67,6 +145,8 @@ def parse_vnnlib_to_tensors(
     """
     if not vnnlib_path.exists():
         raise VNNLibParseError(f"VNNLIB file not found: {vnnlib_path}")
+
+    reject_multi_input_vnnlib(vnnlib_path)
     
     try:
         with open(vnnlib_path, 'r') as f:
@@ -280,6 +360,7 @@ def parse_vnnlib_2_0(
     """Parse VNNLIB 2.0 by ravel-rewriting bracket variables to legacy names."""
     if not vnnlib_path.exists():
         raise VNNLibParseError(f"VNNLIB file not found: {vnnlib_path}")
+    reject_multi_input_vnnlib(vnnlib_path)
     try:
         with open(vnnlib_path, 'r') as f:
             content = f.read()

@@ -9,7 +9,7 @@ License: AGPLv3+
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Tuple, Dict, Any, Optional, Callable, Union
+from typing import List, Tuple, Dict, Any, Optional, Union
 import logging
 import torch
 
@@ -439,17 +439,13 @@ class BaseSpecCreator(ABC):
     @abstractmethod
     def create_specs_for_data_model_pairs(
         self,
-        max_samples: Optional[int] = None,
-        filter_fn: Optional[Callable] = None,
-        validate_shapes: bool = True
-    ) -> List[Tuple[str, str, torch.nn.Module, List[torch.Tensor], List[Tuple[InputSpec, OutputSpec]]]]:
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
         """
         Create specs for data-model pairs (must be implemented by subclasses).
-        
-        Args:
-            max_samples: Maximum number of samples/instances to process
-            filter_fn: Optional filter function (source, model) -> bool
-            validate_shapes: Whether to validate spec shapes with model
+
+        Concrete creators expose source-specific selection and limit options.
         
         Returns:
             List of (data_source, model_name, pytorch_model, input_tensors, spec_pairs) tuples
