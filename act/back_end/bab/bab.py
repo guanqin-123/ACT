@@ -44,6 +44,7 @@ from act.back_end.bab.climb import ClimbSession
 from act.back_end.bab.branching.branching import (
     BranchingStrategy,
     SplitDecision,
+    _assert_witness_residual_decision_unstable,
     _build_branching_strategy as _build_branching_strategy_impl,
     witness_relu_preactivations,
 )
@@ -181,6 +182,26 @@ def _neuron_branching_supported(config: BaBConfig) -> bool:
 
 def _witness_residual_branching_active(config: BaBConfig) -> bool:
     return config.branching_method == "witness_residual"
+
+
+def _assert_multi_split_invariants(
+    stats: Dict[str, int], active_k: Optional[int] = None
+) -> None:
+    requested = stats["multi_split_k_requested"]
+    used = stats["multi_split_k_used"]
+    waves = stats["multi_split_wave_count"]
+    clamped = stats["multi_split_clamped_wave_count"]
+    starved = stats["multi_split_lane_starved_count"]
+    counters_ok = waves >= 0 and clamped >= 0 and 0 <= starved <= waves
+    metadata_ok = (waves == 0 and used == 1) or (
+        waves > 0 and 2 <= used <= requested
+    )
+    active_ok = active_k is None or 1 <= active_k <= requested
+    assert requested >= 1 and counters_ok and metadata_ok and active_ok, (
+        "MULTI-SPLIT invariant violated: split depth or wave counters are inconsistent "
+        f"(k_requested={requested}, k_used={used}, active_k={active_k}, "
+        f"waves={waves}, clamped_waves={clamped}, starved_waves={starved})"
+    )
 
 
 def _solve_dual_batch(
@@ -445,6 +466,7 @@ def verify_bab_batched(
     }
 
     def _branching_metadata() -> Dict[str, Any]:
+        _assert_multi_split_invariants(multi_split_stats)
         meta: Dict[str, Any] = dict(multi_split_stats)
         meta["bounding_top_k_effective"] = int(getattr(pool, "k", 0))
         if _witness_residual_branching_active(config):
@@ -913,6 +935,9 @@ def verify_bab_batched(
                                 if multi[0].batch_size != branch_batch.batch_size * (2 ** k_adaptive):
                                     multi_split_stats["multi_split_lane_starved_count"] += 1
                     if multi is not None:
+                        _assert_multi_split_invariants(
+                            multi_split_stats, active_k=_wave_split_used
+                        )
                         children, parent_index = multi
                     else:
                         decision = None
@@ -944,6 +969,10 @@ def verify_bab_batched(
                                 **extra_branch_kwargs,
                             )
                             decision = cast(SplitDecision, cast(Any, brancher).select(scores))
+                            if _witness_residual_branching_active(config):
+                                _assert_witness_residual_decision_unstable(
+                                    decision, bd_branch
+                                )
                         if decision.kind == "input_axis":
                             if climb is not None:
                                 climb.reject_input_axis_split()

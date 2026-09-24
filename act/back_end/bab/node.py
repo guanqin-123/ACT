@@ -322,6 +322,33 @@ def split_input(
     return children, parent_index
 
 
+def _selected_parent_sign_conflicts(
+    batch: SubproblemBatch,
+    top_layers: torch.Tensor,
+    top_neurons: torch.Tensor,
+    k: int,
+) -> int:
+    """Count selected neurons that already carry a parent split literal."""
+    if not batch.split_signs:
+        return 0
+    conflicts = 0
+    for bit in range(k):
+        for layer_id_value in torch.unique(top_layers[:, bit]).tolist():
+            layer_id = int(layer_id_value)
+            parent_signs = batch.split_signs.get(layer_id)
+            if parent_signs is None:
+                continue
+            lanes = torch.where(top_layers[:, bit] == layer_id_value)[0]
+            neurons = top_neurons[lanes, bit].to(
+                device=parent_signs.device, dtype=torch.long
+            )
+            selected = parent_signs[
+                lanes.to(parent_signs.device), :, neurons
+            ]
+            conflicts += int((selected != 0).any(dim=1).sum().item())
+    return conflicts
+
+
 def split_neurons(
     batch: SubproblemBatch,
     net: Net,
@@ -335,8 +362,25 @@ def split_neurons(
     n_lanes = batch.batch_size
     n_children = 2**k
     device = batch.lb.device
+    assert (
+        conflicts := _selected_parent_sign_conflicts(
+            batch, top_layers, top_neurons, k
+        )
+    ) == 0, (
+        "NEURON SPLIT invariant violated: selected neuron already split in parent "
+        f"(lanes={n_lanes}, k={k}, selections={n_lanes * k}, "
+        f"conflicts={conflicts})"
+    )
     parent_index = torch.arange(n_lanes, device=device).repeat(n_children)
     children = _child_lanes(batch, parent_index, k)
+    expected_children = n_lanes * n_children
+    assert (
+        children.batch_size == parent_index.numel() == expected_children
+    ), (
+        "NEURON SPLIT invariant violated: child/provenance count mismatch "
+        f"(lanes={n_lanes}, k={k}, expected={expected_children}, "
+        f"children={children.batch_size}, parent_indices={parent_index.numel()})"
+    )
 
     m_specs = 1
     if batch.incremental_alpha:

@@ -706,6 +706,61 @@ class WitnessResidualBranching(BaBSRBranching):
         return pairs, torch.isfinite(best_val)
 
 
+def _assert_witness_residual_decision_unstable(
+    decision: SplitDecision,
+    bounds_dict: Optional[Dict[int, Bounds]],
+) -> None:
+    """Check that every non-fallback witness decision splits an unstable ReLU."""
+    if decision.kind != "neuron":
+        return
+    layer_ids = decision.layer_id
+    neuron_indices = decision.neuron_idx
+    violation: Optional[str] = None
+    if layer_ids is None or neuron_indices is None:
+        violation = (
+            f"neuron decision missing tensors (has_layers={layer_ids is not None}, "
+            f"has_neurons={neuron_indices is not None})"
+        )
+    elif bounds_dict is None:
+        violation = (
+            f"missing bounds (lanes={layer_ids.numel()}, "
+            f"decisions={neuron_indices.numel()})"
+        )
+    else:
+        layer_ids = layer_ids.reshape(-1)
+        neuron_indices = neuron_indices.reshape(-1)
+        for lane, (layer_raw, neuron_raw) in enumerate(
+            zip(layer_ids.tolist(), neuron_indices.tolist())
+        ):
+            layer_id = int(layer_raw)
+            neuron = int(neuron_raw)
+            bounds = bounds_dict.get(layer_id)
+            if bounds is None:
+                violation = (
+                    f"decision has no layer bounds (lane={lane}, layer={layer_id}, "
+                    f"neuron={neuron}, available_layers={len(bounds_dict)})"
+                )
+                break
+            lb = bounds.lb.flatten(start_dim=1)
+            ub = bounds.ub.flatten(start_dim=1)
+            if lane >= lb.shape[0] or neuron >= lb.shape[1] or neuron < 0:
+                violation = (
+                    f"decision index out of range (lane={lane}, layer={layer_id}, "
+                    f"neuron={neuron}, bound_lanes={lb.shape[0]}, "
+                    f"bound_neurons={lb.shape[1]})"
+                )
+                break
+            lower = float(lb[lane, neuron].item())
+            upper = float(ub[lane, neuron].item())
+            if not lower < 0.0 < upper:
+                violation = (
+                    f"non-fallback decision selected stable neuron (lane={lane}, "
+                    f"layer={layer_id}, neuron={neuron}, lb={lower:g}, ub={upper:g})"
+                )
+                break
+    assert violation is None, f"WITNESS RESIDUAL invariant violated: {violation}"
+
+
 def _preact_bias_of(net: Net, lid: int) -> torch.Tensor:
     layer = net.by_id[lid]
     n_neurons = len(layer.out_vars)
