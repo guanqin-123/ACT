@@ -14,6 +14,11 @@ _NETGEN_YAML = Path(__file__).parent / "gen_act_net.yaml"
 _PIPELINE_YAML = Path(__file__).parent / "pipeline.yaml"
 _FRONTEND_YAML = Path(__file__).parent / "frontend.yaml"
 
+
+class ConfigError(ValueError):
+    """Invalid configuration; CLIs exit with status 2."""
+
+
 _VALID_SOLVERS = {"auto", "gurobi", "torchlp", "dual", "hybridz"}
 _VALID_DEVICES = {"cpu", "cuda", "gpu"}
 _VALID_DTYPES = {"float32", "float64"}
@@ -105,7 +110,7 @@ def normalize_bert_method(method: str) -> str:
     key = method.strip().lower().replace("-", "_")
     if key not in _BERT_METHOD_SELECTIONS:
         valid = ", ".join(name.replace("_", "-") for name in VALID_BERT_METHODS)
-        raise ValueError(f"Invalid bert method {method!r}; expected one of: {valid}")
+        raise ConfigError(f"Invalid bert method {method!r}; expected one of: {valid}")
     return key
 
 
@@ -287,34 +292,34 @@ class BaBConfig:
 
     def __post_init__(self) -> None:
         if self.solver_tier not in VALID_SOLVER_TIERS:
-            raise ValueError(
+            raise ConfigError(
                 f"Invalid solver_tier {self.solver_tier!r}; expected {VALID_SOLVER_TIERS}"
             )
         if self.bounding not in VALID_BOUNDINGS:
-            raise ValueError(
+            raise ConfigError(
                 f"Invalid bounding {self.bounding!r}; expected {VALID_BOUNDINGS}"
             )
         if self.root_bounds_reuse not in VALID_ROOT_BOUNDS_REUSE:
-            raise ValueError(
+            raise ConfigError(
                 f"Invalid root_bounds_reuse {self.root_bounds_reuse!r}; "
                 f"expected {VALID_ROOT_BOUNDS_REUSE}"
             )
         if self.top_k < 0:
-            raise ValueError(f"top_k must be non-negative, got {self.top_k}")
+            raise ConfigError(f"top_k must be non-negative, got {self.top_k}")
         if not math.isfinite(self.climb_theta) or not 0.0 <= self.climb_theta <= 1.0:
-            raise ValueError("climb_theta must be finite and in [0, 1]")
+            raise ConfigError("climb_theta must be finite and in [0, 1]")
         if not math.isfinite(self.climb_delta_abs) or self.climb_delta_abs < 0.0:
-            raise ValueError("climb_delta_abs must be finite and non-negative")
+            raise ConfigError("climb_delta_abs must be finite and non-negative")
         if not math.isfinite(self.climb_delta_rel) or self.climb_delta_rel < 0.0:
-            raise ValueError("climb_delta_rel must be finite and non-negative")
+            raise ConfigError("climb_delta_rel must be finite and non-negative")
         if self.climb_recheck_k < 0:
-            raise ValueError("climb_recheck_k must be non-negative")
+            raise ConfigError("climb_recheck_k must be non-negative")
         if self.climb_max_cores < 1:
-            raise ValueError("climb_max_cores must be positive")
+            raise ConfigError("climb_max_cores must be positive")
         if self.climb_propagate_core_chunk < 1:
-            raise ValueError("climb_propagate_core_chunk must be positive")
+            raise ConfigError("climb_propagate_core_chunk must be positive")
         if self.top_k > 0 and self.bounding in TOP_K_INCOMPATIBLE_BOUNDINGS:
-            raise ValueError(
+            raise ConfigError(
                 f"top_k={self.top_k} is not supported by bounding={self.bounding!r}; "
                 f"it applies only to the order-ranked pools {TOP_K_BOUNDINGS}"
             )
@@ -324,11 +329,11 @@ class BaBConfig:
             if self.solver_tier == "lp":
                 self.solver_tier = selection.solver_tier
         if self.perturbed_words not in (1, 2):
-            raise ValueError("perturbed_words must be 1 or 2")
+            raise ConfigError("perturbed_words must be 1 or 2")
         if self.num_verify_iters < 0:
-            raise ValueError("num_verify_iters must be non-negative")
+            raise ConfigError("num_verify_iters must be non-negative")
         if self.max_eps < 0 or self.eps < 0:
-            raise ValueError("eps and max_eps must be non-negative")
+            raise ConfigError("eps and max_eps must be non-negative")
 
     @classmethod
     def from_yaml(
@@ -382,19 +387,19 @@ def _validate_bab_presets(
     if raw_presets is None:
         return {}
     if not isinstance(raw_presets, dict):
-        raise ValueError(f"bab_presets in {config_path} must be a YAML mapping")
+        raise ConfigError(f"bab_presets in {config_path} must be a YAML mapping")
 
     valid_keys = {fld.name for fld in fields(BaBConfig)}
     presets: dict[str, dict[str, Any]] = {}
     for name, values in raw_presets.items():
         if not isinstance(name, str) or not isinstance(values, dict):
-            raise ValueError(
+            raise ConfigError(
                 f"BaB preset {name!r} in {config_path} must be a YAML mapping"
             )
         unknown = set(values) - valid_keys
         if unknown:
             names = ", ".join(sorted(unknown))
-            raise ValueError(
+            raise ConfigError(
                 f"Unknown BaB preset key(s) in {config_path} preset {name!r}: {names}"
             )
         copied = deepcopy(values)
@@ -419,7 +424,7 @@ def _select_bab_preset(
 ) -> dict[str, Any]:
     if name not in presets:
         available = ", ".join(sorted(presets)) or "(none)"
-        raise ValueError(
+        raise ConfigError(
             f"Unknown BaB preset {name!r}; available presets: {available}"
         )
     return deepcopy(presets[name])
@@ -460,12 +465,12 @@ class GenerationConfig:
 
     def __post_init__(self) -> None:
         if self.registry_mode not in _VALID_REGISTRY_MODES:
-            raise ValueError(
+            raise ConfigError(
                 f"Invalid registry_mode {self.registry_mode!r}; "
                 f"expected one of {_VALID_REGISTRY_MODES}"
             )
         if self.coverage_mode not in _VALID_COVERAGE_MODES:
-            raise ValueError(
+            raise ConfigError(
                 f"Invalid coverage_mode {self.coverage_mode!r}; "
                 f"expected one of {_VALID_COVERAGE_MODES}"
             )
@@ -513,7 +518,7 @@ class DualConfig:
 
     def __post_init__(self) -> None:
         if self.forward_lin_max_perturbed < 0:
-            raise ValueError(
+            raise ConfigError(
                 "forward_lin_max_perturbed must be non-negative, got "
                 f"{self.forward_lin_max_perturbed}"
             )
@@ -604,15 +609,15 @@ class BackendConfig:
 
     def __post_init__(self) -> None:
         if self.solver not in _VALID_SOLVERS:
-            raise ValueError(
+            raise ConfigError(
                 f"Invalid solver {self.solver!r}; expected one of {_VALID_SOLVERS}"
             )
         if self.device not in _VALID_DEVICES:
-            raise ValueError(
+            raise ConfigError(
                 f"Invalid device {self.device!r}; expected one of {_VALID_DEVICES}"
             )
         if self.dtype not in _VALID_DTYPES:
-            raise ValueError(
+            raise ConfigError(
                 f"Invalid dtype {self.dtype!r}; expected one of {_VALID_DTYPES}"
             )
         if self.method is not None:
@@ -631,7 +636,7 @@ class BackendConfig:
         # Fail loud at config-load time rather than at the first batched call.
         if self.solver == "gurobi":
             if self.lp_enabled:
-                raise ValueError(
+                raise ConfigError(
                     "BackendConfig: solver='gurobi' is incompatible with "
                     "lp_enabled=True.  GurobiSolver.solve_batch raises for N>1 "
                     "(Gurobi does not expose a truly parallel multi-LP API for "
@@ -639,7 +644,7 @@ class BackendConfig:
                     "Either set lp_enabled=False or switch to solver='torchlp'."
                 )
             if self.bab_max_batch_size > 1:
-                raise ValueError(
+                raise ConfigError(
                     f"BackendConfig: solver='gurobi' is incompatible with "
                     f"bab_max_batch_size={self.bab_max_batch_size} > 1.  "
                     f"GurobiSolver.solve_batch raises for N>1.  "

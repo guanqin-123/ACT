@@ -8,6 +8,11 @@ Provides CLI tools for core verification operations:
 - Network serialization (save/load ACT Net structures)
 - Analysis and constraint inspection
 
+Exit status (--verify):
+  0  every lane received a verdict (CERTIFIED / FALSIFIED / UNKNOWN / TIMEOUT)
+  1  error, no verdict, or a network the selected solver cannot handle
+  2  invalid configuration (ConfigError), reported as "❌ <network>: <message>"
+
 Copyright (C) 2025 SVF-tools/ACT
 License: AGPLv3+
 """
@@ -25,7 +30,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Union, cast, get_args, get_origin, get_type_hints
 
-from act.config.config import GurobiConfig, TorchLPConfig, VALID_BERT_METHODS, VALID_BOUNDINGS, VALID_ROOT_BOUNDS_REUSE, VALID_SOLVER_TIERS, _VALID_SOLVERS
+from act.config.config import ConfigError, GurobiConfig, TorchLPConfig, VALID_BERT_METHODS, VALID_BOUNDINGS, VALID_ROOT_BOUNDS_REUSE, VALID_SOLVER_TIERS, _VALID_SOLVERS
 from act.back_end.layer_schema import LayerKind
 from act.front_end.specs import OutKind
 from act.util.cli_utils import add_device_args, initialize_from_args
@@ -261,6 +266,9 @@ def _verify_one_net(
         because no lane received a verdict.
       * ``str`` for any other exception (genuine error).
 
+    Raises ``ConfigError`` when the resolved configuration is invalid (BaB
+    preset application, CLIMB prerequisites) so the caller can exit with 2.
+
     Tier 1 — interval (verify_once): always runs; certifies or falsifies via
               pure-tensor bounds propagation.
     Tier 2 — LP-batched (verify_lp_batched): runs on UNKNOWN lanes when
@@ -405,18 +413,33 @@ def _verify_one_net(
                     raise
 
         return results, None, n_layers
+    except ConfigError:
+        raise
     except Exception as e:  # noqa: BLE001 — surface per-net error, keep iterating
         return [], str(e), None
 
 
+def _report_config_error(label: str, err: ConfigError) -> int:
+    """Print *err* in the CLI error format and return exit status 2."""
+    print(f"❌ {label}: {err}")
+    return 2
+
+
 def run_verification(args, backend_cfg):
-    """Run verification on a network using *backend_cfg*."""
+    """Run verification on a network using *backend_cfg*.
+
+    Returns 0 when every lane received a verdict, 1 on error / no verdict /
+    unsupported network, and 2 on invalid configuration.
+    """
     from act.util.stats import VerifyStatus
 
     pinned_bab_fields = explicit_bab_fields(args)
-    results, err, n_layers = _verify_one_net(
-        args.network, backend_cfg, pinned_bab_fields
-    )
+    try:
+        results, err, n_layers = _verify_one_net(
+            args.network, backend_cfg, pinned_bab_fields
+        )
+    except ConfigError as e:
+        return _report_config_error(args.network, e)
     if err is not None:
         if isinstance(err, _SkipUnsupported):
             print(
@@ -936,6 +959,11 @@ Examples:
   
   # Use GPU with float64
   python -m act.back_end --verify --network cifar.json --device cuda --dtype float64
+
+Exit status (--verify):
+  0  every lane received a verdict (CERTIFIED / FALSIFIED / UNKNOWN / TIMEOUT)
+  1  error, no verdict, or a network the selected solver cannot handle
+  2  invalid configuration (ConfigError)
         """,
     )
 
@@ -1423,10 +1451,13 @@ Examples:
     # verification time so explicit BaB flags remain the highest precedence.
     from act.config.config import BackendConfig
 
-    backend_cfg = BackendConfig.from_yaml(
-        config_path=args.backend_config,
-        **_collect_backend_overrides(args, _user_set),
-    )
+    try:
+        backend_cfg = BackendConfig.from_yaml(
+            config_path=args.backend_config,
+            **_collect_backend_overrides(args, _user_set),
+        )
+    except ConfigError as e:
+        return _report_config_error(args.network or "Error", e)
 
     # Initialize device manager from the resolved config
     import argparse as _ap

@@ -33,6 +33,7 @@ from act.back_end.solver.solver_dual import DualBatchResult
 from act.config.config import (
     BaBConfig,
     CLIMB_SOLVER_TIER,
+    ConfigError,
     NEURON_BRANCHING_METHODS,
     NO_REFINEMENT_MODE,
     TOP_K_BOUNDINGS,
@@ -777,7 +778,7 @@ def validate_climb_config(config: BaBConfig) -> None:
     if config.per_subproblem_refine != NO_REFINEMENT_MODE:
         failures.append(f"per_subproblem_refine must be {NO_REFINEMENT_MODE!r}")
     if failures:
-        raise ValueError("CLIMB configuration error: " + "; ".join(failures))
+        raise ConfigError("CLIMB configuration error: " + "; ".join(failures))
 
 
 @dataclass(frozen=True)
