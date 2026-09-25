@@ -271,18 +271,14 @@ class ConSet:
     
     @staticmethod
     def _is_op_supported_by_exporter(op: str) -> bool:
-        """
-        Best-effort early validation against exporter registry.
-        Falls back to allow if exporter cannot be imported.
-        """
-        try:
-            mod = importlib.import_module("act.back_end.layer_util")
-            fn = getattr(mod, "is_supported_op", None)
-            if fn is None:
-                return True
-            return bool(fn(op))
-        except Exception:
-            return True
+        """Validate an operator against the exporter registry."""
+        mod = importlib.import_module("act.back_end.layer_util")
+        fn = getattr(mod, "is_supported_op", None)
+        if fn is None:
+            raise RuntimeError(
+                f"Exporter capability function is_supported_op is missing while checking {op!r}"
+            )
+        return bool(fn(op))
 
     def __iter__(self):
         """Iterate over constraints (Con objects). Makes ConSet iterable."""

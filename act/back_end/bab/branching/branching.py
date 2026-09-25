@@ -528,6 +528,7 @@ def witness_relu_preactivations(
     x = witness_input
     if input_shape and x.dim() == 2 and x.shape[1] == int(math.prod(input_shape)):
         x = x.reshape(x.shape[0], *input_shape)
+    bounds_dict = None
     try:
         bounds_dict = compute_forward_bounds(
             net,
@@ -536,7 +537,9 @@ def witness_relu_preactivations(
             forward_lin_max_perturbed=dual_config.forward_lin_max_perturbed,
         )
     except (ValueError, RuntimeError, KeyError, IndexError):
-        # An unsupported layer or witness shape falls back to BaBSR scoring.
+        # Unsupported layers and incompatible witness shapes use BaBSR scoring.
+        bounds_dict = None
+    if bounds_dict is None:
         return None
     preactivations = {
         layer_id: bounds.lb.flatten(start_dim=1)
@@ -916,7 +919,8 @@ class FSBBranching(BaBSRBranching):
                 if baseline is not None
                 else stacked_margins
             )
-        except Exception:
+        except (TypeError, NotImplementedError, ValueError):
+            # Legacy solvers without batched hypotheses use serial evaluation.
             improvements = self._evaluate_hypotheses_serial(
                 net,
                 bounds_dict,
@@ -983,13 +987,16 @@ class FSBBranching(BaBSRBranching):
             dtype=next(iter(hypothesis_list[0].values())).dtype,
         )
         for c_idx, hypo in enumerate(hypothesis_list):
+            result = None
             try:
                 result = self._evaluate_hypothesis(net, bounds_dict, hypo)
-                margins = result.margins.reshape(N, -1).mean(dim=-1).to(improvements)
-                improvements[c_idx] = margins - baseline.to(margins.device) if baseline is not None else margins
-            except Exception:
-                # Recoverable: an individual hypothetical split may be incompatible with a legacy solver/mock.
+            except (TypeError, NotImplementedError):
+                # Legacy solver/mock does not support this hypothesis representation.
+                result = None
+            if result is None:
                 continue
+            margins = result.margins.reshape(N, -1).mean(dim=-1).to(improvements)
+            improvements[c_idx] = margins - baseline.to(margins.device) if baseline is not None else margins
         return improvements
 
     def _evaluate_hypothesis(

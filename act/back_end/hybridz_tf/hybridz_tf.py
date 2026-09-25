@@ -388,20 +388,17 @@ class HybridzTF(RegistryTF):
 
     def _seed_sparse_cache(self, L: Layer, input_bounds: Bounds) -> None:
         k = L.kind.upper()
-        try:
-            if k in ("INPUT", "INPUT_SPEC"):
+        if k in ("INPUT", "INPUT_SPEC"):
+            self._sparse_hz_cache[L.id] = self._sparse_from_bounds(input_bounds)
+            self._sparse_drop_reasons.pop(L.id, None)
+        elif k != "ASSERT":
+            preds = self._net.preds.get(L.id, [])
+            if preds and preds[0] in self._sparse_hz_cache:
+                self._sparse_hz_cache[L.id] = self._sparse_hz_cache[preds[0]]
+                self._sparse_drop_reasons.pop(L.id, None)
+            elif not preds:
                 self._sparse_hz_cache[L.id] = self._sparse_from_bounds(input_bounds)
                 self._sparse_drop_reasons.pop(L.id, None)
-            elif k != "ASSERT":
-                preds = self._net.preds.get(L.id, [])
-                if preds and preds[0] in self._sparse_hz_cache:
-                    self._sparse_hz_cache[L.id] = self._sparse_hz_cache[preds[0]]
-                    self._sparse_drop_reasons.pop(L.id, None)
-                elif not preds:
-                    self._sparse_hz_cache[L.id] = self._sparse_from_bounds(input_bounds)
-                    self._sparse_drop_reasons.pop(L.id, None)
-        except Exception as exc:
-            self._drop_sparse_hz(L.id, f"sparse_seed_failed:{type(exc).__name__}")
 
     def _drop_sparse_hz(self, layer_id: int, reason: str) -> None:
         lid = int(layer_id)
@@ -423,24 +420,21 @@ class HybridzTF(RegistryTF):
         if self._sparse_exceeds_limit(hz, result.bounds.lb.numel()):
             self._drop_sparse_hz(L.id, f"sparse_size_limit:{k}")
             return result
-        try:
-            for apply_sparse in (
-                hz_mlp.sparse_hz_apply_layer,
-                hz_cnn.sparse_hz_apply_layer,
-                hz_transformer.sparse_hz_apply_layer,
-            ):
-                handled, out, drop_reason = apply_sparse(L, hz, input_bounds, result, self)
-                if not handled:
-                    continue
-                if out is None:
-                    self._drop_sparse_hz(L.id, drop_reason or f"unsupported_sparse_op:{k}")
-                    return result
-                self._sparse_hz_cache[L.id] = out
-                self._sparse_drop_reasons.pop(L.id, None)
-                return self._sparse_fact(result, out)
-            self._drop_sparse_hz(L.id, f"unsupported_sparse_op:{k}")
-        except Exception as exc:
-            self._drop_sparse_hz(L.id, f"sparse_op_failed:{k}:{type(exc).__name__}")
+        for apply_sparse in (
+            hz_mlp.sparse_hz_apply_layer,
+            hz_cnn.sparse_hz_apply_layer,
+            hz_transformer.sparse_hz_apply_layer,
+        ):
+            handled, out, drop_reason = apply_sparse(L, hz, input_bounds, result, self)
+            if not handled:
+                continue
+            if out is None:
+                self._drop_sparse_hz(L.id, drop_reason or f"unsupported_sparse_op:{k}")
+                return result
+            self._sparse_hz_cache[L.id] = out
+            self._sparse_drop_reasons.pop(L.id, None)
+            return self._sparse_fact(result, out)
+        self._drop_sparse_hz(L.id, f"unsupported_sparse_op:{k}")
         return result
 
     def apply(

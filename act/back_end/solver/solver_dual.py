@@ -843,10 +843,15 @@ class DualSolver(Solver):
         from act.back_end.dual_tf.tf_transformer import (
             attention_rule_alpha, _attention_input_boxes,
         )
+        boxes = None
         try:
-            x_l, x_u, y_l, y_u, _scale, _mask = _attention_input_boxes(layer, bounds_dict)
+            boxes = _attention_input_boxes(layer, bounds_dict)
         except KeyError:
+            # Missing predecessor bounds disable learned attention slopes.
+            boxes = None
+        if boxes is None:
             return None
+        x_l, x_u, y_l, y_u, _scale, _mask = boxes
         x_l = x_l.to(device=device, dtype=dtype)
         x_u = x_u.to(device=device, dtype=dtype)
         y_l = y_l.to(device=device, dtype=dtype)
@@ -1154,6 +1159,7 @@ class DualSolver(Solver):
                 vals[lid] = (b.lb.flatten(start_dim=1), b.ub.flatten(start_dim=1))
                 continue
             preds = net.preds.get(lid, [])
+            refreshed = None
             try:
                 if k == LayerKind.CONV2D.value:
                     plb, pub = vals[preds[0]]
@@ -1182,8 +1188,13 @@ class DualSolver(Solver):
                     lb, ub = vals[preds[0]]
                 else:
                     return None
+                refreshed = (lb, ub)
             except (KeyError, IndexError, ValueError):
+                # Missing/incompatible interval metadata disables this optional refresh.
+                refreshed = None
+            if refreshed is None:
                 return None
+            lb, ub = refreshed
 
             b = out.get(lid)
             if b is not None:
