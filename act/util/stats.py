@@ -260,16 +260,12 @@ class ACTStats:
         Returns:
             tuple: (available_memory_mb, total_memory_mb) - (0.0, 0.0) if no GPU
         """
-        try:
-            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-                total_memory = torch.cuda.get_device_properties(0).total_memory
-                allocated_memory = torch.cuda.memory_allocated()
-                available_memory = total_memory - allocated_memory
-                return available_memory / (1024 * 1024), total_memory / (1024 * 1024)
-            else:
-                return 0.0, 0.0
-        except Exception:
+        if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
             return 0.0, 0.0
+        total_memory = torch.cuda.get_device_properties(0).total_memory
+        allocated_memory = torch.cuda.memory_allocated()
+        available_memory = total_memory - allocated_memory
+        return available_memory / (1024 * 1024), total_memory / (1024 * 1024)
     
     @classmethod
     def get_cpu_memory_usage(cls) -> float:

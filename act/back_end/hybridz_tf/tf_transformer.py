@@ -157,13 +157,16 @@ def _attention_score_differences(L, bounds: Bounds, rowsize: int, tf):
             continue
         if kind in {"SCALE", "BIAS"}:
             key = "a" if kind == "SCALE" else "c"
-            try:
-                value = (
-                    _broadcast_flat(score_layer.params[key], n_scores)
-                    .detach().cpu().double().numpy()
-                )
-            except ValueError:
+            raw_value = score_layer.params[key]
+            value_count = int(raw_value.numel())
+            if value_count == 0 or (
+                value_count not in (1, n_scores) and n_scores % value_count != 0
+            ):
                 return None
+            value = (
+                _broadcast_flat(raw_value, n_scores)
+                .detach().cpu().double().numpy()
+            )
             if kind == "SCALE":
                 scale *= value
             else:

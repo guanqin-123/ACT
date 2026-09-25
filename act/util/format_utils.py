@@ -33,14 +33,16 @@ def format_bytes(size_bytes: Union[int, float], precision: int = 1) -> str:
 
 
 def dir_size(path: Union[str, Path]) -> int:
-    """Return total size in bytes of all files under ``path`` (0 on error)."""
+    """Return total size in bytes of all files under ``path``."""
+    root = Path(path)
+    if not root.exists():
+        raise FileNotFoundError(f"Directory does not exist: {root}")
+    if not root.is_dir():
+        raise NotADirectoryError(f"Expected a directory, got: {root}")
     total = 0
-    try:
-        for item in Path(path).rglob("*"):
-            if item.is_file():
-                total += item.stat().st_size
-    except Exception:
-        pass
+    for item in root.rglob("*"):
+        if item.is_file():
+            total += item.stat().st_size
     return total
 
 
