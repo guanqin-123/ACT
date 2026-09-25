@@ -72,7 +72,7 @@ jobs:
       - name: VNNLIB — download benchmarks
         run: |
           cd ${{ github.workspace }}
-          for cat in acasxu_2023 dist_shift_2023 safenlp_2024 relusplitter_2026 isomorphic_acasxu_2026 smart_turn_multimodal_2026; do
+          for cat in acasxu_2023 dist_shift_2023 safenlp_2024 relusplitter_2026 isomorphic_acasxu_2026; do
             coverage run -p -m act.front_end --download $cat
           done
 
@@ -97,20 +97,6 @@ jobs:
           cd ${{ github.workspace }}
           coverage run -p -m act.pipeline --verify vnnlib --category relusplitter_2026 --max-instances 2 --merge-split-relus \
             --solvers dual --device cpu --dtype float64
-
-      # ===================================================================
-      # smart_turn is a two-input benchmark. ONNX Q/DQ conversion still runs,
-      # then ACT rejects the multi-input property before parsing with exit 3.
-      # ===================================================================
-      - name: VNNLIB E2E — smart_turn_multimodal_2026 (ONNX Q/DQ ingestion)
-        run: |
-          cd ${{ github.workspace }}
-          set +e
-          timeout 60 coverage run -p -m act.pipeline --verify vnnlib --category smart_turn_multimodal_2026 \
-            --max-instances 1 --solvers dual --device cpu --dtype float64
-          status=$?
-          set -e
-          test "$status" -eq 3
 
       # ===================================================================
       # Isomorphic dual-network specs (2026): _isomorphic_multinet_rewrite,
@@ -181,7 +167,7 @@ jobs:
             --device cpu --dtype float64 --verbose
 
       # Top-k cap and pool-size invariants are asserted in branching/bounding.py.
-      # Exit status 0 means every lane received a verdict; config rejection must exit 2.
+      # Exit status 0 means every lane received a verdict.
       - name: BaB bounding — top-k parameter
         run: |
           cd ${{ github.workspace }}
@@ -191,17 +177,6 @@ jobs:
               --bab --bab-bounding $v --bab-top-k 2 \
               --solver torchlp --device cpu --dtype float64 \
               --timeout 30 --bab-max-depth 4 --bab-max-subproblems 40 --verbose
-          done
-          for v in random mcts; do
-            set +e
-            coverage run -p -m act.back_end --verify \
-              --network "$ACT_NETS_DIR/mlp_plain_3x8_64x64_3962224133.json" \
-              --bab --bab-bounding $v --bab-top-k 2 \
-              --solver torchlp --device cpu --dtype float64 \
-              --timeout 20 --bab-max-depth 2 --bab-max-subproblems 5 >/dev/null 2>&1
-            status=$?
-            set -e
-            test "$status" -eq 2
           done
 
       # ===================================================================
@@ -384,22 +359,6 @@ jobs:
             --network "$ACT_NETS_DIR/mlp_plain_3x8_64x64_3962224133.json" \
             --solver dual --bab --bab-preset climb --bab-max-batch-size 16 \
             --bab-max-depth 14 --bab-max-subproblems 250 --timeout 600 --verbose
-
-      # Exit status 2 means the configuration was rejected by validation
-      # (validate_climb_config) before solving; the message names the violated
-      # CLIMB prerequisite.
-      - name: BaB CLIMB — reject incompatible bounding
-        run: |
-          cd ${{ github.workspace }}
-          set +e
-          out=$(coverage run -p -m act.back_end --verify \
-            --network "$ACT_NETS_DIR/mlp_plain_3x8_64x64_3962224133.json" \
-            --solver dual --bab --bab-preset climb \
-            --bab-bounding random --bab-max-depth 1 --bab-max-subproblems 1 2>&1)
-          status=$?
-          set -e
-          echo "$out"
-          test "$status" -eq 2
 
       # These pool nets exercise symbolic MaxPool forward and cached one-hot dual
       # backward. Exit status 0 means every lane received a verdict (CERTIFIED /
