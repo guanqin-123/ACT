@@ -140,8 +140,18 @@ class ACTLayerNorm(nn.Module):
         gamma = self.get_buffer("gamma").to(device=x.device, dtype=x.dtype)
         beta = self.get_buffer("beta").to(device=x.device, dtype=x.dtype)
         if self.variant == "no_var":
-            dims = tuple(range(1, x.dim()))
-            return (x - x.mean(dim=dims, keepdim=True)) * gamma + beta
+            width = int(gamma.numel())
+            features = int(x.shape[1:].numel())
+            if width == 0 or features % width:
+                raise ValueError(
+                    f"ACTLayerNorm: gamma width {width} does not divide the flattened input width {features}"
+                )
+            if width == features:
+                dims = tuple(range(1, x.dim()))
+                return (x - x.mean(dim=dims, keepdim=True)) * gamma + beta
+            rows = x.reshape(x.shape[0], features // width, width)
+            centered = rows - rows.mean(dim=-1, keepdim=True)
+            return (centered * gamma.reshape(width) + beta.reshape(width)).reshape(x.shape)
         import torch.nn.functional as F
 
         return F.layer_norm(x, gamma.shape, weight=gamma, bias=beta, eps=self.eps)
@@ -180,7 +190,7 @@ class ACTMHASplit(nn.Module):
         if bias is not None:
             bias = bias.to(device=x.device, dtype=x.dtype)
         projected = F.linear(x.reshape(x.shape[0], -1, weight.shape[1]), weight, bias)
-        hidden = self.hidden_size or int(projected.shape[-1])
+        hidden = int(weight.shape[0])
         sequence_length = projected.shape[1]
         projected = projected.reshape(x.shape[0], sequence_length, hidden)
         if self.role in {"query", "key"}:
@@ -307,7 +317,12 @@ class ActGraphModule(nn.Module):
             if mod is None:
                 out = self._apply_functional(layer, inp_tensors)
             else:
-                if layer.kind == LayerKind.DENSE.value and inp_tensors[0].dim() >= 3:
+                if (
+                    layer.kind == LayerKind.DENSE.value
+                    and layer.params.get("token_wise")
+                ):
+                    out = mod(inp_tensors[0])
+                elif layer.kind == LayerKind.DENSE.value and inp_tensors[0].dim() >= 3:
                     import torch.nn.functional as F
                     output_shape = layer.params.get("output_shape")
                     if output_shape is not None and len(output_shape) >= 3:

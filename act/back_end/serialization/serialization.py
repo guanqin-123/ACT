@@ -25,6 +25,7 @@ import torch
 from act.back_end.core import Layer, Net
 from act.back_end.layer_schema import REGISTRY, LayerKind
 from act.back_end.layer_util import validate_layer
+from act.front_end.spec_creator_base import LabeledInputTensor
 
 SERIALIZATION_VERSION = "2.0"
 
@@ -85,6 +86,42 @@ class TensorEncoder:
 
         return tensor
 
+
+def _encode_value(value: Any) -> Any:
+    """Encode tensors and ACT wrapper values nested inside layer metadata."""
+    if isinstance(value, torch.Tensor):
+        return TensorEncoder.encode_tensor(value)
+    if isinstance(value, LabeledInputTensor):
+        return {
+            "__act_type__": "LabeledInputTensor",
+            "tensor": TensorEncoder.encode_tensor(value.tensor),
+            "label": _encode_value(value.label),
+        }
+    if isinstance(value, dict):
+        return {key: _encode_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_encode_value(item) for item in value)
+    if isinstance(value, list):
+        return [_encode_value(item) for item in value]
+    return value
+
+
+def _decode_value(value: Any, target_device: Optional[str]) -> Any:
+    """Decode values produced by :func:`_encode_value`."""
+    if isinstance(value, list):
+        return [_decode_value(item, target_device) for item in value]
+    if not isinstance(value, dict):
+        return value
+    value_type = value.get("__act_type__")
+    if value_type == "LabeledInputTensor":
+        return LabeledInputTensor(
+            tensor=TensorEncoder.decode_tensor(value["tensor"], target_device),
+            label=_decode_value(value["label"], target_device),
+        )
+    if "dtype" in value and "shape" in value and "data" in value:
+        return TensorEncoder.decode_tensor(value, target_device)
+    return {key: _decode_value(item, target_device) for key, item in value.items()}
+
 class LayerSerializer:
     """Handles Layer serialization/deserialization."""
     
@@ -92,23 +129,15 @@ class LayerSerializer:
     def serialize_layer(layer: Layer) -> Dict[str, Any]:
         """Convert Layer to JSON-serializable dictionary."""
         # Encode tensor parameters
-        params_encoded = {}
-        for name, value in layer.params.items():
-            if isinstance(value, torch.Tensor):
-                params_encoded[name] = TensorEncoder.encode_tensor(value)
-            else:
-                # Handle non-tensor parameters (floats, ints, strings, etc.)
-                params_encoded[name] = value
+        params_encoded = {
+            name: _encode_value(value) for name, value in layer.params.items()
+        }
         
         # Encode cache tensors (if any)
         cache_encoded = {}
         if hasattr(layer, 'cache'):
             for name, value in layer.cache.items():
-                if isinstance(value, torch.Tensor):
-                    cache_encoded[name] = TensorEncoder.encode_tensor(value)
-                else:
-                    # Handle non-tensor cache values
-                    cache_encoded[name] = value
+                cache_encoded[name] = _encode_value(value)
         
         return {
             "id": layer.id,
@@ -123,24 +152,15 @@ class LayerSerializer:
     def deserialize_layer(layer_dict: Dict[str, Any], target_device: Optional[str] = None) -> Layer:
         """Convert JSON dictionary to Layer object."""
         # Decode tensor parameters
-        params_decoded = {}
-        for name, value in layer_dict.get("params", {}).items():
-            if isinstance(value, dict) and "dtype" in value and "shape" in value:
-                # This is a tensor that was encoded
-                params_decoded[name] = TensorEncoder.decode_tensor(value, target_device)
-            else:
-                # This is a regular value (float, int, string, etc.)
-                params_decoded[name] = value
+        params_decoded = {
+            name: _decode_value(value, target_device)
+            for name, value in layer_dict.get("params", {}).items()
+        }
         
         # Decode cache tensors
         cache_decoded = {}
         for name, value in layer_dict.get("cache", {}).items():
-            if isinstance(value, dict) and "dtype" in value and "shape" in value:
-                # This is a tensor that was encoded
-                cache_decoded[name] = TensorEncoder.decode_tensor(value, target_device)
-            else:
-                # This is a regular value
-                cache_decoded[name] = value
+            cache_decoded[name] = _decode_value(value, target_device)
         
         return Layer(
             id=layer_dict["id"],

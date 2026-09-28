@@ -21,7 +21,7 @@ from act.front_end.torchvision_loader import data_model_mapping as tv_mapping
 from act.front_end.torchvision_loader import data_model_loader as tv_loader
 from act.front_end.vnnlib_loader import category_mapping as vnnlib_mapping
 from act.front_end.bert_loader import data_loader as bert_loader
-from act.config.config import VALID_BERT_METHODS
+from act.config.config import VALID_BERT_CONVERSION_ROUTES, VALID_BERT_METHODS
 
 
 def _parse_list_arg(value: Optional[str], item_type: type = str) -> Optional[list[Any]]:
@@ -47,6 +47,9 @@ _FRONTEND_TEXTVERIFY_OVERRIDE_KEYS: tuple[str, ...] = (
     "num_verify_iters",
     "k",
     "alpha_opt_steps",
+    "checkpoint_dir",
+    "position_mode",
+    "conversion_route",
 )
 
 
@@ -716,6 +719,27 @@ Examples:
         default=None,
         dest="alpha_opt_steps",
         help="Optimized-alpha optimization steps.",
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default=None,
+        dest="checkpoint_dir",
+        help="BUFFET model directory containing the checkpoint file.",
+    )
+    parser.add_argument(
+        "--position-mode",
+        choices=["prefix", "sweep"],
+        default=None,
+        dest="position_mode",
+        help="Use existing prefix positions or sweep eligible WordPieces.",
+    )
+    parser.add_argument(
+        "--conversion-route",
+        choices=VALID_BERT_CONVERSION_ROUTES,
+        default=None,
+        dest="conversion_route",
+        help="Use generic FX route b (default) or manual comparison route a.",
     )
     
     # Add standard device/dtype arguments

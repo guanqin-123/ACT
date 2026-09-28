@@ -36,6 +36,8 @@ from .tf_transformer import (
     forward_matmul, backward_matmul,
     forward_mul, backward_mul,
     forward_mha, backward_mha,
+    forward_mha_split, backward_mha_split,
+    forward_mha_join, backward_mha_join,
     forward_layernorm, backward_layernorm,
     forward_softmax, backward_softmax,
     forward_gelu, backward_gelu,
@@ -521,8 +523,8 @@ class DualTF:
         LayerKind.MATMUL.value:     forward_matmul,
         LayerKind.MUL.value:        forward_mul,
         LayerKind.SIGN.value:       forward_sign,
-        LayerKind.MHA_SPLIT.value:  forward_mha,
-        LayerKind.MHA_JOIN.value:   forward_mha,
+        LayerKind.MHA_SPLIT.value:  forward_mha_split,
+        LayerKind.MHA_JOIN.value:   forward_mha_join,
         LayerKind.MASK_ADD.value:   forward_mha,
         LayerKind.LAYERNORM.value:  forward_layernorm,
         LayerKind.SOFTMAX.value:    forward_softmax,
@@ -589,8 +591,8 @@ class DualTF:
         LayerKind.MATMUL.value:     backward_matmul,
         LayerKind.MUL.value:        backward_mul,
         LayerKind.SIGN.value:       backward_sign,
-        LayerKind.MHA_SPLIT.value:  backward_mha,
-        LayerKind.MHA_JOIN.value:   backward_mha,
+        LayerKind.MHA_SPLIT.value:  backward_mha_split,
+        LayerKind.MHA_JOIN.value:   backward_mha_join,
         LayerKind.MASK_ADD.value:   backward_mha,
         LayerKind.LAYERNORM.value:  backward_layernorm,
         LayerKind.SOFTMAX.value:    backward_softmax,
@@ -600,14 +602,13 @@ class DualTF:
     _UNIMPLEMENTED_KINDS = frozenset({
         LayerKind.LSTM.value,
         LayerKind.GRU.value,
-        LayerKind.MHA_SPLIT.value,
-        LayerKind.MHA_JOIN.value,
         LayerKind.MASK_ADD.value,
         # Backward kernels for these are stubs that raise NotImplementedError
         # at runtime. Listing them here makes supports_layer return False so
         # upstream callers (validate_verifier) cleanly SKIP affected nets
-        # instead of surfacing runtime ERROR. ATT_SCORES / ATT_MIX / CONCAT now
-        # have real backward kernels and are intentionally absent.
+        # instead of surfacing runtime ERROR. ATT_SCORES / ATT_MIX / CONCAT /
+        # MHA_SPLIT / MHA_JOIN now have real backward kernels and are
+        # intentionally absent.
     })
 
     def supports_layer(self, layer_kind: str) -> bool:

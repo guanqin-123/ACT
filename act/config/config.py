@@ -73,6 +73,7 @@ VALID_BERT_METHODS: Final[tuple[str, ...]] = (
     "ibp",
     "discrete",
 )
+VALID_BERT_CONVERSION_ROUTES: Final[tuple[str, ...]] = ("a", "b")
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -238,6 +239,17 @@ class BaBConfig:
     """Max refined neurons per layer per batch (top-cap by interval width);
     bounds the K x 2*cap backward cost."""
 
+    presolve_time_fraction: float = 0.0
+    """Time window of the root, in [0, 1] as a fraction of the verification
+    timeout and measured from the BaB entry: the root refinement, the root
+    alpha/eta loop and the loop batch that re-solves the depth-0 root get
+    ``time_cap = min(fraction * timeout - elapsed, remaining)``. 0.0 = the
+    root is capped only by the remaining timeout."""
+
+    child_n_iters: int = 0
+    """Adam iterations for alpha/eta on non-root batches (every lane at depth
+    > 0). 0 = use ``dual.n_iters`` on every batch."""
+
     auto_batch_safety: float = 0.55
     """Fraction of GPU memory the auto batch sizer (max_batch_size='auto') may
     target; lowered on a shared GPU. The sizer also never exceeds 90% of the
@@ -318,6 +330,18 @@ class BaBConfig:
             raise ConfigError("climb_max_cores must be positive")
         if self.climb_propagate_core_chunk < 1:
             raise ConfigError("climb_propagate_core_chunk must be positive")
+        if (
+            not math.isfinite(self.presolve_time_fraction)
+            or not 0.0 <= self.presolve_time_fraction <= 1.0
+        ):
+            raise ConfigError(
+                "presolve_time_fraction must be finite and in [0, 1], got "
+                f"{self.presolve_time_fraction}"
+            )
+        if self.child_n_iters < 0:
+            raise ConfigError(
+                f"child_n_iters must be non-negative, got {self.child_n_iters}"
+            )
         if self.top_k > 0 and self.bounding in TOP_K_INCOMPATIBLE_BOUNDINGS:
             raise ConfigError(
                 f"top_k={self.top_k} is not supported by bounding={self.bounding!r}; "
@@ -516,11 +540,40 @@ class DualConfig:
     """Cap on the number of perturbed input dims for which the forward pass
     keeps an explicit linear bound; above it, interval-only."""
 
+    stagnation_patience: int = 0
+    """Stop the alpha/eta loop after this many consecutive iterations in which
+    no row's keep-best dual bound improved by more than ``stagnation_tol``
+    (same semantics as ``TorchLPConfig``). 0 = run all ``n_iters``."""
+
+    stagnation_tol: float = 1e-5
+    """Minimum per-row dual-bound gain that counts as an improvement for
+    ``stagnation_patience``."""
+
+    stop_when_verified: bool = False
+    """Stop the alpha/eta loop once every row's keep-best bound certifies its
+    spec row (alpha,beta-CROWN stop criterion)."""
+
+    max_time: float = 0.0
+    """Wall-clock cap in seconds on one alpha/eta loop; the first iteration
+    always completes and keep-best is returned. 0.0 = no cap."""
+
     def __post_init__(self) -> None:
         if self.forward_lin_max_perturbed < 0:
             raise ConfigError(
                 "forward_lin_max_perturbed must be non-negative, got "
                 f"{self.forward_lin_max_perturbed}"
+            )
+        if self.stagnation_patience < 0:
+            raise ConfigError(
+                f"stagnation_patience must be non-negative, got {self.stagnation_patience}"
+            )
+        if not math.isfinite(self.stagnation_tol) or self.stagnation_tol < 0.0:
+            raise ConfigError(
+                f"stagnation_tol must be finite and non-negative, got {self.stagnation_tol}"
+            )
+        if not math.isfinite(self.max_time) or self.max_time < 0.0:
+            raise ConfigError(
+                f"max_time must be finite and non-negative, got {self.max_time}"
             )
 
 
@@ -1037,9 +1090,34 @@ def read_fuzzing_section(config_path: Optional[str | Path] = None) -> dict[str, 
 
 
 @dataclass
+class TextVerificationConfig:
+    """BERT/text robustness specification and checkpoint settings."""
+
+    method: str | None = None
+    p: float = 2.0
+    perturbed_words: int = 1
+    eps: float = 1.0e-5
+    max_eps: float = 0.01
+    num_verify_iters: int = 5
+    k: int = 1
+    alpha_opt_steps: int = 1000
+    checkpoint_dir: str | None = None
+    position_mode: str = "prefix"
+    conversion_route: str = "b"
+
+    def __post_init__(self) -> None:
+        if self.position_mode not in {"prefix", "sweep"}:
+            raise ConfigError("position_mode must be 'prefix' or 'sweep'")
+        if self.conversion_route not in VALID_BERT_CONVERSION_ROUTES:
+            raise ConfigError("conversion_route must be 'a' or 'b'")
+
+
+@dataclass
 class FrontEndConfig:
     specs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    text_verification: dict[str, Any] = field(default_factory=dict)
+    text_verification: TextVerificationConfig = field(
+        default_factory=TextVerificationConfig
+    )
 
     @classmethod
     def from_yaml(
@@ -1055,9 +1133,17 @@ class FrontEndConfig:
             raw = yaml.safe_load(f) or {}
 
         specs = deepcopy(raw.get("specs", {}))
-        text_verification = deepcopy(raw.get("text_verification", {}))
-        text_verification.update(
-            {k: v for k, v in overrides.items() if k in text_verification and v is not None}
+        text_values = deepcopy(raw.get("text_verification", {}))
+        valid_text_keys = {item.name for item in fields(TextVerificationConfig)}
+        text_values.update(
+            {
+                key: value
+                for key, value in overrides.items()
+                if key in valid_text_keys and value is not None
+            }
+        )
+        text_verification = TextVerificationConfig(
+            **{key: value for key, value in text_values.items() if key in valid_text_keys}
         )
         return cls(specs=specs, text_verification=text_verification)
 

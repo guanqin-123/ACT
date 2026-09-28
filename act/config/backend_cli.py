@@ -20,6 +20,7 @@ License: AGPLv3+
 import argparse
 from dataclasses import fields, replace
 import datetime
+from functools import partial
 import glob
 import json
 import logging
@@ -28,13 +29,16 @@ import statistics
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional, Union, cast, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple, Optional, Union, cast, get_args, get_origin, get_type_hints
 
 from act.config.config import ConfigError, GurobiConfig, TorchLPConfig, VALID_BERT_METHODS, VALID_BOUNDINGS, VALID_ROOT_BOUNDS_REUSE, VALID_SOLVER_TIERS, _VALID_SOLVERS
 from act.back_end.layer_schema import LayerKind
 from act.front_end.specs import OutKind
 from act.util.cli_utils import add_device_args, initialize_from_args
 from act.util.format_utils import rule
+
+if TYPE_CHECKING:
+    from act.back_end.core import Net
 
 
 _TF_MODES: tuple[str, ...] = ("interval", "hybridz")
@@ -249,12 +253,101 @@ def _resolve_bab_config(
     return replace(backend_cfg.bab, **preset_values) if preset_values else backend_cfg.bab
 
 
+# An ACT Net JSON path (--network) or a zero-argument in-memory builder (--query-index).
+NetSource = Union[str, Callable[[], "Net"]]
+
+
+def _acquire_net(net_source: NetSource, backend_cfg) -> "Net":
+    """Net-acquisition step of ``_verify_one_net``: load a JSON path or build in memory."""
+    if callable(net_source):
+        return net_source()
+    from act.back_end.serialization.serialization import load_net_from_file
+
+    return load_net_from_file(net_source, target_device=backend_cfg.device)
+
+
+def _apply_json_tensor_contract(net: "Net", target_device: Optional[str]) -> None:
+    """Place an in-memory Net's tensors the way ``load_net_from_file`` does.
+
+    Mirrors ``TensorEncoder.decode_tensor``: floating tensors take the device
+    manager's dtype, every tensor moves to *target_device*, others keep dtype.
+    """
+    import torch
+    from act.util.device_manager import get_default_device, get_default_dtype
+
+    device = torch.device(target_device) if target_device is not None else get_default_device()
+    dtype = get_default_dtype()
+    for layer in net.layers:
+        for store in (layer.params, layer.cache):
+            for key, value in list(store.items()):
+                if isinstance(value, torch.Tensor):
+                    store[key] = value.to(
+                        device=device,
+                        dtype=dtype if value.is_floating_point() else value.dtype,
+                    )
+
+
+def _build_query_net(
+    index_path: str,
+    query_id: int,
+    save_path: Optional[str],
+    target_device: Optional[str],
+) -> "Net":
+    """Build the Net of one query-index row in memory.
+
+    bert creator path -> ``VerifiableModel`` -> ``TorchToACT``. The Net is then
+    given the JSON-load tensor contract and, if *save_path* is set, exported
+    with ``save_net_to_file`` exactly as it will be verified.
+    """
+    from act.back_end.serialization.serialization import save_net_to_file
+    from act.front_end.bert_loader.query_index import build_query_model, read_query
+    from act.pipeline.verification.torch2act import TorchToACT
+
+    start = time.perf_counter()
+    net = TorchToACT(build_query_model(read_query(index_path, query_id))).run()
+    # INPUT's optional labeled_input (a LabeledInputTensor) is not
+    # JSON-serializable and verification does not read it; dropping it keeps
+    # the verified Net identical to the one --save-net exports.
+    for layer in net.layers:
+        layer.params.pop("labeled_input", None)
+    _apply_json_tensor_contract(net, target_device)
+    logger.info(
+        "Built %d-layer net for %s query %d in %.2f s",
+        len(net.layers),
+        index_path,
+        query_id,
+        time.perf_counter() - start,
+    )
+    if save_path is not None:
+        save_net_to_file(net, save_path)
+        logger.info("Saved query net to %s", save_path)
+    return net
+
+
+def _net_source_from_args(args: Any, backend_cfg) -> tuple[NetSource, str]:
+    """Return the net source selected on the command line and its report label."""
+    query_index = getattr(args, "query_index", None)
+    if query_index is None:
+        return args.network, args.network
+    source = partial(
+        _build_query_net,
+        query_index,
+        args.query_id,
+        getattr(args, "save_net", None),
+        backend_cfg.device,
+    )
+    return source, f"{query_index}#{args.query_id}"
+
+
 def _verify_one_net(
-    net_path: str,
+    net_source: NetSource,
     backend_cfg,
     explicit_bab_fields: Optional[set[str]] = None,
 ) -> tuple[list[Any], Optional[Union[_SkipUnsupported, str]], Optional[int]]:
-    """[BATCHED-API] Verify *net_path* via 3-tier cascade.
+    """[BATCHED-API] Verify the net from *net_source* via 3-tier cascade.
+
+    *net_source* is an ACT Net JSON path or an in-memory builder
+    (``_acquire_net``); everything after acquisition is shared.
 
     Named BaB presets yield to fields pinned by CLI flags.
 
@@ -279,7 +372,6 @@ def _verify_one_net(
               constraints. bab_max_batch_size=1 disables K-batching.
     """
     from act.back_end.bab.violation import clear_violation_check_module_cache
-    from act.back_end.serialization.serialization import load_net_from_file
     from act.back_end.transfer_functions import (
         ensure_active_tf,
         is_dual_solver_active,
@@ -291,7 +383,7 @@ def _verify_one_net(
     clear_violation_check_module_cache()
 
     try:
-        net = load_net_from_file(net_path, target_device=backend_cfg.device)
+        net = _acquire_net(net_source, backend_cfg)
         n_layers = len(net.layers)
 
         active_tf = ensure_active_tf("interval")
@@ -433,24 +525,25 @@ def run_verification(args, backend_cfg):
     """
     from act.util.stats import VerifyStatus
 
+    net_source, label = _net_source_from_args(args, backend_cfg)
     pinned_bab_fields = explicit_bab_fields(args)
     try:
         results, err, n_layers = _verify_one_net(
-            args.network, backend_cfg, pinned_bab_fields
+            net_source, backend_cfg, pinned_bab_fields
         )
     except ConfigError as e:
-        return _report_config_error(args.network, e)
+        return _report_config_error(label, e)
     if err is not None:
         if isinstance(err, _SkipUnsupported):
             print(
-                f"⏭️  {args.network}: {err.tf_name} cannot handle: "
+                f"⏭️  {label}: {err.tf_name} cannot handle: "
                 f"{','.join(err.kinds)}"
             )
             return 1
-        print(f"❌ {args.network}: {err}")
+        print(f"❌ {label}: {err}")
         return 1
     if not results:
-        print(f"❌ {args.network}: no verdict")
+        print(f"❌ {label}: no verdict")
         return 1
     print(f"Loaded {n_layers}-layer net; solver={backend_cfg.solver}")
 
@@ -910,6 +1003,10 @@ Examples:
   # Use specific solver
   python -m act.back_end --verify --network cifar_margin_tight.json \\
     --solver gurobi --timeout 60
+
+  # SST/Yelp query built in memory from row 0 of a query index (optional JSON export)
+  python -m act.back_end --verify --query-index queries.csv --query-id 0 \\
+    --solver dual --bab-preset climb --save-net query0.json
   
   # ============================================================================
   # NETWORK INSPECTION - Analyze network structure
@@ -1068,8 +1165,35 @@ Exit status (--verify):
 
     # Verification options
     verify_group = parser.add_argument_group("Verification Options")
-    verify_group.add_argument(
+    net_source_group = verify_group.add_mutually_exclusive_group()
+    net_source_group.add_argument(
         "--network", "-n", type=str, help="Path to network file (JSON format)"
+    )
+    net_source_group.add_argument(
+        "--query-index",
+        type=str,
+        default=None,
+        dest="query_index",
+        help=(
+            "SST/Yelp query-index CSV (columns dataset, split, depth, example_id, "
+            "position, p, eps[, checkpoint_sha256]); --verify builds the Net of "
+            "row --query-id in memory instead of loading --network. The row "
+            "fixes p and eps (--p/--eps do not apply)"
+        ),
+    )
+    verify_group.add_argument(
+        "--query-id",
+        type=int,
+        default=None,
+        dest="query_id",
+        help="0-based data row of --query-index to verify",
+    )
+    verify_group.add_argument(
+        "--save-net",
+        type=str,
+        default=None,
+        dest="save_net",
+        help="Write the in-memory query Net that is verified to this ACT JSON path",
     )
     verify_group.add_argument(
         "--solver",
@@ -1439,9 +1563,16 @@ Exit status (--verify):
     args = parser.parse_args()
 
     # Validate arguments based on command
-    if args.verify or args.info:
-        if not args.network:
-            parser.error("--network is required for --verify and --info")
+    if args.info and not args.network:
+        parser.error("--network is required for --info")
+    if args.verify and not (args.network or args.query_index):
+        parser.error("--verify requires --network or --query-index")
+    if args.query_index is not None and not args.verify:
+        parser.error("--query-index applies only to --verify")
+    if (args.query_index is None) != (args.query_id is None):
+        parser.error("--query-index and --query-id must be given together")
+    if args.save_net is not None and args.query_index is None:
+        parser.error("--save-net requires --query-index")
 
     if args.diff_nets:
         return run_diff_nets(args)

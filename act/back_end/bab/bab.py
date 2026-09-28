@@ -68,14 +68,19 @@ from act.back_end.bab.branching.bounding import (
 )
 
 from act.back_end.core import Bounds, Layer, Net
-from act.back_end.dual_tf.tf_forward import compute_forward_bounds
+from act.back_end.dual_tf.tf_forward import (
+    ForwardFrame,
+    compute_forward_bounds_with_frame,
+)
 from act.back_end.layer_schema import LayerKind
 from act.back_end.bab.violation import _check_input_specs_batched, check_violations_batched
 from act.back_end.solver.solver_base import Solver, SolveStatus
 from act.back_end.solver.solver_dual import (
     DualBatchResult,
     DualSolver,
+    _alpha_tree_select_spec_rows,
     expand_bounds_dict,
+    unproven_spec_rows,
 )
 from act.back_end.verifier import (
     gather_input_spec_layers,
@@ -88,6 +93,9 @@ from act.front_end.specs import OutKind, OutputSpec
 from act.util.stats import VerifyStatus, VerifyResult
 
 log = logging.getLogger(__name__)
+
+_monotonic = time.monotonic
+"""Clock of the BaB time budget; tests substitute a deterministic clock."""
 
 
 # ---------------------------------------------------------------------------
@@ -159,18 +167,11 @@ def _net_bound_elements(net: Net) -> int:
 
 
 def _select_spec_rows(
-    state: Optional[Dict[int, torch.Tensor]],
+    state: Optional[Dict[int, Any]],
     keep_rows: torch.Tensor,
-) -> Optional[Dict[int, torch.Tensor]]:
-    """Slice the spec axis of per-layer incremental dual state."""
-    if state is None:
-        return None
-    return {
-        lid: tensor.index_select(1, keep_rows.to(tensor.device))
-        if tensor.dim() >= 3
-        else tensor
-        for lid, tensor in state.items()
-    }
+) -> Optional[Dict[int, Any]]:
+    """Slice spec-bearing leaves of per-layer incremental dual state."""
+    return cast(Optional[Dict[int, Any]], _alpha_tree_select_spec_rows(state, keep_rows))
 
 
 def _neuron_branching_supported(config: BaBConfig) -> bool:
@@ -217,9 +218,29 @@ def _solve_dual_batch(
     keep_rows: Optional[torch.Tensor] = None,
     root_bounds_dict: Optional[Dict[int, Bounds]] = None,
     round_policy: Optional[Any] = None,
+    root_frame: Optional[ForwardFrame] = None,
+    time_cap: Optional[float] = None,
 ) -> DualBatchResult:
-    """Prepare BaB-specific bounds/state policy, then call ``DualSolver``."""
+    """Prepare BaB-specific bounds/state policy, then call ``DualSolver``.
+
+    ``root_frame`` is the explicit forward frame of the spec layer on the root
+    box; it is only consumed together with ``root_bounds_dict`` (the frame's
+    linear relation holds on every sub-box of the root). Lanes that recompute
+    their forward bounds obtain their own frame. ``time_cap`` (seconds) caps
+    this call's per-subproblem refinement and alpha/eta loop together; child
+    batches (every lane at depth > 0) run ``config.child_n_iters`` iterations
+    when that knob is set.
+    """
     solver = DualSolver()
+    spec_lid = net.preds[assert_layer.id][0]
+    forward_frame: Optional[ForwardFrame] = None
+    call_started = _monotonic() if time_cap is not None else 0.0
+
+    def _remaining_cap() -> Optional[float]:
+        if time_cap is None:
+            return None
+        return max(0.0, time_cap - (_monotonic() - call_started))
+
     block_eps_updates = _install_embedding_child_block_eps(
         net, batched_bounds, batch
     )
@@ -232,6 +253,7 @@ def _solve_dual_batch(
         use_root_dict = root_bounds_dict is not None and not input_split_child
         if use_root_dict:
             assert root_bounds_dict is not None
+            forward_frame = root_frame
             bounds_dict = expand_bounds_dict(root_bounds_dict, k_actual)
             lane_box = Bounds(batched_bounds.lb, batched_bounds.ub)
             for layer in net.layers:
@@ -269,12 +291,17 @@ def _solve_dual_batch(
                         mode=refine_mode,
                         rows_cap=refine_rows_cap,
                         optimize_iters=refine_iters,
+                        stagnation_patience=dual_config.stagnation_patience,
+                        stagnation_tol=dual_config.stagnation_tol,
+                        max_time=dual_config.max_time,
+                        time_cap=_remaining_cap(),
                     )
         else:
-            bounds_dict = compute_forward_bounds(
+            bounds_dict, forward_frame = compute_forward_bounds_with_frame(
                 net,
                 batched_bounds.lb,
                 batched_bounds.ub,
+                frame_lid=spec_lid,
                 forward_lin_max_perturbed=dual_config.forward_lin_max_perturbed,
             )
 
@@ -306,6 +333,10 @@ def _solve_dual_batch(
         is_child_batch = (
             bool(batch.depths.min().item() > 0) if batch.depths.numel() else False
         )
+        child_n_iters = int(config.child_n_iters)
+        n_iters_override = (
+            child_n_iters if optimize and is_child_batch and child_n_iters > 0 else None
+        )
         result = solver.solve_spec_batch(
             net,
             bounds_dict,
@@ -332,6 +363,9 @@ def _solve_dual_batch(
             refresh_forward=not use_root_dict,
             return_nu=_neuron_branching_supported(config),
             reuse_bounds_for_branching=use_root_dict,
+            forward_frame=forward_frame,
+            n_iters=n_iters_override,
+            time_cap=_remaining_cap(),
         )
         if optimize:
             batch.incremental_alpha = result.alpha_state
@@ -417,11 +451,24 @@ def verify_bab_batched(
             from GPU memory; ``config.auto_batch_cap`` on CPU). There is no
             implicit default: callers pass the central
             ``BackendConfig.bab_max_batch_size`` or an explicit value.
-        time_budget_s: wall-clock budget (default 300 s).
+        time_budget_s: wall-clock budget (default 300 s) for the WHOLE call.
+            The clock starts here, so the root pre-solve counts against it.
+            The remaining time is passed as a per-call cap into the dual
+            solver. Root calls (the root refinement, the root pre-solve and
+            the loop batch that re-solves the depth-0 root) share one window
+            measured from this entry: ``min(presolve_time_fraction * budget -
+            elapsed, remaining)`` (fraction 0 = ``remaining``); every other
+            batch gets ``remaining``. The budget is
+            checked before the root refinement, the root pre-solve, the
+            pre-split and at every loop iteration. An exhausted budget
+            returns UNKNOWN with ``exhausted_budget_time`` plus
+            ``budget_exhausted_in`` / ``budget_overshoot_s`` (only on that
+            path), or CERTIFIED when the root pre-solve already certified.
         verbose: reserved.
         _k_log: diagnostic only — if supplied, the actual K used per iteration
             is appended. Tests use this to verify K fluctuates per D4.
     """
+    run_started = _monotonic()
     if config is None:
         config = BaBConfig()
     assert_layer = get_assert_layer(net)
@@ -444,6 +491,32 @@ def verify_bab_batched(
     max_k_seen = 0
 
     budget_s = time_budget_s if time_budget_s is not None else 300.0
+    presolve_fraction = float(config.presolve_time_fraction)
+    presolve_budget_s = presolve_fraction * budget_s if presolve_fraction > 0.0 else budget_s
+
+    def _elapsed() -> float:
+        return _monotonic() - run_started
+
+    def _remaining() -> float:
+        return max(0.0, budget_s - _elapsed())
+
+    def _root_time_cap() -> float:
+        return max(0.0, min(presolve_budget_s - _elapsed(), _remaining()))
+
+    def _loop_time_cap(popped: SubproblemBatch) -> float:
+        """Per-call cap of a loop batch: root lanes (depth 0) share the root
+        pre-solve window, every other batch gets the remaining time."""
+        if presolve_fraction > 0.0 and bool((popped.depths == 0).any().item()):
+            return _root_time_cap()
+        return _remaining()
+
+    def _budget_exhausted_metadata(phase: str) -> Dict[str, Any]:
+        overshoot = _elapsed() - budget_s
+        log.info(
+            "BaB budget exhausted in %s: %.2f s of %.2f s (overshoot %.2f s)",
+            phase, _elapsed(), budget_s, overshoot,
+        )
+        return {"budget_exhausted_in": phase, "budget_overshoot_s": overshoot}
 
     fsb_dual_solver = None
     if config.branching_method == "fsb":
@@ -546,23 +619,54 @@ def verify_bab_batched(
     spec_keep_rows: Optional[torch.Tensor] = None
     presolve_tier = config.solver_tier
     root_fwd: Optional[Dict[int, Bounds]] = None
+    root_frame: Optional[ForwardFrame] = None
     refine_mode = config.intermediate_refine
     reuse_mode = config.root_bounds_reuse
+
+    def _root_budget_exhausted(phase: str) -> Optional[VerifyResult]:
+        if _remaining() > 0.0:
+            return None
+        return VerifyResult(
+            VerifyStatus.UNKNOWN,
+            metadata={
+                "nodes": 0,
+                "spec_rows_kept": (
+                    int(spec_keep_rows.numel()) if spec_keep_rows is not None else None
+                ),
+                "pool_remaining": root_batch.batch_size,
+                "exhausted_budget_time": True,
+                "exhausted_budget_nodes": False,
+                "nodes_minted": node_counter,
+                "any_dropped_frontier_cap": False,
+                "reason": "budget_exhausted_with_unproven_subboxes",
+                **_budget_exhausted_metadata(phase),
+                **_branching_metadata(),
+            },
+        )
+
     if presolve_tier in ("dual", "dual_alpha", "dual_alpha_eta") and (
         reuse_mode != "none" or refine_mode != "none"
     ):
-        root_fwd = compute_forward_bounds(
+        root_fwd, root_frame = compute_forward_bounds_with_frame(
             net,
             root_bounds.lb,
             root_bounds.ub,
+            frame_lid=net.preds[assert_layer.id][0],
             forward_lin_max_perturbed=dual_config.forward_lin_max_perturbed,
         )
         if refine_mode != "none":
+            exhausted = _root_budget_exhausted("root_refine")
+            if exhausted is not None:
+                return exhausted
             root_fwd = DualSolver().refine_intermediate_bounds(
                 net,
                 root_fwd,
                 mode=refine_mode,
                 blowup_ratio=config.intermediate_refine_ratio,
+                stagnation_patience=dual_config.stagnation_patience,
+                stagnation_tol=dual_config.stagnation_tol,
+                max_time=dual_config.max_time,
+                time_cap=_root_time_cap(),
             )
     # Per-node bound reuse is governed solely by root_bounds_reuse: root_fwd may
     # exist just for the root presolve/refine above, and passing it to descendant
@@ -576,6 +680,9 @@ def verify_bab_batched(
         presolve_tier in ("dual", "dual_alpha", "dual_alpha_eta")
         and assert_layer.params.get("kind") != OutKind.UNSAFE_LINEAR
     ):
+        exhausted = _root_budget_exhausted("root_presolve")
+        if exhausted is not None:
+            return exhausted
         presolve = _solve_dual_batch(
             net=net,
             assert_layer=assert_layer,
@@ -586,9 +693,11 @@ def verify_bab_batched(
             dual_config=dual_config,
             optimize=presolve_tier in ("dual_alpha", "dual_alpha_eta"),
             root_bounds_dict=root_fwd,
+            root_frame=root_frame,
+            time_cap=_root_time_cap(),
         )
         if presolve.row_slack is not None:
-            unproven = (presolve.row_slack < 0).any(dim=0)
+            unproven = unproven_spec_rows(presolve.row_slack).any(dim=0)
             total_rows = int(unproven.numel())
             if not bool(unproven.any().item()):
                 return VerifyResult(
@@ -614,6 +723,9 @@ def verify_bab_batched(
                 root_batch.split_signs = _select_spec_rows(
                     root_batch.split_signs, keep,
                 )
+        exhausted = _root_budget_exhausted("root_presplit")
+        if exhausted is not None:
+            return exhausted
         presplit_k = int(config.presplit_levels)
         if (
             presplit_k > 0
@@ -638,13 +750,12 @@ def verify_bab_batched(
         if pool.evict_to(frontier_cap) > 0:
             any_dropped_frontier_cap = True
 
-    start = time.time()
     processed = 0
     any_dropped_max_depth = False
     _last_input_widths: Optional[list[float]] = None
 
     while not pool.empty:
-        elapsed = time.time() - start
+        elapsed = _elapsed()
         if elapsed >= budget_s or processed >= config.max_nodes:
             break
 
@@ -713,7 +824,9 @@ def verify_bab_batched(
                 optimize=False,
                 keep_rows=spec_keep_rows,
                 root_bounds_dict=node_root_fwd,
+                root_frame=root_frame,
                 round_policy=_wave_policy,
+                time_cap=_loop_time_cap(batch),
             )
             solution = dual_solve_result.solution
         elif solver_tier in ("dual_alpha", "dual_alpha_eta"):
@@ -728,7 +841,9 @@ def verify_bab_batched(
                 optimize=True,
                 keep_rows=spec_keep_rows,
                 root_bounds_dict=node_root_fwd,
+                root_frame=root_frame,
                 round_policy=_wave_policy,
+                time_cap=_loop_time_cap(batch),
             )
             solution = dual_solve_result.solution
             bounds_dict_for_branching = dual_solve_result.bounds_dict
@@ -1065,8 +1180,7 @@ def verify_bab_batched(
             _wave_index += 1
 
     pool_remaining = len(pool)
-    elapsed_total = time.time() - start
-    exhausted_time = elapsed_total >= budget_s
+    exhausted_time = _elapsed() >= budget_s
     exhausted_nodes = processed >= config.max_nodes
 
     spec_rows_kept = (
@@ -1099,6 +1213,7 @@ def verify_bab_batched(
             "nodes_minted": node_counter,
             "any_dropped_frontier_cap": any_dropped_frontier_cap,
             "reason": "budget_exhausted_with_unproven_subboxes",
+            **(_budget_exhausted_metadata("bab_loop") if exhausted_time else {}),
             **_branching_metadata(),
         },
     )

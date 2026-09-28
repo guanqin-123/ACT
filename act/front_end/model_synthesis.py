@@ -363,7 +363,18 @@ def synthesize_models_and_seeds_from_specs(
                     out_spec.c.detach().cpu().reshape(-1).numpy().tobytes(),
                     d_sig,
                 )
-            gkey = (data_source, mid, in_spec.kind, out_spec.kind, cd_sig)
+            # BUFFET sequence lengths vary by example and route A is built for
+            # one example shape at a time. Keep all position specs for one
+            # example together, but never merge different examples.
+            example_sig = id(lt) if model_name == "buffet_transformer" else None
+            gkey = (
+                data_source,
+                mid,
+                in_spec.kind,
+                out_spec.kind,
+                cd_sig,
+                example_sig,
+            )
             groups[gkey].append((lt, in_spec, out_spec, f"{data_source}:{model_name}:s{idx}"))
     
     # -------------------------------------------------------------------------
@@ -375,7 +386,7 @@ def synthesize_models_and_seeds_from_specs(
     ] = {}
     disjunct_counter: Dict[Tuple[str, str, str, str], int] = defaultdict(int)
     for gkey, grouped_specs in groups.items():
-        data_src, mid, in_kind, out_kind, _cd_sig = gkey
+        data_src, mid, in_kind, out_kind, _cd_sig, _example_sig = gkey
         pytorch_model, rep_name = models[mid]
         # Use representative model_name for the display key; if a single
         # (data_src, model_name) expands into multiple UNSAFE_LINEAR disjuncts
@@ -478,12 +489,14 @@ def model_synthesis(
         )
     
     elif creator == 'bert':
+        from dataclasses import asdict
+
         from act.front_end.bert_loader.create_specs import BertSpecCreator
         from act.config.config import FrontEndConfig
 
         print(f"\n📊 Attempting to use BertSpecCreator...")
         front_end_config = FrontEndConfig.from_yaml(**(text_verification_overrides or {}))
-        text_config = front_end_config.text_verification
+        text_config = asdict(front_end_config.text_verification)
         creator_overrides: Dict[str, Any] = {}
         if spec_overrides:
             creator_overrides.update(spec_overrides)

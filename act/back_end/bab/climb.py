@@ -29,7 +29,7 @@ from act.back_end.bab.node import (
 )
 from act.back_end.core import Bounds, Net
 from act.back_end.solver.solver_base import SolveStatus
-from act.back_end.solver.solver_dual import DualBatchResult
+from act.back_end.solver.solver_dual import DualBatchResult, _alpha_spec_row_count
 from act.config.config import (
     BaBConfig,
     CLIMB_SOLVER_TIER,
@@ -180,6 +180,7 @@ class ClimbMetrics:
     cores_inserted: int = 0
     core_literals_original: int = 0
     core_literals_retained: int = 0
+    forward_certified_lanes: int = 0
     library: Optional[CoreLibrary] = None
 
     def observe_frontier(self, pending_plus_active_rows: int) -> None:
@@ -206,6 +207,7 @@ class ClimbMetrics:
             "climb_cores_evicted": self.library.evicted if self.library is not None else 0,
             "climb_core_literals_original": self.core_literals_original,
             "climb_core_literals_retained": self.core_literals_retained,
+            "climb_forward_certified_lanes": self.forward_certified_lanes,
         }
 
 
@@ -359,7 +361,7 @@ def apply_literal_assignments(
     if signs:
         specs = next(iter(signs.values())).shape[1]
     elif batch.incremental_alpha:
-        specs = next(iter(batch.incremental_alpha.values())).shape[1]
+        specs = _alpha_spec_row_count(batch.incremental_alpha)
     elif batch.incremental_eta:
         specs = next(iter(batch.incremental_eta.values())).shape[1]
     if active_variables.numel() == 0:
@@ -592,7 +594,10 @@ def certificate_replay(
         local_phase_clamp=True,
     )
     n_lanes = batch.batch_size
-    slack = result.margins.reshape(n_lanes, m_specs)
+    # Replay validates the backward certificate alone; the forward part of the
+    # solver's intersected bound is not produced by alpha/eta/nu.
+    dual_margins = result.dual_margins if result.dual_margins is not None else result.margins
+    slack = dual_margins.reshape(n_lanes, m_specs)
     slack = slack - thresholds.reshape(n_lanes, m_specs).to(slack)
     pinned_rows: Optional[torch.Tensor] = None
     if out_kind == OutKind.UNSAFE_LINEAR:
@@ -850,11 +855,18 @@ class ClimbSession:
         # H2: replay -> coarsen -> insert. Certified lanes only; replay reads
         # the immutable forward snapshot, the theta budget coarsens the
         # validated vector, and the survivor is inserted as a core.
-        unsat_idx = torch.tensor(
-            [i for i, status in enumerate(statuses) if status == SolveStatus.UNSAT],
-            device=batch.lb.device,
-            dtype=torch.long,
-        )
+        forward_only = getattr(dual_solve_result, "forward_only_certified", None)
+        unsat_lanes = []
+        for i, status in enumerate(statuses):
+            if status != SolveStatus.UNSAT:
+                continue
+            if forward_only is not None and bool(forward_only[i].item()):
+                # Certified by the forward bound only: no dual certificate to
+                # replay or learn from; the lane is pruned as-is.
+                self.metrics.forward_certified_lanes += 1
+                continue
+            unsat_lanes.append(i)
+        unsat_idx = torch.tensor(unsat_lanes, device=batch.lb.device, dtype=torch.long)
         if (
             int(unsat_idx.numel()) == 0
             or dual_solve_result.c_rows is None

@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportCallIssue=false, reportConstantRedefinition=false, reportGeneralTypeIssues=false, reportIndexIssue=false, reportOperatorIssue=false, reportOptionalIterable=false, reportOptionalMemberAccess=false, reportOptionalOperand=false, reportOptionalSubscript=false
 #===- act/back_end/interval_tf/tf_mlp.py - MLP Interval Transfer Func ---====#
 # ACT: Abstract Constraint Transformer
 # Copyright (C) 2025– ACT Team
@@ -15,7 +16,7 @@
 
 import torch
 import math
-from typing import List
+from typing import List, cast
 from act.back_end.core import Bounds, Con, ConSet, Fact, Layer
 from act.back_end.utils import affine_bounds, four_corner_envelope, pwl_meta
 
@@ -97,13 +98,43 @@ def _cos_interval(lo: torch.Tensor, hi: torch.Tensor) -> Bounds:
 # -------- MLP Basics --------
 def tf_dense(L: Layer, Bin: Bounds) -> Fact:
     # Parameter names aligned with PyTorch: weight, bias, weight_pos, weight_neg
-    W = L.params["weight"]
-    W_pos = L.params.get("weight_pos", torch.clamp(W, min=0))
-    W_neg = L.params.get("weight_neg", torch.clamp(W, max=0))
-    b = L.params.get("bias", torch.zeros(W.shape[0]))
-    
-    B = affine_bounds(W_pos, W_neg, b, Bin)
-    C = ConSet(); C.replace(Con("EQ", tuple(L.out_vars + L.in_vars), {"tag": f"dense:{L.id}", "W": W, "b": b}))
+    W = cast(torch.Tensor, L.params["weight"]).to(
+        device=Bin.lb.device, dtype=Bin.lb.dtype
+    )
+    b = L.params.get("bias")
+    if b is None:
+        b = W.new_zeros(W.shape[0])
+    else:
+        b = cast(torch.Tensor, b).to(device=Bin.lb.device, dtype=Bin.lb.dtype)
+
+    token_wise = bool(L.params.get("token_wise", False))
+    if token_wise:
+        in_features = int(W.shape[1])
+        if len(L.in_vars) % in_features:
+            raise ValueError(
+                f"token-wise DENSE {L.id}: {len(L.in_vars)} inputs are not divisible "
+                f"by in_features={in_features}"
+            )
+        token_count = len(L.in_vars) // in_features
+        batch = Bin.lb.shape[0]
+        lb = Bin.lb.reshape(batch, token_count, in_features)
+        ub = Bin.ub.reshape(batch, token_count, in_features)
+        W_pos = torch.clamp(W, min=0)
+        W_neg = torch.clamp(W, max=0)
+        B = Bounds(
+            (lb @ W_pos.T + ub @ W_neg.T + b).reshape(batch, -1),
+            (ub @ W_pos.T + lb @ W_neg.T + b).reshape(batch, -1),
+        )
+    else:
+        W_pos = L.params.get("weight_pos", torch.clamp(W, min=0))
+        W_neg = L.params.get("weight_neg", torch.clamp(W, max=0))
+        B = affine_bounds(W_pos, W_neg, b, Bin)
+        token_count = 1
+
+    meta = {"tag": f"dense:{L.id}", "W": W, "b": b}
+    if token_wise:
+        meta.update({"token_wise": True, "token_count": token_count})
+    C = ConSet(); C.replace(Con("EQ", tuple(L.out_vars + L.in_vars), meta))
     C.add_box(L.id, L.out_vars, B); return Fact(B,C)
 
 def tf_bias(L: Layer, Bin: Bounds) -> Fact:

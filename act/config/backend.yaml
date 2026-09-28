@@ -105,8 +105,9 @@ backend:
   # ─────────────────────────────────────────────────────────────────────────
 
   # Wall-clock budget in seconds. The LP-batched tier and each BaB run get the
-  # full budget; with solver hybridz it also bounds the single-shot solve unless
-  # hybridz.timeout is set.
+  # full budget; a BaB run's clock starts at its entry, so its root refinement
+  # and pre-solve count (the single-shot solve before BaB does not); with solver
+  # hybridz it also bounds the single-shot solve unless hybridz.timeout is set.
   timeout: 60.0
 
   # Named bab_presets entry; null auto-selects "dual" when solver = "dual".
@@ -194,6 +195,12 @@ backend:
     # Linear forward bounds are kept up to this many perturbed input dims;
     # above it the forward pass is interval-only.
     forward_lin_max_perturbed: 100
+    # Early stopping of the alpha/eta loop (all off by default; the first
+    # iteration always completes and the keep-best bound is returned).
+    stagnation_patience: 0          # stop after this many iterations without a row gain > tol (0 = off)
+    stagnation_tol: 0.00001         # min per-row dual-bound gain that counts as improvement (finite, >= 0; used only when stagnation_patience > 0)
+    stop_when_verified: false       # stop once every lane certifies by its spec rule on the keep-best bound (UNSAFE_LINEAR: one row > 0); verify/BaB solves only
+    max_time: 0.0                   # wall-clock cap in seconds on one alpha/eta loop (0 = off)
 
   # ═════════════════════════════════════════════════════════════════════════
   # Branch-and-Bound refinement  (bab)
@@ -283,6 +290,8 @@ backend:
     per_subproblem_refine: "none"         # per-subproblem refinement: none/tail/all (needs reuse)
     per_subproblem_refine_iters: 0        # Adam iterations (0 = one fixed-slope backward pass)
     per_subproblem_refine_rows_cap: 64    # max refined neurons per layer per batch (widest first)
+    presolve_time_fraction: 0.0           # root time window in [0, 1] as a fraction of timeout, from BaB entry (0 = remaining timeout)
+    child_n_iters: 0                      # alpha/eta iterations on non-root batches (0 = dual.n_iters)
 
     # Automatic BaB batch sizing. Used only when verify_bab_batched is called with
     # max_batch_size="auto"; the CLI passes the integer bab_max_batch_size.

@@ -60,6 +60,7 @@ from act.back_end.bab.node import (
 from act.back_end.core import Bounds, Layer, Net
 from act.back_end.dual_tf.tf_forward import compute_forward_bounds
 from act.back_end.layer_schema import LayerKind
+from act.back_end.solver.solver_dual import _alpha_spec_row_count
 from act.front_end.specs import InKind
 from act.util.device_manager import get_default_device, get_default_dtype
 
@@ -1050,8 +1051,8 @@ class FSBBranching(BaBSRBranching):
 
         n_neurons = _layer_neuron_count(net.by_id[lid])
         n_specs = 1
-        if batch.incremental_alpha is not None and lid in batch.incremental_alpha:
-            n_specs = int(batch.incremental_alpha[lid].shape[1])
+        if batch.incremental_alpha:
+            n_specs = _alpha_spec_row_count(batch.incremental_alpha)
         elif batch.incremental_eta is not None and lid in batch.incremental_eta:
             n_specs = int(batch.incremental_eta[lid].shape[1])
 

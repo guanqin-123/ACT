@@ -286,6 +286,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
             "weight_pos",
             "weight_neg",
             "activation",
+            "token_wise",
             "input_shape",
             "output_shape",
         ],
@@ -787,7 +788,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     LayerKind.SOFTMAX.value: {
         "params_required": ["axis"],
-        "params_optional": ["input_shape", "output_shape"],
+        "params_optional": ["input_shape", "output_shape", "rowsize"],
     },
     LayerKind.MHA.value: {
         "params_required": ["num_heads"],

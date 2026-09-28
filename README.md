@@ -13,6 +13,15 @@ conda env create -f environment.yml    # Install required lib packages to run AC
 conda activate act-py312 # Activate an environment (python-3.12)  # Activate the environment 
 ```
 
+Install the BUFFET-compatible NLTK tokenizer data into the active environment.
+NLTK 3.10 rejects shared writable data directories, so remove group and other
+write permissions after downloading:
+
+```
+python -m nltk.downloader -d "$CONDA_PREFIX/share/nltk_data" punkt punkt_tab
+chmod -R go-w "$CONDA_PREFIX/share/nltk_data"
+```
+
 ## 1. Clone repository
 ```
 git clone --recursive https://github.com/SVF-tools/ACT.git

@@ -27,7 +27,7 @@ from .tf_forward import (
     LinearBound, Frame, _align,
     _fwd_dense, _fwd_relu, _fwd_bias, _fwd_scale, _fwd_bn, _fwd_lrelu,
     _concretize, _box_dense, _box_bias, _box_scale, _box_bn, _box_relu,
-    _box_lrelu, _intersect_boxes, _reset_forward_box,
+    _box_lrelu, _intersect_boxes, _reset_forward_box, _match_lin_input_dim,
 )
 
 _DEGENERATE_TOL_ABS = 1e-3
@@ -248,8 +248,64 @@ def forward_dense(
     parent_frame = parent_frames[0]
     x_L, x_U = parent_frame
     prev_lb, prev_ub = parent_box.lb, parent_box.ub
-    new_lin = _fwd_dense(L, parent_lin)
-    int_lb, int_ub = _box_dense(L, prev_lb, prev_ub)
+    if not L.params.get("token_wise"):
+        new_lin = _fwd_dense(L, parent_lin)
+        int_lb, int_ub = _box_dense(L, prev_lb, prev_ub)
+    else:
+        W = L.params["weight"].to(device=device, dtype=dtype)
+        bias = L.params.get("bias")
+        in_features = int(W.shape[1])
+        out_features = int(W.shape[0])
+        if len(L.in_vars) % in_features:
+            raise ValueError(
+                f"token-wise DENSE {L.id}: {len(L.in_vars)} inputs are not divisible "
+                f"by in_features={in_features}"
+            )
+        tokens = len(L.in_vars) // in_features
+        matched = _match_lin_input_dim(parent_lin, tokens * in_features)
+        batch = matched.b_lb.shape[0]
+
+        def apply_rows(value: torch.Tensor, absolute: bool = False) -> torch.Tensor:
+            matrix = W.abs() if absolute else W
+            rows = value.reshape(batch, tokens, in_features)
+            return torch.matmul(rows, matrix.T).reshape(batch, tokens * out_features)
+
+        bias_vec = W.new_zeros(tokens * out_features)
+        if isinstance(bias, torch.Tensor):
+            bias_vec = bias.to(device=device, dtype=dtype).flatten().repeat(tokens)
+        b_centre = (matched.b_lb + matched.b_ub) * 0.5
+        b_radius = (matched.b_ub - matched.b_lb) * 0.5
+        b_mid = apply_rows(b_centre) + bias_vec
+        b_spread = apply_rows(b_radius, absolute=True)
+        if matched.A_lb is None or matched.A_ub is None:
+            expanded = torch.block_diag(*([W] * tokens))
+            A_lb = expanded.unsqueeze(0).expand(batch, -1, -1).contiguous()
+            A_ub = A_lb.clone()
+        else:
+            symbols = matched.A_lb.shape[-1]
+            A_centre = (matched.A_lb + matched.A_ub) * 0.5
+            A_radius = (matched.A_ub - matched.A_lb) * 0.5
+            A_mid = torch.einsum(
+                "oi,btis->btos", W,
+                A_centre.reshape(batch, tokens, in_features, symbols),
+            ).reshape(batch, tokens * out_features, symbols)
+            A_spread = torch.einsum(
+                "oi,btis->btos", W.abs(),
+                A_radius.reshape(batch, tokens, in_features, symbols),
+            ).reshape(batch, tokens * out_features, symbols)
+            A_lb, A_ub = A_mid - A_spread, A_mid + A_spread
+        new_lin = LinearBound(
+            A_lb=A_lb, b_lb=b_mid - b_spread,
+            A_ub=A_ub, b_ub=b_mid + b_spread,
+        )
+        box_lb = prev_lb.reshape(prev_lb.shape[0], tokens, in_features)
+        box_ub = prev_ub.reshape(prev_ub.shape[0], tokens, in_features)
+        centre = (box_lb + box_ub) * 0.5
+        radius = (box_ub - box_lb) * 0.5
+        mid = torch.matmul(centre, W.T) + bias_vec.reshape(tokens, out_features)
+        spread = torch.matmul(radius, W.abs().T)
+        int_lb = (mid - spread).reshape(prev_lb.shape[0], -1)
+        int_ub = (mid + spread).reshape(prev_ub.shape[0], -1)
     if new_lin is None:
         lb, ub = int_lb, int_ub
         out = Bounds(lb, ub)
@@ -267,7 +323,29 @@ def forward_dense(
 def backward_dense(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
                    preds: List[int], M: int = 1, alpha=None
                    ) -> Tuple[List[torch.Tensor], torch.Tensor]:
-    nu_out, contrib = dual_dense_backward(nu, L.params["weight"], L.params.get("bias"))
+    weight = L.params["weight"]
+    bias = L.params.get("bias")
+    if not L.params.get("token_wise"):
+        nu_out, contrib = dual_dense_backward(nu, weight, bias)
+    else:
+        out_features, in_features = int(weight.shape[0]), int(weight.shape[1])
+        nu_flat = nu.flatten(start_dim=1)
+        if nu_flat.shape[1] % out_features:
+            raise ValueError(
+                f"token-wise DENSE {L.id}: nu width {nu_flat.shape[1]} is not "
+                f"divisible by out_features={out_features}"
+            )
+        tokens = nu_flat.shape[1] // out_features
+        grouped = nu_flat.reshape(nu_flat.shape[0], tokens, out_features)
+        nu_out = torch.matmul(grouped, weight).reshape(
+            nu_flat.shape[0], tokens * in_features
+        )
+        if isinstance(bias, torch.Tensor):
+            contrib = -(grouped * bias.reshape(1, 1, out_features)).sum(dim=(1, 2))
+        else:
+            contrib = torch.zeros(
+                nu_flat.shape[0], dtype=nu.dtype, device=nu.device
+            )
     assert len(preds) == 1, f"DENSE expects 1 predecessor, got {len(preds)}"
     return [nu_out], contrib
 

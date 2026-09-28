@@ -33,4 +33,5 @@ dependencies:
       - onnxsim==0.6.5
       # ML frameworks (pipeline/llm_probe.py)
       - transformers
+      - nltk==3.10.3  # BUFFET-compatible SST/Yelp tokenization
       - scikit-learn
