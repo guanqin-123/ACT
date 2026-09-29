@@ -29,7 +29,11 @@ from act.back_end.bab.node import (
 )
 from act.back_end.core import Bounds, Net
 from act.back_end.solver.solver_base import SolveStatus
-from act.back_end.solver.solver_dual import DualBatchResult, _alpha_spec_row_count
+from act.back_end.solver.solver_dual import (
+    DualBatchResult,
+    _alpha_spec_row_count,
+    escaping_spec_rows,
+)
 from act.config.config import (
     BaBConfig,
     CLIMB_SOLVER_TIER,
@@ -535,16 +539,36 @@ def propagate(
     return tuple(result_batches)
 
 
-def is_certified(slack: torch.Tensor, out_kind: str) -> torch.Tensor:
+def is_certified(
+    slack: torch.Tensor,
+    out_kind: str,
+    reference: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     """Per-lane certification mask over ``[N, M]`` slack rows.
 
     Byte-consistent with the ``DualSolver.solve_spec_batch`` lane statuses: an
-    ``UNSAFE_LINEAR`` lane certifies when any finite row is strictly positive;
-    every other kind certifies only when all rows are finite and non-negative.
+    ``UNSAFE_LINEAR`` lane certifies when any finite row clears the
+    ``escaping_spec_rows`` band of ``reference`` (the bounds the slack was
+    derived from, broadcastable to ``slack``; defaults to the slack itself,
+    which is only adequate when those bounds are O(1)); every other kind
+    certifies only when all rows are finite and non-negative.
     """
     if out_kind == OutKind.UNSAFE_LINEAR:
-        return (torch.isfinite(slack) & (slack > 0)).any(dim=1)
+        return escaping_spec_rows(
+            slack, slack if reference is None else reference
+        ).any(dim=1)
     return torch.isfinite(slack).all(dim=1) & (slack >= 0).all(dim=1)
+
+
+def replay_reference(thresholds: torch.Tensor) -> torch.Tensor:
+    """Per-lane ``[N, 1]`` magnitude reference for a replayed slack.
+
+    A replayed ``UNSAFE_LINEAR`` slack is pinned to one row, whose margin is
+    unknown to the caller; near the boundary that margin is within the band of
+    its threshold, so the lane's largest ``|threshold|`` is an upper (hence
+    conservative) reference for ``is_certified``.
+    """
+    return thresholds.abs().amax(dim=1, keepdim=True)
 
 
 @torch.no_grad()
@@ -600,11 +624,11 @@ def certificate_replay(
     # Replay validates the backward certificate alone; the forward part of the
     # solver's intersected bound is not produced by alpha/eta/nu.
     dual_margins = result.dual_margins if result.dual_margins is not None else result.margins
-    slack = dual_margins.reshape(n_lanes, m_specs)
-    slack = slack - thresholds.reshape(n_lanes, m_specs).to(slack)
+    margins = dual_margins.reshape(n_lanes, m_specs)
+    slack = margins - thresholds.reshape(n_lanes, m_specs).to(margins)
     pinned_rows: Optional[torch.Tensor] = None
     if out_kind == OutKind.UNSAFE_LINEAR:
-        passing = torch.isfinite(slack) & (slack > 0)
+        passing = escaping_spec_rows(slack, margins)
         pinned_rows = passing.to(torch.int64).argmax(dim=1)
     if result.nu_per_layer is None:
         return None
@@ -953,7 +977,9 @@ class ClimbSession:
         )
         if replay is not None:
             slack, costs = replay
-            valid = is_certified(slack, self._out_kind)
+            valid = is_certified(
+                slack, self._out_kind, replay_reference(replay_thresholds)
+            )
         else:
             slack = costs = valid = None
         if costs is None or valid is None or not bool(valid.any().item()):
@@ -1094,7 +1120,9 @@ class ClimbSession:
                 int(rows.numel()), dtype=torch.bool, device=rows.device
             )
         replayed_slack, _ = replayed
-        return is_certified(replayed_slack, self._out_kind)
+        return is_certified(
+            replayed_slack, self._out_kind, replay_reference(row_thresholds)
+        )
 
     def _instrumented_recheck(
         self,

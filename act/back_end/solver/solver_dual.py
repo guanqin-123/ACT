@@ -302,13 +302,63 @@ def unproven_spec_rows(slack: torch.Tensor) -> torch.Tensor:
     """ALL-rows spec kinds: rows whose ``slack`` does not prove them (``< 0`` or non-finite).
 
     A NaN / inf slack is never proven, so a lane with such a row is not certified.
+    The boundary ``slack == 0`` proves the row: the safe set of every ALL-rows
+    kind is closed, so a bound that lands exactly on the threshold is a proof
+    (a tolerance band here would only turn boundary-touching safe properties
+    into UNKNOWN; see ``escaping_spec_rows`` for the open-boundary kind).
     """
     return (slack < 0) | ~torch.isfinite(slack)
 
 
-def escaping_spec_rows(slack: torch.Tensor) -> torch.Tensor:
-    """EXISTS-row kind (UNSAFE_LINEAR): rows proven to escape (finite ``slack > 0``)."""
-    return (slack > 0) & torch.isfinite(slack)
+# Absolute floor of the certification band (float64 accumulation noise of a
+# deep dual / forward chain, ~1e-12 observed; see certification_tolerance).
+_CERT_EPS_FLOOR = 1e-11
+
+
+def certification_tolerance(reference: torch.Tensor) -> torch.Tensor:
+    """Band a certified bound must clear before a strict comparison counts as proof.
+
+    ``max(100 ulp, 1e-11) * max(|reference|, 1)`` in the dtype of
+    ``reference`` (the bound whose rounding is being absorbed, e.g. the row
+    margin the slack was derived from).
+
+    No bound in ACT is computed with directed rounding: the forward linear
+    track is composed in centre/radius form (``_fwd_dense_lanes`` /
+    ``_fwd_conv2d``: two accumulations that cancel and can land a few ulp on
+    the unsound side of the exact ``W+ A_ub + W- A_lb``), the concretization
+    einsums and the backward dual pass round to nearest as well, and the dual
+    bound accumulates ~1e-12 over deep float64 conv chains (a 100-ulp-only band
+    was seen to false-CERTIFY a netfactory draw in CI with a concrete
+    counterexample). A boundary-touching property (true slack exactly 0, e.g.
+    sat_relu ``Y_0 >= 1`` with ``max Y_0 == 1``) is otherwise certified by
+    that rounding alone. 100 ulp is the per-neuron 'auto' bounds tolerance of
+    ``act/pipeline/cli.py`` (pairwise-reduction drift ~log2(n)*eps); float32
+    (100 ulp = 1.2e-5) is above the floor, float64 (2.2e-14) takes the floor.
+
+    Remaining assumption: the accumulated rounding of a bound stays below the
+    band, i.e. intermediate partial sums are within ~1e5x (float64) / ~100x
+    (float32) of ``max(|reference|, 1)``. Larger internal magnitudes need a
+    rigorous (directed-rounding or error-bound-carrying) propagation, which
+    torch does not provide.
+    """
+    eps = max(100.0 * torch.finfo(reference.dtype).eps, _CERT_EPS_FLOOR)
+    return eps * reference.abs().clamp(min=1.0)
+
+
+def escaping_spec_rows(slack: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
+    """EXISTS-row kind (UNSAFE_LINEAR): rows proven to escape.
+
+    The unsafe polytope ``C y <= d`` is closed, so a row escapes only when its
+    lower bound is STRICTLY above the threshold. A finite ``slack`` proves
+    that only once it clears ``certification_tolerance(reference)``, where
+    ``reference`` is the bound the slack was derived from (the row margins;
+    broadcastable to ``slack``); a slack inside the band is rounding noise,
+    not proof. Every UNSAFE_LINEAR certification path (``solve_spec_batch``,
+    ``evaluate_spec``, CLIMB replay, the interval path of ``verify_once``)
+    decides through this predicate.
+    """
+    tol = certification_tolerance(reference).to(device=slack.device, dtype=slack.dtype)
+    return (slack > tol) & torch.isfinite(slack)
 
 
 def _clone_alpha_tree(tree: AlphaTree) -> AlphaTree:
@@ -468,9 +518,12 @@ class DualSolver(Solver):
         )
 
         def _lanes_certified(row_bounds: torch.Tensor) -> torch.Tensor:
-            row_slack = row_bounds.view(k_actual, m_specs) - thresholds
+            row_margins = row_bounds.view(k_actual, m_specs)
+            row_slack = row_margins - thresholds
             if out_spec.kind == OutKind.UNSAFE_LINEAR:
-                return (escaping_spec_rows(row_slack) & active_mask).any(dim=-1)
+                return (
+                    escaping_spec_rows(row_slack, row_margins) & active_mask
+                ).any(dim=-1)
             return ~(unproven_spec_rows(row_slack) & active_mask).any(dim=-1)
 
         def _all_lanes_certified(row_bounds: torch.Tensor) -> bool:
@@ -529,8 +582,10 @@ class DualSolver(Solver):
         slack = margins - thresholds
         dual_slack = dual_margins - thresholds
         if out_spec.kind == OutKind.UNSAFE_LINEAR:
-            certified = (escaping_spec_rows(slack) & active_mask).any(dim=-1)
-            dual_certified = (escaping_spec_rows(dual_slack) & active_mask).any(dim=-1)
+            certified = (escaping_spec_rows(slack, margins) & active_mask).any(dim=-1)
+            dual_certified = (
+                escaping_spec_rows(dual_slack, dual_margins) & active_mask
+            ).any(dim=-1)
             candidate_rows = torch.zeros(
                 k_actual, dtype=torch.long, device=device
             )
@@ -2147,22 +2202,6 @@ class DualSolver(Solver):
         sample = next(iter(bounds_dict.values()))
         device = sample.lb.device
         dtype = sample.lb.dtype
-        # Soundness tolerance for the certify comparison: a dual bound whose
-        # slack is within float rounding of the threshold must yield UNKNOWN,
-        # not CERTIFIED (a tolerance-free `slack < 0` lets a boundary-case
-        # margin that rounds slightly positive falsely certify — observed as
-        # concrete_ce=FOUND + verifier=CERTIFIED on netfactory CNNs).
-        # 100 ulp = the same arithmetic-noise-floor convention as the
-        # per-neuron 'auto' bounds tolerance (act/pipeline/cli.py
-        # _per_neuron_config): pairwise-reduction drift of the largest
-        # layers is ~log2(n)*eps. The 1e-11 floor additionally covers the
-        # ACCUMULATED rounding of the dual bound computation itself over
-        # deep conv chains in float64 (~1e-12): netfactory random draws can
-        # land a true margin within that band of zero, and a 100-ulp-only
-        # f64 tolerance (2.2e-14) was observed to false-CERTIFY such a draw
-        # in CI while a concrete counterexample existed. float32 is
-        # unaffected (100 ulp = 1.2e-5 > 1e-11).
-        cert_eps = max(100.0 * torch.finfo(dtype).eps, 1e-11)
         if sample.lb.dim() < 2:
             raise ValueError(
                 "DualSolver.evaluate_spec: bounds_dict entries must be batched "
@@ -2202,8 +2241,9 @@ class DualSolver(Solver):
             # UNSAFE_LINEAR (specs.py:179-201) — pass +C / +thresholds
             # directly. Certified iff any row escapes the unsafe polytope.
             # Slack semantics is ASYMMETRIC vs ALL-rows kinds below:
-            # here ``slack > 0`` means the row certifies; ``min_slack`` is
-            # NOT a meaningful summary (use ``slack.max(dim=-1)`` instead).
+            # here a row certifies once its slack clears the
+            # ``escaping_spec_rows`` band; ``min_slack`` is NOT a meaningful
+            # summary (use ``slack.max(dim=-1)`` instead).
             fe_params = out_spec.encode_linear(B=B, n_out=n_out, device=device, dtype=dtype)
             C = fe_params["C"].contiguous()
             thresholds = fe_params["thresholds"].contiguous()
@@ -2224,9 +2264,8 @@ class DualSolver(Solver):
                     )
                 margins = margins_flat.view(B, N)
                 slack = margins - thresholds
-                cert_tol = cert_eps * margins.abs().clamp(min=1.0)
                 certified = (
-                    (slack > cert_tol) & torch.isfinite(slack) & active_mask
+                    escaping_spec_rows(slack, margins) & active_mask
                 ).any(dim=-1)
 
             return SpecBatchResult(
@@ -2259,7 +2298,7 @@ class DualSolver(Solver):
             slack = margins - thresholds_neg
             # margins is a SOUND LOWER bound on the true margin: certify iff
             # every active row has slack >= 0. A positive tolerance band flags
-            # safe near-boundary rows (false UNKNOWN); slack < -cert_tol would be
+            # safe near-boundary rows (false UNKNOWN); a negative one would be
             # unsound. Hard zero boundary, matching bab.py; a non-finite slack
             # never passes.
             violations = unproven_spec_rows(slack) & active_mask

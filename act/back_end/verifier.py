@@ -713,8 +713,12 @@ def verify_once(
         # the box, EXISTS row i with c_i @ y > d_i (i.e. y leaves the polytope
         # on row i). Sound under-approximation: EXISTS row i such that
         # min_{y in box} (c_i @ y) > d_i. min(c_i @ y) = c_i_pos @ lb + c_i_neg @ ub.
-        margin_min = (C_pos * lb_exp + C_neg * ub_exp).sum(dim=-1)
-        certified = (margin_min.view(B, M) > thresholds).any(dim=-1)
+        # The strict comparison goes through the certification band of
+        # escaping_spec_rows: the box itself carries rounding noise.
+        from act.back_end.solver.solver_dual import escaping_spec_rows
+
+        margin_min = (C_pos * lb_exp + C_neg * ub_exp).sum(dim=-1).view(B, M)
+        certified = escaping_spec_rows(margin_min - thresholds, margin_min).any(dim=-1)
     else:
         # LINEAR_LE / TOP1_ROBUST / MARGIN_ROBUST / RANGE: certified iff for
         # all y in the box, ALL rows max_y (c_i @ y) < d_i.
