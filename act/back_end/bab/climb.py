@@ -181,6 +181,8 @@ class ClimbMetrics:
     core_literals_original: int = 0
     core_literals_retained: int = 0
     forward_certified_lanes: int = 0
+    retired_unknown_lanes: int = 0
+    coarsen_replay_fallbacks: int = 0
     library: Optional[CoreLibrary] = None
 
     def observe_frontier(self, pending_plus_active_rows: int) -> None:
@@ -208,6 +210,7 @@ class ClimbMetrics:
             "climb_core_literals_original": self.core_literals_original,
             "climb_core_literals_retained": self.core_literals_retained,
             "climb_forward_certified_lanes": self.forward_certified_lanes,
+            "climb_retired_unknown_lanes": self.retired_unknown_lanes,
         }
 
 
@@ -765,6 +768,18 @@ def coarsen(
     return literals.masked_fill(~retained, 0)
 
 
+CLIMB_ROOT_BOUNDS_REUSE_MODES: Tuple[str, ...] = ("none", "plain")
+"""Root-bound reuse modes whose reference bounds depend only on the lane box.
+
+``plain`` hands every descendant the root forward dict with INPUT / INPUT_SPEC
+replaced by the lane box (bab.py ``_solve_dual_batch``); root-level
+``intermediate_refine`` tightens that dict once, on the root box, before any
+split exists. Both keep the replay reference free of split literals, which is
+the premise of core reuse. ``split_refresh`` and ``per_subproblem_refine``
+harden bounds from the lane's split signs and stay rejected.
+"""
+
+
 def validate_climb_config(config: BaBConfig) -> None:
     """Fail before solving when CLIMB's soundness prerequisites are absent."""
     if not config.climb_enabled:
@@ -776,10 +791,10 @@ def validate_climb_config(config: BaBConfig) -> None:
         failures.append(f"bounding must be one of {TOP_K_BOUNDINGS}")
     if config.branching_method not in NEURON_BRANCHING_METHODS:
         failures.append(f"branching_method must be one of {NEURON_BRANCHING_METHODS}")
-    if config.root_bounds_reuse != "none":
-        failures.append("root_bounds_reuse must be 'none'")
-    if config.intermediate_refine != NO_REFINEMENT_MODE:
-        failures.append(f"intermediate_refine must be {NO_REFINEMENT_MODE!r}")
+    if config.root_bounds_reuse not in CLIMB_ROOT_BOUNDS_REUSE_MODES:
+        failures.append(
+            f"root_bounds_reuse must be one of {CLIMB_ROOT_BOUNDS_REUSE_MODES}"
+        )
     if config.per_subproblem_refine != NO_REFINEMENT_MODE:
         failures.append(f"per_subproblem_refine must be {NO_REFINEMENT_MODE!r}")
     if failures:
@@ -798,9 +813,18 @@ class _ReplayContext:
 class ClimbSession:
     """Own the query-local CLIMB library, metrics, and BaB-loop hooks."""
 
-    def __init__(self, config: BaBConfig, net: Net, out_kind: str) -> None:
+    def __init__(
+        self,
+        config: BaBConfig,
+        net: Net,
+        out_kind: str,
+        budget_remaining: Optional[Callable[[], float]] = None,
+    ) -> None:
         self._net = net
         self._out_kind = out_kind
+        self._budget_remaining = budget_remaining
+        self._coarsening_enabled = config.climb_coarsening_enabled
+        self._propagation_enabled = config.climb_propagation_enabled
         self._theta = config.climb_theta
         self._delta_abs = config.climb_delta_abs
         self._delta_rel = config.climb_delta_rel
@@ -812,12 +836,23 @@ class ClimbSession:
 
     @classmethod
     def from_config(
-        cls, config: BaBConfig, net: Net, out_kind: str
+        cls,
+        config: BaBConfig,
+        net: Net,
+        out_kind: str,
+        budget_remaining: Optional[Callable[[], float]] = None,
     ) -> Optional[ClimbSession]:
+        """``budget_remaining`` (seconds left in the BaB budget, None =
+        unbounded) lets ``learn`` skip coarsening once the budget is spent."""
         validate_climb_config(config)
-        return cls(config, net, out_kind) if config.climb_enabled else None
+        if not config.climb_enabled:
+            return None
+        return cls(config, net, out_kind, budget_remaining)
 
     def before_pop(self, pool: TopKBounding) -> None:
+        if not self._propagation_enabled:
+            self.metrics.observe_frontier(len(pool))
+            return
         if self.library.core_count > 0:
             # H1: eager discharge of the whole pending pool before any lane is
             # bounded. view_all/replace_all never score, cool, or probe.
@@ -854,7 +889,9 @@ class ClimbSession:
     ) -> None:
         # H2: replay -> coarsen -> insert. Certified lanes only; replay reads
         # the immutable forward snapshot, the theta budget coarsens the
-        # validated vector, and the survivor is inserted as a core.
+        # validated vector, and the survivor is inserted as a core. Once the
+        # BaB budget is spent after the replay, the replay-certified rows are
+        # inserted whole: no coarsening rechecks.
         forward_only = getattr(dual_solve_result, "forward_only_certified", None)
         unsat_lanes = []
         for i, status in enumerate(statuses):
@@ -880,6 +917,13 @@ class ClimbSession:
         # The replay reference is the exact unhardened forward snapshot the
         # main solve consumed, sliced by certified lane; it is never recomputed
         # so Eq. 12 magnitudes and the local clamps read the same immutable bounds.
+        # Invariant (D7): that snapshot depends only on the lane input box -
+        # a fresh forward pass, or under root_bounds_reuse="plain" the root dict
+        # (optionally refined once on the root box) with the lane box swapped
+        # in - never on the lane's split literals. Split-dependent hardening
+        # (split_refresh, per_subproblem_refine) is rejected by
+        # validate_climb_config, so a learned core stays valid on every
+        # sub-box whose signs contain it.
         replay_bounds = slice_bounds_dict(
             dual_solve_result.reference_bounds, unsat_idx
         )
@@ -921,26 +965,34 @@ class ClimbSession:
             replay_batch, replay_bounds, replay_c_lanes, replay_thresholds, replay_m_specs
         )
         coarsen_started = time.perf_counter()
-        retained = coarsen(
-            packed,
-            costs,
-            budget_slack,
-            theta=self._theta,
-            delta_abs=self._delta_abs,
-            delta_rel=self._delta_rel,
-            recheck_k=self._recheck_k,
-            recheck=lambda candidate, rows: self._instrumented_recheck(
-                context, candidate, rows
-            ),
+        budget_spent = (
+            self._budget_remaining is not None and self._budget_remaining() <= 0.0
         )
-        self.metrics.coarsen_time_s += time.perf_counter() - coarsen_started
+        if self._coarsening_enabled and not budget_spent:
+            retained = coarsen(
+                packed,
+                costs,
+                budget_slack,
+                theta=self._theta,
+                delta_abs=self._delta_abs,
+                delta_rel=self._delta_rel,
+                recheck_k=self._recheck_k,
+                recheck=lambda candidate, rows: self._instrumented_recheck(
+                    context, candidate, rows
+                ),
+            )
+        else:
+            retained = packed
         original_literals = int((packed != 0).sum())
-        retained_literals = int((retained != 0).sum())
+        coarsened_literals = int((retained != 0).sum())
         assert _retained_literals_are_subset(packed, retained), (
             "CLIMB invariant violated: coarsening added or changed a literal "
             f"(rows={packed.shape[0]}, width={packed.shape[1]}, "
-            f"original_literals={original_literals}, retained_literals={retained_literals})"
+            f"original_literals={original_literals}, retained_literals={coarsened_literals})"
         )
+        retained = self._admit_replay_certified_rows(context, packed, retained, valid)
+        self.metrics.coarsen_time_s += time.perf_counter() - coarsen_started
+        retained_literals = int((retained != 0).sum())
         self.metrics.core_literals_original += original_literals
         self.metrics.core_literals_retained += retained_literals
         assert (
@@ -954,6 +1006,37 @@ class ClimbSession:
         valid_rows = torch.where(valid)[0]
         valid_cores = retained.index_select(0, valid_rows)
         self.metrics.cores_inserted += self.library.insert(valid_cores)
+
+    def _admit_replay_certified_rows(
+        self,
+        context: _ReplayContext,
+        packed: torch.Tensor,
+        retained: torch.Tensor,
+        valid: torch.Tensor,
+    ) -> torch.Tensor:
+        """Restore the full certified row wherever the coarsened row fails replay.
+
+        The Eq. 12 costs ``(eta + relu(-nu)) * m`` bound the removal loss only
+        when the split neuron's alpha equals its phase slope (1 active, 0
+        inactive); the certificate carries the optimizer's alpha, so once a
+        literal is dropped the un-split neuron's ``alpha * nu`` plane can lose
+        more slack than the budget charged. A core is therefore admitted only
+        if its retained literal set certifies under the same replay used by
+        ``_recheck``; otherwise the packed row, already replay-certified, is
+        inserted instead.
+        """
+        changed = valid & (retained != packed).any(dim=1)
+        rows = torch.where(changed)[0]
+        if rows.numel() == 0:
+            return retained
+        passing = self._recheck(context, retained.index_select(0, rows), rows)
+        failed = rows[~passing.to(rows.device)]
+        if failed.numel() == 0:
+            return retained
+        self.metrics.coarsen_replay_fallbacks += int(failed.numel())
+        restored = retained.clone()
+        restored[failed] = packed[failed]
+        return restored
 
     def _recheck(
         self,
@@ -1029,6 +1112,9 @@ class ClimbSession:
     def before_split(
         self, pool: TopKBounding, unresolved: SubproblemBatch
     ) -> SubproblemBatch:
+        if not self._propagation_enabled:
+            self.metrics.observe_frontier(len(pool) + unresolved.batch_size)
+            return unresolved
         if self.library.core_count == 0:
             return unresolved
         # H3: one joint fixpoint over (pending, active); pending removals were
@@ -1065,6 +1151,11 @@ class ClimbSession:
             "brancher fell back to an input-axis split, which "
             "would break the shared-box premise of core reuse"
         )
+
+    def retire_lanes_without_relu_candidate(self, retired: int) -> None:
+        """Count unresolved lanes dropped as UNKNOWN because no ReLU literal is left to split (D8b)."""
+        assert retired >= 0
+        self.metrics.retired_unknown_lanes += retired
 
     def after_children(self, generated: int, frontier_rows: int) -> None:
         self.metrics.generated_children += generated

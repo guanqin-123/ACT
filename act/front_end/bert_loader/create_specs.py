@@ -33,11 +33,11 @@ from act.front_end.bert_loader.data_loader import (
     load_bert_dataset,
     sample_correctly_classified,
 )
-from act.front_end.bert_loader.buffet_model import (
-    BuffetTokenizedInput,
-    LoadedBuffetModel,
+from act.front_end.bert_loader.compact_bert import (
+    CompactBertTokenizedInput,
+    LoadedCompactBert,
     embedding_sum,
-    load_buffet_model,
+    load_compact_bert,
     tokenize_act_tokens,
 )
 from act.util.device_manager import get_current_settings
@@ -84,14 +84,14 @@ class BertSpecCreator(BaseSpecCreator):
 
         Args:
             dataset_names: Dataset names, defaulting to SST.
-            model_names: ``embedding_classifier`` or ``buffet_transformer``.
+            model_names: ``embedding_classifier`` or ``compact_bert``.
             num_samples: Number of correctly classified examples per pair.
             split: Dataset split to read.
             max_verify_length: Maximum token sequence length to verify.
             epsilon: Embedding-space perturbation radius.
             p_norm: Lp norm metadata carried by ``LP_EMBEDDING``.
             perturbed_words: Number of token positions to perturb from the start.
-            checkpoint_dir: BUFFET model directory containing the ``checkpoint`` file.
+            checkpoint_dir: Compact BERT model directory containing the ``checkpoint`` file.
             position_mode: ``prefix`` for the existing behavior or ``sweep`` for
                 one spec per non-continuation WordPiece position.
             conversion_route: ``b`` for generic FX lowering or ``a`` for the
@@ -178,27 +178,27 @@ class BertSpecCreator(BaseSpecCreator):
                         )
                     continue
 
-                if model_name != "buffet_transformer":
+                if model_name != "compact_bert":
                     logger.warning("Skipping unsupported BERT model '%s'", model_name)
                     continue
                 if checkpoint_dir is None:
                     raise ValueError(
-                        "buffet_transformer requires checkpoint_dir to name a "
-                        "BUFFET model directory"
+                        "compact_bert requires checkpoint_dir to name a "
+                        "compact BERT model directory"
                     )
                 model_dir = Path(checkpoint_dir)
                 if not model_dir.is_absolute():
                     model_dir = Path(get_data_root()) / model_dir
                 device, dtype = get_current_settings()
-                loaded = load_buffet_model(model_dir, device=device, dtype=dtype)
+                loaded = load_compact_bert(model_dir, device=device, dtype=dtype)
                 loaded.model._act_conversion_route = conversion_route
-                selected_buffet = self._sample_buffet_inputs(
+                selected_compact_bert = self._sample_compact_bert_inputs(
                     examples,
                     loaded,
                     num_samples=num_samples,
                     max_verify_length=max_verify_length,
                 )
-                for tokenized, embeddings, predicted in selected_buffet:
+                for tokenized, embeddings, predicted in selected_compact_bert:
                     labeled = LabeledInputTensor(
                         tensor=embeddings,
                         label=torch.tensor(
@@ -296,15 +296,15 @@ class BertSpecCreator(BaseSpecCreator):
         return input_spec, output_spec
 
     @staticmethod
-    def _sample_buffet_inputs(
+    def _sample_compact_bert_inputs(
         examples: Sequence[Any],
-        loaded: LoadedBuffetModel,
+        loaded: LoadedCompactBert,
         *,
         num_samples: int,
         max_verify_length: int,
-    ) -> list[tuple[BuffetTokenizedInput, torch.Tensor, int]]:
+    ) -> list[tuple[CompactBertTokenizedInput, torch.Tensor, int]]:
         """Select correctly classified checkpoint-backed examples in file order."""
-        selected: list[tuple[BuffetTokenizedInput, torch.Tensor, int]] = []
+        selected: list[tuple[CompactBertTokenizedInput, torch.Tensor, int]] = []
         with torch.no_grad():
             for example in examples:
                 tokenized = tokenize_act_tokens(example.tokens, loaded.tokenizer)
@@ -322,6 +322,6 @@ class BertSpecCreator(BaseSpecCreator):
                     break
         if not selected:
             raise ValueError(
-                "No correctly classified BUFFET samples found within max_verify_length"
+                "No correctly classified compact BERT samples found within max_verify_length"
             )
         return selected

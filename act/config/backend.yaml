@@ -44,8 +44,9 @@ bab_presets:
   # bounding, and unresolved ones before splitting.
   # validate_climb_config raises ConfigError unless solver_tier is
   # dual_alpha_eta, bounding is a TopKBounding pool, branching splits neurons,
-  # and root_bounds_reuse, intermediate_refine and per_subproblem_refine are
-  # "none".
+  # root_bounds_reuse is "none" or "plain" and per_subproblem_refine is "none"
+  # (root-level intermediate_refine is allowed: it runs once on the root box,
+  # so replayed reference bounds still depend only on the lane input box).
   climb:
     # Replay needs the alpha/eta dual certificate.
     solver_tier: "dual_alpha_eta"
@@ -67,6 +68,26 @@ bab_presets:
     # The first 2 lanes get one extra replay to try dropping one more literal.
     climb_recheck_k: 2
     # One split per step, so small nets still learn cores.
+    multi_split_levels: 1
+
+  # CLIMB with root-tightened, reused bounds (D7): the climb preset plus a
+  # single root-level refinement of every unstable layer, handed unchanged to
+  # every descendant with the lane box swapped in. Reference bounds still
+  # depend only on the lane input box, so cores stay reusable.
+  climb_refined:
+    solver_tier: "dual_alpha_eta"
+    branching_method: "babsr"
+    bounding: "depth_bound_blend"
+    # Descendants reuse the root forward dict (lane box swapped in) instead of
+    # re-running the forward pass; no split-derived hardening.
+    root_bounds_reuse: "plain"
+    # Tighten the root's pre-activation bounds on every unstable layer once.
+    intermediate_refine: "all"
+    # Prerequisite: no per-subproblem (split-dependent) refinement.
+    per_subproblem_refine: "none"
+    climb_enabled: true
+    climb_theta: 0.5
+    climb_recheck_k: 2
     multi_split_levels: 1
 
 backend:
@@ -104,9 +125,12 @@ backend:
   # Verification cascade  (single-shot → LP-batched → BaB)
   # ─────────────────────────────────────────────────────────────────────────
 
-  # Wall-clock budget in seconds. The LP-batched tier and each BaB run get the
-  # full budget; a BaB run's clock starts at its entry, so its root refinement
-  # and pre-solve count (the single-shot solve before BaB does not); with solver
+  # Wall-clock budget in seconds for one net's --verify. The LP-batched tier
+  # gets the full budget; each BaB run gets what is left after the net build
+  # and the single-shot / LP tiers (the same remainder for every lane), and
+  # its clock starts at its entry, so its root refinement and pre-solve count.
+  # BaB may overshoot by at most one bounding unit (one dual batch call,
+  # reported as budget_longest_unit_s when the budget runs out). With solver
   # hybridz it also bounds the single-shot solve unless hybridz.timeout is set.
   timeout: 60.0
 
@@ -320,6 +344,9 @@ backend:
 
     # -- CLIMB certificate reuse (ReLU neuron branching only) ---------------
     climb_enabled: false          # enable CLIMB (see bab_presets.climb above)
+    # Ablation gates default on, preserving the existing CLIMB algorithm.
+    climb_coarsening_enabled: true  # false admits full replay-certified literal rows
+    climb_propagation_enabled: true # false learns cores but does not prune/infer with them
     climb_theta: 0.0              # fraction of replay slack spent on dropping literals
     # Deletion-budget safety margin: delta = climb_delta_abs + climb_delta_rel * |slack|.
     climb_delta_abs: 0.000000001  # absolute part of delta

@@ -13,7 +13,7 @@ conda env create -f environment.yml    # Install required lib packages to run AC
 conda activate act-py312 # Activate an environment (python-3.12)  # Activate the environment 
 ```
 
-Install the BUFFET-compatible NLTK tokenizer data into the active environment.
+Install the NLTK tokenizer data used by the SST/Yelp text loaders into the active environment.
 NLTK 3.10 rejects shared writable data directories, so remove group and other
 write permissions after downloading:
 

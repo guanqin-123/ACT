@@ -411,13 +411,11 @@ class ActGraphModule(nn.Module):
             target = layer.params.get("target_shape") or layer.params.get("output_shape")
             if target is None:
                 return inputs[0]
-            # target encodes a per-sample shape (leading dim is conceptual
-            # batch slot = 1 in the template). At runtime the input carries
-            # the actual batch B from VerifiableModel batchification, so
-            # substitute B for the leading dim rather than reshaping literally
-            # — otherwise B>1 fails with "shape '[1, n]' invalid for input of
-            # size B*n".
-            return inputs[0].reshape(inputs[0].shape[0], *target[1:])
+            target_shape = tuple(int(d) for d in target)
+            input_shape = layer.params.get("input_shape")
+            if input_shape is not None and tuple(inputs[0].shape) == tuple(input_shape):
+                return inputs[0].reshape(target_shape)
+            return inputs[0].reshape(inputs[0].shape[0], *target_shape[1:])
         if kind == LayerKind.MAX.value:
             if len(inputs) < 2:
                 raise RuntimeError(
@@ -742,7 +740,9 @@ class ActGraphModule(nn.Module):
             # Same axis convention as SLICE (see _axis_shift).
             shift = _axis_shift(layer.params.get("input_shape"), inputs[0])
             idx = torch.as_tensor(indices, dtype=torch.long, device=inputs[0].device)
-            return torch.index_select(inputs[0], dim=axis + shift, index=idx)
+            dim = axis + shift
+            output = torch.index_select(inputs[0], dim=dim, index=idx)
+            return output.squeeze(dim) if layer.params.get("scalar_indices") else output
         if kind == LayerKind.MEAN.value:
             keepdim = bool(layer.params.get("keepdim", 0))
             shift = _axis_shift(layer.params.get("input_shape"), inputs[0])

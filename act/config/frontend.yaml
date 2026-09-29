@@ -187,6 +187,6 @@ text_verification:
   num_verify_iters: 5    # verification iterations
   k: 1                   # top-k value
   alpha_opt_steps: 1000  # alpha optimization steps
-  checkpoint_dir: null   # BUFFET model directory containing the checkpoint file
+  checkpoint_dir: null   # compact BERT model directory containing the checkpoint file
   position_mode: prefix  # prefix (existing arange(k)) or sweep (one WordPiece position)
   conversion_route: b    # b (generic FX default) or a (manual comparison baseline)

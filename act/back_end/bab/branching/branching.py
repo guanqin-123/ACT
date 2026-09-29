@@ -79,6 +79,10 @@ class BranchingScores:
     """Width-masked input-axis scores kept alongside neuron scores, so a lane
     with no splittable neuron falls back to a *wide* input dimension instead of
     a hard-coded dim 0 (zero width on any sparse-perturbation benchmark)."""
+    babsr_per_layer: Optional[Dict[int, torch.Tensor]] = None
+    """BaBSR primary scores retained when ``per_layer`` holds re-scored values
+    (FSB measured improvements), so ``select_neuron_only`` can fall back to the
+    lane's best BaBSR candidate instead of an input-axis split."""
 
 
 @dataclass
@@ -88,6 +92,10 @@ class SplitDecision:
     fanout: int = 2
     layer_id: Optional[torch.Tensor] = None
     neuron_idx: Optional[torch.Tensor] = None
+    lane_mask: Optional[torch.Tensor] = None
+    """Bool ``[N]`` over the scored batch: lanes this decision covers. Only set
+    by neuron-only selection; ``False`` lanes had no ReLU candidate and must be
+    retired by the caller before ``apply``. ``None`` means every lane."""
 
     def input_axes(self, batch: SubproblemBatch) -> torch.Tensor:
         if self.input_axis is None:
@@ -340,10 +348,12 @@ class BaBSRBranching(BranchingStrategy):
         decision_threshold: float = 1e-3,
         intercept_fallback_max: int = 2,
         sparsest_layer: Optional[int] = None,
+        neuron_only: bool = False,
     ) -> None:
         self.decision_threshold = decision_threshold
         self.intercept_fallback_max = intercept_fallback_max
         self.sparsest_layer = sparsest_layer
+        self.neuron_only = neuron_only
         self.icp_score_counter = 0
 
     def compute_scores(
@@ -463,6 +473,8 @@ class BaBSRBranching(BranchingStrategy):
     def select(self, scores: torch.Tensor | BranchingScores) -> torch.Tensor | SplitDecision:
         if isinstance(scores, torch.Tensor):
             return _argmax_splittable(scores)
+        if self.neuron_only:
+            return self.select_neuron_only(scores)
         if scores.flat is not None:
             return SplitDecision(kind="input_axis", input_axis=_argmax_splittable(scores.flat))
         per_layer = scores.per_layer
@@ -512,6 +524,99 @@ class BaBSRBranching(BranchingStrategy):
             return self._input_axis_fallback(scores)
 
         return SplitDecision(kind="neuron", layer_id=decisions_layer, neuron_idx=decisions_neuron)
+
+    def select_neuron_only(self, scores: BranchingScores) -> SplitDecision:
+        """Per-lane neuron decision that never emits an input-axis split (D8a).
+
+        Lanes decide exactly as ``select`` while the primary score clears
+        ``decision_threshold`` or the intercept backup applies. Where ``select``
+        would fall back to an input-axis split, the lane instead takes its best
+        finite ReLU candidate: ``babsr_per_layer`` (FSB keeps the BaBSR scores
+        there), else ``per_layer``, else the intercept score. Lanes without any
+        finite candidate are dropped from the decision tensors and flagged
+        ``False`` in ``lane_mask`` so the caller can retire them.
+        """
+        per_layer = scores.per_layer
+        if not per_layer:
+            n_lanes = 0
+            for table in (scores.flat, scores.input_fallback):
+                if table is not None:
+                    n_lanes = int(table.shape[0])
+                    break
+            return _neuron_decision_over_lanes(
+                torch.zeros(n_lanes, dtype=torch.long),
+                torch.zeros(n_lanes, dtype=torch.long),
+                torch.zeros(n_lanes, dtype=torch.bool),
+            )
+
+        N = next(iter(per_layer.values())).shape[0]
+        device = next(iter(per_layer.values())).device
+        keep = torch.zeros(N, dtype=torch.bool)
+        decisions_layer = torch.zeros(N, dtype=torch.long, device=device)
+        decisions_neuron = torch.zeros(N, dtype=torch.long, device=device)
+        intercept = scores.intercept_per_layer
+        candidate_tables = [
+            table
+            for table in (scores.babsr_per_layer or per_layer, intercept)
+            if table
+        ]
+
+        for n in range(N):
+            best_lid, best_idx, best_val = _lane_argmax(per_layer, n)
+            if best_lid is not None and best_val > self.decision_threshold:
+                decisions_layer[n] = best_lid
+                decisions_neuron[n] = best_idx
+                keep[n] = True
+                self.icp_score_counter = 0
+                continue
+
+            if intercept and self.icp_score_counter < self.intercept_fallback_max:
+                ic_lid, ic_idx, ic_val = _lane_argmax(intercept, n)
+                if ic_lid is not None and ic_val > float("-inf"):
+                    decisions_layer[n] = ic_lid
+                    decisions_neuron[n] = ic_idx
+                    keep[n] = True
+                    self.icp_score_counter += 1
+                    continue
+
+            self.icp_score_counter = 0
+            for table in candidate_tables:
+                lid, idx, val = _lane_argmax(table, n)
+                if lid is not None and val > float("-inf"):
+                    decisions_layer[n] = lid
+                    decisions_neuron[n] = idx
+                    keep[n] = True
+                    break
+
+        return _neuron_decision_over_lanes(decisions_layer, decisions_neuron, keep)
+
+
+def _neuron_decision_over_lanes(
+    layer_id: torch.Tensor, neuron_idx: torch.Tensor, keep: torch.Tensor
+) -> SplitDecision:
+    kept_rows = torch.where(keep)[0].to(layer_id.device)
+    return SplitDecision(
+        kind="neuron",
+        layer_id=layer_id.index_select(0, kept_rows),
+        neuron_idx=neuron_idx.index_select(0, kept_rows),
+        lane_mask=keep,
+    )
+
+
+def _lane_argmax(
+    per_layer: Dict[int, torch.Tensor], lane: int
+) -> Tuple[Optional[int], int, float]:
+    """Best ``(layer_id, neuron_idx, score)`` of one lane over a per-layer score table."""
+    best_lid: Optional[int] = None
+    best_idx = 0
+    best_val = float("-inf")
+    for lid, score in per_layer.items():
+        val, idx = score[lane].max(dim=0)
+        if float(val.item()) > best_val:
+            best_val = float(val.item())
+            best_lid = lid
+            best_idx = int(idx.item())
+    return best_lid, best_idx, best_val
 
 
 _WITNESS_GAP_TOL = 1e-6
@@ -566,8 +671,10 @@ class WitnessResidualBranching(BaBSRBranching):
     paths whose solver does not expose an SCE.
     """
 
-    def __init__(self, decision_threshold: float = 1e-12) -> None:
-        super().__init__(decision_threshold=decision_threshold)
+    def __init__(
+        self, decision_threshold: float = 1e-12, neuron_only: bool = False
+    ) -> None:
+        super().__init__(decision_threshold=decision_threshold, neuron_only=neuron_only)
         self.fallback_count = 0
         self.different_from_babsr_count = 0
 
@@ -842,11 +949,13 @@ class FSBBranching(BaBSRBranching):
         decision_threshold: float = 1e-3,
         intercept_fallback_max: int = 2,
         sparsest_layer: Optional[int] = None,
+        neuron_only: bool = False,
     ) -> None:
         super().__init__(
             decision_threshold=decision_threshold,
             intercept_fallback_max=intercept_fallback_max,
             sparsest_layer=sparsest_layer,
+            neuron_only=neuron_only,
         )
         self.dual_solver = dual_solver
         self.branching_candidates = branching_candidates
@@ -953,6 +1062,7 @@ class FSBBranching(BaBSRBranching):
             per_layer=final_per_layer,
             intercept_per_layer=bsr.intercept_per_layer,
             input_fallback=bsr.input_fallback,
+            babsr_per_layer=bsr.per_layer,
         )
 
     def _evaluate_hypotheses(
@@ -1078,17 +1188,24 @@ def _build_branching_strategy(
     *,
     dual_solver: Any = None,
     branching_candidates: int = 3,
+    neuron_only: bool = False,
 ) -> BranchingStrategy:
+    """Build a strategy; ``neuron_only`` (CLIMB) makes the BaBSR family never
+    emit an input-axis split and instead flag candidate-less lanes (D8)."""
     if method == "random":
         return RandomBranching()
     if method == "width":
         return InputBranching()
     if method == "babsr":
-        return BaBSRBranching()
+        return BaBSRBranching(neuron_only=neuron_only)
     if method == "witness_residual":
-        return WitnessResidualBranching()
+        return WitnessResidualBranching(neuron_only=neuron_only)
     if method == "fsb":
         if dual_solver is None:
             raise ValueError("FSB branching requires a dual_solver instance (inject via factory).")
-        return FSBBranching(dual_solver=dual_solver, branching_candidates=branching_candidates)
+        return FSBBranching(
+            dual_solver=dual_solver,
+            branching_candidates=branching_candidates,
+            neuron_only=neuron_only,
+        )
     raise ValueError(f"Unknown branching method: {method!r}")

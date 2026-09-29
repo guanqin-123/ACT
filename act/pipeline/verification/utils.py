@@ -561,7 +561,10 @@ def _convert_OnnxReshape(self, mod: nn.Module, node: fx.Node) -> None:
     output_shape = tuple(resolved)
     out_vars = self._same_size_forward()
     layer_id = self._add_layer(
-        LayerKind.RESHAPE.value, {"target_shape": output_shape}, self.prev_out, out_vars,
+        LayerKind.RESHAPE.value,
+        {"target_shape": output_shape, "input_shape": self.shape, "output_shape": output_shape},
+        self.prev_out,
+        out_vars,
     )
     self.prev_out = out_vars
     self.shape = output_shape
@@ -692,10 +695,22 @@ def _convert_OnnxGather(self, mod: nn.Module, node: fx.Node) -> None:
     axis = int(getattr(mod, '_axis', 0))
     args = [a for a in node.args if isinstance(a, fx.Node)]
     idx = self._resolve_constant_tensor(args[1].name) if len(args) >= 2 else None
+    if idx is None and len(args) >= 2:
+        idx = self._evaluate_constant_subgraph(args[1].name)
     if idx is None:
         raise ValueError(f"OnnxGather: cannot resolve indices at {node.name}")
-    indices = idx.detach().clone().to(torch.int64)
     norm_axis = axis if axis >= 0 else axis + len(self.shape)
+    if not 0 <= norm_axis < len(self.shape):
+        raise ValueError(
+            f"OnnxGather at {node.name}: axis {axis} is invalid for shape {self.shape}"
+        )
+    indices = idx.detach().clone().to(torch.int64)
+    indices = torch.where(indices < 0, indices + self.shape[norm_axis], indices)
+    if torch.any((indices < 0) | (indices >= self.shape[norm_axis])):
+        raise IndexError(
+            f"OnnxGather at {node.name}: index is out of bounds for axis {axis} "
+            f"with size {self.shape[norm_axis]}"
+        )
     if indices.dim() == 0:
         output_shape = tuple(self.shape[:norm_axis] + self.shape[norm_axis + 1:]) or (1,)
     else:
@@ -703,7 +718,8 @@ def _convert_OnnxGather(self, mod: nn.Module, node: fx.Node) -> None:
     out_vars = self._alloc_ids(_prod(output_shape) or 1)
     layer_id = self._add_layer(
         LayerKind.GATHER.value,
-        {"indices": indices, "axis": axis,
+        {"indices": indices.reshape(-1), "axis": norm_axis,
+         "scalar_indices": indices.dim() == 0,
          "input_shape": self.shape, "output_shape": output_shape},
         self.prev_out, out_vars,
     )
@@ -932,34 +948,52 @@ def _convert_OnnxSlice(self, mod: nn.Module, node: fx.Node) -> None:
     self._register_node(node.name, layer_id)
 
 def _convert_OnnxPow(self, mod: nn.Module, node: fx.Node) -> None:
-    """OnnxPow with constant integer exponent.
-
-    Currently supports exponent==2 (squaring) by emitting MUL(var, var).
-    Higher integer exponents would chain MULs; non-integer exponents need
-    a real POW transfer-function and are deferred (future enhancement).
-    """
+    """OnnxPow with a constant positive integer exponent, lowered exactly."""
     if not self._get_predecessor_state(node):
         raise ValueError(f"OnnxPow: missing predecessor for {node.name}")
     args = [a for a in node.args if isinstance(a, fx.Node)]
     if len(args) < 2:
-        raise ValueError(f"OnnxPow at {node.name}: expected 2 args")
+        raise ValueError(f"OnnxPow at {node.name}: expected base and exponent")
     exp_t = self._resolve_constant_tensor(args[1].name)
     if exp_t is None:
         raise NotImplementedError(f"OnnxPow at {node.name}: dynamic exponent (future enhancement)")
     exp_val = float(exp_t.flatten().tolist()[0])
-    if abs(exp_val - 2.0) > 1e-9:
+    exp_int = int(round(exp_val))
+    if exp_int < 2 or abs(exp_val - exp_int) > 1e-9:
         raise NotImplementedError(
-            f"OnnxPow at {node.name}: only exponent==2 supported (got {exp_val}; future enhancement)"
+            f"OnnxPow at {node.name}: exponent must be an integer >= 2 "
+            f"(got {exp_val}; future enhancement)"
         )
-    var_vars = self.node_outputs[args[0].name]
-    out_vars = self._alloc_ids(len(var_vars))
+    base_vars = self.node_outputs[args[0].name]
+    source_layer_id = self.node_to_layer_id.get(args[0].name)
+    result_vars = self._alloc_ids(len(base_vars))
     layer_id = self._add_layer(
-        LayerKind.MUL.value,
-        {"x_vars": var_vars, "y_vars": var_vars,
-         "input_shape": self.shape, "output_shape": self.shape},
-        var_vars + var_vars, out_vars,
+        LayerKind.SQUARE.value,
+        {"input_shape": self.shape, "output_shape": self.shape},
+        base_vars,
+        result_vars,
     )
-    self.prev_out = out_vars
+    self._fx_pred_override[layer_id] = (
+        [source_layer_id]
+        if source_layer_id is not None and source_layer_id >= 0
+        else []
+    )
+    result_layer_id = layer_id
+    for _ in range(2, exp_int):
+        out_vars = self._alloc_ids(len(base_vars))
+        layer_id = self._add_layer(
+            LayerKind.MUL.value,
+            {"x_vars": result_vars, "y_vars": base_vars,
+             "input_shape": self.shape, "output_shape": self.shape},
+            result_vars + base_vars, out_vars,
+        )
+        predecessor_ids = [result_layer_id]
+        if source_layer_id is not None and source_layer_id >= 0:
+            predecessor_ids.append(source_layer_id)
+        self._fx_pred_override[layer_id] = predecessor_ids
+        result_vars = out_vars
+        result_layer_id = layer_id
+    self.prev_out = result_vars
     self._register_node(node.name, layer_id)
 
 def _convert_OnnxSplit13(self, mod: nn.Module, node: fx.Node) -> None:
@@ -979,7 +1013,9 @@ def _convert_OnnxSplit13(self, mod: nn.Module, node: fx.Node) -> None:
         )
     split_t = self._resolve_constant_tensor(args[1].name)
     if split_t is None:
-        raise ValueError(f"OnnxSplit13 at {node.name}: cannot resolve split sizes")
+        split_t = self._evaluate_constant_subgraph(args[1].name)
+        if split_t is None:
+            raise ValueError(f"OnnxSplit13 at {node.name}: cannot resolve split sizes")
     split_sizes = [int(x) for x in split_t.flatten().tolist()]
     axis_attr = getattr(mod, '_axis', None)
     if axis_attr is None:
@@ -987,14 +1023,14 @@ def _convert_OnnxSplit13(self, mod: nn.Module, node: fx.Node) -> None:
     rank = len(self.shape)
     norm_axis = int(axis_attr) + rank if int(axis_attr) < 0 else int(axis_attr)
 
-    getitem_children: Dict[int, fx.Node] = {}
+    getitem_children: Dict[int, List[fx.Node]] = {}
     if self.fx_graph is not None:
         for n in self.fx_graph.nodes:
             if n.op == 'call_function' and 'getitem' in str(n.target).lower() and n.args:
                 if isinstance(n.args[0], fx.Node) and n.args[0].name == node.name and len(n.args) > 1:
                     idx_arg = n.args[1]
                     if isinstance(idx_arg, int):
-                        getitem_children[idx_arg] = n
+                        getitem_children.setdefault(idx_arg, []).append(n)
 
     var_vars = list(self.prev_out)
     var_shape = self.shape
@@ -1017,13 +1053,16 @@ def _convert_OnnxSplit13(self, mod: nn.Module, node: fx.Node) -> None:
              "input_shape": var_shape, "output_shape": chunk_shape_t},
             var_vars, chunk_vars,
         )
-        if input_layer_id is not None and input_layer_id >= 0:
-            self._fx_pred_override[layer_id] = [input_layer_id]
+        self._fx_pred_override[layer_id] = (
+            [input_layer_id]
+            if input_layer_id is not None and input_layer_id >= 0
+            else []
+        )
         if i in getitem_children:
-            git_node = getitem_children[i]
-            self.node_outputs[git_node.name] = chunk_vars
-            self.node_shapes[git_node.name] = chunk_shape_t
-            self.node_to_layer_id[git_node.name] = layer_id
+            for getitem_node in getitem_children[i]:
+                self.node_outputs[getitem_node.name] = chunk_vars
+                self.node_shapes[getitem_node.name] = chunk_shape_t
+                self.node_to_layer_id[getitem_node.name] = layer_id
         last_chunk_vars = chunk_vars
         last_chunk_shape = chunk_shape_t
         last_layer_id = layer_id
@@ -1101,13 +1140,35 @@ def _convert_OnnxBinaryMathOperation(self, mod: nn.Module, node: fx.Node) -> Non
     if x_var and y_var:
         xv, yv = self.node_outputs[x.name], self.node_outputs[y.name]
         xs, ys = self.node_shapes[x.name], self.node_shapes[y.name]
-        if len(xv) != len(yv):
-            raise NotImplementedError(
-                f"Var-var '{op}' size mismatch ({len(xv)} vs {len(yv)}) at {node.name}"
+        try:
+            out_shape = tuple(int(d) for d in torch.broadcast_shapes(xs, ys))
+        except RuntimeError as e:
+            raise ValueError(
+                f"OnnxBinaryMathOperation at {node.name}: variable shapes "
+                f"{xs} and {ys} are not broadcast-compatible ({e})"
             )
+
+        def expand_operand(
+            operand_vars: List[int], operand_shape: Tuple[int, ...], operand_node: fx.Node
+        ) -> List[int]:
+            if operand_shape == out_shape:
+                return operand_vars
+            expanded_vars = self._alloc_ids(_prod(out_shape) or 1)
+            expand_id = self._add_layer(
+                LayerKind.EXPAND.value,
+                {"shape": out_shape, "input_shape": operand_shape, "output_shape": out_shape},
+                operand_vars,
+                expanded_vars,
+            )
+            source_id = self.node_to_layer_id.get(operand_node.name)
+            if source_id is not None and source_id >= 0:
+                self._fx_pred_override[expand_id] = [source_id]
+            return expanded_vars
+
+        xv = expand_operand(xv, xs, x)
+        yv = expand_operand(yv, ys, y)
         kind = {'add': LayerKind.ADD, 'sub': LayerKind.SUB,
                 'mul': LayerKind.MUL, 'div': LayerKind.DIV}[op]
-        out_shape = xs if _prod(xs) >= _prod(ys) else ys
         out_vars = self._alloc_ids(len(xv))
         layer_id = self._add_layer(
             kind.value,

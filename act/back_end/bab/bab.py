@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Union, cast
 
 import torch
@@ -53,6 +54,7 @@ from act.back_end.bab.branching.multi_split import (
     enumerate_unstable_candidates,
     gain_tested_decision,
     groups_to_tensors,
+    lanes_with_relu_candidates,
     presplit_root,
 )
 from act.back_end.bab.branching.bounding import (
@@ -103,8 +105,12 @@ _monotonic = time.monotonic
 # ---------------------------------------------------------------------------
 
 
-def _build_branching_strategy(method: str, *, dual_solver: Any = None) -> BranchingStrategy:
-    return _build_branching_strategy_impl(method, dual_solver=dual_solver)
+def _build_branching_strategy(
+    method: str, *, dual_solver: Any = None, neuron_only: bool = False
+) -> BranchingStrategy:
+    return _build_branching_strategy_impl(
+        method, dual_solver=dual_solver, neuron_only=neuron_only
+    )
 
 
 def _build_bounding(
@@ -185,6 +191,34 @@ def _witness_residual_branching_active(config: BaBConfig) -> bool:
     return config.branching_method == "witness_residual"
 
 
+def _keep_branch_lanes(
+    branch_batch: SubproblemBatch,
+    bounds_dict: Optional[Dict[int, Bounds]],
+    nu_per_layer: Optional[Dict[int, torch.Tensor]],
+    witness_preact: Optional[Dict[int, torch.Tensor]],
+    keep: torch.Tensor,
+) -> tuple[
+    SubproblemBatch,
+    Optional[Dict[int, Bounds]],
+    Optional[Dict[int, torch.Tensor]],
+    Optional[Dict[int, torch.Tensor]],
+]:
+    """Restrict the branch batch and its per-lane branching state to ``keep`` lanes."""
+    kept_idx = torch.where(keep.to(branch_batch.lb.device))[0]
+    bounds_out, nu_out = slice_branching_state(
+        bounds_dict, nu_per_layer, kept_idx, branch_batch.batch_size
+    )
+    witness_out = (
+        None
+        if witness_preact is None
+        else {
+            lid: tensor.index_select(0, kept_idx.to(tensor.device))
+            for lid, tensor in witness_preact.items()
+        }
+    )
+    return branch_batch.select(kept_idx), bounds_out, nu_out, witness_out
+
+
 def _assert_multi_split_invariants(
     stats: Dict[str, int], active_k: Optional[int] = None
 ) -> None:
@@ -220,6 +254,8 @@ def _solve_dual_batch(
     round_policy: Optional[Any] = None,
     root_frame: Optional[ForwardFrame] = None,
     time_cap: Optional[float] = None,
+    budget_remaining: Optional[float] = None,
+    branching_state: bool = True,
 ) -> DualBatchResult:
     """Prepare BaB-specific bounds/state policy, then call ``DualSolver``.
 
@@ -229,17 +265,28 @@ def _solve_dual_batch(
     their forward bounds obtain their own frame. ``time_cap`` (seconds) caps
     this call's per-subproblem refinement and alpha/eta loop together; child
     batches (every lane at depth > 0) run ``config.child_n_iters`` iterations
-    when that knob is set.
+    when that knob is set. ``budget_remaining`` (seconds of the whole BaB
+    budget left at entry, None = unbounded) lets the solver skip the
+    heuristic-only branching-state pass once the budget is spent;
+    ``branching_state=False`` never requests it (the root pre-solve without a
+    pre-split consumes no nu).
     """
     solver = DualSolver()
     spec_lid = net.preds[assert_layer.id][0]
     forward_frame: Optional[ForwardFrame] = None
-    call_started = _monotonic() if time_cap is not None else 0.0
+    call_started = (
+        _monotonic() if time_cap is not None or budget_remaining is not None else 0.0
+    )
 
     def _remaining_cap() -> Optional[float]:
         if time_cap is None:
             return None
         return max(0.0, time_cap - (_monotonic() - call_started))
+
+    def _remaining_budget() -> Optional[float]:
+        if budget_remaining is None:
+            return None
+        return max(0.0, budget_remaining - (_monotonic() - call_started))
 
     block_eps_updates = _install_embedding_child_block_eps(
         net, batched_bounds, batch
@@ -361,11 +408,12 @@ def _solve_dual_batch(
                 config.eta_only_children and is_child_batch
             ),
             refresh_forward=not use_root_dict,
-            return_nu=_neuron_branching_supported(config),
+            return_nu=_neuron_branching_supported(config) and branching_state,
             reuse_bounds_for_branching=use_root_dict,
             forward_frame=forward_frame,
             n_iters=n_iters_override,
             time_cap=_remaining_cap(),
+            nu_time_cap=_remaining_budget(),
         )
         if optimize:
             batch.incremental_alpha = result.alpha_state
@@ -460,9 +508,13 @@ def verify_bab_batched(
             elapsed, remaining)`` (fraction 0 = ``remaining``); every other
             batch gets ``remaining``. The budget is
             checked before the root refinement, the root pre-solve, the
-            pre-split and at every loop iteration. An exhausted budget
-            returns UNKNOWN with ``exhausted_budget_time`` plus
-            ``budget_exhausted_in`` / ``budget_overshoot_s`` (only on that
+            pre-split, at every loop iteration and again after each batch
+            is bounded (a spent budget then skips the branching-state pass,
+            CLIMB learning and branching: unresolved lanes return to the
+            pool unsplit). The overshoot is therefore at most one bounding
+            unit (one dual batch call). An exhausted budget returns UNKNOWN
+            with ``exhausted_budget_time`` plus ``budget_exhausted_in`` /
+            ``budget_overshoot_s`` / ``budget_longest_unit_s`` (only on that
             path), or CERTIFIED when the root pre-solve already certified.
         verbose: reserved.
         _k_log: diagnostic only — if supplied, the actual K used per iteration
@@ -471,9 +523,19 @@ def verify_bab_batched(
     run_started = _monotonic()
     if config is None:
         config = BaBConfig()
+    budget_s = time_budget_s if time_budget_s is not None else 300.0
+    presolve_fraction = float(config.presolve_time_fraction)
+    presolve_budget_s = presolve_fraction * budget_s if presolve_fraction > 0.0 else budget_s
+
+    def _elapsed() -> float:
+        return _monotonic() - run_started
+
+    def _remaining() -> float:
+        return max(0.0, budget_s - _elapsed())
+
     assert_layer = get_assert_layer(net)
     climb = ClimbSession.from_config(
-        config, net, cast(str, assert_layer.params["kind"])
+        config, net, cast(str, assert_layer.params["kind"]), budget_remaining=_remaining
     )
     if dual_config is None:
         dual_config = DualConfig()
@@ -490,16 +552,6 @@ def verify_bab_batched(
         raise ValueError(f"max_batch_size must be >= 1, got {effective_batch}")
     max_k_seen = 0
 
-    budget_s = time_budget_s if time_budget_s is not None else 300.0
-    presolve_fraction = float(config.presolve_time_fraction)
-    presolve_budget_s = presolve_fraction * budget_s if presolve_fraction > 0.0 else budget_s
-
-    def _elapsed() -> float:
-        return _monotonic() - run_started
-
-    def _remaining() -> float:
-        return max(0.0, budget_s - _elapsed())
-
     def _root_time_cap() -> float:
         return max(0.0, min(presolve_budget_s - _elapsed(), _remaining()))
 
@@ -510,13 +562,29 @@ def verify_bab_batched(
             return _root_time_cap()
         return _remaining()
 
+    longest_unit_s = 0.0
+
+    def _timed_unit(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        """Run one uninterruptible bounding unit and remember the longest."""
+        nonlocal longest_unit_s
+        unit_started = _monotonic()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            longest_unit_s = max(longest_unit_s, _monotonic() - unit_started)
+
     def _budget_exhausted_metadata(phase: str) -> Dict[str, Any]:
         overshoot = _elapsed() - budget_s
         log.info(
-            "BaB budget exhausted in %s: %.2f s of %.2f s (overshoot %.2f s)",
-            phase, _elapsed(), budget_s, overshoot,
+            "BaB budget exhausted in %s: %.2f s of %.2f s (overshoot %.2f s, "
+            "longest bounding unit %.2f s)",
+            phase, _elapsed(), budget_s, overshoot, longest_unit_s,
         )
-        return {"budget_exhausted_in": phase, "budget_overshoot_s": overshoot}
+        return {
+            "budget_exhausted_in": phase,
+            "budget_overshoot_s": overshoot,
+            "budget_longest_unit_s": longest_unit_s,
+        }
 
     fsb_dual_solver = None
     if config.branching_method == "fsb":
@@ -528,7 +596,9 @@ def verify_bab_batched(
     brancher_method = (
         "babsr" if config.branching_method == "gain" else config.branching_method
     )
-    brancher = _build_branching_strategy(brancher_method, dual_solver=fsb_dual_solver)
+    brancher = _build_branching_strategy(
+        brancher_method, dual_solver=fsb_dual_solver, neuron_only=climb is not None
+    )
 
     multi_split_stats: Dict[str, int] = {
         "multi_split_k_requested": int(config.multi_split_levels),
@@ -658,7 +728,8 @@ def verify_bab_batched(
             exhausted = _root_budget_exhausted("root_refine")
             if exhausted is not None:
                 return exhausted
-            root_fwd = DualSolver().refine_intermediate_bounds(
+            root_fwd = _timed_unit(
+                DualSolver().refine_intermediate_bounds,
                 net,
                 root_fwd,
                 mode=refine_mode,
@@ -683,7 +754,9 @@ def verify_bab_batched(
         exhausted = _root_budget_exhausted("root_presolve")
         if exhausted is not None:
             return exhausted
-        presolve = _solve_dual_batch(
+        presplit_k = int(config.presplit_levels)
+        presolve = _timed_unit(
+            _solve_dual_batch,
             net=net,
             assert_layer=assert_layer,
             batched_bounds=Bounds(root_bounds.lb, root_bounds.ub),
@@ -695,6 +768,8 @@ def verify_bab_batched(
             root_bounds_dict=root_fwd,
             root_frame=root_frame,
             time_cap=_root_time_cap(),
+            budget_remaining=_remaining(),
+            branching_state=presplit_k > 0,
         )
         if presolve.row_slack is not None:
             unproven = unproven_spec_rows(presolve.row_slack).any(dim=0)
@@ -726,7 +801,6 @@ def verify_bab_batched(
         exhausted = _root_budget_exhausted("root_presplit")
         if exhausted is not None:
             return exhausted
-        presplit_k = int(config.presplit_levels)
         if (
             presplit_k > 0
             and root_batch.batch_size == 1
@@ -752,7 +826,35 @@ def verify_bab_batched(
 
     processed = 0
     any_dropped_max_depth = False
+    any_retired_no_relu_candidate = False
     _last_input_widths: Optional[list[float]] = None
+
+    def _retire_lanes(
+        keep: torch.Tensor,
+        branch_batch: SubproblemBatch,
+        bounds_dict: Optional[Dict[int, Bounds]],
+        nu_per_layer: Optional[Dict[int, torch.Tensor]],
+        witness_preact: Optional[Dict[int, torch.Tensor]],
+    ) -> tuple[
+        Optional[SubproblemBatch],
+        Optional[Dict[int, Bounds]],
+        Optional[Dict[int, torch.Tensor]],
+        Optional[Dict[int, torch.Tensor]],
+    ]:
+        # D8(b): under CLIMB an unresolved lane with no ReLU literal left to
+        # split is dropped as UNKNOWN (never an input-axis split) and counted.
+        nonlocal any_retired_no_relu_candidate
+        assert climb is not None
+        retired = int((~keep).sum().item())
+        if retired == 0:
+            return branch_batch, bounds_dict, nu_per_layer, witness_preact
+        climb.retire_lanes_without_relu_candidate(retired)
+        any_retired_no_relu_candidate = True
+        if not bool(keep.any().item()):
+            return None, None, None, None
+        return _keep_branch_lanes(
+            branch_batch, bounds_dict, nu_per_layer, witness_preact, keep
+        )
 
     while not pool.empty:
         elapsed = _elapsed()
@@ -813,7 +915,8 @@ def verify_bab_batched(
                 net, batched_bounds, solver, timelimit=None,
             )
         elif solver_tier == "dual":
-            dual_solve_result = _solve_dual_batch(
+            dual_solve_result = cast(DualBatchResult, _timed_unit(
+                _solve_dual_batch,
                 net=net,
                 assert_layer=assert_layer,
                 batched_bounds=batched_bounds,
@@ -827,10 +930,12 @@ def verify_bab_batched(
                 root_frame=root_frame,
                 round_policy=_wave_policy,
                 time_cap=_loop_time_cap(batch),
-            )
+                budget_remaining=_remaining(),
+            ))
             solution = dual_solve_result.solution
         elif solver_tier in ("dual_alpha", "dual_alpha_eta"):
-            dual_solve_result = _solve_dual_batch(
+            dual_solve_result = cast(DualBatchResult, _timed_unit(
+                _solve_dual_batch,
                 net=net,
                 assert_layer=assert_layer,
                 batched_bounds=batched_bounds,
@@ -844,7 +949,8 @@ def verify_bab_batched(
                 root_frame=root_frame,
                 round_policy=_wave_policy,
                 time_cap=_loop_time_cap(batch),
-            )
+                budget_remaining=_remaining(),
+            ))
             solution = dual_solve_result.solution
             bounds_dict_for_branching = dual_solve_result.bounds_dict
             nu_per_layer_for_branching = dual_solve_result.nu_per_layer
@@ -928,11 +1034,24 @@ def verify_bab_batched(
             device=batch.lb.device,
             dtype=torch.long,
         )
-        if climb is not None:
+        # Phase boundary after bounding: once the budget is spent, learning
+        # and branching would only serve batches that never run, so the
+        # unresolved lanes go back to the pool unsplit and the loop ends.
+        budget_spent_after_bound = _remaining() <= 0.0
+        if climb is not None and not budget_spent_after_bound:
             assert dual_solve_result is not None
             climb.learn(batch, solution.statuses, dual_solve_result, k_actual)
 
-        if int(unresolved_idx.numel()) > 0:
+        if budget_spent_after_bound and int(unresolved_idx.numel()) > 0:
+            unresolved = batch.select(unresolved_idx)
+            unresolved.lower_bound = node_lower_bound.index_select(
+                0, unresolved_idx.to(node_lower_bound.device)
+            )
+            pool.push(unresolved)
+            if frontier_cap > 0 and len(pool) > frontier_cap:
+                if pool.evict_to(frontier_cap) > 0:
+                    any_dropped_frontier_cap = True
+        elif int(unresolved_idx.numel()) > 0:
             unresolved = batch.select(unresolved_idx)
             unresolved.lower_bound = node_lower_bound.index_select(
                 0, unresolved_idx.to(node_lower_bound.device)
@@ -945,6 +1064,8 @@ def verify_bab_batched(
             branch_idx = torch.where(branch_mask)[0]
             if int(branch_idx.numel()) > 0:
                 branch_batch = unresolved.select(branch_idx)
+                children: Optional[SubproblemBatch] = None
+                parent_index = torch.zeros(0, dtype=torch.long, device=branch_batch.lb.device)
                 if neuron_branching_supported:
                     full_branch_idx = unresolved_idx.index_select(
                         0, branch_idx.to(unresolved_idx.device)
@@ -1056,7 +1177,18 @@ def verify_bab_batched(
                         children, parent_index = multi
                     else:
                         decision = None
-                        if config.branching_method == "gain":
+                        if climb is not None and config.branching_method == "gain":
+                            kept_batch, bd_branch, nu_branch, witness_preact_branch = _retire_lanes(
+                                lanes_with_relu_candidates(branch_batch, bd_branch, nu_branch),
+                                branch_batch,
+                                bd_branch,
+                                nu_branch,
+                                witness_preact_branch,
+                            )
+                            branch_batch = kept_batch
+                        if branch_batch is None:
+                            children = None
+                        elif config.branching_method == "gain":
                             decision = gain_tested_decision(
                                 branch_batch,
                                 net,
@@ -1068,9 +1200,14 @@ def verify_bab_batched(
                                 bd_branch,
                                 nu_branch,
                                 input_shape,
-                                solve_dual=_solve_dual_batch,
+                                solve_dual=partial(
+                                    _timed_unit,
+                                    _solve_dual_batch,
+                                    time_cap=_remaining(),
+                                    budget_remaining=_remaining(),
+                                ),
                             )
-                        if decision is None:
+                        if branch_batch is not None and decision is None:
                             extra_branch_kwargs = (
                                 {"witness_preact_per_layer": witness_preact_branch}
                                 if _witness_residual_branching_active(config)
@@ -1084,15 +1221,28 @@ def verify_bab_batched(
                                 **extra_branch_kwargs,
                             )
                             decision = cast(SplitDecision, cast(Any, brancher).select(scores))
-                            if _witness_residual_branching_active(config):
+                            if climb is not None and decision.lane_mask is not None:
+                                # D8(a): the neuron-only brancher flags lanes with
+                                # no ReLU candidate instead of an input-axis split.
+                                branch_batch, bd_branch, nu_branch, witness_preact_branch = _retire_lanes(
+                                    decision.lane_mask,
+                                    branch_batch,
+                                    bd_branch,
+                                    nu_branch,
+                                    witness_preact_branch,
+                                )
+                            if branch_batch is not None and _witness_residual_branching_active(config):
                                 _assert_witness_residual_decision_unstable(
                                     decision, bd_branch
                                 )
-                        if decision.kind == "input_axis":
-                            if climb is not None:
-                                climb.reject_input_axis_split()
-                            decision.fanout = fanout
-                        children, parent_index = decision.apply(branch_batch, net)
+                        if branch_batch is None or decision is None:
+                            children = None
+                        else:
+                            if decision.kind == "input_axis":
+                                if climb is not None:
+                                    climb.reject_input_axis_split()
+                                decision.fanout = fanout
+                            children, parent_index = decision.apply(branch_batch, net)
                 else:
                     scores = brancher.compute_scores(branch_batch, net)
                     legacy_decision = cast(Any, brancher).select(scores)
@@ -1126,24 +1276,26 @@ def verify_bab_batched(
                         decision.fanout = int(_wave_policy.input_split_fanout)
                     children, parent_index = decision.apply(branch_batch, net)
 
-                if provenance:
-                    pid = branch_batch.node_id
-                    assert pid is not None
-                    children.parent_id = pid.index_select(0, parent_index.to(pid.device))
-                    nc = children.batch_size
-                    children.node_id = torch.arange(
-                        node_counter,
-                        node_counter + nc,
-                        device=children.lb.device,
-                        dtype=torch.long,
-                    )
-                    node_counter += nc
-                pool.push(children)
-                if climb is not None:
-                    climb.after_children(children.batch_size, len(pool))
-                if frontier_cap > 0 and len(pool) > frontier_cap:
-                    if pool.evict_to(frontier_cap) > 0:
-                        any_dropped_frontier_cap = True
+                if children is not None:
+                    if provenance:
+                        assert branch_batch is not None
+                        pid = branch_batch.node_id
+                        assert pid is not None
+                        children.parent_id = pid.index_select(0, parent_index.to(pid.device))
+                        nc = children.batch_size
+                        children.node_id = torch.arange(
+                            node_counter,
+                            node_counter + nc,
+                            device=children.lb.device,
+                            dtype=torch.long,
+                        )
+                        node_counter += nc
+                    pool.push(children)
+                    if climb is not None:
+                        climb.after_children(children.batch_size, len(pool))
+                    if frontier_cap > 0 and len(pool) > frontier_cap:
+                        if pool.evict_to(frontier_cap) > 0:
+                            any_dropped_frontier_cap = True
 
         processed += k_actual
 
@@ -1187,7 +1339,12 @@ def verify_bab_batched(
         int(spec_keep_rows.numel()) if spec_keep_rows is not None else None
     )
 
-    if not any_dropped_max_depth and not any_dropped_frontier_cap and pool_remaining == 0:
+    if (
+        not any_dropped_max_depth
+        and not any_dropped_frontier_cap
+        and not any_retired_no_relu_candidate
+        and pool_remaining == 0
+    ):
         return VerifyResult(
             VerifyStatus.CERTIFIED,
             metadata={

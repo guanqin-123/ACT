@@ -725,7 +725,7 @@ Examples:
         type=str,
         default=None,
         dest="checkpoint_dir",
-        help="BUFFET model directory containing the checkpoint file.",
+        help="Compact BERT model directory containing the checkpoint file.",
     )
     parser.add_argument(
         "--position-mode",

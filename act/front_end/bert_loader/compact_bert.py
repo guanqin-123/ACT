@@ -1,4 +1,7 @@
-"""Checkpoint-backed BUFFET BERT inference from embedding sums."""
+"""Checkpoint-backed compact BERT inference from embedding sums.
+
+The checkpoints come from the BUFFET artifact and are used unchanged (D5).
+"""
 
 from __future__ import annotations
 
@@ -22,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class NoVarLayerNorm(nn.Module):
-    """BUFFET's affine mean-centering layer normalization without variance."""
+    """Affine mean-centering layer normalization without variance."""
 
     variant: str = "no_var"
 
@@ -38,8 +41,8 @@ class NoVarLayerNorm(nn.Module):
         return self.weight * centered + self.bias
 
 
-class BuffetEmbeddings(nn.Module):
-    """The embedding LayerNorm portion of BUFFET's from-embeddings graph."""
+class CompactBertEmbeddings(nn.Module):
+    """The embedding LayerNorm portion of the compact BERT from-embeddings graph."""
 
     def __init__(self, hidden_size: int) -> None:
         """Create the no-variance embedding LayerNorm."""
@@ -47,15 +50,15 @@ class BuffetEmbeddings(nn.Module):
         self.LayerNorm = NoVarLayerNorm(hidden_size)
 
     def forward(self, embedding_sum: torch.Tensor) -> torch.Tensor:
-        """Apply BUFFET's embedding LayerNorm to a precomputed embedding sum."""
+        """Apply the no-variance embedding LayerNorm to a precomputed embedding sum."""
         return self.LayerNorm(embedding_sum)
 
 
-class BuffetEncoder(nn.Module):
+class CompactBertEncoder(nn.Module):
     """BERT encoder with the naming expected by ACT's route-A lowering."""
 
     def __init__(self, config: BertConfig) -> None:
-        """Build eager-attention layers and install BUFFET LayerNorm variants."""
+        """Build eager-attention layers and install no-variance LayerNorm variants."""
         super().__init__()
         self.layer = nn.ModuleList()
         for layer_index in range(config.num_hidden_layers):
@@ -76,7 +79,7 @@ class BuffetEncoder(nn.Module):
         return hidden_states
 
 
-class BuffetPooler(nn.Module):
+class CompactBertPooler(nn.Module):
     """Dense/tanh pooler over the final hidden state of ``[CLS]``."""
 
     def __init__(self, hidden_size: int) -> None:
@@ -90,16 +93,16 @@ class BuffetPooler(nn.Module):
         return self.activation(self.dense(hidden_states[:, 0]))
 
 
-class BuffetFromEmbeddings(nn.Module):
-    """BUFFET classifier whose public input is the raw three-table embedding sum."""
+class CompactBertFromEmbeddings(nn.Module):
+    """Compact BERT classifier whose public input is the raw three-table embedding sum."""
 
     def __init__(self, config: BertConfig, num_labels: int = 2) -> None:
         """Build embedding LN, encoder, pooler, and classifier modules."""
         super().__init__()
         self._act_conversion_route = "b"
-        self.embeddings = BuffetEmbeddings(config.hidden_size)
-        self.encoder = BuffetEncoder(config)
-        self.pooler = BuffetPooler(config.hidden_size)
+        self.embeddings = CompactBertEmbeddings(config.hidden_size)
+        self.encoder = CompactBertEncoder(config)
+        self.pooler = CompactBertPooler(config.hidden_size)
         self.classifier = nn.Linear(config.hidden_size, num_labels)
 
     def forward(self, embedding_sum: torch.Tensor) -> torch.Tensor:
@@ -112,8 +115,8 @@ class BuffetFromEmbeddings(nn.Module):
         return self.classifier(self.pooler(hidden_states))
 
 
-class BuffetRouteBNoVarNorm(nn.Module):
-    """Pure-tensor form of BUFFET's affine mean-centering normalization."""
+class CompactBertRouteBNoVarNorm(nn.Module):
+    """Pure-tensor form of the affine mean-centering normalization."""
 
     def __init__(self, source: Any) -> None:
         super().__init__()
@@ -125,8 +128,8 @@ class BuffetRouteBNoVarNorm(nn.Module):
         return self.scale * centered + self.shift
 
 
-class BuffetRouteBBlock(nn.Module):
-    """One BUFFET encoder block expressed as traceable tensor operations."""
+class CompactBertRouteBBlock(nn.Module):
+    """One compact BERT encoder block expressed as traceable tensor operations."""
 
     def __init__(self, source: Any, sequence_length: int) -> None:
         super().__init__()
@@ -135,11 +138,11 @@ class BuffetRouteBBlock(nn.Module):
         self.k_proj = copy.deepcopy(attention.self.key)
         self.v_proj = copy.deepcopy(attention.self.value)
         self.attn_proj = copy.deepcopy(attention.output.dense)
-        self.attn_norm = BuffetRouteBNoVarNorm(attention.output.LayerNorm)
+        self.attn_norm = CompactBertRouteBNoVarNorm(attention.output.LayerNorm)
         self.ff_in = copy.deepcopy(source.intermediate.dense)
         self.relu = nn.ReLU()
         self.ff_out = copy.deepcopy(source.output.dense)
-        self.ff_norm = BuffetRouteBNoVarNorm(source.output.LayerNorm)
+        self.ff_norm = CompactBertRouteBNoVarNorm(source.output.LayerNorm)
         self.softmax = nn.Softmax(dim=-1)
         self.sequence_length = int(sequence_length)
         self.num_heads = int(attention.self.num_attention_heads)
@@ -166,14 +169,14 @@ class BuffetRouteBBlock(nn.Module):
         return self.ff_norm(self.ff_out(intermediate) + attention_output)
 
 
-class BuffetRouteBModel(nn.Module):
-    """Traceable whole-tensor BUFFET model used by generic FX route B."""
+class CompactBertRouteBModel(nn.Module):
+    """Traceable whole-tensor compact BERT model used by generic FX route B."""
 
-    def __init__(self, source: BuffetFromEmbeddings, sequence_length: int) -> None:
+    def __init__(self, source: CompactBertFromEmbeddings, sequence_length: int) -> None:
         super().__init__()
-        self.input_norm = BuffetRouteBNoVarNorm(source.embeddings.LayerNorm)
+        self.input_norm = CompactBertRouteBNoVarNorm(source.embeddings.LayerNorm)
         self.stages = nn.ModuleList(
-            BuffetRouteBBlock(block, sequence_length) for block in source.encoder.layer
+            CompactBertRouteBBlock(block, sequence_length) for block in source.encoder.layer
         )
         self.pool_proj = copy.deepcopy(source.pooler.dense)
         self.pool_activation = nn.Tanh()
@@ -187,15 +190,15 @@ class BuffetRouteBModel(nn.Module):
         return self.output_proj(pooled)
 
 
-def build_buffet_route_b_model(
-    source: BuffetFromEmbeddings, sequence_length: int
-) -> BuffetRouteBModel:
+def build_compact_bert_route_b_model(
+    source: CompactBertFromEmbeddings, sequence_length: int
+) -> CompactBertRouteBModel:
     """Create the generic-FX tensor graph for one verification sequence length."""
-    return BuffetRouteBModel(source, sequence_length).train(source.training)
+    return CompactBertRouteBModel(source, sequence_length).train(source.training)
 
 
 @dataclass(frozen=True)
-class BuffetTokenizedInput:
+class CompactBertTokenizedInput:
     """WordPiece tokens and integer inputs derived from ACT loader tokens."""
 
     wordpiece_tokens: list[str]
@@ -204,10 +207,10 @@ class BuffetTokenizedInput:
 
 
 @dataclass(frozen=True)
-class LoadedBuffetModel:
-    """A strict BUFFET model load plus the tables needed to form its input."""
+class LoadedCompactBert:
+    """A strict compact BERT load plus the tables needed to form its input."""
 
-    model: BuffetFromEmbeddings
+    model: CompactBertFromEmbeddings
     tokenizer: BertTokenizer
     word_embeddings: torch.Tensor
     position_embeddings: torch.Tensor
@@ -219,7 +222,7 @@ class LoadedBuffetModel:
 
 
 def resolve_checkpoint(model_dir: str | Path) -> Path:
-    """Resolve ``ckpt-N`` from a BUFFET model directory's checkpoint file."""
+    """Resolve ``ckpt-N`` from a compact BERT model directory's checkpoint file."""
     directory = Path(model_dir).resolve()
     checkpoint_value = (directory / "checkpoint").read_text(encoding="utf-8").strip()
     if not checkpoint_value.isdigit():
@@ -232,14 +235,14 @@ def resolve_checkpoint(model_dir: str | Path) -> Path:
 
 
 def _bert_config(values: Mapping[str, object]) -> BertConfig:
-    """Create the eager-attention HF configuration matching a BUFFET config."""
+    """Create the eager-attention HF configuration matching a checkpoint config."""
     config = BertConfig.from_dict(dict(values))
     config.layer_norm_eps = 1e-12
     config._attn_implementation = "eager"
     return config
 
 
-def _parameter_key_map(model: BuffetFromEmbeddings) -> dict[str, str]:
+def _parameter_key_map(model: CompactBertFromEmbeddings) -> dict[str, str]:
     """Map every from-embeddings parameter explicitly to its checkpoint key."""
     mapping: dict[str, str] = {}
     for target_key in model.state_dict():
@@ -248,19 +251,19 @@ def _parameter_key_map(model: BuffetFromEmbeddings) -> dict[str, str]:
         elif target_key.startswith("classifier."):
             source_key = target_key
         else:
-            raise RuntimeError(f"no BUFFET checkpoint mapping for {target_key}")
+            raise RuntimeError(f"no compact BERT checkpoint mapping for {target_key}")
         mapping[target_key] = source_key
     return mapping
 
 
-def load_buffet_model(
+def load_compact_bert(
     model_dir: str | Path,
     *,
     device: torch.device | str = "cpu",
     dtype: torch.dtype = torch.float32,
     strict: bool = True,
-) -> LoadedBuffetModel:
-    """Load a BUFFET checkpoint with explicit mapping and unused-key reporting."""
+) -> LoadedCompactBert:
+    """Load a compact BERT checkpoint with explicit mapping and unused-key reporting."""
     directory = Path(model_dir).resolve()
     checkpoint_dir = resolve_checkpoint(directory)
     config_values: dict[str, object] = json.loads(
@@ -273,10 +276,10 @@ def load_buffet_model(
         isinstance(key, str) and isinstance(value, torch.Tensor)
         for key, value in raw_state.items()
     ):
-        raise TypeError("BUFFET checkpoint must be a string-to-tensor mapping")
+        raise TypeError("compact BERT checkpoint must be a string-to-tensor mapping")
 
     checkpoint_state = dict(cast(Mapping[str, torch.Tensor], raw_state))
-    model = BuffetFromEmbeddings(_bert_config(config_values))
+    model = CompactBertFromEmbeddings(_bert_config(config_values))
     key_map = _parameter_key_map(model)
     missing_sources = sorted(set(key_map.values()) - set(checkpoint_state))
     if missing_sources:
@@ -297,7 +300,7 @@ def load_buffet_model(
         raise RuntimeError(f"checkpoint is missing embedding tables: {missing_tables}")
     consumed = set(key_map.values()) | set(embedding_keys.values())
     unused = tuple(sorted(set(checkpoint_state) - consumed))
-    logger.info("Unused BUFFET checkpoint keys for %s: %s", directory, list(unused))
+    logger.info("Unused compact BERT checkpoint keys for %s: %s", directory, list(unused))
     if strict and unused:
         raise RuntimeError(f"unused checkpoint keys: {list(unused)}")
 
@@ -305,7 +308,7 @@ def load_buffet_model(
     tokenizer = BertTokenizer(
         vocab_file=str(checkpoint_dir / "vocab.txt"), do_lower_case=True
     )
-    return LoadedBuffetModel(
+    return LoadedCompactBert(
         model=model,
         tokenizer=tokenizer,
         word_embeddings=checkpoint_state[embedding_keys["word"]].to(
@@ -326,8 +329,8 @@ def load_buffet_model(
 
 def tokenize_act_tokens(
     tokens: Sequence[str], tokenizer: BertTokenizer
-) -> BuffetTokenizedInput:
-    """Reproduce BUFFET WordPiece conversion starting from ACT loader tokens."""
+) -> CompactBertTokenizedInput:
+    """Reproduce the checkpoint's WordPiece conversion starting from ACT loader tokens."""
     cls_token = tokenizer.cls_token
     sep_token = tokenizer.sep_token
     if not isinstance(cls_token, str) or not isinstance(sep_token, str):
@@ -339,7 +342,7 @@ def tokenize_act_tokens(
     if not isinstance(converted, list) or not all(isinstance(item, int) for item in converted):
         raise TypeError("tokenizer did not return a list of integer input IDs")
     input_ids = torch.tensor(converted, dtype=torch.long)
-    return BuffetTokenizedInput(
+    return CompactBertTokenizedInput(
         wordpiece_tokens=wordpieces,
         input_ids=input_ids,
         token_type_ids=torch.zeros_like(input_ids),
@@ -347,7 +350,7 @@ def tokenize_act_tokens(
 
 
 def embedding_sum(
-    loaded: LoadedBuffetModel,
+    loaded: LoadedCompactBert,
     input_ids: torch.Tensor,
     token_type_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:

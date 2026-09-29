@@ -954,10 +954,19 @@ def backward_mul(L, nu, bounds_dict, preds, M: int = 1, alpha=None):
     return [nu_x, nu_y], contrib
 
 
+LocalPlanes = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+
+
+def _planes_of(
+    build: "Callable[[LinearBounds], LinearBounds]",
+) -> "Callable[[torch.Tensor, torch.Tensor], LocalPlanes]":
+    return lambda l, u: _local_vector_planes(l, u, build)
+
+
 def _local_vector_planes(
     l: torch.Tensor, u: torch.Tensor,
     build: "Callable[[LinearBounds], LinearBounds]",
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> LocalPlanes:
     """Sound per-output linear planes of a vector op over a local input box.
 
     Seeds an identity :class:`LinearBounds` frame whose unit L-infinity ball maps
@@ -1002,7 +1011,7 @@ def _local_vector_planes(
 
 def _dual_vector_backward(
     nu: torch.Tensor, l: torch.Tensor, u: torch.Tensor, row: int,
-    build: "Callable[[LinearBounds], LinearBounds]", M: int,
+    planes_fn: "Callable[[torch.Tensor, torch.Tensor], LocalPlanes]", M: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Route the dual variable through the transpose of local relaxation planes.
 
@@ -1024,7 +1033,7 @@ def _dual_vector_backward(
 
     l_g = l.flatten(start_dim=1)[:, :n].reshape(B * n_rows, row)
     u_g = u.flatten(start_dim=1)[:, :n].reshape(B * n_rows, row)
-    a_lo, c_lo, a_hi, c_hi = _local_vector_planes(l_g, u_g, build)
+    a_lo, c_lo, a_hi, c_hi = planes_fn(l_g, u_g)
     a_lo = a_lo.reshape(B, n_rows, row, row)
     a_hi = a_hi.reshape(B, n_rows, row, row)
     c_lo = c_lo.reshape(B, n_rows, row)
@@ -1039,6 +1048,61 @@ def _dual_vector_backward(
     nu_in = torch.einsum("bmrj,bmrjk->bmrk", v, a_sel)
     contrib = (v * c_sel).sum(dim=(-1, -2)).reshape(BM)
     return nu_in.reshape(BM, n), contrib
+
+
+def softmax_interval_box(l: torch.Tensor, u: torch.Tensor
+                         ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Exact per-row interval image of softmax over the box ``[l, u]``.
+
+    ``sigma_j`` is monotone increasing in ``x_j`` and decreasing in every other
+    coordinate, so its extremes over the box are
+    ``1 / (1 + sum_{k != j} exp(u_k - l_j))`` and
+    ``1 / (1 + sum_{k != j} exp(l_k - u_j))``. Only differences enter ``exp``,
+    so overflow (``exp -> inf``) lands on ``1 / inf = 0`` and underflow on
+    ``1 / 1 = 1``: the result is finite and inside ``[0, 1]`` for every finite
+    box, however wide.
+    """
+    row = l.shape[-1]
+    diag = torch.eye(row, dtype=torch.bool, device=l.device)
+    lo_terms = torch.exp(u.unsqueeze(-2) - l.unsqueeze(-1)).masked_fill(diag, 0.0)
+    hi_terms = torch.exp(l.unsqueeze(-2) - u.unsqueeze(-1)).masked_fill(diag, 0.0)
+    lo = 1.0 / (1.0 + lo_terms.sum(dim=-1))
+    hi = 1.0 / (1.0 + hi_terms.sum(dim=-1))
+    return lo.clamp(0.0, 1.0), hi.clamp(0.0, 1.0)
+
+
+def _softmax_planes_finite(
+    planes: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    l: torch.Tensor, u: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Replace non-finite softmax planes by zero-slope interval planes.
+
+    The tangent / secant envelopes of :meth:`LinearBounds.softmax` overflow
+    (``exp`` of a wide row) or divide by a zero row-sum lower bound (``exp``
+    underflow) when the input box is very wide, which yields ``inf`` / ``nan``
+    coefficients. Every output plane that is not finite is replaced by the
+    constant plane at the exact interval bound of :func:`softmax_interval_box`
+    (a valid, if coarse, envelope); finite planes are returned untouched.
+    """
+    a_lo, c_lo, a_hi, c_hi = planes
+    bad_lo = ~(torch.isfinite(a_lo).all(dim=-1) & torch.isfinite(c_lo))
+    bad_hi = ~(torch.isfinite(a_hi).all(dim=-1) & torch.isfinite(c_hi))
+    if not bool(bad_lo.any()) and not bool(bad_hi.any()):
+        return planes
+    box_lo, box_hi = softmax_interval_box(l, u)
+    a_lo = torch.where(bad_lo.unsqueeze(-1), torch.zeros_like(a_lo), a_lo)
+    c_lo = torch.where(bad_lo, box_lo, c_lo)
+    a_hi = torch.where(bad_hi.unsqueeze(-1), torch.zeros_like(a_hi), a_hi)
+    c_hi = torch.where(bad_hi, box_hi, c_hi)
+    return a_lo, c_lo, a_hi, c_hi
+
+
+def _softmax_local_planes(
+    l: torch.Tensor, u: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Sound, finite per-output softmax planes over the local box ``[l, u]``."""
+    planes = _local_vector_planes(l, u, lambda bound: bound.softmax())
+    return _softmax_planes_finite(planes, l, u)
 
 
 def _layernorm_builder(
@@ -1076,8 +1140,7 @@ def forward_softmax(L, parent_boxes, parent_lins, parent_frames, preds,
     parent_box = parent_boxes[0]
     pre_lb, pre_ub = parent_box.lb, parent_box.ub
     row = int(L.params.get("rowsize", pre_lb.shape[-1]))
-    planes, l_g, u_g = _vector_local_planes(
-        pre_lb, pre_ub, row, lambda bound: bound.softmax())
+    planes, l_g, u_g = _vector_local_planes(pre_lb, pre_ub, row, _softmax_local_planes)
     out_lb, out_ub = _vector_planes_box(planes, l_g, u_g, pre_lb.shape[0])
     out_lb = out_lb.clamp(0.0, 1.0)
     out_ub = out_ub.clamp(0.0, 1.0)
@@ -1115,7 +1178,7 @@ def backward_softmax(L, nu, bounds_dict, preds, M: int = 1, alpha=None):
         raise ValueError(f"SOFTMAX expects 1 predecessor, got {len(preds)}")
     row = int(L.params.get("rowsize", bounds.lb.flatten(start_dim=1).shape[-1]))
     nu_in, contrib = _dual_vector_backward(
-        nu, bounds.lb, bounds.ub, row, lambda bound: bound.softmax(), M)
+        nu, bounds.lb, bounds.ub, row, _softmax_local_planes, M)
     return [nu_in], contrib
 
 
@@ -1218,7 +1281,7 @@ def backward_layernorm(L, nu, bounds_dict, preds, M: int = 1, alpha=None):
     row = n if gamma_n == 0 or n % gamma_n else gamma_n
     builder = _layernorm_builder(L, row, bounds.lb.device, bounds.lb.dtype)
     nu_in, contrib = _dual_vector_backward(
-        nu, bounds.lb, bounds.ub, row, builder, M)
+        nu, bounds.lb, bounds.ub, row, _planes_of(builder), M)
     return [nu_in], contrib
 
 
@@ -1227,13 +1290,13 @@ def _vector_forward_box(
     build: "Callable[[LinearBounds], LinearBounds]",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Concretize the local relaxation planes to a sound per-row output box."""
-    planes, l_g, u_g = _vector_local_planes(pre_lb, pre_ub, row, build)
+    planes, l_g, u_g = _vector_local_planes(pre_lb, pre_ub, row, _planes_of(build))
     return _vector_planes_box(planes, l_g, u_g, pre_lb.shape[0])
 
 
 def _vector_local_planes(
     pre_lb: torch.Tensor, pre_ub: torch.Tensor, row: int,
-    build: "Callable[[LinearBounds], LinearBounds]",
+    planes_fn: "Callable[[torch.Tensor, torch.Tensor], LocalPlanes]",
 ):
     """Local planes of a row-wise vector op plus the per-row input box it used.
 
@@ -1247,7 +1310,7 @@ def _vector_local_planes(
     n_rows = n // row
     l_g = pre_lb.flatten(start_dim=1).reshape(B * n_rows, row)
     u_g = pre_ub.flatten(start_dim=1).reshape(B * n_rows, row)
-    return _local_vector_planes(l_g, u_g, build), l_g, u_g
+    return planes_fn(l_g, u_g), l_g, u_g
 
 
 def _vector_planes_box(planes, l_g: torch.Tensor, u_g: torch.Tensor, B: int

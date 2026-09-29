@@ -363,10 +363,10 @@ def synthesize_models_and_seeds_from_specs(
                     out_spec.c.detach().cpu().reshape(-1).numpy().tobytes(),
                     d_sig,
                 )
-            # BUFFET sequence lengths vary by example and route A is built for
+            # Compact BERT sequence lengths vary by example and route A is built for
             # one example shape at a time. Keep all position specs for one
             # example together, but never merge different examples.
-            example_sig = id(lt) if model_name == "buffet_transformer" else None
+            example_sig = id(lt) if model_name == "compact_bert" else None
             gkey = (
                 data_source,
                 mid,

@@ -395,6 +395,41 @@ def dual_sqrt_backward(nu: torch.Tensor, bounds: Bounds, M: int = 1):
     return _dual_constant_box_backward(nu, torch.sqrt(lo_e), torch.sqrt(hi_e), M)
 
 
+# ---- SQUARE ----
+
+@torch.no_grad()
+def forward_square(
+    L: Any, parent_boxes: List[Bounds], parent_lins: List[LinearBound],
+    parent_frames: List[Frame], preds: List[int], post_activation: bool,
+    device: torch.device, dtype: torch.dtype,
+) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
+    """Exact interval range for element-wise ``x ** 2``."""
+    lower = parent_boxes[0].lb
+    upper = parent_boxes[0].ub
+    out_lower = torch.where(
+        (lower <= 0) & (upper >= 0),
+        torch.zeros_like(lower),
+        torch.minimum(lower.square(), upper.square()),
+    )
+    out_upper = torch.maximum(lower.square(), upper.square())
+    out = Bounds(out_lower, out_upper)
+    lin, frame = _reset_forward_box(out_lower, out_upper, device, dtype)
+    return out, out, lin, frame
+
+
+def backward_square(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
+                    preds: List[int], M: int = 1, alpha=None
+                    ) -> Tuple[List[torch.Tensor], torch.Tensor]:
+    """Absorb SQUARE's interval-box support and route zero upstream."""
+    if len(preds) != 1:
+        raise ValueError(f"SQUARE expects 1 predecessor, got {len(preds)}")
+    bounds = bounds_dict.get(L.id)
+    if bounds is None:
+        raise ValueError(f"backward_square: layer {L.id} missing bounds in bounds_dict")
+    nu_out, contrib = _dual_constant_box_backward(nu, bounds.lb, bounds.ub, M)
+    return [nu_out], contrib
+
+
 # ---- SIN ----
 
 @torch.no_grad()

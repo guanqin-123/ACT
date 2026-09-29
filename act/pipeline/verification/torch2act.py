@@ -94,10 +94,10 @@ _TORCH_TO_ACT_EXACT = {module_cls: kind for kind, module_cls in ACT_TO_TORCH.ite
 class _LayerGraphBuilder:
     """
     Build ACT layer graph from nn.Module using torch.fx for graph extraction.
-    
+
     The resulting graph is a DAG supporting skip connections (ResNet, etc.).
     """
-    
+
     # Dispatch tables for FX call_method operations
     _METADATA_METHODS = frozenset({'size', 'dim', 'numel'})
     _PASSTHROUGH_METHODS = frozenset({'contiguous', 'to', 'float', 'double', 'half', 'cpu', 'cuda', 'detach'})
@@ -106,7 +106,7 @@ class _LayerGraphBuilder:
 
     # ONNX Shape spec; DeviceManager is float-only so we can't derive this from self.dtype.
     _ONNX_SHAPE_DTYPE: ClassVar[torch.dtype] = torch.int64
-    
+
     def __init__(
         self, model: nn.Module, input_shape: Tuple[int, ...],
         dtype: torch.dtype = torch.float64,
@@ -158,7 +158,7 @@ class _LayerGraphBuilder:
     # -------------------------------------------------------------------------
     # Public API
     # -------------------------------------------------------------------------
-    
+
     def build_layer_graph(self) -> Tuple[List[Layer], Dict[int, List[int]], Dict[int, List[int]]]:
         """
         Build ACT layer graph from the model.
@@ -198,17 +198,17 @@ class _LayerGraphBuilder:
     # -------------------------------------------------------------------------
     # Helper Methods
     # -------------------------------------------------------------------------
-    
+
     def _alloc_ids(self, n: int) -> List[int]:
         """Allocate n consecutive variable IDs."""
         ids = list(range(self.next_var, self.next_var + n))
         self.next_var += n
         return ids
-    
+
     def _same_size_forward(self) -> List[int]:
         """Allocate same number of output vars as current prev_out."""
         return self._alloc_ids(len(self.prev_out))
-    
+
     def _add_layer(self, kind: str, params: Dict[str, Any],
                    in_vars: List[int], out_vars: List[int]) -> int:
         """Add a layer and return its ID."""
@@ -846,13 +846,13 @@ class _LayerGraphBuilder:
             return True
         name = getattr(act, "__name__", "").lower()
         return "gelu" in name
-    
+
     def _register_node(self, name: str, layer_id: Optional[int] = None) -> None:
         """Register node's output vars, shape, and layer mapping."""
         self.node_outputs[name] = self.prev_out.copy()
         self.node_shapes[name] = self.shape
         self.node_to_layer_id[name] = layer_id if layer_id is not None else (len(self.layers) - 1)
-    
+
     def _pre_register_nodes(self) -> None:
         """Pre-register placeholder nodes so successor nodes can look up input vars."""
         if self.fx_graph is None:
@@ -1284,6 +1284,9 @@ class _LayerGraphBuilder:
         if kind == LayerKind.RELU.value:
             self._convert_activation(mod, LayerKind.RELU)
             return
+        if kind == LayerKind.CONV1D.value and isinstance(mod, nn.Conv1d):
+            self._convert_conv1d(mod)
+            return
         if kind == LayerKind.CONV2D.value and isinstance(mod, nn.Conv2d):
             self._convert_conv2d(mod)
             return
@@ -1538,12 +1541,67 @@ class _LayerGraphBuilder:
         self.shape = output_shape
         self.prev_out = out_vars
     
+    def _convert_conv1d(self, mod: nn.Conv1d) -> None:
+        """Convert nn.Conv1d to the native ACT CONV1D layer."""
+        if len(self.shape) != 3:
+            raise ValueError(f"Conv1d requires 3D input shape, got {self.shape}")
+        batch, in_channels, input_width = (int(d) for d in self.shape)
+        if batch != 1:
+            raise ValueError(f"Conv1d conversion requires batch size 1, got {batch}")
+        if in_channels != int(mod.in_channels):
+            raise ValueError(
+                f"Conv1d input shape has {in_channels} channels, expected {mod.in_channels}"
+            )
+
+        kernel_size = tuple(int(d) for d in mod.kernel_size)
+        stride = tuple(int(d) for d in mod.stride)
+        if isinstance(mod.padding, str):
+            raise NotImplementedError(
+                f"Conv1d string padding {mod.padding!r} is not supported"
+            )
+        padding = tuple(int(d) for d in mod.padding)
+        dilation = tuple(int(d) for d in mod.dilation)
+        output_width = (
+            input_width + 2 * padding[0] - dilation[0] * (kernel_size[0] - 1) - 1
+        ) // stride[0] + 1
+        if output_width <= 0:
+            raise ValueError(
+                f"Conv1d produces invalid output width {output_width} from shape {self.shape}"
+            )
+
+        out_channels = int(mod.out_channels)
+        output_shape = (batch, out_channels, output_width)
+        params = {
+            "weight": mod.weight.detach(),
+            "input_shape": self.shape,
+            "output_shape": output_shape,
+            "in_channels": in_channels,
+            "out_channels": out_channels,
+            "kernel_size": kernel_size,
+            "stride": stride,
+            "padding": padding,
+            "dilation": dilation,
+            "groups": int(mod.groups),
+            "padding_mode": mod.padding_mode,
+        }
+        if mod.bias is not None:
+            params["bias"] = mod.bias.detach()
+
+        out_vars = self._alloc_ids(out_channels * output_width)
+        self._add_layer(
+            LayerKind.CONV1D.value,
+            params,
+            self.prev_out,
+            out_vars,
+        )
+        self.shape = output_shape
+        self.prev_out = out_vars
+
     def _convert_conv2d(self, mod: nn.Conv2d) -> None:
         """Convert nn.Conv2d."""
         weight = mod.weight.detach()
         bias = mod.bias.detach() if mod.bias is not None else None
-        
-        # Infer input shape if flattened
+
         if len(self.shape) == 2:
             n_features = self.shape[1]
             channels = mod.in_channels
@@ -1551,7 +1609,7 @@ class _LayerGraphBuilder:
             input_shape = (1, channels, spatial, spatial)
         else:
             input_shape = tuple(int(d) for d in self.shape)
-        
+
         batch, in_c, in_h, in_w = (int(d) for d in input_shape)
         out_c = int(mod.out_channels)
         kernel_size = tuple(int(d) for d in _normalize_tuple(mod.kernel_size))
@@ -1561,8 +1619,7 @@ class _LayerGraphBuilder:
         out_h = (in_h + 2 * padding[0] - dilation[0] * (kernel_size[0] - 1) - 1) // stride[0] + 1
         out_w = (in_w + 2 * padding[1] - dilation[1] * (kernel_size[1] - 1) - 1) // stride[1] + 1
         output_shape = (1, out_c, out_h, out_w)
-        
-        
+
         params = {
             "weight": weight,
             "input_shape": input_shape, "output_shape": output_shape,
@@ -1572,7 +1629,7 @@ class _LayerGraphBuilder:
         }
         if bias is not None:
             params["bias"] = bias
-        
+
         out_vars = self._alloc_ids(out_c * out_h * out_w)
         self._add_layer(
             LayerKind.CONV2D.value, params,
@@ -2371,13 +2428,25 @@ class TorchToACT:
         new_layers, out_vars = input_layer.to_act_layers(len(self.layers), [])
         self.layers.extend(new_layers)
         self.prev_out = out_vars
-        # Capture batch dim from InputLayer for downstream spec encoding.
-        B = input_layer.shape[0]
+        # InputSpec bounds carry the verifier-lane axis.  It normally matches
+        # InputLayer.shape[0], but fixed-batch ONNX tensors are one verification
+        # instance whose structural leading dimension can be greater than one.
+        batch_size = input_layer.shape[0]
+        for mod in self.m.children():
+            if type(mod).__name__ != "InputSpecLayer":
+                continue
+            spec = getattr(mod, "spec", None)
+            for field in ("lb", "ub", "center"):
+                value = getattr(spec, field, None)
+                if isinstance(value, torch.Tensor) and value.dim() >= 1:
+                    batch_size = int(value.shape[0])
+                    break
+            break
 
         for mod in self.m.children():
             if type(mod).__name__ == "InputSpecLayer" and hasattr(mod, 'to_act_layers'):
                 new_layers, out_vars = cast(Any, mod).to_act_layers(
-                    len(self.layers), self.prev_out, B
+                    len(self.layers), self.prev_out, batch_size
                 )
                 self.layers.extend(new_layers)
                 self.prev_out = out_vars
@@ -2387,7 +2456,7 @@ class TorchToACT:
         for mod in self.m.children():
             if type(mod).__name__ == "OutputSpecLayer" and hasattr(mod, 'to_act_layers'):
                 new_layers, out_vars = cast(Any, mod).to_act_layers(
-                    len(self.layers), self.prev_out, B
+                    len(self.layers), self.prev_out, batch_size
                 )
                 self.layers.extend(new_layers)
                 self.prev_out = out_vars
@@ -2411,18 +2480,18 @@ class TorchToACT:
             self._wrapper_offset = len(self.layers)
             return
         if getattr(inner, "_act_conversion_route", None) == "b":
-            from act.front_end.bert_loader.buffet_model import (
-                BuffetFromEmbeddings,
-                build_buffet_route_b_model,
+            from act.front_end.bert_loader.compact_bert import (
+                CompactBertFromEmbeddings,
+                build_compact_bert_route_b_model,
             )
 
-            if not isinstance(inner, BuffetFromEmbeddings):
-                raise TypeError("route b is only supported for BuffetFromEmbeddings")
+            if not isinstance(inner, CompactBertFromEmbeddings):
+                raise TypeError("route b is only supported for CompactBertFromEmbeddings")
             if len(self.shape) != 3:
                 raise ValueError(
-                    f"route-b BUFFET input must have shape [B, L, H], got {self.shape}"
+                    f"route-b compact BERT input must have shape [B, L, H], got {self.shape}"
                 )
-            inner = build_buffet_route_b_model(inner, int(self.shape[-2]))
+            inner = build_compact_bert_route_b_model(inner, int(self.shape[-2]))
         
         dtype = getattr(self.input_layer, 'dtype', torch.float64)
         model_layers, model_preds, model_succs = build_act(

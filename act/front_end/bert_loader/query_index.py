@@ -8,8 +8,8 @@
 #
 # Purpose:
 #   Reads one row of an SST/Yelp query-index CSV and builds the wrapped
-#   BUFFET model of that query through the bert creator path, so the backend
-#   CLI can verify the query without a per-query ACT JSON file.
+#   compact BERT model of that query through the bert creator path, so the
+#   backend CLI can verify the query without a per-query ACT JSON file.
 #
 #===---------------------------------------------------------------------===#
 
@@ -29,6 +29,7 @@ import csv
 import hashlib
 import logging
 import math
+import random
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -37,9 +38,10 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from act.front_end.bert_loader.buffet_model import load_buffet_model, resolve_checkpoint
+from act.front_end.bert_loader.compact_bert import load_compact_bert, resolve_checkpoint
 from act.front_end.bert_loader.create_specs import BertSpecCreator
 from act.front_end.bert_loader.data_loader import (
+    BertExample,
     _synthetic_examples,
     find_bert_dataset_name,
     load_bert_dataset,
@@ -62,9 +64,11 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
 )
 CHECKSUM_COLUMN = "checkpoint_sha256"
 # Model name under which BertSpecCreator creates checkpoint-backed specs.
-BUFFET_MODEL_NAME = "buffet_transformer"
+COMPACT_BERT_MODEL_NAME = "compact_bert"
 # Same WordPiece length cap (incl. [CLS]/[SEP]) as BertSpecCreator's default.
 MAX_VERIFY_LENGTH = 20
+YELP_PARTITION_SEED = 20260928
+YELP_PARTITION_SPLITS: tuple[str, ...] = ("calibration", "evaluation")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
@@ -87,7 +91,7 @@ class TextQuery:
 
     @property
     def model_dir(self) -> Path:
-        """BUFFET model directory (holding the ``checkpoint`` file) of this query."""
+        """Compact BERT model directory (holding the ``checkpoint`` file) of this query."""
         return (
             Path(get_data_root())
             / "buffet"
@@ -226,10 +230,46 @@ def verify_checkpoint_sha256(query: TextQuery) -> Path:
     return checkpoint_file
 
 
+def yelp_partition_indices(num_examples: int) -> dict[str, tuple[int, ...]]:
+    """Return the fixed 20/80 source-row partition of Yelp ``test.csv``."""
+    if num_examples < 0:
+        raise ValueError("num_examples must be >= 0")
+    shuffled = list(range(num_examples))
+    random.Random(YELP_PARTITION_SEED).shuffle(shuffled)
+    calibration_size = num_examples // 5
+    return {
+        "calibration": tuple(sorted(shuffled[:calibration_size])),
+        "evaluation": tuple(sorted(shuffled[calibration_size:])),
+    }
+
+
+def _load_query_examples(query: TextQuery) -> list[BertExample]:
+    """Load the raw split and enforce Yelp calibration/evaluation membership."""
+    partitioned_yelp = (
+        query.dataset == "yelp" and query.split in YELP_PARTITION_SPLITS
+    )
+    source_split = "test" if partitioned_yelp else query.split
+    examples = load_bert_dataset(query.dataset, source_split)
+    if examples == _synthetic_examples(query.dataset):
+        raise QueryIndexError(f"no raw {query.dataset} data for split '{query.split}'")
+    if query.example_id >= len(examples):
+        raise QueryIndexError(
+            f"example_id {query.example_id} out of range for {query.dataset} "
+            f"{query.split} ({len(examples)} examples)"
+        )
+    if partitioned_yelp:
+        allowed = yelp_partition_indices(len(examples))[query.split]
+        if query.example_id not in allowed:
+            raise QueryIndexError(
+                f"example_id {query.example_id} is not in Yelp {query.split} split"
+            )
+    return examples
+
+
 def build_query_model(query: TextQuery) -> nn.Module:
     """Build the wrapped model (``VerifiableModel``) of one query.
 
-    Follows the ``buffet_transformer`` path of ``BertSpecCreator``: the
+    Follows the ``compact_bert`` path of ``BertSpecCreator``: the
     checkpoint is loaded at the device manager's device/dtype, the example must
     be correctly classified with at most ``MAX_VERIFY_LENGTH`` WordPieces, and
     the spec is the creator's sweep spec for ``query.position``.
@@ -239,23 +279,14 @@ def build_query_model(query: TextQuery) -> nn.Module:
     """
     model_dir = query.model_dir
     if not model_dir.is_dir():
-        raise QueryIndexError(f"no BUFFET model directory {model_dir}")
+        raise QueryIndexError(f"no compact BERT model directory {model_dir}")
     if query.checkpoint_sha256 is not None:
         verify_checkpoint_sha256(query)
-    examples = load_bert_dataset(query.dataset, query.split)
-    # load_bert_dataset falls back to a synthetic fixture when the split's raw
-    # file is missing (e.g. Yelp has no dev split); never verify fixture data.
-    if examples == _synthetic_examples(query.dataset):
-        raise QueryIndexError(f"no raw {query.dataset} data for split '{query.split}'")
-    if query.example_id >= len(examples):
-        raise QueryIndexError(
-            f"example_id {query.example_id} out of range for {query.dataset} "
-            f"{query.split} ({len(examples)} examples)"
-        )
+    examples = _load_query_examples(query)
     device, dtype = get_current_settings()
-    loaded = load_buffet_model(model_dir, device=device, dtype=dtype)
+    loaded = load_compact_bert(model_dir, device=device, dtype=dtype)
     try:
-        ((tokenized, embeddings, predicted),) = BertSpecCreator._sample_buffet_inputs(
+        ((tokenized, embeddings, predicted),) = BertSpecCreator._sample_compact_bert_inputs(
             [examples[query.example_id]],
             loaded,
             num_samples=1,
@@ -291,7 +322,7 @@ def build_query_model(query: TextQuery) -> nn.Module:
         label=torch.tensor([predicted], dtype=torch.int64, device=embeddings.device),
     )
     wrapped = synthesize_models_from_specs(
-        [(query.dataset, BUFFET_MODEL_NAME, loaded.model, [labeled], [by_position[query.position]])]
+        [(query.dataset, COMPACT_BERT_MODEL_NAME, loaded.model, [labeled], [by_position[query.position]])]
     )
     (model,) = wrapped.values()
     logger.info(

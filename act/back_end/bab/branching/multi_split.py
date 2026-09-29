@@ -137,7 +137,8 @@ def _collect_neuron_candidates(
             amb &= already[:, 0, :n].to(device) == 0
         area = (-lb[:, :n] * ub[:, :n] / (ub[:, :n] - lb[:, :n]).clamp(min=1e-12)).clamp(min=0)
         nv = nut.reshape(kb, -1, nut.shape[-1])[:, :, :n].abs().sum(dim=1)
-        sc = torch.where(amb, area * nv, torch.full_like(area, float("-inf")))
+        raw = area * nv
+        sc = torch.where(amb & torch.isfinite(raw), raw, torch.full_like(area, float("-inf")))
         cand_scores.append(sc)
         cand_layers.append(torch.full((kb, n), lid, device=device, dtype=torch.long))
         cand_neurons.append(
@@ -150,6 +151,20 @@ def _collect_neuron_candidates(
         torch.cat(cand_layers, dim=1),
         torch.cat(cand_neurons, dim=1),
     )
+
+
+def lanes_with_relu_candidates(
+    branch_batch: SubproblemBatch,
+    bounds_dict: Optional[Dict[int, Bounds]],
+    nu_per_layer: Optional[Dict[int, torch.Tensor]],
+) -> torch.Tensor:
+    """Bool ``[K]`` mask of lanes that still own an unstable, unsplit ReLU."""
+    if bounds_dict is None or nu_per_layer is None:
+        return torch.zeros(branch_batch.batch_size, dtype=torch.bool)
+    cand = _collect_neuron_candidates(branch_batch, bounds_dict, nu_per_layer)
+    if cand is None:
+        return torch.zeros(branch_batch.batch_size, dtype=torch.bool)
+    return torch.isfinite(cand[0]).any(dim=1).cpu()
 
 
 def enumerate_unstable_candidates(
@@ -249,6 +264,12 @@ def gain_tested_decision(
     all_scores, all_layers, all_neurons = candidates
     n_selected = min(n_candidates, all_scores.shape[1])
     top = torch.topk(all_scores, k=n_selected, dim=1).indices
+    # topk pads a lane with fewer than n_selected finite candidates (or none,
+    # e.g. non-finite bounds) with arbitrary -inf entries, which may be stable
+    # or already-split neurons; those must never be probed or selected.
+    top_valid = torch.isfinite(all_scores.gather(1, top))
+    if not bool(top_valid.any(dim=1).all().item()):
+        return None
     top_layers = all_layers.gather(1, top)
     top_neurons = all_neurons.gather(1, top)
 
@@ -321,7 +342,13 @@ def gain_tested_decision(
         batch_size, n_selected, 2
     )
     pair_gain = child_lbs.min(dim=2).values
-    best_candidate = pair_gain.argmax(dim=1)
+    pair_gain = pair_gain.masked_fill(~top_valid | torch.isnan(pair_gain), float("-inf"))
+    first_valid = top_valid.to(torch.uint8).argmax(dim=1)
+    best_candidate = torch.where(
+        torch.isfinite(pair_gain.max(dim=1).values),
+        pair_gain.argmax(dim=1),
+        first_valid,
+    )
     lane_indices = torch.arange(batch_size, device=device)
     return SplitDecision(
         kind="neuron",

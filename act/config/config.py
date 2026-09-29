@@ -166,6 +166,10 @@ class BaBConfig:
 
     climb_enabled: bool = False
     """Enable query-local CLIMB certificate replay and core propagation."""
+    climb_coarsening_enabled: bool = True
+    """Apply literal-budget coarsening before admitting replay-certified cores."""
+    climb_propagation_enabled: bool = True
+    """Apply learned cores to pending and active subproblems."""
     climb_theta: float = 0.0
     """Fraction of replay slack available to the vector deletion budget."""
     climb_delta_abs: float = 1e-9

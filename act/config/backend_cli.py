@@ -18,7 +18,7 @@ License: AGPLv3+
 """
 
 import argparse
-from dataclasses import fields, replace
+from dataclasses import asdict, fields, replace
 import datetime
 from functools import partial
 import glob
@@ -33,7 +33,6 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple, Optiona
 
 from act.config.config import ConfigError, GurobiConfig, TorchLPConfig, VALID_BERT_METHODS, VALID_BOUNDINGS, VALID_ROOT_BOUNDS_REUSE, VALID_SOLVER_TIERS, _VALID_SOLVERS
 from act.back_end.layer_schema import LayerKind
-from act.front_end.specs import OutKind
 from act.util.cli_utils import add_device_args, initialize_from_args
 from act.util.format_utils import rule
 
@@ -253,7 +252,8 @@ def _resolve_bab_config(
     return replace(backend_cfg.bab, **preset_values) if preset_values else backend_cfg.bab
 
 
-# An ACT Net JSON path (--network) or a zero-argument in-memory builder (--query-index).
+# An ACT Net JSON path (--network) or a zero-argument in-memory builder
+# (--query-index, --onnx/--vnnlib).
 NetSource = Union[str, Callable[[], "Net"]]
 
 
@@ -339,6 +339,114 @@ def _net_source_from_args(args: Any, backend_cfg) -> tuple[NetSource, str]:
     return source, f"{query_index}#{args.query_id}"
 
 
+def _build_vnncomp_net(wrapped: Any, save_path: Optional[str]) -> "Net":
+    """Convert one synthesized VNN-COMP disjunct model to a Net in memory.
+
+    ``TorchToACT(wrapped).run()`` as in ``vnncomp/act_run_instance.py``; the
+    Net keeps the runner's tensor placement. Only INPUT's ``labeled_input`` is
+    dropped (not read by verification, not JSON-serializable, as in
+    ``_build_query_net``), so *save_path* receives the Net that is verified.
+    """
+    from act.back_end.serialization.serialization import save_net_to_file
+    from act.pipeline.verification.torch2act import TorchToACT
+
+    start = time.perf_counter()
+    net = TorchToACT(wrapped).run()
+    for layer in net.layers:
+        layer.params.pop("labeled_input", None)
+    logger.info(
+        "Built %d-layer VNN-COMP net in %.2f s", len(net.layers), time.perf_counter() - start
+    )
+    if save_path is not None:
+        save_net_to_file(net, save_path)
+        logger.info("Saved VNN-COMP net to %s", save_path)
+    return net
+
+
+def _disjunct_save_path(save_path: Optional[str], index: int, count: int) -> Optional[str]:
+    """``--save-net`` target of disjunct *index*: the path itself when the
+    instance has one model, else ``<stem>.d<index><suffix>`` beside it."""
+    if save_path is None or count == 1:
+        return save_path
+    path = Path(save_path)
+    return str(path.with_name(f"{path.stem}.d{index}{path.suffix}"))
+
+
+def _vnncomp_instance_verdict(results: List[Any], n_models: int, n_verified: int) -> str:
+    """Aggregate lane results over disjuncts like ``vnncomp/act_run_instance.py``.
+
+    sat: a lane is FALSIFIED with a counterexample; unsat: every disjunct was
+    verified and every lane CERTIFIED; unknown: some lane has another
+    inconclusive status; timeout: otherwise (budget ran out first).
+    """
+    from act.util.stats import VerifyStatus
+
+    if any(r.status == VerifyStatus.FALSIFIED and r.counterexample is not None for r in results):
+        return "sat"
+    if n_verified == n_models and all(r.status == VerifyStatus.CERTIFIED for r in results):
+        return "unsat"
+    if any(r.status not in (VerifyStatus.CERTIFIED, VerifyStatus.TIMEOUT) for r in results):
+        return "unknown"
+    return "timeout"
+
+
+def _run_vnncomp_verification(args: Any, backend_cfg) -> int:
+    """``--verify --onnx --vnnlib``: verify one VNN-COMP instance built in memory.
+
+    The wrapped models come from ``build_instance_models`` (the runner's model
+    acquisition); each disjunct model is converted by ``_build_vnncomp_net``
+    inside the shared ``_verify_one_net`` and reported like a ``--network``
+    net. With one model the verdict lines and exit status are exactly those
+    of ``--network``. With several disjuncts (as in ``act_run_instance.py``) they are verified in
+    order, each with an even share of the remaining ``timeout``, verification
+    stops at the first falsified disjunct, and a final ``Instance:`` line
+    gives the aggregated VNN-COMP verdict.
+    """
+    from act.front_end.vnnlib_loader.vnncomp_instance import build_instance_models
+
+    label = f"{args.onnx}+{args.vnnlib}"
+    pinned_bab_fields = explicit_bab_fields(args)
+    try:
+        models = build_instance_models(args.onnx, args.vnnlib)
+    except Exception as e:  # noqa: BLE001 — same contract as a net that fails to load
+        print(f"❌ {label}: {e}")
+        return 1
+    n_models = len(models)
+    all_results: List[Any] = []
+    n_verified = 0
+    deadline = time.monotonic() + backend_cfg.timeout
+    for index, wrapped in enumerate(models):
+        disjunct_cfg = backend_cfg
+        disjunct_label = label
+        if n_models > 1:
+            remaining = deadline - time.monotonic()
+            if remaining <= 1.0:
+                break
+            disjunct_cfg = replace(
+                backend_cfg, timeout=max(1.0, remaining / (n_models - index))
+            )
+            disjunct_label = f"{label}#d{index}"
+            print(f"Disjunct {index + 1}/{n_models}: {disjunct_label}")
+        source = partial(
+            _build_vnncomp_net, wrapped, _disjunct_save_path(args.save_net, index, n_models)
+        )
+        try:
+            results, err, n_layers = _verify_one_net(source, disjunct_cfg, pinned_bab_fields)
+        except ConfigError as e:
+            return _report_config_error(disjunct_label, e)
+        status = _report_verification(disjunct_label, results, err, n_layers, backend_cfg)
+        if status != 0:
+            return status
+        all_results.extend(results)
+        n_verified += 1
+        if _vnncomp_instance_verdict(results, n_models, n_verified) == "sat":
+            break
+    if n_models > 1:
+        verdict = _vnncomp_instance_verdict(all_results, n_models, n_verified)
+        print(f"Instance: {verdict} ({n_verified}/{n_models} disjuncts verified)")
+    return 0
+
+
 def _verify_one_net(
     net_source: NetSource,
     backend_cfg,
@@ -369,7 +477,9 @@ def _verify_one_net(
               constraints. Skipped under DualTF (see soundness note below).
     Tier 3 — BaB (verify_bab_batched): runs on remaining UNKNOWN lanes when
               backend_cfg.bab_enabled is True AND active TF propagates LP
-              constraints. bab_max_batch_size=1 disables K-batching.
+              constraints. bab_max_batch_size=1 disables K-batching. Its
+              budget is ``timeout`` minus the time this call already spent
+              (net build, tiers 1-2), the same for every lane.
     """
     from act.back_end.bab.violation import clear_violation_check_module_cache
     from act.back_end.transfer_functions import (
@@ -382,6 +492,7 @@ def _verify_one_net(
 
     clear_violation_check_module_cache()
 
+    verify_started = time.monotonic()
     try:
         net = _acquire_net(net_source, backend_cfg)
         n_layers = len(net.layers)
@@ -402,26 +513,15 @@ def _verify_one_net(
             kind_authority = active_tf
             authority_name = active_tf.name
 
-        unsupported_kinds = sorted(
-            {L.kind for L in net.layers if not kind_authority.supports_layer(L.kind)}
+        # Every OutKind passes: DualSolver certifies UNSAFE_LINEAR (EXISTS row)
+        # when some row's sound lower bound escapes the unsafe polytope
+        # (evaluate_spec / solve_spec_batch); FALSIFIED needs a BaB
+        # counterexample that check_violations_batched confirms.
+        unsupported_kinds = tuple(
+            sorted({L.kind for L in net.layers if not kind_authority.supports_layer(L.kind)})
         )
-        # DualSolver rejects UNSAFE_LINEAR (EXISTS quantifier not representable
-        # by sound dual lower bounds — see solver_dual.evaluate_spec). Detect
-        # this distinct skip reason in parallel with the layer-kind check so
-        # users see ALL skip reasons in one pass, not sequentially.
-        unsupported_specs: List[str] = []
-        if is_dual:
-            for L in net.layers:
-                if (
-                    L.kind == LayerKind.ASSERT.value
-                    and L.params.get("kind") == OutKind.UNSAFE_LINEAR
-                ):
-                    unsupported_specs.append(f"{LayerKind.ASSERT.value}:{OutKind.UNSAFE_LINEAR}")
-                    break
-
-        blocking = tuple(unsupported_kinds + unsupported_specs)
-        if blocking:
-            return [], _SkipUnsupported(tf_name=authority_name, kinds=blocking), n_layers
+        if unsupported_kinds:
+            return [], _SkipUnsupported(tf_name=authority_name, kinds=unsupported_kinds), n_layers
 
         hz_timeout = None
         hz_tolerance = None
@@ -478,6 +578,15 @@ def _verify_one_net(
                 pinned,
                 is_dual=is_dual,
             )
+            # The net build and the earlier tiers already consumed part of
+            # --timeout; every per-lane BaB run gets the same remainder.
+            bab_budget_s = max(
+                0.0, backend_cfg.timeout - (time.monotonic() - verify_started)
+            )
+            logger.info(
+                "BaB budget %.2f s of --timeout %.2f s (%.2f s spent before BaB)",
+                bab_budget_s, backend_cfg.timeout, backend_cfg.timeout - bab_budget_s,
+            )
 
             try:
                 results = [
@@ -488,7 +597,7 @@ def _verify_one_net(
                         ),
                         config=bab_cfg,
                         max_batch_size=backend_cfg.bab_max_batch_size,
-                        time_budget_s=backend_cfg.timeout,
+                        time_budget_s=bab_budget_s,
                         dual_config=backend_cfg.dual,
                     )
                     if results[i].status == VerifyStatus.UNKNOWN
@@ -523,16 +632,36 @@ def run_verification(args, backend_cfg):
     Returns 0 when every lane received a verdict, 1 on error / no verdict /
     unsupported network, and 2 on invalid configuration.
     """
-    from act.util.stats import VerifyStatus
-
-    net_source, label = _net_source_from_args(args, backend_cfg)
     pinned_bab_fields = explicit_bab_fields(args)
+    if backend_cfg.verbose:
+        resolved_bab = _resolve_bab_config(
+            backend_cfg,
+            pinned_bab_fields,
+            is_dual=backend_cfg.solver == "dual",
+        )
+        print(f"Resolved BaBConfig: {json.dumps(asdict(resolved_bab), sort_keys=True)}")
+    if getattr(args, "onnx", None) is not None:
+        return _run_vnncomp_verification(args, backend_cfg)
+    net_source, label = _net_source_from_args(args, backend_cfg)
     try:
         results, err, n_layers = _verify_one_net(
             net_source, backend_cfg, pinned_bab_fields
         )
     except ConfigError as e:
         return _report_config_error(label, e)
+    return _report_verification(label, results, err, n_layers, backend_cfg)
+
+
+def _report_verification(
+    label: str,
+    results: List[Any],
+    err: Optional[Union[_SkipUnsupported, str]],
+    n_layers: Optional[int],
+    backend_cfg,
+) -> int:
+    """Print one net's ``_verify_one_net`` outcome; return the exit status."""
+    from act.util.stats import VerifyStatus
+
     if err is not None:
         if isinstance(err, _SkipUnsupported):
             print(
@@ -1007,6 +1136,10 @@ Examples:
   # SST/Yelp query built in memory from row 0 of a query index (optional JSON export)
   python -m act.back_end --verify --query-index queries.csv --query-id 0 \\
     --solver dual --bab-preset climb --save-net query0.json
+
+  # VNN-COMP instance built in memory from ONNX + VNNLIB (optional JSON export)
+  python -m act.back_end --verify --onnx net.onnx --vnnlib prop.vnnlib \\
+    --solver dual --bab-preset climb --device cuda --save-net instance.json
   
   # ============================================================================
   # NETWORK INSPECTION - Analyze network structure
@@ -1181,6 +1314,24 @@ Exit status (--verify):
             "fixes p and eps (--p/--eps do not apply)"
         ),
     )
+    net_source_group.add_argument(
+        "--onnx",
+        type=str,
+        default=None,
+        help=(
+            "VNN-COMP instance network (ONNX); with --vnnlib, --verify builds "
+            "the Net in memory like vnncomp/act_run_instance.py instead of "
+            "loading --network. Disjunct models of one property are verified "
+            "in order with an even share of the remaining --timeout and "
+            "summarised by an 'Instance:' line"
+        ),
+    )
+    verify_group.add_argument(
+        "--vnnlib",
+        type=str,
+        default=None,
+        help="VNN-COMP instance property (VNNLIB 2.0) verified with --onnx",
+    )
     verify_group.add_argument(
         "--query-id",
         type=int,
@@ -1193,7 +1344,11 @@ Exit status (--verify):
         type=str,
         default=None,
         dest="save_net",
-        help="Write the in-memory query Net that is verified to this ACT JSON path",
+        help=(
+            "Write the in-memory Net that is verified (--query-index, "
+            "--onnx/--vnnlib) to this ACT JSON path; disjunct k of a "
+            "multi-disjunct instance goes to <stem>.d<k><suffix>"
+        ),
     )
     verify_group.add_argument(
         "--solver",
@@ -1221,7 +1376,9 @@ Exit status (--verify):
         "-t",
         type=float,
         default=None,
-        help="Verification timeout in seconds (default: from config.yaml)",
+        help="Verification timeout in seconds per net; BaB gets the remainder "
+        "after the net build and the earlier tiers and may overshoot by at "
+        "most one bounding unit (default: from config.yaml)",
     )
     verify_group.add_argument(
         "--tf-mode",
@@ -1565,14 +1722,18 @@ Exit status (--verify):
     # Validate arguments based on command
     if args.info and not args.network:
         parser.error("--network is required for --info")
-    if args.verify and not (args.network or args.query_index):
-        parser.error("--verify requires --network or --query-index")
+    if args.verify and not (args.network or args.query_index or args.onnx):
+        parser.error("--verify requires --network or --query-index (or --onnx with --vnnlib)")
     if args.query_index is not None and not args.verify:
         parser.error("--query-index applies only to --verify")
     if (args.query_index is None) != (args.query_id is None):
         parser.error("--query-index and --query-id must be given together")
-    if args.save_net is not None and args.query_index is None:
-        parser.error("--save-net requires --query-index")
+    if (args.onnx is not None or args.vnnlib is not None) and not args.verify:
+        parser.error("--onnx/--vnnlib apply only to --verify")
+    if (args.onnx is None) != (args.vnnlib is None):
+        parser.error("--onnx and --vnnlib must be given together")
+    if args.save_net is not None and args.query_index is None and args.onnx is None:
+        parser.error("--save-net requires --query-index or --onnx/--vnnlib")
 
     if args.diff_nets:
         return run_diff_nets(args)

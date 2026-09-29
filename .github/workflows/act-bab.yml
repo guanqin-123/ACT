@@ -372,6 +372,14 @@ jobs:
               --bab-branching babsr --bab-multi-split-levels 1 --verbose
           done
 
+      - name: BaB CLIMB-refined — tiny route-B BERT fixtures
+        run: |
+          cd ${{ github.workspace }}
+          for fixture in act/back_end/examples/fixtures/tiny_routeb_bert_l4_h8_i{0,1}.json; do
+            python -m act.back_end --verify --network "$fixture" --solver dual --bab \
+              --bab-preset climb_refined --device cpu
+          done
+
       # ── Coverage ───────────────────────────────────────────────────────
       - name: Combine coverage data
         if: always()

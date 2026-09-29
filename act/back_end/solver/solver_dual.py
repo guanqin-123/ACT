@@ -20,8 +20,12 @@ from act.back_end.core import Bounds, Layer, Net, get_topo_order
 from act.back_end.layer_schema import LayerKind
 from act.back_end.dual_tf.tf_forward import (
     ForwardFrame,
+    _dual_norm_exponent,
     _intersect_boxes,
+    _resolve_perturbation_norm,
     forward_frame_row_lower_bounds,
+    input_block_slices,
+    lp_ball_support,
 )
 from act.config.config import DualConfig
 from act.back_end.solver.solver_base import (
@@ -325,43 +329,6 @@ def _clone_alpha_tree(tree: AlphaTree) -> AlphaTree:
 _DUAL_NORM_EPS = 1e-12
 
 
-def _resolve_perturbation_norm(value: Any) -> float:
-    """Normalize a spec ``p_norm`` field to a float, defaulting to ``inf``.
-
-    LP_EMBEDDING carries the input perturbation norm ``p``; box / L_inf specs
-    omit it. A missing field (``None``) maps to ``inf`` so the dual solver keeps
-    the exact box concretization with zero behavior change.
-
-    Args:
-        value: Raw ``p_norm`` from the input-spec layer params. Accepts ``None``,
-            a number, or a string such as ``"inf"`` / ``"2"``.
-
-    Returns:
-        The perturbation norm ``p`` as a float (``float('inf')`` for L_inf).
-    """
-    if value is None:
-        return float("inf")
-    if isinstance(value, str):
-        token = value.strip().lower()
-        if token in ("inf", "+inf", "infinity", "linf", "l_inf"):
-            return float("inf")
-        return float(token)
-    return float(value)
-
-
-def _dual_norm_exponent(p: float) -> float:
-    """Return the Hölder dual exponent ``q`` with ``1/p + 1/q = 1``.
-
-    Used to evaluate the exact ``min`` of a linear form over an Lp input ball
-    (``min_{‖δ‖_p ≤ ε} ν·δ = −ε‖ν‖_q``): p=inf→q=1 (box), p=2→q=2, p=1→q=inf.
-    """
-    if p == float("inf"):
-        return 1.0
-    if p == 1.0:
-        return float("inf")
-    return p / (p - 1.0)
-
-
 class DualSolver(Solver):
     """Dual (linear-relaxation) certified bounds solver. Strict [B, *shape] API."""
 
@@ -395,6 +362,7 @@ class DualSolver(Solver):
         self.last_forward_bounds: Optional[Dict[int, Bounds]] = None
         self.last_alpha_iterations: int = 0
         self.last_alpha_stop_reason: Optional[str] = None
+        self.last_branching_state_skipped: bool = False
 
     def capabilities(self) -> SolverCaps:
         return SolverCaps(supports_gpu=True, supports_csp=False, supports_dual=True)
@@ -420,6 +388,7 @@ class DualSolver(Solver):
         forward_frame: Optional[ForwardFrame] = None,
         n_iters: Optional[int] = None,
         time_cap: Optional[float] = None,
+        nu_time_cap: Optional[float] = None,
     ) -> DualBatchResult:
         """Solve and decode one prepared K-lane output-spec batch.
 
@@ -437,7 +406,15 @@ class DualSolver(Solver):
         honours ``dual_config.stagnation_patience`` and, when
         ``dual_config.stop_when_verified`` is set, stops once every lane's
         keep-best bound certifies under this method's own lane rule.
+        ``nu_time_cap`` (seconds from this call's start, None = never) skips
+        the extra branching-state pass (a full forward pass plus a backward
+        pass, heuristic-only) once it has elapsed: the lanes then return
+        ``bounds_dict=None`` / ``nu_per_layer=None`` and the caller must not
+        branch them. The bound itself is unaffected;
+        ``last_branching_state_skipped`` records the skip.
         """
+        call_started = _monotonic() if nu_time_cap is not None else 0.0
+        self.last_branching_state_skipped = False
         sample_bounds = next(iter(bounds_dict.values()))
         device = sample_bounds.lb.device
         dtype = sample_bounds.lb.dtype
@@ -610,10 +587,16 @@ class DualSolver(Solver):
 
         branch_bounds: Optional[Dict[int, Bounds]] = None
         branch_nu: Optional[Dict[int, torch.Tensor]] = None
+        skip_nu_pass = (
+            nu_time_cap is not None and _monotonic() - call_started >= nu_time_cap
+        )
         if return_nu and reuse_bounds_for_branching:
             branch_bounds = bounds_dict
             branch_nu = dual_result.nu_per_layer
-            if branch_nu is None:
+            if branch_nu is None and skip_nu_pass:
+                branch_bounds = None
+                self.last_branching_state_skipped = True
+            elif branch_nu is None:
                 nu_pass = self.compute_certified_bound(
                     net,
                     bounds_dict,
@@ -625,6 +608,8 @@ class DualSolver(Solver):
                     return_nu_per_layer=True,
                 )
                 branch_nu = nu_pass.nu_per_layer
+        elif return_nu and skip_nu_pass:
+            self.last_branching_state_skipped = True
         elif return_nu:
             branch_bounds, branch_nu = self.recompute_bounds_and_nu(
                 net,
@@ -2516,7 +2501,9 @@ class DualSolver(Solver):
         Each embedding block is normed independently, so word balls stay
         decoupled. The dual norm is the exact value of ``min`` over the Lp ball,
         so no second-order-cone constraint is needed (q=1↔p=inf reproduces the
-        box result, which the caller already routes through the box path).
+        box result, which the caller already routes through the box path). The
+        arithmetic is :func:`lp_ball_support`, shared with the forward frame
+        concretization so that every frame w.r.t. the INPUT is bounded alike.
 
         Args:
             input_layer: INPUT/INPUT_SPEC layer carrying ``p_norm`` and the
@@ -2550,34 +2537,18 @@ class DualSolver(Solver):
         center = (lb_f + ub_f) * 0.5                              # [B|1, n]
         half = (ub_f - lb_f) * 0.5
         BM = v_flat.shape[0]
-        blocks = self._perturbed_block_slices(input_layer.params, orig_shape, n)
+        blocks = input_block_slices(input_layer.params, orig_shape, n)
 
         if batched:
             v = v_flat.reshape(B, M, n)                           # [B, M, n]
-            center_bc = center.unsqueeze(1)                       # [B, 1, n]
-            half_bc = half.unsqueeze(1)
-            dot = (center_bc * v).sum(dim=-1)                     # [B, M]
-            penalty = torch.zeros_like(dot)
             block_eps = input_layer.params.get("bab_block_eps")
-            if isinstance(block_eps, torch.Tensor):
-                eps_b = block_eps.to(device=v.device, dtype=v.dtype)
-                for block_idx, (s, e) in enumerate(blocks):
-                    penalty = penalty + eps_b[:, block_idx].unsqueeze(1) * torch.linalg.vector_norm(
-                        v[..., s:e], ord=q, dim=-1
-                    )
-            else:
-                for s, e in blocks:
-                    penalty = penalty + torch.linalg.vector_norm(
-                        half_bc[..., s:e] * v[..., s:e], ord=q, dim=-1
-                    )
+            dot, penalty = lp_ball_support(
+                v, center.unsqueeze(1), half.unsqueeze(1), blocks, q,
+                block_eps if isinstance(block_eps, torch.Tensor) else None,
+            )                                                     # [B, M]
             contrib = (dot - penalty).reshape(BM)
         else:
-            dot = (center * v_flat).sum(dim=-1)                   # [BM]
-            penalty = torch.zeros_like(dot)
-            for s, e in blocks:
-                penalty = penalty + torch.linalg.vector_norm(
-                    half[..., s:e] * v_flat[..., s:e], ord=q, dim=-1
-                )
+            dot, penalty = lp_ball_support(v_flat, center, half, blocks, q)   # [BM]
             contrib = dot - penalty
 
         sce = None
@@ -2586,33 +2557,6 @@ class DualSolver(Solver):
                 center, half, v_flat, blocks, q, M, orig_shape, batched
             )
         return contrib, sce
-
-    @staticmethod
-    def _perturbed_block_slices(params: Dict[str, Any], orig_shape: torch.Size,
-                                n: int) -> List[Tuple[int, int]]:
-        """Coordinate ranges ``[start, end)`` of each per-word embedding block.
-
-        Each word occupies ``embed_dim`` contiguous embedding coordinates, so the
-        dual norm is taken over those ``D`` coordinates independently and word
-        balls do not couple. Splitting every token (not only perturbed ones) is
-        sound and format-agnostic: a non-perturbed token has zero half-width, so
-        its block penalty ``‖0 ⊙ nu_block‖_q`` is exactly 0 — the box already
-        encodes which coordinates carry width, so ``perturbed_positions`` (index
-        list or bool mask, possibly per-sample) need not be parsed here. The block
-        size is read from ``embed_dim`` or, failing that, the trailing
-        ``[..., L, D]`` axis when ``perturbed_positions`` flags an embedding spec.
-        Otherwise the whole input is one Lp ball (e.g. an image L2 spec).
-        """
-        embed_dim = params.get("embed_dim")
-        if embed_dim is None:
-            if params.get("perturbed_positions") is not None and len(orig_shape) >= 2:
-                embed_dim = int(orig_shape[-1])
-            else:
-                return [(0, n)]
-        d = int(embed_dim)
-        if d <= 0 or n % d != 0:
-            return [(0, n)]
-        return [(i * d, (i + 1) * d) for i in range(n // d)]
 
     def _dual_norm_sce(self, center: torch.Tensor, half: torch.Tensor,
                        v_flat: torch.Tensor, blocks: List[Tuple[int, int]],

@@ -901,7 +901,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     LayerKind.GATHER.value: {
         "params_required": ["indices", "axis"],
-        "params_optional": ["input_shape", "output_shape"],
+        "params_optional": ["input_shape", "output_shape", "scalar_indices"],
     },
     LayerKind.PAD.value: {
         "params_required": ["pad"],

@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, List, Tuple, Dict, Optional, override
 import logging
+import torch
 import torch.nn as nn
 
 from act.front_end.spec_creator_base import BaseSpecCreator, LabeledInputTensor
@@ -32,6 +33,28 @@ from act.front_end.vnnlib_loader.vnnlib_parser import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _canonicalize_fixed_batch_input_specs(
+    spec_pairs: List[Tuple[InputSpec, OutputSpec]],
+    labeled_tensor: LabeledInputTensor,
+) -> None:
+    """Represent a fixed ONNX leading dimension as one verification lane.
+
+    VNNLIB describes one network input tensor, even when that tensor's declared
+    ONNX shape begins with a fixed value other than one.  ACT reserves the
+    leading bounds dimension for independent verification lanes, so preserve
+    the declared tensor dimensions behind an explicit leading lane of size one.
+    """
+    declared_shape = tuple(int(d) for d in labeled_tensor.tensor.shape)
+    if len(declared_shape) < 2 or declared_shape[0] == 1:
+        return
+    canonical_shape = (1, *declared_shape)
+    for input_spec, _ in spec_pairs:
+        for field in ("lb", "ub", "center"):
+            value = getattr(input_spec, field, None)
+            if isinstance(value, torch.Tensor) and tuple(value.shape) == declared_shape:
+                setattr(input_spec, field, value.reshape(canonical_shape))
 
 
 class VNNLibSpecCreator(BaseSpecCreator):
@@ -262,6 +285,8 @@ class VNNLibSpecCreator(BaseSpecCreator):
                 return None
             
             spec_pairs = validated_pairs
+
+        _canonicalize_fixed_batch_input_specs(spec_pairs, labeled_tensor)
         
         # Return in unified format with labeled_tensors as list
         labeled_tensors = [labeled_tensor]
