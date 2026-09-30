@@ -372,6 +372,7 @@ class TopKBounding(BoundingStrategy):
         self._incremental_alpha: Optional[AlphaState] = None
         self._incremental_eta: Optional[Dict[int, torch.Tensor]] = None
         self._split_signs: Optional[Dict[int, torch.Tensor]] = None
+        self._propagation_revisions: Optional[torch.Tensor] = None
 
     def push(self, batch: SubproblemBatch) -> None:
         size_before = len(self)
@@ -400,11 +401,15 @@ class TopKBounding(BoundingStrategy):
             self._incremental_alpha = _clone_optional_dict(batch.incremental_alpha)
             self._incremental_eta = _clone_optional_dict(batch.incremental_eta)
             self._split_signs = _clone_optional_dict(batch.split_signs)
+            self._propagation_revisions = torch.full(
+                (n_new,), -1, dtype=torch.long, device=device
+            )
             self._assert_push_transition(size_before, n_new)
             return
 
         assert prev_ub is not None and prev_depths is not None
         assert prev_lower is not None and prev_parent is not None
+        assert self._propagation_revisions is not None
         assert (self._node_id is None) == (batch.node_id is None)
         assert (self._parent_id is None) == (batch.parent_id is None)
         n_old = prev_lb.shape[0]
@@ -422,6 +427,17 @@ class TopKBounding(BoundingStrategy):
         if self._parent_id is not None:
             assert batch.parent_id is not None
             self._parent_id = torch.cat([self._parent_id, batch.parent_id.to(self._parent_id.device)], dim=0)
+        self._propagation_revisions = torch.cat(
+            [
+                self._propagation_revisions,
+                torch.full(
+                    (n_new,),
+                    -1,
+                    dtype=torch.long,
+                    device=self._propagation_revisions.device,
+                ),
+            ]
+        )
         self._assert_push_transition(size_before, n_new)
 
     def pop(self, batch_size: int = 1) -> SubproblemBatch:
@@ -482,6 +498,65 @@ class TopKBounding(BoundingStrategy):
         if batch.batch_size > 0:
             self.push(batch)
 
+    def propagation_batch(
+        self, library_revision: int
+    ) -> Optional[Tuple[torch.Tensor, SubproblemBatch]]:
+        """Return only rows not checked against the current core library."""
+        if self._lb is None:
+            return None
+        assert self._propagation_revisions is not None
+        indices = torch.where(self._propagation_revisions != library_revision)[0]
+        if indices.numel() == 0:
+            return None
+        return indices, self._build(indices)
+
+    def apply_propagation(
+        self,
+        selected: torch.Tensor,
+        kept: torch.Tensor,
+        propagated: SubproblemBatch,
+        library_revision: int,
+    ) -> None:
+        """Write inferred signs and remove discharged rows from a selected subset."""
+        assert self._lb is not None and self._propagation_revisions is not None
+        selected = selected.to(self._lb.device)
+        kept = kept.to(selected.device)
+        assert propagated.batch_size == int(kept.numel()), (
+            "incremental propagation survivor index mismatch"
+        )
+        survivor_indices = selected.index_select(0, kept)
+        if propagated.split_signs is not None:
+            if self._split_signs is None:
+                self._split_signs = {}
+            for layer_id, incoming in propagated.split_signs.items():
+                stored = self._split_signs.get(layer_id)
+                if stored is None:
+                    stored = torch.zeros(
+                        (len(self), *incoming.shape[1:]),
+                        dtype=incoming.dtype,
+                        device=incoming.device,
+                    )
+                    self._split_signs[layer_id] = stored
+                stored.index_copy_(
+                    0, survivor_indices.to(stored.device), incoming.to(stored)
+                )
+        self._propagation_revisions[survivor_indices] = library_revision
+
+        selected_survived = torch.zeros(
+            selected.numel(), dtype=torch.bool, device=selected.device
+        )
+        selected_survived[kept] = True
+        discharged = selected[~selected_survived]
+        if discharged.numel() == 0:
+            return
+        retain = torch.ones(len(self), dtype=torch.bool, device=self._lb.device)
+        retain[discharged] = False
+        retained = torch.where(retain)[0]
+        if retained.numel() == 0:
+            self._clear()
+        else:
+            self._restrict(retained)
+
     def _priority_scores(self) -> torch.Tensor:
         depths_t, lb = self._depths, self._lower_bound
         assert depths_t is not None and lb is not None
@@ -515,6 +590,8 @@ class TopKBounding(BoundingStrategy):
         )
 
     def _restrict(self, idx: torch.Tensor) -> None:
+        revisions = self._propagation_revisions
+        assert revisions is not None
         kept = self._build(idx)
         self._lb, self._ub, self._depths = kept.lb, kept.ub, kept.depths
         self._lower_bound, self._parent_margins = kept.lower_bound, kept.parent_margins
@@ -524,12 +601,16 @@ class TopKBounding(BoundingStrategy):
             kept.incremental_eta,
             kept.split_signs,
         )
+        self._propagation_revisions = revisions.index_select(
+            0, idx.to(revisions.device)
+        )
 
     def _clear(self) -> None:
         self._lb = self._ub = self._depths = None
         self._lower_bound = self._parent_margins = None
         self._node_id = self._parent_id = None
         self._incremental_alpha = self._incremental_eta = self._split_signs = None
+        self._propagation_revisions = None
 
     def evict_to(self, cap: int) -> int:
         total = len(self)

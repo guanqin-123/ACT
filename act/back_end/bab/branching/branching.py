@@ -93,9 +93,10 @@ class SplitDecision:
     layer_id: Optional[torch.Tensor] = None
     neuron_idx: Optional[torch.Tensor] = None
     lane_mask: Optional[torch.Tensor] = None
-    """Bool ``[N]`` over the scored batch: lanes this decision covers. Only set
-    by neuron-only selection; ``False`` lanes had no ReLU candidate and must be
-    retired by the caller before ``apply``. ``None`` means every lane."""
+    """Bool ``[N]`` over the scored batch. For ``mixed`` decisions, ``True``
+    lanes use packed neuron decisions and ``False`` lanes use packed input axes.
+    For neuron-only selection, ``False`` lanes must be retired by the caller.
+    ``None`` means every lane."""
 
     def input_axes(self, batch: SubproblemBatch) -> torch.Tensor:
         if self.input_axis is None:
@@ -166,6 +167,46 @@ class SplitDecision:
                 1,
                 first_sign=+1.0,
             )
+
+        if self.kind == "mixed":
+            if self.lane_mask is None:
+                raise ValueError("mixed decision missing lane_mask")
+            neuron_rows = torch.where(self.lane_mask)[0]
+            input_rows = torch.where(~self.lane_mask)[0]
+            if neuron_rows.numel() == 0 or input_rows.numel() == 0:
+                raise ValueError("mixed decision requires both neuron and input lanes")
+            if self.layer_id is None or self.neuron_idx is None:
+                raise ValueError("mixed decision missing packed neuron decisions")
+            if self.input_axis is None:
+                raise ValueError("mixed decision missing packed input axes")
+
+            neuron_children, neuron_parent = SplitDecision(
+                kind="neuron",
+                layer_id=self.layer_id,
+                neuron_idx=self.neuron_idx,
+            ).apply(batch.select(neuron_rows), net)
+            input_children, input_parent = SplitDecision(
+                kind="input_axis",
+                input_axis=self.input_axis,
+                fanout=fanout,
+            ).apply(batch.select(input_rows), net)
+            neuron_parent = neuron_rows.index_select(
+                0, neuron_parent.to(neuron_rows.device)
+            )
+            input_parent = input_rows.index_select(0, input_parent.to(input_rows.device))
+            children = neuron_children.concat(input_children)
+            parent_index = torch.cat([neuron_parent, input_parent.to(neuron_parent.device)])
+
+            occurrence = torch.cat(
+                [
+                    torch.arange(neuron_parent.numel(), device=parent_index.device)
+                    // neuron_rows.numel(),
+                    torch.arange(input_parent.numel(), device=parent_index.device)
+                    // input_rows.numel(),
+                ]
+            )
+            order = torch.argsort(occurrence * batch.batch_size + parent_index)
+            return children.select(order), parent_index.index_select(0, order)
 
         raise ValueError(f"Unknown SplitDecision.kind: {self.kind!r}")
 
@@ -355,6 +396,7 @@ class BaBSRBranching(BranchingStrategy):
         self.sparsest_layer = sparsest_layer
         self.neuron_only = neuron_only
         self.icp_score_counter = 0
+        self.whole_batch_fallback_count = 0
 
     def compute_scores(
         self,
@@ -460,15 +502,18 @@ class BaBSRBranching(BranchingStrategy):
         return (signs != 0).any(dim=1)
 
     @staticmethod
-    def _input_axis_fallback(scores: BranchingScores) -> SplitDecision:
+    def _input_axis_fallback(
+        scores: BranchingScores, lane_mask: Optional[torch.Tensor] = None
+    ) -> SplitDecision:
         if scores.input_fallback is None:
             raise ValueError(
                 "no splittable input dimension: neuron branching fell back to an "
                 "input-axis split but no width scores were recorded"
             )
-        return SplitDecision(
-            kind="input_axis", input_axis=_argmax_splittable(scores.input_fallback)
-        )
+        fallback = scores.input_fallback
+        if lane_mask is not None:
+            fallback = fallback.index_select(0, torch.where(lane_mask)[0].to(fallback.device))
+        return SplitDecision(kind="input_axis", input_axis=_argmax_splittable(fallback))
 
     def select(self, scores: torch.Tensor | BranchingScores) -> torch.Tensor | SplitDecision:
         if isinstance(scores, torch.Tensor):
@@ -481,49 +526,48 @@ class BaBSRBranching(BranchingStrategy):
         if not per_layer:
             return self._input_axis_fallback(scores)
 
-        N = next(iter(per_layer.values())).shape[0]
-        device = next(iter(per_layer.values())).device
-        decisions_layer = torch.zeros(N, dtype=torch.long, device=device)
-        decisions_neuron = torch.zeros(N, dtype=torch.long, device=device)
+        primary_lid, primary_idx, primary_value, primary_valid = _batched_layer_argmax(
+            per_layer
+        )
+        primary = primary_valid & (
+            primary_value.to(torch.float64) > self.decision_threshold
+        )
+        intercept = scores.intercept_per_layer or {}
+        ic_lid, ic_idx, _ic_value, ic_valid = _batched_layer_argmax(
+            intercept,
+            lanes=primary.shape[0],
+            device=primary.device,
+        )
+        use_intercept, self.icp_score_counter = _intercept_choice_mask(
+            primary,
+            ic_valid,
+            limit=self.intercept_fallback_max,
+            initial_counter=self.icp_score_counter,
+        )
+        neuron_mask = primary | use_intercept
+        decisions_layer = torch.where(primary, primary_lid, ic_lid)
+        decisions_neuron = torch.where(primary, primary_idx, ic_idx)
+        neuron_rows = torch.where(neuron_mask)[0]
+        input_mask = ~neuron_mask
+        input_count = int(input_mask.sum())
 
-        for n in range(N):
-            best_lid: Optional[int] = None
-            best_idx = 0
-            best_val = float("-inf")
-            for lid, score in per_layer.items():
-                val, idx = score[n].max(dim=0)
-                if float(val.item()) > best_val:
-                    best_val = float(val.item())
-                    best_lid = lid
-                    best_idx = int(idx.item())
-
-            if best_lid is not None and best_val > self.decision_threshold:
-                decisions_layer[n] = best_lid
-                decisions_neuron[n] = best_idx
-                self.icp_score_counter = 0
-                continue
-
-            intercept = scores.intercept_per_layer
-            if intercept is not None and self.icp_score_counter < self.intercept_fallback_max:
-                ic_lid: Optional[int] = None
-                ic_idx = 0
-                ic_val = float("-inf")
-                for lid, score in intercept.items():
-                    val, idx = score[n].max(dim=0)
-                    if float(val.item()) > ic_val:
-                        ic_val = float(val.item())
-                        ic_lid = lid
-                        ic_idx = int(idx.item())
-                if ic_lid is not None and ic_val > float("-inf"):
-                    decisions_layer[n] = ic_lid
-                    decisions_neuron[n] = ic_idx
-                    self.icp_score_counter += 1
-                    continue
-
-            self.icp_score_counter = 0
-            return self._input_axis_fallback(scores)
-
-        return SplitDecision(kind="neuron", layer_id=decisions_layer, neuron_idx=decisions_neuron)
+        if input_count == 0:
+            return SplitDecision(
+                kind="neuron",
+                layer_id=decisions_layer,
+                neuron_idx=decisions_neuron,
+            )
+        input_decision = self._input_axis_fallback(scores, input_mask)
+        if input_count == neuron_mask.numel():
+            self.whole_batch_fallback_count += 1
+            return input_decision
+        return SplitDecision(
+            kind="mixed",
+            input_axis=input_decision.input_axis,
+            layer_id=decisions_layer.index_select(0, neuron_rows),
+            neuron_idx=decisions_neuron.index_select(0, neuron_rows),
+            lane_mask=neuron_mask,
+        )
 
     def select_neuron_only(self, scores: BranchingScores) -> SplitDecision:
         """Per-lane neuron decision that never emits an input-axis split (D8a).
@@ -549,45 +593,46 @@ class BaBSRBranching(BranchingStrategy):
                 torch.zeros(n_lanes, dtype=torch.bool),
             )
 
-        N = next(iter(per_layer.values())).shape[0]
-        device = next(iter(per_layer.values())).device
-        keep = torch.zeros(N, dtype=torch.bool)
-        decisions_layer = torch.zeros(N, dtype=torch.long, device=device)
-        decisions_neuron = torch.zeros(N, dtype=torch.long, device=device)
-        intercept = scores.intercept_per_layer
-        candidate_tables = [
-            table
-            for table in (scores.babsr_per_layer or per_layer, intercept)
-            if table
-        ]
+        primary_lid, primary_idx, primary_value, primary_valid = _batched_layer_argmax(
+            per_layer
+        )
+        primary = primary_valid & (
+            primary_value.to(torch.float64) > self.decision_threshold
+        )
+        intercept = scores.intercept_per_layer or {}
+        ic_lid, ic_idx, _ic_value, ic_valid = _batched_layer_argmax(
+            intercept,
+            lanes=primary.shape[0],
+            device=primary.device,
+        )
+        use_intercept, self.icp_score_counter = _intercept_choice_mask(
+            primary,
+            ic_valid,
+            limit=self.intercept_fallback_max,
+            initial_counter=self.icp_score_counter,
+        )
 
-        for n in range(N):
-            best_lid, best_idx, best_val = _lane_argmax(per_layer, n)
-            if best_lid is not None and best_val > self.decision_threshold:
-                decisions_layer[n] = best_lid
-                decisions_neuron[n] = best_idx
-                keep[n] = True
-                self.icp_score_counter = 0
-                continue
+        fallback_lid, fallback_idx, _fallback_value, fallback_valid = (
+            _batched_layer_argmax(scores.babsr_per_layer or per_layer)
+        )
+        use_fallback_intercept = ~fallback_valid & ic_valid
+        fallback_lid = torch.where(use_fallback_intercept, ic_lid, fallback_lid)
+        fallback_idx = torch.where(use_fallback_intercept, ic_idx, fallback_idx)
+        fallback_valid = fallback_valid | ic_valid
 
-            if intercept and self.icp_score_counter < self.intercept_fallback_max:
-                ic_lid, ic_idx, ic_val = _lane_argmax(intercept, n)
-                if ic_lid is not None and ic_val > float("-inf"):
-                    decisions_layer[n] = ic_lid
-                    decisions_neuron[n] = ic_idx
-                    keep[n] = True
-                    self.icp_score_counter += 1
-                    continue
-
-            self.icp_score_counter = 0
-            for table in candidate_tables:
-                lid, idx, val = _lane_argmax(table, n)
-                if lid is not None and val > float("-inf"):
-                    decisions_layer[n] = lid
-                    decisions_neuron[n] = idx
-                    keep[n] = True
-                    break
-
+        undecided = ~(primary | use_intercept)
+        use_fallback = undecided & fallback_valid
+        decisions_layer = torch.where(
+            primary,
+            primary_lid,
+            torch.where(use_intercept, ic_lid, fallback_lid),
+        )
+        decisions_neuron = torch.where(
+            primary,
+            primary_idx,
+            torch.where(use_intercept, ic_idx, fallback_idx),
+        )
+        keep = primary | use_intercept | use_fallback
         return _neuron_decision_over_lanes(decisions_layer, decisions_neuron, keep)
 
 
@@ -603,20 +648,65 @@ def _neuron_decision_over_lanes(
     )
 
 
-def _lane_argmax(
-    per_layer: Dict[int, torch.Tensor], lane: int
-) -> Tuple[Optional[int], int, float]:
-    """Best ``(layer_id, neuron_idx, score)`` of one lane over a per-layer score table."""
-    best_lid: Optional[int] = None
-    best_idx = 0
-    best_val = float("-inf")
-    for lid, score in per_layer.items():
-        val, idx = score[lane].max(dim=0)
-        if float(val.item()) > best_val:
-            best_val = float(val.item())
-            best_lid = lid
-            best_idx = int(idx.item())
-    return best_lid, best_idx, best_val
+def _batched_layer_argmax(
+    per_layer: Dict[int, torch.Tensor],
+    *,
+    lanes: Optional[int] = None,
+    device: Optional[torch.device] = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Best layer/neuron per lane, preserving loop tie and NaN semantics."""
+    if not per_layer:
+        if lanes is None or device is None:
+            raise ValueError("empty score table requires lanes and device")
+        return (
+            torch.zeros(lanes, dtype=torch.long, device=device),
+            torch.zeros(lanes, dtype=torch.long, device=device),
+            torch.full((lanes,), float("-inf"), device=device),
+            torch.zeros(lanes, dtype=torch.bool, device=device),
+        )
+
+    layer_ids = list(per_layer)
+    layer_values = []
+    layer_neurons = []
+    for table in per_layer.values():
+        values, neurons = table.max(dim=1)
+        layer_values.append(values.masked_fill(torch.isnan(values), float("-inf")))
+        layer_neurons.append(neurons)
+    values = torch.stack(layer_values, dim=1)
+    neurons = torch.stack(layer_neurons, dim=1)
+    best_values, layer_positions = values.max(dim=1)
+    best_neurons = neurons.gather(1, layer_positions.unsqueeze(1)).squeeze(1)
+    lids = torch.tensor(layer_ids, dtype=torch.long, device=values.device)
+    best_layers = lids.index_select(0, layer_positions)
+    return best_layers, best_neurons, best_values, best_values > float("-inf")
+
+
+def _intercept_choice_mask(
+    primary: torch.Tensor,
+    intercept_valid: torch.Tensor,
+    *,
+    limit: int,
+    initial_counter: int,
+) -> tuple[torch.Tensor, int]:
+    """Vectorised scan of the legacy consecutive-intercept fallback state."""
+    candidate = ~primary & intercept_valid
+    if limit <= 0 or candidate.numel() == 0:
+        return torch.zeros_like(candidate), 0
+    positions = torch.arange(1, candidate.numel() + 1, device=candidate.device)
+    last_separator = torch.where(~candidate, positions, torch.zeros_like(positions))
+    last_separator = last_separator.cummax(dim=0).values
+    run_position = positions - last_separator
+    initial_offset = torch.where(
+        last_separator == 0,
+        torch.full_like(positions, initial_counter),
+        torch.zeros_like(positions),
+    )
+    phase = (run_position + initial_offset - 1).remainder(limit + 1)
+    use_intercept = candidate & (phase < limit)
+    final_counter = int(
+        torch.where(use_intercept[-1], phase[-1] + 1, torch.zeros_like(phase[-1]))
+    )
+    return use_intercept, final_counter
 
 
 _WITNESS_GAP_TOL = 1e-6

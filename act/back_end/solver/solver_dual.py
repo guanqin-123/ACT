@@ -11,6 +11,7 @@
 # justification: torch C-extension stubs are absent in CI; DualSolver and verifier share result utilities during type analysis
 
 from __future__ import annotations
+import logging
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, TypeAlias, Union, cast
@@ -42,8 +43,116 @@ if TYPE_CHECKING:
     from act.back_end.dual_tf.dual_tf import DualTF
 
 
+logger = logging.getLogger(__name__)
+
 _monotonic = time.monotonic
 """Clock of the alpha/eta time cap; tests substitute a deterministic clock."""
+
+_MIB = 1024 * 1024
+_PER_CLASS_ALPHA_MAX_MIB = 1024.0
+_INCREMENTAL_ALPHA_PER_LANE_MAX_MIB = 32.0
+_PER_CLASS_ALPHA_CAP_REPORTED: set[Tuple[int, int, int]] = set()
+_INCREMENTAL_ALPHA_CAP_REPORTED: set[Tuple[int, int]] = set()
+
+
+def _per_class_alpha_estimated_bytes(
+    net: Net,
+    bounds_dict: Dict[int, Bounds],
+    lanes: int,
+    rows: int,
+    dtype: torch.dtype,
+) -> int:
+    """Bytes needed by one complete per-class ReLU alpha state."""
+    neurons = 0
+    for layer in net.layers:
+        kind = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
+        bounds = bounds_dict.get(layer.id)
+        if kind == LayerKind.RELU.value and bounds is not None:
+            neurons += int(bounds.lb[0].numel())
+    itemsize = torch.empty((), dtype=dtype).element_size()
+    return lanes * rows * neurons * itemsize
+
+
+def _retain_incremental_alpha_state(
+    state: Optional[AlphaState], lanes: int,
+) -> Optional[AlphaState]:
+    """Keep a warm start only when its alpha state is bounded per lane."""
+    if state is None:
+        return None
+    if lanes <= 0:
+        raise ValueError(f"incremental alpha lanes must be positive, got {lanes}")
+    total_bytes = sum(
+        leaf.numel() * leaf.element_size()
+        for tree in state.values()
+        for leaf in _alpha_tree_leaves(tree)
+    )
+    cap_bytes = int(_INCREMENTAL_ALPHA_PER_LANE_MAX_MIB * _MIB) * lanes
+    if total_bytes <= cap_bytes:
+        return state
+    report_key = (lanes, total_bytes)
+    if report_key not in _INCREMENTAL_ALPHA_CAP_REPORTED:
+        _INCREMENTAL_ALPHA_CAP_REPORTED.add(report_key)
+        logger.warning(
+            "incremental alpha state %.3f MiB exceeds %.3f MiB per-lane cap "
+            "for lanes=%d; discarding warm start",
+            total_bytes / _MIB,
+            _INCREMENTAL_ALPHA_PER_LANE_MAX_MIB,
+            lanes,
+        )
+    return None
+
+
+def _max_backward_tensor_width(
+    net: Net, bounds_dict: Dict[int, Bounds], start_lid: int,
+) -> int:
+    """Largest per-lane width visited by a backward pass from ``start_lid``."""
+    pending = [start_lid]
+    visited: set[int] = set()
+    max_width = 0
+    while pending:
+        lid = pending.pop()
+        if lid in visited:
+            continue
+        visited.add(lid)
+        bounds = bounds_dict.get(lid)
+        if bounds is not None and bounds.lb.dim() >= 2:
+            max_width = max(max_width, int(bounds.lb[0].numel()))
+        pending.extend(net.preds.get(lid, []))
+    return max_width
+
+
+def _skip_refinement_for_tensor_cap(
+    *,
+    net: Net,
+    bounds_dict: Dict[int, Bounds],
+    layer_id: int,
+    start_lid: int,
+    lanes: int,
+    rows: int,
+    itemsize: int,
+    max_tensor_mib: float,
+    refinement_stats: Optional[Dict[str, int]],
+) -> bool:
+    """Log and apply the deterministic dense-backward tensor cap."""
+    width = _max_backward_tensor_width(net, bounds_dict, start_lid)
+    estimate_bytes = lanes * rows * width * itemsize
+    estimate_mib = estimate_bytes / _MIB
+    skipped = estimate_bytes > max_tensor_mib * _MIB
+    logger.info(
+        "Intermediate refinement layer=%d lanes=%d rows=%d width=%d "
+        "estimate=%.3f MiB cap=%.3f MiB action=%s",
+        layer_id,
+        lanes,
+        rows,
+        width,
+        estimate_mib,
+        max_tensor_mib,
+        "skipped" if skipped else "refined",
+    )
+    if skipped and refinement_stats is not None:
+        key = "intermediate_refine_skipped_calls"
+        refinement_stats[key] = refinement_stats.get(key, 0) + 1
+    return skipped
 
 
 def _effective_time_cap(time_cap: Optional[float], max_time: float) -> Optional[float]:
@@ -98,6 +207,8 @@ class DualBatchResult:
     thresholds: Optional[torch.Tensor] = None
     m_specs: int = 0
     reference_bounds: Optional[Dict[int, Bounds]] = None
+    # Split-free bounds a split_refresh lane was refreshed from (CLIMB C3).
+    base_reference_bounds: Optional[Dict[int, Bounds]] = None
 
 
 def expand_bounds_dict(bounds_dict: Dict[int, Bounds], M: int) -> Dict[int, Bounds]:
@@ -291,6 +402,76 @@ def _alpha_relu_forward_view(state: Optional[AlphaState]) -> Dict[int, torch.Ten
     }
 
 
+def _phase_slope_replay_alpha(
+    alpha: AlphaTree,
+    split_signs: torch.Tensor,
+    phase_slope_signs: torch.Tensor,
+) -> AlphaTree:
+    """Use the source phase slope only where replay dropped a ReLU literal."""
+    if not isinstance(alpha, torch.Tensor):
+        raise TypeError("phase-slope ReLU replay requires a tensor alpha state")
+    current = split_signs.to(device=alpha.device)
+    source = phase_slope_signs.to(device=alpha.device)
+    if current.shape != alpha.shape or source.shape != alpha.shape:
+        raise ValueError(
+            "phase-slope replay shape mismatch: "
+            f"alpha={tuple(alpha.shape)}, split={tuple(current.shape)}, "
+            f"source={tuple(source.shape)}"
+        )
+    dropped = source.ne(0) & current.eq(0)
+    return torch.where(dropped, source.gt(0).to(dtype=alpha.dtype), alpha)
+
+
+def _phase_slope_replay_relu(
+    nu: torch.Tensor,
+    bounds: Bounds,
+    m_specs: int,
+    split_signs: torch.Tensor,
+    phase_slope_signs: torch.Tensor,
+    pred_nu: torch.Tensor,
+    contrib: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Replace dropped ReLU chord terms with the source phase-slope strip."""
+    bm = nu.shape[0]
+    if bm % m_specs:
+        raise ValueError(f"phase-slope replay batch {bm} is not divisible by M={m_specs}")
+    lanes = bm // m_specs
+    values = nu.flatten(start_dim=1)
+    lower = bounds.lb.flatten(start_dim=1)
+    upper = bounds.ub.flatten(start_dim=1)
+    width = min(values.shape[-1], lower.shape[-1])
+    values = values[..., :width].view(lanes, m_specs, width)
+    lower = lower[..., :width].unsqueeze(1)
+    upper = upper[..., :width].unsqueeze(1)
+    current = split_signs.to(device=values.device)[..., :width]
+    source = phase_slope_signs.to(device=values.device)[..., :width]
+    if current.shape != values.shape or source.shape != values.shape:
+        raise ValueError(
+            "phase-slope replay sign shape mismatch: "
+            f"nu={tuple(values.shape)}, split={tuple(current.shape)}, "
+            f"source={tuple(source.shape)}"
+        )
+    dropped = source.ne(0) & current.eq(0)
+    if not bool(dropped.any()):
+        return pred_nu, contrib
+
+    denominator = (upper - lower).clamp(min=1e-12)
+    chord_slope = upper / denominator
+    chord_intercept = -chord_slope * lower
+    phase_slope = source.gt(0).to(dtype=values.dtype)
+    phase_intercept = torch.where(source.gt(0), -lower, upper)
+    negative = values < 0
+    old_contrib = torch.where(negative, values * chord_intercept, 0.0)
+    new_contrib = torch.where(negative, values * phase_intercept, 0.0)
+
+    corrected_nu = pred_nu.flatten(start_dim=1)[..., :width].view_as(values).clone()
+    corrected_nu[dropped] = (phase_slope * values)[dropped]
+    corrected_contrib = contrib + torch.where(
+        dropped, new_contrib - old_contrib, 0.0
+    ).sum(dim=-1).reshape(bm)
+    return corrected_nu.reshape(bm, width), corrected_contrib
+
+
 def _max_with_optional(value: torch.Tensor, other: Optional[torch.Tensor]) -> torch.Tensor:
     """Elementwise maximum that treats a missing second operand as no-op."""
     if other is None:
@@ -298,15 +479,43 @@ def _max_with_optional(value: torch.Tensor, other: Optional[torch.Tensor]) -> to
     return torch.maximum(value, other.to(device=value.device, dtype=value.dtype))
 
 
-def unproven_spec_rows(slack: torch.Tensor) -> torch.Tensor:
-    """ALL-rows spec kinds: rows whose ``slack`` does not prove them (``< 0`` or non-finite).
+# ALL-rows kinds whose SAFE set is open: ``TOP1_ROBUST`` requires ``z_t > z_j``
+# and ``MARGIN_ROBUST`` requires ``z_t - z_j > m`` (a tie already violates;
+# ``OutputSpec.CLOSED_KINDS`` lists them as kinds with a closed UNSAFE set).
+_OPEN_SAFE_SET_KINDS = frozenset({OutKind.TOP1_ROBUST, OutKind.MARGIN_ROBUST})
 
-    A NaN / inf slack is never proven, so a lane with such a row is not certified.
-    The boundary ``slack == 0`` proves the row: the safe set of every ALL-rows
-    kind is closed, so a bound that lands exactly on the threshold is a proof
-    (a tolerance band here would only turn boundary-touching safe properties
-    into UNKNOWN; see ``escaping_spec_rows`` for the open-boundary kind).
+
+def unproven_spec_rows(
+    slack: torch.Tensor, reference: torch.Tensor, out_kind: str
+) -> torch.Tensor:
+    """ALL-rows spec kinds: rows whose ``slack`` does not prove them.
+
+    ``slack`` is ``lower bound - threshold`` of a row in certification form and
+    ``reference`` the bound it was derived from (the row margins, broadcastable
+    to ``slack``). A NaN / inf slack is never proven, so a lane with such a row
+    is not certified. The boundary depends on the kind:
+
+    - ``LINEAR_LE`` / ``RANGE`` have a CLOSED safe set (``c y <= d``,
+      ``lb <= y <= ub``): ``slack == 0`` proves the row, hard zero. A band here
+      would only turn boundary-touching safe properties into UNKNOWN.
+    - ``TOP1_ROBUST`` / ``MARGIN_ROBUST`` have an OPEN safe set (``z_t > z_j``,
+      ``z_t - z_j > m``; an exact tie is a violation): a row is proven only
+      when it clears the ``escaping_spec_rows`` band, exactly like an
+      UNSAFE_LINEAR escape. With a hard zero an exact tie (two identical logit
+      rows: true slack exactly ``0``) certified, and rounding of a few ulp
+      (``certification_tolerance``) could certify a violated property.
+
+    Raises:
+        ValueError: for the EXISTS-row kind ``UNSAFE_LINEAR`` (decided by
+            ``escaping_spec_rows``, whose lane rule is ``.any()``).
     """
+    if out_kind == OutKind.UNSAFE_LINEAR:
+        raise ValueError(
+            "unproven_spec_rows: UNSAFE_LINEAR is an EXISTS-row kind; use "
+            "escaping_spec_rows"
+        )
+    if out_kind in _OPEN_SAFE_SET_KINDS:
+        return ~escaping_spec_rows(slack, reference)
     return (slack < 0) | ~torch.isfinite(slack)
 
 
@@ -524,7 +733,9 @@ class DualSolver(Solver):
                 return (
                     escaping_spec_rows(row_slack, row_margins) & active_mask
                 ).any(dim=-1)
-            return ~(unproven_spec_rows(row_slack) & active_mask).any(dim=-1)
+            return ~(
+                unproven_spec_rows(row_slack, row_margins, out_spec.kind) & active_mask
+            ).any(dim=-1)
 
         def _all_lanes_certified(row_bounds: torch.Tensor) -> bool:
             return bool(_lanes_certified(row_bounds).all().item())
@@ -590,9 +801,11 @@ class DualSolver(Solver):
                 k_actual, dtype=torch.long, device=device
             )
         else:
-            violations = unproven_spec_rows(slack) & active_mask
+            violations = unproven_spec_rows(slack, margins, out_spec.kind) & active_mask
             certified = ~violations.any(dim=-1)
-            dual_certified = ~(unproven_spec_rows(dual_slack) & active_mask).any(dim=-1)
+            dual_certified = ~(
+                unproven_spec_rows(dual_slack, dual_margins, out_spec.kind) & active_mask
+            ).any(dim=-1)
             candidate_rows = torch.where(
                 violations.any(dim=1),
                 violations.to(torch.int64).argmax(dim=1),
@@ -683,6 +896,9 @@ class DualSolver(Solver):
             else None
         )
         lower_bounds = -solution.max_viol
+        retained_alpha_state = _retain_incremental_alpha_state(
+            dual_result.alpha_state, k_actual,
+        )
         return DualBatchResult(
             solution=solution,
             margins=margins,
@@ -691,7 +907,7 @@ class DualSolver(Solver):
             forward_only_certified=forward_only_certified.detach(),
             bounds_dict=branch_bounds,
             nu_per_layer=branch_nu,
-            alpha_state=dual_result.alpha_state,
+            alpha_state=retained_alpha_state,
             eta_state=dual_result.eta_state,
             witness_input=witness_input,
             row_slack=slack.detach(),
@@ -723,6 +939,7 @@ class DualSolver(Solver):
         refresh_forward: bool = True,
         start_lid: Optional[int] = None,
         local_phase_clamp: bool = False,
+        phase_slope_signs: Optional[Dict[int, torch.Tensor]] = None,
         forward_lin_max_perturbed: Optional[int] = None,
         forward_frame: Optional[ForwardFrame] = None,
         stagnation_patience: int = 0,
@@ -769,6 +986,10 @@ class DualSolver(Solver):
         local_phase_clamp: For fixed-parameter replay, shallow-copy and clamp only
             the current ReLU handler's bounds. Reference bounds remain immutable;
             optimization is rejected because it requires globally hardened bounds.
+        phase_slope_signs: Original replay literals. Where a current split sign
+            is zero but its original sign is nonzero, use alpha=1 for the active
+            phase and alpha=0 for the inactive phase. Other alpha entries stay
+            frozen at their stored values.
         η is applied to the TRUE pre-activation variable (immediately AFTER the
         activation handler in the reverse-topological backward loop):
         nu_pre = slope · nu_post − η · sign, so the multiplier acts on the
@@ -829,6 +1050,7 @@ class DualSolver(Solver):
                     per_class_alpha=per_class_alpha,
                     return_nu_per_layer=False,
                     local_phase_clamp=local_phase_clamp,
+                    phase_slope_signs=phase_slope_signs,
                     forward_lin_max_perturbed=forward_lin_max_perturbed,
                     forward_frame=forward_frame,
                 )
@@ -971,12 +1193,40 @@ class DualSolver(Solver):
                     )
                 if k in self._BILINEAR_KINDS:
                     handler_bounds = self._bilinear_operand_bounds(net, handler_bounds, preds)
-                if alpha is None:
+                layer_alpha = alpha.get(lid) if alpha is not None else None
+                if (
+                    phase_slope_signs is not None
+                    and split_signs is not None
+                    and lid in phase_slope_signs
+                    and lid in split_signs
+                ):
+                    layer_alpha = _phase_slope_replay_alpha(
+                        layer_alpha, split_signs[lid], phase_slope_signs[lid]
+                    )
+                if layer_alpha is None:
                     pred_nus, contrib = handler(layer, nu_here, handler_bounds, preds, M)
                 else:
                     pred_nus, contrib = handler(
-                        layer, nu_here, handler_bounds, preds, M, alpha=alpha.get(lid)
+                        layer, nu_here, handler_bounds, preds, M, alpha=layer_alpha
                     )
+
+                if (
+                    k == LayerKind.RELU.value
+                    and phase_slope_signs is not None
+                    and split_signs is not None
+                    and lid in phase_slope_signs
+                    and lid in split_signs
+                ):
+                    corrected_nu, contrib = _phase_slope_replay_relu(
+                        nu_here,
+                        bounds_dict[lid],
+                        M,
+                        split_signs[lid],
+                        phase_slope_signs[lid],
+                        pred_nus[0],
+                        contrib,
+                    )
+                    pred_nus = [corrected_nu, *pred_nus[1:]]
 
                 if eta is not None and split_signs is not None and lid in eta:
                     # Split Lagrangian on the TRUE pre-activation variable:
@@ -1390,6 +1640,26 @@ class DualSolver(Solver):
             )
         B = BM // M
         device, dtype = c.device, c.dtype
+
+        if per_class_alpha:
+            alpha_bytes = _per_class_alpha_estimated_bytes(
+                net, bounds_dict, B, M, dtype,
+            )
+            if alpha_bytes > _PER_CLASS_ALPHA_MAX_MIB * _MIB:
+                report_key = (B, M, alpha_bytes)
+                if report_key not in _PER_CLASS_ALPHA_CAP_REPORTED:
+                    _PER_CLASS_ALPHA_CAP_REPORTED.add(report_key)
+                    logger.warning(
+                        "per-class alpha state estimate %.3f MiB exceeds %.3f MiB cap "
+                        "for lanes=%d rows=%d; using shared alpha slopes",
+                        alpha_bytes / _MIB,
+                        _PER_CLASS_ALPHA_MAX_MIB,
+                        B,
+                        M,
+                    )
+                per_class_alpha = False
+                if incremental_alphas is not None and _alpha_spec_row_count(incremental_alphas) > 1:
+                    incremental_alphas = None
 
         input_lid = self._find_input_layer_id(net)
         if input_lid is None:
@@ -1843,6 +2113,8 @@ class DualSolver(Solver):
         blowup_ratio: float = 10.0,
         max_rows_per_call: int = 4096,
         optimize_iters: int = 20,
+        max_tensor_mib: float = 1024.0,
+        refinement_stats: Optional[Dict[str, int]] = None,
         stagnation_patience: int = 0,
         stagnation_tol: Optional[float] = None,
         max_time: float = 0.0,
@@ -1860,10 +2132,12 @@ class DualSolver(Solver):
         so the intersection is sound). Layers are processed in topological
         order so later refinements consume earlier ones.
 
-        ``stagnation_patience`` / ``stagnation_tol`` / ``max_time`` apply to
-        every row chunk's alpha loop; ``time_cap`` caps the whole call: each
-        chunk receives the remaining time and, once it is used up, the
-        remaining layers keep their forward bounds (sound).
+        ``max_tensor_mib`` skips a selected layer as one unit when the largest
+        existing row chunk would make one dense backward tensor exceed the cap;
+        its current sound forward bounds are retained. ``stagnation_patience`` /
+        ``stagnation_tol`` / ``max_time`` apply to every row chunk's alpha loop;
+        ``time_cap`` caps the whole call: each chunk receives the remaining time
+        and, once it is used up, the remaining layers keep their forward bounds.
         """
         if mode == "none":
             return bounds_dict
@@ -1887,30 +2161,33 @@ class DualSolver(Solver):
             lb, ub = b.lb.flatten(start_dim=1), b.ub.flatten(start_dim=1)
             unstable = int(((lb < 0) & (ub > 0)).sum().item())
             stats.append((layer.id, unstable, float((ub - lb).mean().item())))
-        if not stats:
-            return bounds_dict
-
-        median_width = sorted(s[2] for s in stats)[len(stats) // 2]
-        threshold = max(median_width, 1e-9) * blowup_ratio
-        if mode == "tail":
-            unstable_lids = [lid for lid, unstable, _ in stats if unstable > 0]
-            selected = unstable_lids[-2:]
-        else:
-            selected = [
-                lid for lid, unstable, width in stats
-                if unstable > 0 and (mode == "all" or width > threshold)
-            ]
-        if not selected:
+        selected: List[int] = []
+        if stats:
+            median_width = sorted(s[2] for s in stats)[len(stats) // 2]
+            threshold = max(median_width, 1e-9) * blowup_ratio
+            if mode == "tail":
+                unstable_lids = [lid for lid, unstable, _ in stats if unstable > 0]
+                selected = unstable_lids[-2:]
+            else:
+                selected = [
+                    lid for lid, unstable, width in stats
+                    if unstable > 0 and (mode == "all" or width > threshold)
+                ]
+        targets = [
+            (lid, net.preds[lid][0], False)
+            for lid in selected if len(net.preds.get(lid, [])) == 1
+        ]
+        if mode == "all":
+            targets += self._attention_refine_targets(net, bounds_dict)
+            position = {layer.id: index for index, layer in enumerate(net.layers)}
+            targets.sort(key=lambda target: position[target[0]])
+        if not targets:
             return bounds_dict
 
         out = dict(bounds_dict)
-        for layer_index, lid in enumerate(selected):
+        for layer_index, (lid, pred_lid, every_neuron) in enumerate(targets):
             if layer_index > 0 and _remaining_cap() == 0.0:
                 break
-            preds = net.preds.get(lid, [])
-            if len(preds) != 1:
-                continue
-            pred_lid = preds[0]
             b = out[lid]
             lb0 = b.lb.flatten(start_dim=1)
             ub0 = b.ub.flatten(start_dim=1)
@@ -1921,9 +2198,25 @@ class DualSolver(Solver):
             # Only unstable neurons need refinement: stable phases make the
             # relaxation exact regardless of bound width, so querying them
             # would spend backward rows for zero tightening.
-            amb_idx = torch.where((lb0[0] < 0) & (ub0[0] > 0))[0]
+            if every_neuron:
+                amb_idx = torch.where(ub0[0] > lb0[0])[0]
+            else:
+                amb_idx = torch.where((lb0[0] < 0) & (ub0[0] > 0))[0]
             n_amb = int(amb_idx.numel())
             if n_amb == 0:
+                continue
+            dense_rows = 2 * min(n_amb, max_rows_per_call)
+            if _skip_refinement_for_tensor_cap(
+                net=net,
+                bounds_dict=out,
+                layer_id=lid,
+                start_lid=pred_lid,
+                lanes=1,
+                rows=dense_rows,
+                itemsize=lb0.element_size(),
+                max_tensor_mib=max_tensor_mib,
+                refinement_stats=refinement_stats,
+            ):
                 continue
             lb_new = torch.empty(n_amb, device=device, dtype=dtype)
             ub_new = torch.empty(n_amb, device=device, dtype=dtype)
@@ -1935,7 +2228,7 @@ class DualSolver(Solver):
                 res = self.compute_certified_bound(
                     net, out, rows.contiguous(), M=int(rows.shape[0]),
                     start_lid=pred_lid,
-                    optimize=optimize_iters > 0,
+                    optimize=optimize_iters > 0 and not every_neuron,
                     n_iters=optimize_iters,
                     lr_alpha=0.25,
                     lr_decay=0.98,
@@ -1961,6 +2254,49 @@ class DualSolver(Solver):
                 out[pred_lid] = refined
         return out
 
+    _ATTENTION_REFINE_ACTIVATIONS = {
+        LayerKind.SOFTMAX.value, LayerKind.TANH.value,
+        LayerKind.SIGMOID.value, LayerKind.GELU.value,
+    }
+
+    def _attention_refine_targets(
+        self, net: Net, bounds_dict: Dict[int, Bounds],
+    ) -> List[Tuple[int, int, bool]]:
+        """Relaxation-input boxes of a net with a bilinear layer, as refine targets.
+
+        Each target is ``(lid, start_lid, True)``: the box stored at ``lid`` is
+        the output of ``start_lid`` and every neuron of it is refined. Smooth
+        activations store their pre-activation box (``start_lid`` = the
+        predecessor); a bilinear operand stores its own output
+        (``start_lid == lid``). Targets take one rule-alpha backward pass (no
+        alpha loop), so the root budget is kept for the presolve. Forward-mode composition through the McCormick
+        planes of the value mixing loses the objective-aware plane choice of a
+        backward pass, so deep attention blocks feed these relaxations with
+        boxes far wider than the true range. Nets without a bilinear layer get
+        no targets.
+        """
+        kinds = {
+            layer.id: layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
+            for layer in net.layers
+        }
+        if not any(kind in self._BILINEAR_KINDS for kind in kinds.values()):
+            return []
+        targets: Dict[int, Tuple[int, int, bool]] = {}
+        for layer in net.layers:
+            lid, preds = layer.id, net.preds.get(layer.id, [])
+            if kinds[lid] in self._ATTENTION_REFINE_ACTIVATIONS:
+                if len(preds) == 1 and lid in bounds_dict:
+                    targets[lid] = (lid, preds[0], True)
+            elif kinds[lid] in self._BILINEAR_KINDS:
+                for operand in preds:
+                    if (
+                        operand in bounds_dict
+                        and net.preds.get(operand)
+                        and kinds.get(operand) not in self._PRE_ACTIVATION_KINDS
+                    ):
+                        targets.setdefault(operand, (operand, operand, True))
+        return list(targets.values())
+
     def refine_intermediate_bounds_batched(
         self,
         net: Net,
@@ -1970,6 +2306,8 @@ class DualSolver(Solver):
         rows_cap: int = 64,
         optimize_iters: int = 0,
         lane_chunk: int = 32,
+        max_tensor_mib: float = 1024.0,
+        refinement_stats: Optional[Dict[str, int]] = None,
         stagnation_patience: int = 0,
         stagnation_tol: Optional[float] = None,
         max_time: float = 0.0,
@@ -1993,9 +2331,9 @@ class DualSolver(Solver):
         bound (both are valid over-approximations: sound). Layers are visited
         in topological order so later refinements consume earlier ones.
 
-        The early-stop / time-cap arguments follow
-        ``refine_intermediate_bounds``: ``time_cap`` caps the whole call and
-        layers left when it is used up keep their current bounds.
+        The tensor cap and early-stop / time-cap arguments follow
+        ``refine_intermediate_bounds``: a capped layer or layers left when time
+        is used up keep their current sound bounds.
         """
         if mode == "none":
             return bounds_dict
@@ -2048,6 +2386,20 @@ class DualSolver(Solver):
                 width = (ub0 - lb0).amax(dim=0)[amb_idx]
                 amb_idx = amb_idx[torch.topk(width, k=rows_cap).indices]
                 n_amb = rows_cap
+            dense_lanes = min(k_lanes, lane_chunk)
+            dense_rows = 2 * n_amb
+            if _skip_refinement_for_tensor_cap(
+                net=net,
+                bounds_dict=out,
+                layer_id=lid,
+                start_lid=pred_lid,
+                lanes=dense_lanes,
+                rows=dense_rows,
+                itemsize=lb0.element_size(),
+                max_tensor_mib=max_tensor_mib,
+                refinement_stats=refinement_stats,
+            ):
+                continue
             eye = torch.zeros(n_amb, n, device=device, dtype=dtype)
             eye[torch.arange(n_amb), amb_idx] = 1.0
             rows = torch.cat([eye, -eye], dim=0)
@@ -2165,8 +2517,12 @@ class DualSolver(Solver):
         - ALL-rows kinds (LINEAR_LE, TOP1_ROBUST, MARGIN_ROBUST, RANGE):
           ``encode_linear`` emits (C, thresholds) in UB-cert form (CERTIFIED
           iff ``UB(C @ y) < threshold``). Pass ``-C`` / ``-thresholds`` to
-          ``compute_certified_bound`` and compare; ``slack >= 0`` means the
-          row passes. Certified iff every row passes (``.all()``).
+          ``compute_certified_bound`` and compare through the kind-aware
+          ``unproven_spec_rows``: ``slack >= 0`` passes a LINEAR_LE / RANGE
+          row (closed safe set), while a TOP1_ROBUST / MARGIN_ROBUST row
+          (open safe set, a tie violates) passes only when its slack clears
+          the ``certification_tolerance`` band. Certified iff every row
+          passes (``.all()``).
         - EXISTS-row kind (UNSAFE_LINEAR): the unsafe polytope is
           ``P = {y : c_i^T y <= d_i for ALL i}``. SAFE iff for all reachable
           y, some row i satisfies ``c_i^T y > d_i`` (escape). Sound
@@ -2297,11 +2653,10 @@ class DualSolver(Solver):
             margins = margins_flat.view(B, M)
             slack = margins - thresholds_neg
             # margins is a SOUND LOWER bound on the true margin: certify iff
-            # every active row has slack >= 0. A positive tolerance band flags
-            # safe near-boundary rows (false UNKNOWN); a negative one would be
-            # unsound. Hard zero boundary, matching bab.py; a non-finite slack
-            # never passes.
-            violations = unproven_spec_rows(slack) & active_mask
+            # every active row is proven under the kind's boundary rule
+            # (hard zero for LINEAR_LE / RANGE, strict + band for TOP1 /
+            # MARGIN), matching bab.py; a non-finite slack never passes.
+            violations = unproven_spec_rows(slack, margins, out_spec.kind) & active_mask
             certified = ~violations.any(dim=-1)
 
         return SpecBatchResult(
@@ -2358,8 +2713,9 @@ class DualSolver(Solver):
             bounds_dict: layer bounds from forward analysis.
             y_true: [B] true class labels, or scalar for uniform label.
             num_classes: K (output dim of network's ASSERT predecessor).
-            margin: if > 0 use MARGIN_ROBUST semantics (require y_t - y_j >= margin);
-                    else use TOP1_ROBUST (require y_t - y_j >= 0).
+            margin: if > 0 use MARGIN_ROBUST semantics (require y_t - y_j > margin);
+                    else use TOP1_ROBUST (require y_t - y_j > 0). Both are
+                    strict: an exact tie violates (``OutputSpec.CLOSED_KINDS``).
             return_full: if True, return the full SpecBatchResult (has per-class
                          [B, K] margins useful for training losses). If False,
                          return legacy tuple (min_slack: Tensor[B], certified: Tensor[B] bool).

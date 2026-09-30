@@ -65,6 +65,28 @@ from act.front_end.specs import InKind, OutKind, OutputSpec, normalize_position_
 # Verification types (canonical location: act/util/stats.py)
 from act.util.stats import VerifyStatus, VerifyResult
 
+
+@torch.no_grad()
+def verify_milp_escalation(
+    net: Net,
+    *,
+    timelimit: float,
+    max_variables: int,
+    max_constraints: int,
+) -> VerifyResult:
+    """Run the optional exact small-network MILP tier with sound defaults."""
+    from act.back_end.solver.milp_escalate import escalate_milp
+
+    result = escalate_milp(
+        net,
+        timelimit=timelimit,
+        max_variables=max_variables,
+        max_constraints=max_constraints,
+    )
+    if result.is_conclusive():
+        result.metadata = {**result.metadata, "resolved_by": "milp_escalation"}
+    return result
+
 # -----------------------------------------------------------------------------
 # Sequential per-sample slicing (for B>1 BaB)
 # -----------------------------------------------------------------------------
@@ -708,6 +730,8 @@ def verify_once(
     lb_exp = output_lb.repeat_interleave(M, dim=0)
     ub_exp = output_ub.repeat_interleave(M, dim=0)
 
+    from act.back_end.solver.solver_dual import escaping_spec_rows
+
     if is_unsafe_linear:
         # UNSAFE polytope = {y : C y <= d}. Property is SAFE iff for all y in
         # the box, EXISTS row i with c_i @ y > d_i (i.e. y leaves the polytope
@@ -715,15 +739,18 @@ def verify_once(
         # min_{y in box} (c_i @ y) > d_i. min(c_i @ y) = c_i_pos @ lb + c_i_neg @ ub.
         # The strict comparison goes through the certification band of
         # escaping_spec_rows: the box itself carries rounding noise.
-        from act.back_end.solver.solver_dual import escaping_spec_rows
-
         margin_min = (C_pos * lb_exp + C_neg * ub_exp).sum(dim=-1).view(B, M)
         certified = escaping_spec_rows(margin_min - thresholds, margin_min).any(dim=-1)
     else:
         # LINEAR_LE / TOP1_ROBUST / MARGIN_ROBUST / RANGE: certified iff for
-        # all y in the box, ALL rows max_y (c_i @ y) < d_i.
-        margin_max = (C_pos * ub_exp + C_neg * lb_exp).sum(dim=-1)
-        certified = (margin_max.view(B, M) < thresholds).all(dim=-1)
+        # all y in the box, ALL rows max_y (c_i @ y) < d_i. TOP1_ROBUST /
+        # MARGIN_ROBUST have an OPEN safe set (a tie violates), so their strict
+        # comparison goes through the same band as an UNSAFE_LINEAR escape.
+        margin_max = (C_pos * ub_exp + C_neg * lb_exp).sum(dim=-1).view(B, M)
+        if kind in (OutKind.TOP1_ROBUST, OutKind.MARGIN_ROBUST):
+            certified = escaping_spec_rows(thresholds - margin_max, margin_max).all(dim=-1)
+        else:
+            certified = (margin_max < thresholds).all(dim=-1)
 
     # 5. Concrete falsification (optional).
     falsified = torch.zeros(B, dtype=torch.bool, device=device)
@@ -746,11 +773,16 @@ def verify_once(
                 (concrete_violation <= thresholds).all(dim=-1)
             )
         else:
-            # ALL-rows kinds: FALSIFIED iff ANY lane's concrete margin
-            # meets-or-exceeds threshold.
-            falsified = (~certified) & (
-                (concrete_violation >= thresholds).any(dim=-1)
-            )
+            # ALL-rows kinds: FALSIFIED iff ANY row's concrete margin breaks
+            # the property, with the same boundary rule as
+            # OutputSpec.violation: a tie already violates the closed-unsafe
+            # kinds (TOP1_ROBUST / MARGIN_ROBUST, `>=`), while LINEAR_LE /
+            # RANGE hold on the boundary (`>`).
+            if kind in OutputSpec.CLOSED_KINDS:
+                row_violated = concrete_violation >= thresholds
+            else:
+                row_violated = concrete_violation > thresholds
+            falsified = (~certified) & row_violated.any(dim=-1)
         if falsified.any():
             x_center_cpu = x_center.detach().cpu()
             # B1 (oracle-verified): single sync via .tolist() replaces B per-element .item() syncs.

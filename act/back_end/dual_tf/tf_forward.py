@@ -53,6 +53,7 @@ _DENSE_LIN_BOUND_MAX_DIM: int = 10_000
 
 
 _LIN_BOUND_FREE_FRACTION: float = 0.8
+_LIN_BOUND_MAX_MIB: float = 1024.0
 
 # Peak transient working set of one lane of the symbolic composition, as a
 # multiple of that lane's persistent coefficient pair
@@ -99,14 +100,24 @@ def _lin_bound_lane_chunk(B: int, n_out: int, n_sym: int, ref: torch.Tensor,
     pair is concatenated back and stays resident either way, so it is checked
     against the full free memory separately.
     """
-    if not ref.is_cuda:
-        return B
     pair_bytes = 2 * n_out * n_sym * ref.element_size()
     if pair_bytes <= 0:
         return B
+    persistent = B * pair_bytes
+    cap_bytes = int(_LIN_BOUND_MAX_MIB * 2 ** 20)
+    if persistent > cap_bytes:
+        _report_lin_bound_once(
+            layer_id, mode, logging.WARNING,
+            "forward linear bound %.2f GiB persistent pair exceeds deterministic "
+            "%.2f GiB cap for [%d, %d, %d]; falling back to interval for this layer",
+            persistent / 2 ** 30, _LIN_BOUND_MAX_MIB / 1024.0,
+            B, n_out, n_sym,
+        )
+        return None
+    if not ref.is_cuda:
+        return B
     free_bytes, _ = torch.cuda.mem_get_info(ref.device)
     budget = free_bytes * _LIN_BOUND_FREE_FRACTION
-    persistent = B * pair_bytes
     if persistent <= budget:
         return B
 
@@ -713,6 +724,40 @@ def _canonical_input_box(
     return input_lb.reshape(batch_size, -1), input_ub.reshape(batch_size, -1)
 
 
+def _identical_input_lanes(
+    input_lb: torch.Tensor, input_ub: torch.Tensor, net: Optional[Net] = None,
+) -> int:
+    """Return the batch size when every lane is bitwise identical, else one.
+
+    BaB input splits of a finite-p spec keep every lane's box and only install
+    a per-lane radius table ``bab_block_eps``; such lanes differ, so they are
+    never shared (a one-lane frame would meet per-lane ball boxes downstream).
+    """
+    if input_lb.dim() < 2 or input_lb.shape[0] <= 1:
+        return 1
+    lanes = int(input_lb.shape[0])
+    if input_ub.shape[0] != lanes:
+        return 1
+    if net is not None and isinstance(_input_spec_params(net).get("bab_block_eps"), torch.Tensor):
+        return 1
+    same_lb = torch.equal(input_lb, input_lb[:1].expand_as(input_lb))
+    same_ub = torch.equal(input_ub, input_ub[:1].expand_as(input_ub))
+    return lanes if same_lb and same_ub else 1
+
+
+def _expand_bounds_lanes(bounds_dict: Dict[int, Bounds], lanes: int) -> Dict[int, Bounds]:
+    """Broadcast single-lane public boxes without allocating lane copies."""
+    if lanes == 1:
+        return bounds_dict
+    return {
+        lid: Bounds(
+            bounds.lb.expand(lanes, *bounds.lb.shape[1:]),
+            bounds.ub.expand(lanes, *bounds.ub.shape[1:]),
+        )
+        for lid, bounds in bounds_dict.items()
+    }
+
+
 def _clone_cache_tensor(
     tensor: torch.Tensor, memo: Dict[int, torch.Tensor],
 ) -> torch.Tensor:
@@ -942,6 +987,7 @@ class ForwardPrefixCache:
         post_activation: bool,
         alphas: Optional[Dict[int, torch.Tensor]],
         forward_lin_max_perturbed: Optional[int],
+        retain_lin_lids: FrozenSet[int],
     ) -> Tuple[Dict[int, Bounds], Dict[int, LinearBound], Dict[int, Frame], Optional[InputBall]]:
         """Resume the standard pass from the immutable cached state."""
         lb_key, ub_key, resolved_cap = self._validate_key(
@@ -965,6 +1011,7 @@ class ForwardPrefixCache:
             ),
             _initial_ball=self._input_ball,
             _active_lids=self._recompute_lids,
+            _retain_lin_lids=retain_lin_lids,
         )
 
 
@@ -983,12 +1030,18 @@ def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Ten
     frozen at import time.
     """
     if prefix_cache is None:
+        shared_lanes = _identical_input_lanes(input_lb, input_ub, net) if alphas is None else 1
+        run_lb = input_lb[:1] if shared_lanes > 1 else input_lb
+        run_ub = input_ub[:1] if shared_lanes > 1 else input_ub
         bounds_dict, _lin_state, _frame_dict, _ball = _forward_pass(
-            net, input_lb, input_ub, post_activation, alphas, forward_lin_max_perturbed,
+            net, run_lb, run_ub, post_activation, alphas, forward_lin_max_perturbed,
+            _retain_lin_lids=frozenset(),
         )
+        bounds_dict = _expand_bounds_lanes(bounds_dict, shared_lanes)
     else:
         bounds_dict, _lin_state, _frame_dict, _ball = prefix_cache._resume(
             net, input_lb, input_ub, post_activation, alphas, forward_lin_max_perturbed,
+            frozenset(),
         )
     return bounds_dict
 
@@ -1011,12 +1064,18 @@ def compute_forward_bounds_with_frame(
     information for that layer).
     """
     if prefix_cache is None:
+        shared_lanes = _identical_input_lanes(input_lb, input_ub, net) if alphas is None else 1
+        run_lb = input_lb[:1] if shared_lanes > 1 else input_lb
+        run_ub = input_ub[:1] if shared_lanes > 1 else input_ub
         bounds_dict, lin_state, frame_dict, entry_ball = _forward_pass(
-            net, input_lb, input_ub, post_activation, alphas, forward_lin_max_perturbed,
+            net, run_lb, run_ub, post_activation, alphas, forward_lin_max_perturbed,
+            _retain_lin_lids=frozenset({frame_lid}),
         )
+        bounds_dict = _expand_bounds_lanes(bounds_dict, shared_lanes)
     else:
         bounds_dict, lin_state, frame_dict, entry_ball = prefix_cache._resume(
             net, input_lb, input_ub, post_activation, alphas, forward_lin_max_perturbed,
+            frozenset({frame_lid}),
         )
     frame: Optional[ForwardFrame] = None
     lin = lin_state.get(frame_lid)
@@ -1086,6 +1145,7 @@ def _forward_pass(net: Net, input_lb: torch.Tensor, input_ub: torch.Tensor,
                   ]] = None,
                   _initial_ball: Optional[InputBall] = None,
                   _active_lids: Optional[FrozenSet[int]] = None,
+                  _retain_lin_lids: Optional[FrozenSet[int]] = None,
                   _box_state_out: Optional[Dict[int, Bounds]] = None,
                   ) -> Tuple[Dict[int, Bounds], Dict[int, LinearBound], Dict[int, Frame], Optional[InputBall]]:
     """Run the forward pass; return stored bounds, per-layer lins / frames and the entry ball.
@@ -1132,6 +1192,7 @@ def _forward_pass(net: Net, input_lb: torch.Tensor, input_ub: torch.Tensor,
             net, topo_order, by_id, post_activation, alphas, device, dtype,
             entry_box, entry_lin, entry_frame, _active_lids,
             bounds_dict, box_state, lin_state, frame_dict, DualTF,
+            _retain_lin_lids,
         )
     finally:
         _ACTIVE_INPUT_BALL.reset(ball_token)
@@ -1148,7 +1209,25 @@ def _run_forward_layers(net: Net, topo_order: List[int], by_id: Dict[int, Layer]
                         entry_frame: Optional[Frame], _active_lids: Optional[FrozenSet[int]],
                         bounds_dict: Dict[int, Bounds], box_state: Dict[int, Bounds],
                         lin_state: Dict[int, LinearBound], frame_dict: Dict[int, Frame],
-                        DualTF: Any) -> None:
+                        DualTF: Any,
+                        retain_lin_lids: Optional[FrozenSet[int]]) -> None:
+    remaining_uses: Dict[int, int] = {}
+    if retain_lin_lids is not None:
+        active = set(topo_order) if _active_lids is None else set(_active_lids)
+        for successor in active:
+            for predecessor in net.preds.get(successor, []) or []:
+                remaining_uses[predecessor] = remaining_uses.get(predecessor, 0) + 1
+
+    def retire_predecessors(preds: List[int]) -> None:
+        if retain_lin_lids is None:
+            return
+        for predecessor in preds:
+            uses = remaining_uses.get(predecessor, 0) - 1
+            remaining_uses[predecessor] = uses
+            if uses <= 0 and predecessor not in retain_lin_lids:
+                lin_state.pop(predecessor, None)
+                frame_dict.pop(predecessor, None)
+
     for lid in topo_order:
         if _active_lids is not None and lid not in _active_lids:
             continue
@@ -1210,6 +1289,7 @@ def _run_forward_layers(net: Net, topo_order: List[int], by_id: Dict[int, Layer]
             )
             _store_forward_state(bounds_dict, box_state, lin_state, frame_dict,
                                  lid, stored, out, lin, frame)
+            retire_predecessors(preds)
             continue
 
         if kind == LayerKind.RELU.value and alphas is not None:
@@ -1237,6 +1317,7 @@ def _run_forward_layers(net: Net, topo_order: List[int], by_id: Dict[int, Layer]
                     lin, frame = _reset_forward_box(lb, ub, device, dtype)
             _store_forward_state(bounds_dict, box_state, lin_state, frame_dict,
                                  lid, stored, out, lin, frame)
+            retire_predecessors(preds)
             continue
 
         handler = DualTF._FORWARD_REGISTRY.get(kind)
@@ -1254,6 +1335,13 @@ def _run_forward_layers(net: Net, topo_order: List[int], by_id: Dict[int, Layer]
         )
         _store_forward_state(bounds_dict, box_state, lin_state, frame_dict,
                              lid, stored, out, lin, frame)
+        retire_predecessors(preds)
+
+    if retain_lin_lids is not None:
+        for layer_id in tuple(lin_state):
+            if layer_id not in retain_lin_lids:
+                lin_state.pop(layer_id, None)
+                frame_dict.pop(layer_id, None)
 
 
 def _fwd_dense(layer: Layer, lin: LinearBound) -> Optional[LinearBound]:

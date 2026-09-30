@@ -63,10 +63,10 @@ bab_presets:
     per_subproblem_refine: "none"
     # Turn CLIMB on (off in the backend.bab defaults).
     climb_enabled: true
-    # Spend up to half of each row's replay slack on dropping literals.
-    climb_theta: 0.5
-    # The first 2 lanes get one extra replay to try dropping one more literal.
-    climb_recheck_k: 2
+    climb_merge_enabled: true
+    # Paper default (theta, K) = (0, 0): drop only exact zero-cost literals, no rechecks.
+    climb_theta: 0.0
+    climb_recheck_k: 0
     # One split per step, so small nets still learn cores.
     multi_split_levels: 1
 
@@ -86,9 +86,54 @@ bab_presets:
     # Prerequisite: no per-subproblem (split-dependent) refinement.
     per_subproblem_refine: "none"
     climb_enabled: true
-    climb_theta: 0.5
-    climb_recheck_k: 2
+    climb_merge_enabled: true
+    climb_theta: 0.0
+    climb_recheck_k: 0
     multi_split_levels: 1
+
+  # CLIMB with split-dependent bounds (D21 amends D7): climb_refined plus the
+  # split-derived interval refresh on every lane. Candidate cores are rechecked
+  # and replayed with bounds refreshed from the core's own literals, and
+  # literal costs include the E_i support costs. Paper configuration theta=0, K=0.
+  climb_split:
+    solver_tier: "dual_alpha_eta"
+    branching_method: "babsr"
+    bounding: "depth_bound_blend"
+    # Descendants reuse the root forward dict, hardened by their own splits.
+    root_bounds_reuse: "split_refresh"
+    intermediate_refine: "all"
+    # Prerequisite: no per-subproblem (split-dependent) refinement.
+    per_subproblem_refine: "none"
+    climb_enabled: true
+    climb_merge_enabled: true
+    # S6 speculative complement bounding (off the frontier; paper extension).
+    climb_complement_bounding: true
+    # Delete only literals whose total cost is certified exactly zero.
+    climb_theta: 0.0
+    climb_recheck_k: 0
+    multi_split_levels: 1
+
+  # G2 (D23): climb_split with the split-aware linear (CROWN-style backward)
+  # refresh; neurons it stabilizes are implied literals (not split by BaBSR),
+  # cores stay in decision literals and replay under the same refresh.
+  climb_split_lin:
+    solver_tier: "dual_alpha_eta"
+    branching_method: "babsr"
+    bounding: "depth_bound_blend"
+    # Descendants reuse the root forward dict, hardened by their own splits.
+    root_bounds_reuse: "split_refresh_linear"
+    intermediate_refine: "all"
+    # Prerequisite: no per-subproblem (split-dependent) refinement.
+    per_subproblem_refine: "none"
+    climb_enabled: true
+    climb_merge_enabled: true
+    # Delete only literals whose total cost is certified exactly zero.
+    climb_theta: 0.0
+    climb_recheck_k: 0
+    multi_split_levels: 1
+    # Z3 ladder ablation (experiments/climb_ladder/ablation_z3.md): N2 terminal-LP cores on
+    # (inherited) with N3's support refinement off had the best completed-pair wall.
+    climb_lin_support_refinement: false
 
 backend:
 
@@ -133,6 +178,13 @@ backend:
   # reported as budget_longest_unit_s when the budget runs out). With solver
   # hybridz it also bounds the single-shot solve unless hybridz.timeout is set.
   timeout: 60.0
+
+  # Optional exact Gurobi MILP escalation after root tiers remain UNKNOWN and
+  # before BaB. Disabled by default; size/time guards fail closed to UNKNOWN.
+  milp_escalation: false
+  milp_max_variables: 2000
+  milp_max_constraints: 2000
+  milp_timeout: 60.0
 
   # Named bab_presets entry; null auto-selects "dual" when solver = "dual".
   bab_preset: null
@@ -308,6 +360,9 @@ backend:
     # -- Intermediate-bound refinement and root-bound reuse (dual tiers) -----
     intermediate_refine: "none"           # root pre-activation refinement: none/auto/all
     intermediate_refine_ratio: 10.0       # auto mode: refine layers wider than ratio x median
+    # Skip a whole selected layer when one dense backward tensor would exceed
+    # this deterministic cap: lane chunk x +/- rows x max ancestor width x itemsize.
+    intermediate_refine_max_tensor_mib: 1024.0
     root_bounds_reuse: "none"             # children reuse root bounds: none/plain/split_refresh
     eta_only_children: false              # children keep the parent's alpha, optimize only eta
     presplit_levels: 0                    # pre-split k root neurons into 2^k sign combinations
@@ -347,6 +402,10 @@ backend:
     # Ablation gates default on, preserving the existing CLIMB algorithm.
     climb_coarsening_enabled: true  # false admits full replay-certified literal rows
     climb_propagation_enabled: true # false learns cores but does not prune/infer with them
+    climb_merge_enabled: false    # merge complementary unresolved rows on unseen cores (Alg. 1)
+    climb_complement_bounding: false  # S6: bound the complement of each new core's deepest decision once
+    climb_presplit_propagation_enabled: true  # false = pre-bound only ablation
+    climb_steer: false            # C5 core-steered BaBSR bias
     climb_theta: 0.0              # fraction of replay slack spent on dropping literals
     # Deletion-budget safety margin: delta = climb_delta_abs + climb_delta_rel * |slack|.
     climb_delta_abs: 0.000000001  # absolute part of delta
@@ -355,6 +414,10 @@ backend:
     climb_max_cores: 1024         # max cores kept (after subsumption, then eviction)
     # Cores per propagate matmul chunk (memory only; fixpoint is chunk-independent).
     climb_propagate_core_chunk: 4096
+    climb_terminal_cores: true    # N2: learn cores from terminal-LP-certified root-box lanes (false = Kraft record only)
+    # N3, split_refresh_linear only: same-layer halfspace E_i supports, effective lower
+    # slopes and warm-witness replay (false = pre-N3 costs and replay).
+    climb_lin_support_refinement: true
 
     # -- LLM-probe controller ----------------------------------------------
     llm_probe_enabled: false              # enable the LLM-probe BaB controller

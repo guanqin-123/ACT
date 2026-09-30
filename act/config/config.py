@@ -35,7 +35,11 @@ NO_REFINEMENT_MODE: Final[str] = "none"
 #   plain          | yes, untouched               | no
 #   split_refresh  | yes                          | _interval_refresh_bounds +
 #                  |                              | per_subproblem_refine
-VALID_ROOT_BOUNDS_REUSE: Final[tuple[str, ...]] = ("none", "plain", "split_refresh")
+#   split_refresh_ | yes                          | linear_refresh (split-aware
+#   linear         |                              | CROWN backward; G2, D23)
+VALID_ROOT_BOUNDS_REUSE: Final[tuple[str, ...]] = (
+    "none", "plain", "split_refresh", "split_refresh_linear",
+)
 # BaB subproblem-pool selection strategies (``--bab-bounding``).
 #
 #   value                | pool class          | order function                       | --bab-top-k | reference
@@ -170,6 +174,14 @@ class BaBConfig:
     """Apply literal-budget coarsening before admitting replay-certified cores."""
     climb_propagation_enabled: bool = True
     """Apply learned cores to pending and active subproblems."""
+    climb_merge_enabled: bool = False
+    """Merge complementary unresolved rows when a previously unseen core is learned (Alg. 1)."""
+    climb_complement_bounding: bool = False
+    """S6: bound (C - {l_h}) | {-l_h} once per new core C, off the frontier; certified -> learned."""
+    climb_presplit_propagation_enabled: bool = True
+    """Propagate cores before splitting; false = pre-bound only (lifting and merge wait for the next pop)."""
+    climb_steer: bool = False
+    """C5: bias BaBSR scores towards neurons that occur in learned cores."""
     climb_theta: float = 0.0
     """Fraction of replay slack available to the vector deletion budget."""
     climb_delta_abs: float = 1e-9
@@ -182,6 +194,10 @@ class BaBConfig:
     """Maximum retained cores after subsumption and deterministic eviction."""
     climb_propagate_core_chunk: int = 4096
     """Cores per propagate matmul chunk (memory only; the fixpoint is chunk-independent)."""
+    climb_terminal_cores: bool = True
+    """N2: learn admission-LP cores from terminal-LP-certified root-box lanes; false only records their Kraft mass."""
+    climb_lin_support_refinement: bool = True
+    """N3 (split_refresh_linear): same-layer halfspace E_i supports, effective lower slopes and warm-witness replay; false = pre-N3."""
 
     provenance_enabled: bool = False
     """Track logical BaB node ids and parent ids in TopKBounding."""
@@ -208,9 +224,15 @@ class BaBConfig:
     intermediate_refine_ratio: float = 10.0
     """Width-blowup threshold multiplier for intermediate_refine='auto'."""
 
+    intermediate_refine_max_tensor_mib: float = 1024.0
+    """Skip a selected intermediate-refinement layer when the estimated bytes
+    for one dense backward tensor exceed this MiB cap. The estimate is the
+    active lane chunk x +/- objective rows x widest traversed ancestor x dtype
+    itemsize; it is deterministic and does not inspect free device memory."""
+
     root_bounds_reuse: str = "none"
     """Reuse of the root box's forward bounds by descendants (dual tiers).
-    Valid: 'none', 'plain', 'split_refresh'.
+    Valid: 'none', 'plain', 'split_refresh', 'split_refresh_linear'.
 
     Sound by monotonicity: a child box is contained in the root box, so the
     root's per-layer bounds remain valid over-approximations. Children only
@@ -345,6 +367,14 @@ class BaBConfig:
         if self.child_n_iters < 0:
             raise ConfigError(
                 f"child_n_iters must be non-negative, got {self.child_n_iters}"
+            )
+        if (
+            not math.isfinite(self.intermediate_refine_max_tensor_mib)
+            or self.intermediate_refine_max_tensor_mib <= 0.0
+        ):
+            raise ConfigError(
+                "intermediate_refine_max_tensor_mib must be finite and positive, got "
+                f"{self.intermediate_refine_max_tensor_mib}"
             )
         if self.top_k > 0 and self.bounding in TOP_K_INCOMPATIBLE_BOUNDINGS:
             raise ConfigError(
@@ -639,13 +669,19 @@ class BackendConfig:
     see commit af797ff / C6).
     """
 
-    bab_max_batch_size: int = 8
+    bab_max_batch_size: Union[int, str] = 8
     """Maximum K for BaB sub-problem batching (tier 3).
 
     BaB dispatches up to K sub-problems per solve_batch call.  Set to 1 to
     disable batching inside BaB (equivalent to the legacy sequential loop).
     Must be 1 when solver='gurobi' (same N=1 restriction as lp_enabled).
     """
+
+    milp_escalation: bool = False
+    """Run the exact small-network MILP tier before BaB (default off)."""
+    milp_max_variables: int = 2000
+    milp_max_constraints: int = 2000
+    milp_timeout: float = 60.0
 
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     hybridz: HybridZConfig = field(default_factory=HybridZConfig)
@@ -700,13 +736,19 @@ class BackendConfig:
                     "varying constraint matrices; see commit af797ff).  "
                     "Either set lp_enabled=False or switch to solver='torchlp'."
                 )
-            if self.bab_max_batch_size > 1:
+            if self.bab_max_batch_size == "auto" or int(self.bab_max_batch_size) > 1:
                 raise ConfigError(
                     f"BackendConfig: solver='gurobi' is incompatible with "
                     f"bab_max_batch_size={self.bab_max_batch_size} > 1.  "
                     f"GurobiSolver.solve_batch raises for N>1.  "
                     f"Either set bab_max_batch_size=1 or switch to solver='torchlp'."
                 )
+        if self.bab_max_batch_size != "auto" and int(self.bab_max_batch_size) < 1:
+            raise ConfigError("BackendConfig: bab_max_batch_size must be >= 1 or 'auto'.")
+        if self.milp_max_variables < 1 or self.milp_max_constraints < 1:
+            raise ConfigError("BackendConfig: MILP size limits must be positive.")
+        if self.milp_timeout <= 0.0:
+            raise ConfigError("BackendConfig: milp_timeout must be positive.")
 
     # -- YAML I/O -----------------------------------------------------------
 

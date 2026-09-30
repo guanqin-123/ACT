@@ -45,6 +45,18 @@ _SOLVERS: tuple[str, ...] = tuple(sorted(_VALID_SOLVERS))
 logger = logging.getLogger(__name__)
 
 
+def _parse_bab_batch_size(raw: str) -> int | str:
+    if raw == "auto":
+        return raw
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected an integer >= 1 or 'auto'") from error
+    if value < 1:
+        raise argparse.ArgumentTypeError("expected an integer >= 1 or 'auto'")
+    return value
+
+
 def _strip_optional(tp: Any) -> Any:
     origin = get_origin(tp)
     if origin is Union:
@@ -564,6 +576,28 @@ def _verify_one_net(
                 # missing-implementation bugs still surface as ERROR.
                 if "export_to_batch_problem" not in str(e):
                     raise
+
+        if any_unknown and backend_cfg.milp_escalation:
+            from act.back_end.verifier import slice_net_to_sample, verify_milp_escalation
+
+            for i, current in enumerate(results):
+                if current.status != VerifyStatus.UNKNOWN:
+                    continue
+                remaining = max(
+                    0.0, backend_cfg.timeout - (time.monotonic() - verify_started)
+                )
+                milp_budget = min(float(backend_cfg.milp_timeout), remaining)
+                if milp_budget <= 0.0:
+                    break
+                escalated = verify_milp_escalation(
+                    slice_net_to_sample(net, i),
+                    timelimit=milp_budget,
+                    max_variables=int(backend_cfg.milp_max_variables),
+                    max_constraints=int(backend_cfg.milp_max_constraints),
+                )
+                if escalated.is_conclusive():
+                    results[i] = escalated
+            any_unknown = any(r.status == VerifyStatus.UNKNOWN for r in results)
 
         if any_unknown and backend_cfg.bab_enabled and not is_hybridz:
             # verify_bab_batched operates on a single-instance (B=1) net and
@@ -1466,6 +1500,13 @@ Exit status (--verify):
     )
 
     # BaB algorithm parameters
+    verify_group.add_argument(
+        "--bab-max-batch-size",
+        type=_parse_bab_batch_size,
+        default=None,
+        dest="bab_max_batch_size",
+        help="Maximum BaB batch size, or 'auto' for memory-based sizing",
+    )
     verify_group.add_argument(
         "--bab-max-depth",
         type=int,
