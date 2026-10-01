@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Union, cast
@@ -452,6 +453,7 @@ def _solve_dual_batch(
         )
         if optimize:
             batch.incremental_alpha = result.alpha_state
+            batch.warm_start = None
             if eta_enabled:
                 batch.incremental_eta = result.eta_state
         if split_free_bounds is not None:
@@ -516,6 +518,27 @@ def _auto_recalibrate_batch(
     lanes - safe against OOM while still ramping up on small nets with spare
     memory. ``overhead`` charges the CLIMB bursts (``_climb_lane_overhead``)."""
     return _auto_batch_lanes(peak_bytes / max(1, max_k_seen) * overhead, config)
+
+
+def _frontier_budget_bytes(config: BaBConfig, device: torch.device) -> Optional[float]:
+    """Budget of the frontier memory plan on the frontier's device (None =
+    no plan off CUDA); the same accounting as the auto batch sizer."""
+    if device.type != "cuda":
+        return None
+    with torch.cuda.device(device):
+        return _auto_batch_budget_bytes(float(config.auto_batch_safety))
+
+
+def _frontier_host_budget_bytes(config: BaBConfig, offloaded_bytes: int) -> float:
+    """Host memory the offloaded warm-start state may occupy."""
+    try:
+        import psutil
+
+        available = float(psutil.virtual_memory().available)
+    except ImportError:
+        available = float(os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE"))
+    available += float(offloaded_bytes)
+    return float(config.frontier_mem_safety) * available
 
 
 @torch.no_grad()
@@ -721,6 +744,7 @@ def verify_bab_batched(
         if oom_backoffs:
             meta["oom_backoffs"] = oom_backoffs
             meta["oom_lane_cap"] = oom_lane_cap
+        meta.update(_frontier_metadata())
         return meta
 
     pool = _build_bounding(
@@ -759,6 +783,274 @@ def verify_bab_batched(
 
     spec_layers = gather_input_spec_layers(net)
     root_bounds = seed_from_input_specs(spec_layers)
+
+    # Frontier memory plan (pool device bytes F, planned wave bytes W, budget
+    # B): the pool's transient copies (push concat, pop restrict) and every
+    # wave must fit B. Pressure sheds warm-start state first, then caps this
+    # wave's K, and only then evicts nodes.
+    frontier_device = root_bounds.lb.device
+    frontier_plan_active = _frontier_budget_bytes(config, frontier_device) is not None
+    frontier_stats: Dict[str, int] = {
+        "frontier_bytes_peak": 0,
+        "frontier_nodes_peak": 0,
+        "frontier_offload_events": 0,
+        "frontier_warmstart_dropped_nodes": 0,
+        "frontier_wave_k_caps": 0,
+        "frontier_evicted_nodes": 0,
+    }
+    initial_bytes_per_lane = 4.0 * max(1, _net_bound_elements(net)) * 256.0 * lane_overhead
+    wave_peak_seen = 0
+    wave_peak_base_bytes = 0
+    wave_start_bytes = 0
+    wave_max_k = 0
+
+    def _frontier_metadata() -> Dict[str, int]:
+        if not frontier_plan_active:
+            return {}
+        return {**frontier_stats, "frontier_cold_pops": int(getattr(pool, "cold_pops", 0))}
+
+    def _wave_bytes_per_lane() -> float:
+        """Measured per-lane wave memory: the run's allocation peak minus the
+        resident frontier when that wave started, over the largest K;
+        the measured wave already contains the
+        CLIMB bursts, so no overhead is charged again. Before the first
+        measured wave, the net-size estimate of the initial auto-K (with the
+        CLIMB overhead)."""
+        if wave_max_k == 0 or wave_peak_seen == 0:
+            return initial_bytes_per_lane
+        return max(0.0, float(wave_peak_seen - wave_peak_base_bytes)) / wave_max_k
+
+    def _planned_lanes(frontier_rows: int) -> int:
+        """Lanes the next wave can actually pop."""
+        lanes = min(effective_batch, frontier_rows, max(0, int(config.max_nodes) - processed))
+        pool_k = int(getattr(pool, "k", 0))
+        return max(0, min(lanes, pool_k) if pool_k > 0 else lanes)
+
+    def _external_bytes(frontier_pool: Union[TopKBounding, RandomBounding]) -> float:
+        """Live device memory outside the frontier (solutions, batches,
+        children, caches); 0 off CUDA."""
+        if frontier_device.type != "cuda":
+            return 0.0
+        return max(0.0, float(torch.cuda.memory_allocated(frontier_device) - frontier_pool.nbytes()))
+
+    def _measure_wave(k_actual: int) -> None:
+        nonlocal wave_peak_seen, wave_peak_base_bytes, wave_max_k
+        if not frontier_plan_active or frontier_device.type != "cuda":
+            return
+        wave_max_k = max(wave_max_k, k_actual)
+        peak = int(torch.cuda.max_memory_allocated(frontier_device))
+        if peak > wave_peak_seen:
+            wave_peak_seen = peak
+            wave_peak_base_bytes = wave_start_bytes
+
+    def _observe_frontier(frontier_pool: Union[TopKBounding, RandomBounding]) -> None:
+        frontier_stats["frontier_bytes_peak"] = max(
+            frontier_stats["frontier_bytes_peak"], frontier_pool.nbytes()
+        )
+        frontier_stats["frontier_nodes_peak"] = max(
+            frontier_stats["frontier_nodes_peak"], len(frontier_pool)
+        )
+
+    def _enforce_host_budget(frontier_pool: Union[TopKBounding, RandomBounding]) -> None:
+        """Drop the coldest offloaded warm starts beyond the host budget."""
+        if not isinstance(frontier_pool, TopKBounding):
+            return
+        excess = frontier_pool.offloaded_nbytes() - _frontier_host_budget_bytes(
+            config, frontier_pool.offloaded_nbytes()
+        )
+        if excess > 0:
+            per_node = frontier_pool.warm_state_nbytes() / max(1, frontier_pool.warm_nodes())
+            frontier_stats["frontier_warmstart_dropped_nodes"] += frontier_pool.drop_warm_state(
+                int(math.ceil(excess / max(per_node, 1.0)))
+            )
+
+    def _shed_warm_state(frontier_pool: Union[TopKBounding, RandomBounding], target: float) -> None:
+        """Reduce resident bytes to ``target``: offload the warm state to host
+        (lossless) or, without offload, drop it for the coldest nodes."""
+        if not isinstance(frontier_pool, TopKBounding):
+            return
+        frontier = frontier_pool.nbytes()
+        if frontier <= target:
+            return
+        if config.frontier_offload and frontier_pool.offload_warm_state():
+            frontier_stats["frontier_offload_events"] += 1
+            log.warning(
+                "BaB frontier %.1f MiB exceeds %.1f MiB: warm-start state offloaded to host",
+                frontier / 2**20, target / 2**20,
+            )
+            _enforce_host_budget(frontier_pool)
+            frontier = frontier_pool.nbytes()
+        if frontier > target and not frontier_pool.warm_offloaded and frontier_pool.warm_nodes() > 0:
+            per_node = frontier_pool.warm_state_nbytes() / frontier_pool.warm_nodes()
+            dropped = frontier_pool.drop_warm_state(
+                int(math.ceil((frontier - target) / max(per_node, 1.0)))
+            )
+            frontier_stats["frontier_warmstart_dropped_nodes"] += dropped
+            log.warning(
+                "BaB frontier %.1f MiB exceeds %.1f MiB: dropped the warm start of %d nodes",
+                frontier / 2**20, target / 2**20, dropped,
+            )
+
+    def _evict_frontier(frontier_pool: Union[TopKBounding, RandomBounding], target: float) -> None:
+        """Last resort: keep only the nodes that fit ``target`` bytes (none
+        when a single node does not fit); the verdict becomes UNKNOWN."""
+        nonlocal any_dropped_frontier_cap
+        if frontier_pool.empty or frontier_pool.nbytes() <= target:
+            return
+        _shed_warm_state(frontier_pool, 0.0)
+        if frontier_pool.nbytes() <= target:
+            return
+        cap = int(target / max(frontier_pool.bytes_per_node, 1.0))
+        before = len(frontier_pool)
+        try:
+            evicted = frontier_pool.evict_to(cap) if cap >= 1 else frontier_pool.evict_all()
+        except torch.cuda.OutOfMemoryError:
+            frontier_pool.evict_all()
+            evicted = before
+        if evicted > 0:
+            any_dropped_frontier_cap = True
+            frontier_stats["frontier_evicted_nodes"] += evicted
+            log.warning(
+                "BaB frontier exceeds its memory allowance: evicted %d nodes (%d kept)",
+                evicted, len(frontier_pool),
+            )
+
+    def _push_frontier(batch_in: SubproblemBatch) -> None:
+        """``pool.push`` preceded by the memory preflight.
+
+        The concat keeps the old tensors alive while it allocates the merged
+        ones; key-union concatenation may also allocate a zero-padding block,
+        so ``E + F + 2P <= B`` (E: live memory outside the frontier, F:
+        frontier now, P: frontier after the push) must hold, and the next wave
+        is reserved: ``P + W <= B`` with ``W = p * effective_batch``. Warm state
+        is shed first (pool, then the incoming rows); nodes are evicted only
+        when the concat itself cannot fit."""
+        nonlocal any_dropped_frontier_cap
+        budget = _frontier_budget_bytes(config, frontier_device) if frontier_plan_active else None
+        if budget is None or not isinstance(pool, (TopKBounding, RandomBounding)):
+            pool.push(batch_in)
+            return
+        frontier_pool: Union[TopKBounding, RandomBounding] = pool
+        wave = _wave_bytes_per_lane() * _planned_lanes(len(frontier_pool) + batch_in.batch_size)
+        fraction_cap = float(config.frontier_mem_safety) * budget
+
+        def transient_excess() -> float:
+            return (
+                _external_bytes(frontier_pool) + frontier_pool.nbytes()
+                + 2 * frontier_pool.projected_push_nbytes(batch_in) - budget
+            )
+
+        def excess() -> float:
+            return max(
+                transient_excess(),
+                frontier_pool.projected_push_nbytes(batch_in) + wave - budget,
+            )
+
+        def minimum_excess() -> float:
+            return max(
+                transient_excess(),
+                frontier_pool.projected_push_nbytes(batch_in)
+                + (_wave_bytes_per_lane() if wave > 0 else 0.0) - budget,
+            )
+
+        if excess() > 0:
+            incoming = frontier_pool.projected_push_nbytes(batch_in) - frontier_pool.nbytes()
+            room = budget - _external_bytes(frontier_pool) - 2 * incoming
+            _shed_warm_state(
+                frontier_pool,
+                min(fraction_cap, max(0.0, room / 3.0), max(0.0, budget - wave - incoming)),
+            )
+            incoming_warm = (
+                batch_in.incremental_alpha is not None or batch_in.incremental_eta is not None
+            )
+            if (
+                excess() > 0 and incoming_warm and config.frontier_offload
+                and (isinstance(frontier_pool, TopKBounding) and frontier_pool.offload_warm_state())
+            ):
+                # Lossless: the incoming warm state is stored on the host.
+                frontier_stats["frontier_offload_events"] += 1
+            if excess() > 0 and (isinstance(frontier_pool, TopKBounding) and not frontier_pool.warm_offloaded) and incoming_warm:
+                warm_in = batch_in.warm_start
+                frontier_stats["frontier_warmstart_dropped_nodes"] += (
+                    batch_in.batch_size if warm_in is None else int(warm_in.sum().item())
+                )
+                batch_in.warm_start = torch.zeros(
+                    batch_in.batch_size, dtype=torch.bool, device=batch_in.lb.device
+                )
+                batch_in.incremental_alpha = None
+                batch_in.incremental_eta = None
+            if minimum_excess() > 0:
+                incoming = frontier_pool.projected_push_nbytes(batch_in) - frontier_pool.nbytes()
+                room = budget - _external_bytes(frontier_pool) - 2 * incoming
+                _evict_frontier(frontier_pool, min(
+                    fraction_cap, max(0.0, room / 3.0),
+                    max(0.0, budget - incoming - _wave_bytes_per_lane()),
+                ))
+            if minimum_excess() > 0:
+                # The incoming rows alone cannot be stored: they are dropped.
+                any_dropped_frontier_cap = True
+                frontier_stats["frontier_evicted_nodes"] += batch_in.batch_size
+                log.warning(
+                    "BaB frontier push of %d nodes exceeds the memory budget: dropped",
+                    batch_in.batch_size,
+                )
+                return
+        frontier_pool.push(batch_in)
+        _observe_frontier(frontier_pool)
+
+    def _plan_frontier_wave(lanes: int) -> int:
+        """Cap of this wave's K from the frontier memory plan.
+
+        With E the live memory outside the frontier, the pop's restrict copy
+        needs ``E + 2F <= B`` and the wave ``E + F + K*p <= B``. Under pressure
+        the warm state is shed to ``min(frontier_mem_safety*B,
+        max(0, B - E - K*p), (B - E)/2)``; if the wave still does not fit, K is
+        capped for this wave only; nodes are evicted only when even ``K = 1``
+        does not fit. Without pressure ``lanes`` is returned unchanged."""
+        if not frontier_plan_active or not isinstance(pool, (TopKBounding, RandomBounding)) or pool.empty:
+            return lanes
+        budget = _frontier_budget_bytes(config, frontier_device)
+        if budget is None:
+            return lanes
+        frontier_pool: Union[TopKBounding, RandomBounding] = pool
+        lanes = max(1, _planned_lanes(len(frontier_pool)))
+        _observe_frontier(frontier_pool)
+        if isinstance(frontier_pool, TopKBounding) and frontier_pool.warm_offloaded:
+            _enforce_host_budget(frontier_pool)
+        per_lane = _wave_bytes_per_lane()
+        if isinstance(frontier_pool, TopKBounding) and frontier_pool.warm_offloaded:
+            per_lane = max(
+                per_lane,
+                frontier_pool.offloaded_nbytes() / max(1, frontier_pool.warm_nodes()),
+            )
+        room = budget - _external_bytes(frontier_pool)
+        frontier = frontier_pool.nbytes()
+        if 2.0 * frontier <= room and frontier + lanes * per_lane <= room:
+            return lanes
+        fraction_cap = float(config.frontier_mem_safety) * budget
+        _shed_warm_state(
+            frontier_pool, min(fraction_cap, max(0.0, room - lanes * per_lane), max(0.0, room / 2.0))
+        )
+        frontier = frontier_pool.nbytes()
+        capped = lanes
+        if frontier + lanes * per_lane > room:
+            capped = int((room - frontier) / max(per_lane, 1.0))
+        if 2.0 * frontier > room or frontier + per_lane > room:
+            _evict_frontier(frontier_pool, min(
+                fraction_cap, max(0.0, room / 2.0), max(0.0, room - per_lane),
+            ))
+            frontier = frontier_pool.nbytes()
+            capped = min(lanes, int((room - frontier) / max(per_lane, 1.0)))
+        # An empty frontier terminates UNKNOWN via the eviction flag.
+        capped = max(1, capped)
+        if capped < lanes:
+            frontier_stats["frontier_wave_k_caps"] += 1
+            log.warning(
+                "BaB frontier %.1f MiB + wave of %d lanes exceed the budget %.1f MiB: "
+                "K capped to %d for this wave", frontier / 2**20, lanes, budget / 2**20, capped,
+            )
+        return max(1, min(lanes, capped))
+
     input_shape: tuple[int, ...] = tuple(root_bounds.lb.shape[1:])
 
     per_lane_dim = int(root_bounds.lb[0].numel())
@@ -879,10 +1171,12 @@ def verify_bab_batched(
             refinement_stats=refinement_stats,
         )
         if presolve.row_slack is not None:
+            out_kind = assert_layer.params.get("kind")
+            assert isinstance(out_kind, str)
             unproven = unproven_spec_rows(
                 presolve.row_slack,
                 presolve.margins,
-                assert_layer.params.get("kind"),
+                out_kind,
             ).any(dim=0)
             total_rows = int(unproven.numel())
             if not bool(unproven.any().item()):
@@ -896,6 +1190,7 @@ def verify_bab_batched(
                         "resolved_by": "root_presolve",
                         **_refinement_metadata(),
                         **(climb.metadata() if climb is not None else {}),
+                        **_frontier_metadata(),
                     },
                 )
             keep = torch.where(unproven)[0]
@@ -930,13 +1225,13 @@ def verify_bab_batched(
                 root_batch = presplit
                 node_counter += root_batch.batch_size
 
-    pool.push(root_batch)
     any_dropped_frontier_cap = False
+    processed = 0
+    _push_frontier(root_batch)
     if frontier_cap > 0 and len(pool) > frontier_cap:
         if pool.evict_to(frontier_cap) > 0:
             any_dropped_frontier_cap = True
 
-    processed = 0
     any_dropped_max_depth = False
     any_terminal_lp_failed = False
     terminal_falsified: Optional[VerifyResult] = None
@@ -1044,7 +1339,7 @@ def verify_bab_batched(
                     )
                     node_counter += children.batch_size
                 terminal_lp_stats["terminal_input_split_lanes"] += source.batch_size
-                pool.push(children)
+                _push_frontier(children)
                 climb.after_children(children.batch_size, len(pool))
                 if frontier_cap > 0 and len(pool) > frontier_cap:
                     if pool.evict_to(frontier_cap) > 0:
@@ -1094,18 +1389,22 @@ def verify_bab_batched(
 
         climb.complement_bounder = _bound_complement_rows
 
+    solution = None
     while not pool.empty:
         elapsed = _elapsed()
         if elapsed >= budget_s or processed >= config.max_nodes:
             break
 
+        wave_lane_cap = _plan_frontier_wave(effective_batch)
+        if pool.empty:
+            break
         if climb is not None:
             climb.before_pop(cast(TopKBounding, pool))
         if pool.empty:
             break
 
         remaining_nodes = config.max_nodes - processed
-        k_requested = min(len(pool), effective_batch, remaining_nodes)
+        k_requested = min(len(pool), wave_lane_cap, remaining_nodes)
         if k_requested <= 0:
             break
 
@@ -1124,10 +1423,12 @@ def verify_bab_batched(
                 input_widths=_last_input_widths,
             ))
             if _wave_policy.k_requested is not None:
-                k_requested = max(1, min(_wave_policy.k_requested, len(pool), effective_batch, remaining_nodes))
+                k_requested = max(1, min(_wave_policy.k_requested, len(pool), wave_lane_cap, remaining_nodes))
 
         batch = pool.pop(batch_size=k_requested)
         k_actual = batch.batch_size
+        if frontier_plan_active and frontier_device.type == "cuda":
+            wave_start_bytes = cast(Union[TopKBounding, RandomBounding], pool).nbytes()
         if _k_log is not None:
             _k_log.append(k_actual)
         if climb is not None:
@@ -1209,9 +1510,10 @@ def verify_bab_batched(
             # Nothing was decided for these rows: they return to the pool
             # unchanged and are re-popped in smaller waves.
             _oom_backoff(k_actual)
-            pool.push(batch)
+            _push_frontier(batch)
             continue
 
+        assert solution is not None
         if climb is not None:
             climb.after_main_bound(k_actual, batch)
 
@@ -1329,7 +1631,7 @@ def verify_bab_batched(
             unresolved.lower_bound = node_lower_bound.index_select(
                 0, unresolved_idx.to(node_lower_bound.device)
             )
-            pool.push(unresolved)
+            _push_frontier(unresolved)
             if frontier_cap > 0 and len(pool) > frontier_cap:
                 if pool.evict_to(frontier_cap) > 0:
                     any_dropped_frontier_cap = True
@@ -1598,7 +1900,7 @@ def verify_bab_batched(
                             dtype=torch.long,
                         )
                         node_counter += nc
-                    pool.push(children)
+                    _push_frontier(children)
                     if climb is not None:
                         climb.after_children(children.batch_size, len(pool))
                     if frontier_cap > 0 and len(pool) > frontier_cap:
@@ -1606,6 +1908,7 @@ def verify_bab_batched(
                             any_dropped_frontier_cap = True
 
         processed += k_actual
+        _measure_wave(k_actual)
 
         if isinstance(pool, MCTSBounding):
             log.info(
