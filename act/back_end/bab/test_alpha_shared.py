@@ -69,6 +69,26 @@ def test_shared_alpha_replay_rejects_wrong_lane_or_width() -> None:
             _phase_slope_replay_alpha(torch.zeros(shape), torch.zeros(2, 3, 4), torch.zeros(2, 3, 4))
 
 
+@pytest.mark.parametrize("cap, mode", [(0.0, "shared"), (1024.0, "per_row")])
+def test_alpha_mode_survives_warm_state_shedding(
+    monkeypatch: pytest.MonkeyPatch, cap: float, mode: str,
+) -> None:
+    monkeypatch.setattr(solver_dual, "_PER_CLASS_ALPHA_MAX_MIB", cap)
+    monkeypatch.setattr(solver_dual, "_INCREMENTAL_ALPHA_PER_LANE_MAX_MIB", 0.0)
+    net = _make_relu_net()
+    lb = torch.full((2, 2), -1.0, dtype=torch.float64)
+    bounds = compute_forward_bounds(net, lb, -lb, post_activation=False)
+    spec = OutputSpec(
+        kind=OutKind.UNSAFE_LINEAR,
+        c=torch.tensor([[1.], [-1.]], dtype=lb.dtype),
+        d=torch.tensor([-0.1, -0.1], dtype=lb.dtype),
+    )
+    result = DualSolver().solve_spec_batch(
+        net, bounds, spec, optimize=True, dual_config=DualConfig(n_iters=1),
+        input_shape=(2,),
+    )
+    assert result.alpha_state is None
+    assert result.alpha_mode == mode
 
 
 def test_singleton_split_rows_replay_all_6237_objectives() -> None:
@@ -122,8 +142,12 @@ def test_climb_forced_shared_alpha_matches_default(monkeypatch: pytest.MonkeyPat
     default, default_k = run(1024.0)
     shared, _ = run(0.0)
     assert default.status == shared.status == VerifyStatus.CERTIFIED
+    assert shared.metadata["alpha_shared_waves"] > 0
+    assert shared.metadata["alpha_per_row_waves"] == 0
     assert shared.metadata["climb_acquisition_replay_calls"] > 0
     assert shared.metadata["climb_cores_inserted"] > 0
+    assert default.metadata["alpha_shared_waves"] == 0
+    assert default.metadata["alpha_per_row_waves"] > 0
     uncapped, uncapped_k = run(float("inf"))
     assert uncapped.status == default.status
     assert uncapped_k == default_k

@@ -209,6 +209,8 @@ class DualBatchResult:
     reference_bounds: Optional[Dict[int, Bounds]] = None
     # Split-free bounds a split_refresh lane was refreshed from (CLIMB C3).
     base_reference_bounds: Optional[Dict[int, Bounds]] = None
+    # Actual ReLU mode before optional warm-state retention/shedding.
+    alpha_mode: Optional[str] = None
 
 
 def expand_bounds_dict(bounds_dict: Dict[int, Bounds], M: int) -> Dict[int, Bounds]:
@@ -924,6 +926,14 @@ class DualSolver(Solver):
         retained_alpha_state = _retain_incremental_alpha_state(
             dual_result.alpha_state, k_actual,
         )
+        relu_alphas = [
+            value for value in (dual_result.alpha_state or {}).values()
+            if isinstance(value, torch.Tensor)
+        ]
+        alpha_mode = (
+            ("shared" if any(value.dim() == 2 for value in relu_alphas) else "per_row")
+            if relu_alphas else None
+        )
         return DualBatchResult(
             solution=solution,
             margins=margins,
@@ -933,6 +943,7 @@ class DualSolver(Solver):
             bounds_dict=branch_bounds,
             nu_per_layer=branch_nu,
             alpha_state=retained_alpha_state,
+            alpha_mode=alpha_mode,
             eta_state=dual_result.eta_state,
             witness_input=witness_input,
             row_slack=slack.detach(),

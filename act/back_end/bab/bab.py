@@ -701,7 +701,10 @@ def verify_bab_batched(
         brancher_method, dual_solver=fsb_dual_solver, neuron_only=climb is not None
     )
 
-    refinement_stats: Dict[str, int] = {}
+    refinement_stats: Dict[str, int] = {
+        "alpha_shared_waves": 0,
+        "alpha_per_row_waves": 0,
+    }
 
     def _refinement_metadata() -> Dict[str, int]:
         return dict(refinement_stats)
@@ -1514,6 +1517,8 @@ def verify_bab_batched(
             continue
 
         assert solution is not None
+        if dual_solve_result is not None and dual_solve_result.alpha_mode is not None:
+            refinement_stats[f"alpha_{dual_solve_result.alpha_mode}_waves"] += 1
         if climb is not None:
             climb.after_main_bound(k_actual, batch)
 
