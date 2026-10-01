@@ -296,6 +296,8 @@ backend:
     # Max pending subproblems; above it the lowest-priority ones are evicted,
     # which also rules out CERTIFIED. 0 = no cap.
     frontier_cap: 0
+    frontier_mem_safety: 0.6
+    frontier_offload: true
     # Pieces per input-axis split (values below 2 are raised to 2).
     input_split_fanout: 2
     # -- Branching: which over-approximated activation (or input axis) to split

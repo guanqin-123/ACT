@@ -143,6 +143,21 @@ class BaBConfig:
     max_depth: int = 20
     max_nodes: int = 2000
     frontier_cap: int = 0
+    frontier_mem_safety: float = 0.6
+    """Fraction of the frontier memory plan's budget B the pending frontier may
+    keep under pressure; must be in (0, 1]. The plan (CUDA frontier device
+    only; always on there) is checked before every frontier push and wave: with
+    E the live memory outside the frontier, F the frontier and W = K * p the
+    planned wave, it requires E + 2F <= B (pop/push copy) and F + W <= B; B is
+    the auto batch budget (``auto_batch_safety``). Under pressure the warm-start
+    state is shed first (host offload with ``frontier_offload``, else drop for
+    the coldest nodes; those are solved from a cold start), then K is capped
+    for that wave only, and nodes are evicted as with ``frontier_cap`` (verdict
+    UNKNOWN) only when even K = 1 does not fit."""
+    frontier_offload: bool = True
+    """Let the frontier memory planner move warm-start state to host memory
+    (lossless; host use is capped at frontier_mem_safety * available RAM)
+    before dropping any of it."""
     top_k: int = 0
     """Cap on how many pooled subproblems a single BaB wave may pop, independently
     of the batch size. 0 = unbounded. Honoured by the TopKBounding family
@@ -329,6 +344,10 @@ class BaBConfig:
     alpha_opt_steps: int = 1000
 
     def __post_init__(self) -> None:
+        if not 0.0 < float(self.frontier_mem_safety) <= 1.0:
+            raise ConfigError(
+                f"frontier_mem_safety must be in (0, 1], got {self.frontier_mem_safety!r}"
+            )
         if self.solver_tier not in VALID_SOLVER_TIERS:
             raise ConfigError(
                 f"Invalid solver_tier {self.solver_tier!r}; expected {VALID_SOLVER_TIERS}"
