@@ -71,6 +71,7 @@ from act.back_end.bab.node import SubproblemBatch
 from act.back_end.solver.solver_base import SolveStatus
 from act.back_end.solver.solver_dual import (
     AlphaState,
+    _alpha_concat_views,
     _alpha_tree_concat_lanes,
     _alpha_tree_gather_lanes,
     _alpha_tree_leaves,
@@ -296,6 +297,8 @@ def _concat_tree_nbytes(left: Any, right: Any, n_left: int, n_right: int) -> int
         return 0
     present = left if left is not None else right
     if isinstance(present, torch.Tensor):
+        if isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor):
+            present, _ = _alpha_concat_views(left, right)
         return (n_left + n_right) * math.prod(present.shape[1:]) * present.element_size()
     if isinstance(present, dict):
         lhs = left if isinstance(left, dict) else {}

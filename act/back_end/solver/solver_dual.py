@@ -310,6 +310,22 @@ def _alpha_tree_zero_lanes(tree: AlphaTree, lanes: int) -> AlphaTree:
     )
 
 
+def _alpha_concat_views(
+    left: torch.Tensor, right: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Align shared/per-row ReLU state without allocating row copies."""
+    if left.dim() == 2 and right.dim() == 3 and left.shape[-1] == right.shape[-1]:
+        left = left.unsqueeze(1).expand(-1, right.shape[1], -1)
+    elif right.dim() == 2 and left.dim() == 3 and left.shape[-1] == right.shape[-1]:
+        right = right.unsqueeze(1).expand(-1, left.shape[1], -1)
+    if left.dim() == right.dim() == 3 and left.shape[-1] == right.shape[-1]:
+        if left.shape[1] == 1:
+            left = left.expand(-1, right.shape[1], -1)
+        elif right.shape[1] == 1:
+            right = right.expand(-1, left.shape[1], -1)
+    return left, right
+
+
 def _alpha_tree_concat_lanes(
     left: AlphaTree,
     right: AlphaTree,
@@ -325,6 +341,7 @@ def _alpha_tree_concat_lanes(
     if right is None:
         right = _alpha_tree_zero_lanes(left, n_right)
     if isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor):
+        left, right = _alpha_concat_views(left, right)
         if left.shape[1:] != right.shape[1:]:
             raise ValueError(
                 "alpha leaf trailing shape mismatch: "
