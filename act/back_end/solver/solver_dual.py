@@ -412,6 +412,14 @@ def _phase_slope_replay_alpha(
         raise TypeError("phase-slope ReLU replay requires a tensor alpha state")
     current = split_signs.to(device=alpha.device)
     source = phase_slope_signs.to(device=alpha.device)
+    # A memory-capped certificate shares its lower slope across spec rows.
+    # Expand before applying row-specific dropped-literal phase overrides.
+    if (
+        alpha.dim() == 2
+        and current.dim() == 3
+        and alpha.shape == (current.shape[0], current.shape[2])
+    ):
+        alpha = alpha.unsqueeze(1).expand_as(current)
     if current.shape != alpha.shape or source.shape != alpha.shape:
         raise ValueError(
             "phase-slope replay shape mismatch: "
@@ -1064,6 +1072,24 @@ class DualSolver(Solver):
 
         if optimize and local_phase_clamp:
             raise ValueError("local_phase_clamp is only valid for fixed-parameter replay")
+        # Branchers can emit a singleton spec axis when their warm alpha is
+        # shared (or absent). A phase literal constrains the domain, not one
+        # objective: repeat it for every actual row before flattening B*M.
+        def expand_shared_rows(
+            state: Optional[Dict[int, torch.Tensor]],
+        ) -> Optional[Dict[int, torch.Tensor]]:
+            if state is None or M == 1:
+                return state
+            return {
+                lid: value.expand(-1, M, -1)
+                if value.dim() == 3 and value.shape[1] == 1 else value
+                for lid, value in state.items()
+            }
+
+        split_signs = expand_shared_rows(split_signs)
+        phase_slope_signs = expand_shared_rows(phase_slope_signs)
+        eta = expand_shared_rows(eta)
+        incremental_etas = expand_shared_rows(incremental_etas)
         if not local_phase_clamp:
             bounds_dict = self._harden_split_bounds(bounds_dict, split_signs)
 
