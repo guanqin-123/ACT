@@ -166,7 +166,7 @@ def _merge_pass(
                 )
                 signs = merged.split_signs.get(eta_layer)
                 if signs is not None and eta[output].shape == signs[output].shape:
-                    eta[output].masked_fill_(signs[output] == 0, 0)
+                    eta[output].masked_fill_((signs[output] == 0).to(eta.device), 0)
         if merged.parent_id is not None:
             assert rows.parent_id is not None
             same_parent = rows.parent_id[left] == rows.parent_id[right]

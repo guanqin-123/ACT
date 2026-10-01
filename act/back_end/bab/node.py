@@ -71,6 +71,10 @@ class SubproblemBatch:
     lower_bound: Optional[torch.Tensor] = None
     node_id: Optional[torch.Tensor] = None  # [N] long; logical identity
     parent_id: Optional[torch.Tensor] = None  # [N] long; parent's node_id (-1 for root)
+    # [N] bool; False marks a lane whose incremental_alpha/eta rows are
+    # zero placeholders (warm start shed under frontier memory pressure).
+    # None = every lane carries its real warm start.
+    warm_start: Optional[torch.Tensor] = None
 
     # -- properties ---------------------------------------------------------
 
@@ -124,6 +128,7 @@ class SubproblemBatch:
             lower_bound=_gather_optional_tensor(self.lower_bound, indices),
             node_id=_gather_optional_tensor(self.node_id, indices),
             parent_id=_gather_optional_tensor(self.parent_id, indices),
+            warm_start=_gather_optional_tensor(self.warm_start, indices),
         )
 
     def concat(self, other: SubproblemBatch) -> SubproblemBatch:
@@ -160,6 +165,9 @@ class SubproblemBatch:
             lower_bound=_concat_optional_tensor(self.lower_bound, other.lower_bound),
             node_id=_concat_optional_tensor(self.node_id, other.node_id),
             parent_id=_concat_optional_tensor(self.parent_id, other.parent_id),
+            warm_start=_concat_warm_start(
+                self.warm_start, other.warm_start, n_self, n_other, self.lb.device
+            ),
         )
 
     # -- geometry -----------------------------------------------------------
@@ -254,6 +262,21 @@ def _concat_optional_tensor(
     return torch.cat([x, y.to(device=x.device, dtype=x.dtype)], dim=0)
 
 
+def _concat_warm_start(
+    x: Optional[torch.Tensor],
+    y: Optional[torch.Tensor],
+    n_x: int,
+    n_y: int,
+    device: torch.device,
+) -> Optional[torch.Tensor]:
+    """Stack two warm-start masks; a missing mask means every lane is warm."""
+    if x is None and y is None:
+        return None
+    left = x if x is not None else torch.ones(n_x, dtype=torch.bool, device=device)
+    right = y if y is not None else torch.ones(n_y, dtype=torch.bool, device=device)
+    return torch.cat([left.to(device), right.to(device)], dim=0)
+
+
 def _concat_padded_dict(
     x: Optional[Dict[int, torch.Tensor]],
     y: Optional[Dict[int, torch.Tensor]],
@@ -317,6 +340,7 @@ def _child_lanes(
         split_signs=_gather_optional_dict(batch.split_signs, parent_index),
         parent_margins=_gather_optional_tensor(batch.parent_margins, parent_index),
         lower_bound=_gather_optional_tensor(batch.lower_bound, parent_index),
+        warm_start=_gather_optional_tensor(batch.warm_start, parent_index),
     )
 
 

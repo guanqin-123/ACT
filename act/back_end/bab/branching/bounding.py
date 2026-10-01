@@ -73,6 +73,7 @@ from act.back_end.solver.solver_dual import (
     AlphaState,
     _alpha_tree_concat_lanes,
     _alpha_tree_gather_lanes,
+    _alpha_tree_leaves,
     _alpha_tree_map,
 )
 from act.util.device_manager import get_default_dtype
@@ -208,13 +209,31 @@ class RandomBounding(BoundingStrategy):
         if total <= cap or cap <= 0:
             return 0
         assert self._lb is not None and self._ub is not None and self._depths is not None
-        self._lb = self._lb[:cap]
-        self._ub = self._ub[:cap]
-        self._depths = self._depths[:cap]
+        self._lb = self._lb[:cap].clone()
+        self._ub = self._ub[:cap].clone()
+        self._depths = self._depths[:cap].clone()
         return total - cap
 
     def __len__(self) -> int:
         return 0 if self._lb is None else self._lb.shape[0]
+
+    def nbytes(self) -> int:
+        return sum(_tensor_nbytes(t) for t in (self._lb, self._ub, self._depths))
+
+    @property
+    def bytes_per_node(self) -> float:
+        return self.nbytes() / len(self) if len(self) else 0.0
+
+    def projected_push_nbytes(self, batch: SubproblemBatch) -> int:
+        return (len(self) + batch.batch_size) * sum(
+            math.prod(t.shape[1:]) * t.element_size()
+            for t in (batch.lb, batch.ub, batch.depths)
+        )
+
+    def evict_all(self) -> int:
+        total = len(self)
+        self._lb = self._ub = self._depths = None
+        return total
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +269,83 @@ def _merge_optional_dict(
     return cast(
         Optional[Dict[int, Any]],
         _alpha_tree_concat_lanes(existing, incoming, n_existing, n_incoming),
+    )
+
+
+def _tensor_nbytes(t: Optional[torch.Tensor]) -> int:
+    return 0 if t is None else t.numel() * t.element_size()
+
+
+def _tree_nbytes(tree: Any) -> int:
+    return sum(leaf.numel() * leaf.element_size() for leaf in _alpha_tree_leaves(tree))
+
+
+def _tree_to_device(
+    tree: Optional[Dict[int, Any]], device: torch.device
+) -> Optional[Dict[int, Any]]:
+    return cast(
+        Optional[Dict[int, Any]],
+        _alpha_tree_map(tree, lambda leaf: leaf.to(device)),
+    )
+
+
+def _concat_tree_nbytes(left: Any, right: Any, n_left: int, n_right: int) -> int:
+    """Bytes ``_alpha_tree_concat_lanes(left, right, ...)`` would allocate,
+    including the zero padding of a subtree present on one side only."""
+    if left is None and right is None:
+        return 0
+    present = left if left is not None else right
+    if isinstance(present, torch.Tensor):
+        return (n_left + n_right) * math.prod(present.shape[1:]) * present.element_size()
+    if isinstance(present, dict):
+        lhs = left if isinstance(left, dict) else {}
+        rhs = right if isinstance(right, dict) else {}
+        return sum(
+            _concat_tree_nbytes(lhs.get(key), rhs.get(key), n_left, n_right)
+            for key in set(lhs) | set(rhs)
+        )
+    if isinstance(present, (list, tuple)):
+        lhs_seq = left if left is not None else [None] * len(present)
+        rhs_seq = right if right is not None else [None] * len(present)
+        return sum(
+            _concat_tree_nbytes(lval, rval, n_left, n_right)
+            for lval, rval in zip(lhs_seq, rhs_seq)
+        )
+    raise TypeError(f"unsupported alpha pytree node: {type(present)!r}")
+
+
+def _compact_tree_inplace(tree: Any, idx: torch.Tensor) -> Any:
+    """Keep lanes ``idx`` of every leaf, replacing leaves one at a time so
+    at most one old leaf is alive next to its copy."""
+    if isinstance(tree, torch.Tensor):
+        return tree.index_select(0, idx.to(tree.device))
+    if isinstance(tree, dict):
+        for key in list(tree):
+            tree[key] = _compact_tree_inplace(tree[key], idx)
+        return tree
+    if isinstance(tree, list):
+        for pos in range(len(tree)):
+            tree[pos] = _compact_tree_inplace(tree[pos], idx)
+        return tree
+    if isinstance(tree, tuple):
+        return tuple(_compact_tree_inplace(value, idx) for value in tree)
+    if tree is None:
+        return None
+    raise TypeError(f"unsupported alpha pytree node: {type(tree)!r}")
+
+
+def _scatter_lanes(
+    tree: Optional[Dict[int, Any]], positions: torch.Tensor, lanes: int
+) -> Optional[Dict[int, Any]]:
+    """Place ``tree``'s lanes at ``positions`` of an all-zero ``lanes``-row tree."""
+    return cast(
+        Optional[Dict[int, Any]],
+        _alpha_tree_map(
+            tree,
+            lambda leaf: torch.zeros(
+                (lanes, *leaf.shape[1:]), dtype=leaf.dtype, device=leaf.device
+            ).index_copy_(0, positions.to(leaf.device), leaf),
+        ),
     )
 
 
@@ -348,6 +444,14 @@ class TopKBounding(BoundingStrategy):
     Storage is lossless: bounds, depth, lower bound, parent margins and every
     incremental-state dict (including split_signs, which neuron-split BaB requires) are
     preserved across push/pop.
+
+    Warm-start state (``incremental_alpha`` / ``incremental_eta``) is the only
+    state the frontier memory planner may shed: ``offload_warm_state`` moves it
+    to host memory (lossless) and ``drop_warm_state`` discards it for the
+    lowest-priority rows, which are then popped in cold-only waves and solved
+    from the solver's cold start. ``_warm`` is ``None`` until the first drop
+    (every row warm); afterwards the warm-state tensors hold only the warm
+    rows, in pool order.
     """
 
     def __init__(
@@ -373,9 +477,14 @@ class TopKBounding(BoundingStrategy):
         self._incremental_eta: Optional[Dict[int, torch.Tensor]] = None
         self._split_signs: Optional[Dict[int, torch.Tensor]] = None
         self._propagation_revisions: Optional[torch.Tensor] = None
+        self._warm: Optional[torch.Tensor] = None
+        self._warm_offloaded = False
+        self.cold_pops = 0
 
     def push(self, batch: SubproblemBatch) -> None:
         size_before = len(self)
+        assert batch.batch_size == batch.lb.shape[0], "TOP-K BOUNDING invariant violated: batch size mismatch"
+        alpha_in, eta_in, warm_in = self._incoming_warm_state(batch)
         n_new = batch.batch_size
         device, dtype = batch.lb.device, batch.lb.dtype
         lower = (
@@ -398,9 +507,10 @@ class TopKBounding(BoundingStrategy):
             self._parent_margins = parent.clone()
             self._node_id = batch.node_id.clone() if batch.node_id is not None else None
             self._parent_id = batch.parent_id.clone() if batch.parent_id is not None else None
-            self._incremental_alpha = _clone_optional_dict(batch.incremental_alpha)
-            self._incremental_eta = _clone_optional_dict(batch.incremental_eta)
+            self._incremental_alpha = _clone_optional_dict(alpha_in)
+            self._incremental_eta = _clone_optional_dict(eta_in)
             self._split_signs = _clone_optional_dict(batch.split_signs)
+            self._warm = None if warm_in is None else warm_in.clone()
             self._propagation_revisions = torch.full(
                 (n_new,), -1, dtype=torch.long, device=device
             )
@@ -413,9 +523,18 @@ class TopKBounding(BoundingStrategy):
         assert (self._node_id is None) == (batch.node_id is None)
         assert (self._parent_id is None) == (batch.parent_id is None)
         n_old = prev_lb.shape[0]
-        self._incremental_alpha = _merge_optional_dict(self._incremental_alpha, n_old, batch.incremental_alpha, n_new)
-        self._incremental_eta = _merge_optional_dict(self._incremental_eta, n_old, batch.incremental_eta, n_new)
+        n_old_warm = n_old if self._warm is None else int(self._warm.sum().item())
+        n_new_warm = n_new if warm_in is None else int(warm_in.sum().item())
+        self._incremental_alpha = _merge_optional_dict(self._incremental_alpha, n_old_warm, alpha_in, n_new_warm)
+        self._incremental_eta = _merge_optional_dict(self._incremental_eta, n_old_warm, eta_in, n_new_warm)
         self._split_signs = _merge_optional_dict(self._split_signs, n_old, batch.split_signs, n_new)
+        if self._warm is not None or warm_in is not None:
+            self._warm = torch.cat([
+                self._warm if self._warm is not None
+                else torch.ones(n_old, dtype=torch.bool, device=prev_lb.device),
+                warm_in.to(prev_lb.device) if warm_in is not None
+                else torch.ones(n_new, dtype=torch.bool, device=prev_lb.device),
+            ])
         self._lb = torch.cat([prev_lb, batch.lb], dim=0)
         self._ub = torch.cat([prev_ub, batch.ub], dim=0)
         self._depths = torch.cat([prev_depths, batch.depths], dim=0)
@@ -457,6 +576,7 @@ class TopKBounding(BoundingStrategy):
             selected = order[:n]
             remaining = order[n:]
 
+        selected, remaining = self._split_warm_classes(selected, remaining)
         result = self._build(selected)
         if self.select_probe is not None:
             self.select_probe(result)
@@ -466,6 +586,214 @@ class TopKBounding(BoundingStrategy):
             self._restrict(remaining)
         self._assert_pop_transition(total, result.batch_size)
         return result
+
+    def _split_warm_classes(
+        self, selected: torch.Tensor, remaining: Optional[torch.Tensor]
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Keep one warm-start class per wave: the class of the first selected
+        row. Rows of the other class return to the pool for a later wave, so
+        the solver never sees a batch mixing real and placeholder warm starts."""
+        if self._warm is None:
+            return selected, remaining
+        warm = self._warm.index_select(0, selected.to(self._warm.device))
+        same = warm == warm[0]
+        lead_warm = bool(warm[0].item())
+        if not bool(same.all().item()):
+            same = same.to(selected.device)
+            deferred = selected[~same]
+            selected = selected[same]
+            remaining = deferred if remaining is None else torch.cat([deferred, remaining])
+        if not lead_warm:
+            self.cold_pops += int(selected.numel())
+        return selected, remaining
+
+    # -- frontier memory accounting / shedding ------------------------------
+
+    def warm_state_nbytes(self) -> int:
+        """Bytes of the stored ``incremental_alpha`` / ``incremental_eta``."""
+        return _tree_nbytes(self._incremental_alpha) + _tree_nbytes(self._incremental_eta)
+
+    def nbytes(self) -> int:
+        """Device-resident bytes of every stored field (sum of
+        ``numel * element_size``); warm state offloaded to host is excluded
+        (see ``offloaded_nbytes``)."""
+        total = sum(
+            _tensor_nbytes(t)
+            for t in (
+                self._lb, self._ub, self._depths, self._lower_bound,
+                self._parent_margins, self._node_id, self._parent_id,
+                self._propagation_revisions, self._warm,
+            )
+        )
+        total += _tree_nbytes(self._split_signs)
+        if not self._warm_offloaded:
+            total += self.warm_state_nbytes()
+        return total
+
+    def offloaded_nbytes(self) -> int:
+        """Host bytes of warm state moved off the device."""
+        return self.warm_state_nbytes() if self._warm_offloaded else 0
+
+    @property
+    def bytes_per_node(self) -> float:
+        """Mean device-resident bytes per pending node."""
+        n = len(self)
+        return self.nbytes() / n if n else 0.0
+
+    @property
+    def warm_offloaded(self) -> bool:
+        return self._warm_offloaded
+
+    def warm_nodes(self) -> int:
+        """Pending rows whose warm-start state is stored."""
+        if self._incremental_alpha is None and self._incremental_eta is None:
+            return 0
+        return len(self) if self._warm is None else int(self._warm.sum().item())
+
+    def offload_warm_state(self) -> bool:
+        """Move the warm-start state to host memory for the rest of the run.
+
+        Lossless: popped rows are copied back to the frontier's device, and
+        warm state pushed later is stored on the host too. Returns False when
+        it was already moved."""
+        if self._warm_offloaded:
+            return False
+        host = torch.device("cpu")
+        self._incremental_alpha = _tree_to_device(self._incremental_alpha, host)
+        self._incremental_eta = _tree_to_device(self._incremental_eta, host)
+        self._warm_offloaded = True
+        return True
+
+    def drop_warm_state(self, count: int) -> int:
+        """Discard the warm start of the ``count`` lowest-priority warm rows.
+
+        The rows stay pending (bounds, depth, split signs and lower bound are
+        kept) and are later solved from the solver's cold start, which can only
+        weaken their bounds. Returns the number of rows made cold."""
+        if count <= 0 or self.warm_nodes() == 0:
+            return 0
+        assert self._lb is not None
+        warm = (
+            self._warm if self._warm is not None
+            else torch.ones(len(self), dtype=torch.bool, device=self._lb.device)
+        )
+        warm_rows = torch.where(warm)[0]
+        scores = self._priority_scores().index_select(0, warm_rows.to(self._lb.device))
+        coldest = torch.argsort(scores)[:count]
+        keep = torch.ones(warm_rows.numel(), dtype=torch.bool, device=warm_rows.device)
+        keep[coldest.to(keep.device)] = False
+        kept_slots = torch.where(keep)[0]
+        try:
+            self._incremental_alpha = _compact_tree_inplace(self._incremental_alpha, kept_slots)
+            self._incremental_eta = _compact_tree_inplace(self._incremental_eta, kept_slots)
+            oom = False
+        except torch.cuda.OutOfMemoryError:
+            oom = True
+        if oom:
+            # No room even for the kept copy: every row goes cold.
+            self._incremental_alpha = self._incremental_eta = None
+            self._warm = torch.zeros(len(self), dtype=torch.bool, device=self._lb.device)
+            return int(warm_rows.numel())
+        new_warm = warm.clone()
+        new_warm[warm_rows[~keep]] = False
+        self._warm = new_warm
+        return int(coldest.numel())
+
+    def _incoming_warm_state(
+        self, batch: SubproblemBatch
+    ) -> Tuple[Optional[AlphaState], Optional[Dict[int, torch.Tensor]], Optional[torch.Tensor]]:
+        """Warm-start rows of ``batch`` to store, and its warm mask (None = all warm).
+
+        Once rows have been made cold, a batch arriving without any warm state
+        (e.g. a cold wave returned after an OOM) is recorded as cold instead of
+        being zero-padded into warm rows."""
+        mask = batch.warm_start
+        if (
+            mask is None
+            and self._warm is not None
+            and batch.incremental_alpha is None
+            and batch.incremental_eta is None
+            and (self._incremental_alpha is not None or self._incremental_eta is not None)
+        ):
+            mask = torch.zeros(batch.batch_size, dtype=torch.bool, device=batch.lb.device)
+        alpha: Optional[AlphaState] = batch.incremental_alpha
+        eta = batch.incremental_eta
+        if mask is not None:
+            mask = mask.to(device=batch.lb.device, dtype=torch.bool)
+            if not bool(mask.all().item()):
+                rows = torch.where(mask)[0]
+                alpha = cast(Optional[AlphaState], _index_optional_dict(alpha, rows))
+                eta = _index_optional_dict(eta, rows)
+        if self._warm_offloaded:
+            host = torch.device("cpu")
+            alpha = cast(Optional[AlphaState], _tree_to_device(alpha, host))
+            eta = _tree_to_device(eta, host)
+        return alpha, eta, mask
+
+    def evict_all(self) -> int:
+        """Drop every pending row (a memory allowance below one node)."""
+        total = len(self)
+        self._clear()
+        return total
+
+    def projected_push_nbytes(self, batch: SubproblemBatch) -> int:
+        """Device-resident bytes after ``push(batch)``, computed without
+        allocating: per-field concat sizes including the key-union zero padding
+        of the per-layer dicts; warm state is excluded once offloaded."""
+        n_old, n_new = len(self), batch.batch_size
+        n = n_old + n_new
+        row_bytes = sum(
+            math.prod(t.shape[1:]) * t.element_size()
+            for t in (batch.lb, batch.ub, batch.depths)
+        )
+        total = n * row_bytes + 2 * n * batch.lb.element_size() + n * 8
+        for mine, theirs in ((self._node_id, batch.node_id), (self._parent_id, batch.parent_id)):
+            if mine is not None or theirs is not None:
+                total += n * 8
+        total += _concat_tree_nbytes(self._split_signs, batch.split_signs, n_old, n_new)
+        if self._warm is not None or batch.warm_start is not None:
+            total += n
+        if not self._warm_offloaded:
+            n_old_warm = n_old if self._warm is None else int(self._warm.sum().item())
+            n_new_warm = n_new if batch.warm_start is None else int(batch.warm_start.sum().item())
+            for mine_tree, their_tree in (
+                (self._incremental_alpha, batch.incremental_alpha),
+                (self._incremental_eta, batch.incremental_eta),
+            ):
+                total += _concat_tree_nbytes(mine_tree, their_tree, n_old_warm, n_new_warm)
+        return total
+
+    def _gather_warm_state(
+        self, idx: torch.Tensor, upload: bool = True
+    ) -> Tuple[Optional[AlphaState], Optional[Dict[int, torch.Tensor]], Optional[torch.Tensor]]:
+        """Warm state of rows ``idx``, on the frontier device when ``upload``
+        (else on its storage device); cold rows of a mixed selection get zero
+        placeholders flagged in the returned mask."""
+        assert self._lb is not None
+        device = self._lb.device if upload else torch.device("cpu") if self._warm_offloaded else self._lb.device
+        alpha_store, eta_store = self._incremental_alpha, self._incremental_eta
+        if self._warm is None:
+            alpha = _index_optional_dict(alpha_store, idx)
+            eta = _index_optional_dict(eta_store, idx)
+            if self._warm_offloaded:
+                alpha, eta = _tree_to_device(alpha, device), _tree_to_device(eta, device)
+            return cast(Optional[AlphaState], alpha), eta, None
+        warm = self._warm.index_select(0, idx)
+        slots = (torch.cumsum(self._warm.long(), dim=0) - 1).index_select(0, idx)
+        n_warm = int(warm.sum().item())
+        if n_warm == 0:
+            return None, None, None
+        warm_pos = torch.where(warm)[0]
+        alpha = _tree_to_device(_index_optional_dict(alpha_store, slots[warm_pos]), device)
+        eta = _tree_to_device(_index_optional_dict(eta_store, slots[warm_pos]), device)
+        if n_warm == int(idx.numel()):
+            return cast(Optional[AlphaState], alpha), eta, None
+        lanes = int(idx.numel())
+        return (
+            cast(Optional[AlphaState], _scatter_lanes(alpha, warm_pos, lanes)),
+            _scatter_lanes(eta, warm_pos, lanes),
+            warm,
+        )
 
     def _assert_push_transition(self, size_before: int, added: int) -> None:
         size_after = len(self)
@@ -490,7 +818,8 @@ class TopKBounding(BoundingStrategy):
         if self._lb is None:
             raise IndexError("view of empty pool")
         indices = torch.arange(self._lb.shape[0], device=self._lb.device)
-        return self._build(indices)
+        # Offloaded warm state stays on the host: push re-offloads it anyway.
+        return self._build(indices, upload=False)
 
     def replace_all(self, batch: SubproblemBatch) -> None:
         """Replace the full frontier without scoring or advancing schedules."""
@@ -508,7 +837,8 @@ class TopKBounding(BoundingStrategy):
         indices = torch.where(self._propagation_revisions != library_revision)[0]
         if indices.numel() == 0:
             return None
-        return indices, self._build(indices)
+        # Propagation reads split signs only; the warm state is not copied.
+        return indices, (self._build(indices) if self._warm is None and not self._warm_offloaded else self._build_base(indices))
 
     def apply_propagation(
         self,
@@ -562,7 +892,17 @@ class TopKBounding(BoundingStrategy):
         assert depths_t is not None and lb is not None
         return self.order(depths_t, lb)
 
-    def _build(self, idx: torch.Tensor) -> SubproblemBatch:
+    def _build(self, idx: torch.Tensor, upload: bool = True) -> SubproblemBatch:
+        lb = self._lb
+        assert lb is not None
+        idx = idx.to(lb.device)
+        alpha, eta, warm = self._gather_warm_state(idx, upload)
+        batch = self._build_base(idx)
+        batch.incremental_alpha, batch.incremental_eta, batch.warm_start = alpha, eta, warm
+        return batch
+
+    def _build_base(self, idx: torch.Tensor) -> SubproblemBatch:
+        """Rows ``idx`` of every field except the warm-start state."""
         lb, ub, depths = self._lb, self._ub, self._depths
         lower, parent = self._lower_bound, self._parent_margins
         assert lb is not None and ub is not None and depths is not None
@@ -572,8 +912,6 @@ class TopKBounding(BoundingStrategy):
             lb=lb.index_select(0, idx),
             ub=ub.index_select(0, idx),
             depths=depths.index_select(0, idx),
-            incremental_alpha=_index_optional_dict(self._incremental_alpha, idx),
-            incremental_eta=_index_optional_dict(self._incremental_eta, idx),
             split_signs=_index_optional_dict(self._split_signs, idx),
             parent_margins=parent.index_select(0, idx),
             lower_bound=lower.index_select(0, idx),
@@ -590,17 +928,35 @@ class TopKBounding(BoundingStrategy):
         )
 
     def _restrict(self, idx: torch.Tensor) -> None:
+        if self._warm is None and not self._warm_offloaded:
+            revisions = self._propagation_revisions
+            assert revisions is not None
+            kept = self._build(idx)
+            self._lb, self._ub, self._depths = kept.lb, kept.ub, kept.depths
+            self._lower_bound, self._parent_margins = kept.lower_bound, kept.parent_margins
+            self._node_id, self._parent_id = kept.node_id, kept.parent_id
+            self._incremental_alpha, self._incremental_eta = kept.incremental_alpha, kept.incremental_eta
+            self._split_signs = kept.split_signs
+            self._propagation_revisions = revisions.index_select(0, idx.to(revisions.device))
+            return
         revisions = self._propagation_revisions
         assert revisions is not None
-        kept = self._build(idx)
+        kept = self._build_base(idx)
         self._lb, self._ub, self._depths = kept.lb, kept.ub, kept.depths
         self._lower_bound, self._parent_margins = kept.lower_bound, kept.parent_margins
         self._node_id, self._parent_id = kept.node_id, kept.parent_id
-        self._incremental_alpha, self._incremental_eta, self._split_signs = (
-            kept.incremental_alpha,
-            kept.incremental_eta,
-            kept.split_signs,
-        )
+        self._split_signs = kept.split_signs
+        # Warm state stays on its storage device; only kept warm rows remain.
+        if self._warm is None:
+            slots = idx
+        else:
+            warm = self._warm.index_select(0, idx.to(self._warm.device))
+            slots = (torch.cumsum(self._warm.long(), dim=0) - 1).index_select(
+                0, idx.to(self._warm.device)
+            )[warm]
+            self._warm = warm
+        self._incremental_alpha = _compact_tree_inplace(self._incremental_alpha, slots)
+        self._incremental_eta = _compact_tree_inplace(self._incremental_eta, slots)
         self._propagation_revisions = revisions.index_select(
             0, idx.to(revisions.device)
         )
@@ -611,6 +967,7 @@ class TopKBounding(BoundingStrategy):
         self._node_id = self._parent_id = None
         self._incremental_alpha = self._incremental_eta = self._split_signs = None
         self._propagation_revisions = None
+        self._warm = None
 
     def evict_to(self, cap: int) -> int:
         total = len(self)
@@ -678,6 +1035,7 @@ class DiverseTopKBounding(TopKBounding):
             selected_mask[selected] = True
             remaining = order[~selected_mask.index_select(0, order)]
 
+        selected, remaining = self._split_warm_classes(selected, remaining)
         result = self._build(selected)
         if self.select_probe is not None:
             self.select_probe(result)
@@ -864,7 +1222,7 @@ def _mcts_visit_diagnostics(
     return root_visits, min_visit, max_child_excess
 
 
-class MCTSBounding(BoundingStrategy):
+class MCTSBounding(TopKBounding):
     """MCTS side tables (``N``/``Q``) over the BaB tree, maintained as a pure observer.
 
     ``order`` governs **eviction priority only**; selection is UCB1 (W2). At this
@@ -884,27 +1242,16 @@ class MCTSBounding(BoundingStrategy):
         *,
         exploration: float = 1.0,
         lambda_: float = 0.5,
-        virtual_loss: float = 1.0,  # inert at K=1; reserved for the batched extension
+        virtual_loss: float = 1.0,
     ) -> None:
-        self.order: OrderFunction = order if order is not None else DepthLowerBoundOrder()
-        self.select_probe = select_probe
-        self.exploration: float = float(exploration)
-        self.lambda_: float = float(lambda_)
-        self.virtual_loss: float = float(virtual_loss)
+        super().__init__(order, select_probe)
+        self.exploration = float(exploration)
+        self.lambda_ = float(lambda_)
+        self.virtual_loss = float(virtual_loss)
         self.parent: Dict[int, int] = {}
         self.N: Dict[int, int] = {}
         self.Q: Dict[int, float] = {}
-        self.n_tot: int = 0
-        self._lb: Optional[torch.Tensor] = None
-        self._ub: Optional[torch.Tensor] = None
-        self._depths: Optional[torch.Tensor] = None
-        self._lower_bound: Optional[torch.Tensor] = None
-        self._parent_margins: Optional[torch.Tensor] = None
-        self._node_id: Optional[torch.Tensor] = None
-        self._parent_id: Optional[torch.Tensor] = None
-        self._incremental_alpha: Optional[AlphaState] = None
-        self._incremental_eta: Optional[Dict[int, torch.Tensor]] = None
-        self._split_signs: Optional[Dict[int, torch.Tensor]] = None
+        self.n_tot = 0
 
     def push(self, batch: SubproblemBatch) -> None:
         if batch.node_id is None or batch.parent_id is None:
@@ -912,129 +1259,9 @@ class MCTSBounding(BoundingStrategy):
             raise ValueError(
                 f"MCTSBounding.push requires provenance, but batch.{missing} is None"
             )
-        n_new = batch.batch_size
-        device, dtype = batch.lb.device, batch.lb.dtype
-        lower = (
-            batch.lower_bound
-            if batch.lower_bound is not None
-            else torch.zeros(n_new, dtype=dtype, device=device)
-        )
-        parent = (
-            batch.parent_margins
-            if batch.parent_margins is not None
-            else torch.zeros(n_new, dtype=dtype, device=device)
-        )
-        prev_lb = self._lb
-        if prev_lb is None:
-            self._lb = batch.lb.clone()
-            self._ub = batch.ub.clone()
-            self._depths = batch.depths.clone()
-            self._lower_bound = lower.clone()
-            self._parent_margins = parent.clone()
-            self._node_id = batch.node_id.clone()
-            self._parent_id = batch.parent_id.clone()
-            self._incremental_alpha = _clone_optional_dict(batch.incremental_alpha)
-            self._incremental_eta = _clone_optional_dict(batch.incremental_eta)
-            self._split_signs = _clone_optional_dict(batch.split_signs)
-        else:
-            prev_ub, prev_depths = self._ub, self._depths
-            prev_lower, prev_parent = self._lower_bound, self._parent_margins
-            prev_node, prev_parent_id = self._node_id, self._parent_id
-            assert prev_ub is not None and prev_depths is not None
-            assert prev_lower is not None and prev_parent is not None
-            assert prev_node is not None and prev_parent_id is not None
-            n_old = prev_lb.shape[0]
-            self._incremental_alpha = _merge_optional_dict(self._incremental_alpha, n_old, batch.incremental_alpha, n_new)
-            self._incremental_eta = _merge_optional_dict(self._incremental_eta, n_old, batch.incremental_eta, n_new)
-            self._split_signs = _merge_optional_dict(self._split_signs, n_old, batch.split_signs, n_new)
-            self._lb = torch.cat([prev_lb, batch.lb], dim=0)
-            self._ub = torch.cat([prev_ub, batch.ub], dim=0)
-            self._depths = torch.cat([prev_depths, batch.depths], dim=0)
-            self._lower_bound = torch.cat([prev_lower, lower.to(prev_lower)], dim=0)
-            self._parent_margins = torch.cat([prev_parent, parent.to(prev_parent)], dim=0)
-            self._node_id = torch.cat([prev_node, batch.node_id.to(prev_node.device)], dim=0)
-            self._parent_id = torch.cat([prev_parent_id, batch.parent_id.to(prev_parent_id.device)], dim=0)
-
+        super().push(batch)
         for nid, pid in zip(batch.node_id.tolist(), batch.parent_id.tolist()):
             self.parent[int(nid)] = int(pid)
-
-    def pop(self, batch_size: int = 1) -> SubproblemBatch:
-        lb = self._lb
-        if lb is None:
-            raise IndexError("pop from empty pool")
-        total = lb.shape[0]
-        n = min(batch_size, total)
-        _advance_order_schedule(self.order)
-        if n >= total:
-            selected = torch.arange(total, device=lb.device)
-            remaining: Optional[torch.Tensor] = None
-        else:
-            order = torch.argsort(self._priority_scores(), descending=True)
-            selected = order[:n]
-            remaining = order[n:]
-
-        result = self._build(selected)
-        if self.select_probe is not None:
-            self.select_probe(result)
-        if remaining is None or remaining.numel() == 0:
-            self._clear()
-        else:
-            self._restrict(remaining)
-        return result
-
-    def evict_to(self, cap: int) -> int:
-        total = len(self)
-        if total <= cap or cap <= 0:
-            return 0
-        order = torch.argsort(self._priority_scores(), descending=True)
-        self._restrict(order[:cap])
-        return total - cap
-
-    def __len__(self) -> int:
-        return 0 if self._lb is None else self._lb.shape[0]
-
-    def _priority_scores(self) -> torch.Tensor:
-        depths_t, lb = self._depths, self._lower_bound
-        assert depths_t is not None and lb is not None
-        return self.order(depths_t, lb)
-
-    def _build(self, idx: torch.Tensor) -> SubproblemBatch:
-        lb, ub, depths = self._lb, self._ub, self._depths
-        lower, parent = self._lower_bound, self._parent_margins
-        node_id, parent_id = self._node_id, self._parent_id
-        assert lb is not None and ub is not None and depths is not None
-        assert lower is not None and parent is not None
-        assert node_id is not None and parent_id is not None
-        idx = idx.to(lb.device)
-        return SubproblemBatch(
-            lb=lb.index_select(0, idx),
-            ub=ub.index_select(0, idx),
-            depths=depths.index_select(0, idx),
-            incremental_alpha=_index_optional_dict(self._incremental_alpha, idx),
-            incremental_eta=_index_optional_dict(self._incremental_eta, idx),
-            split_signs=_index_optional_dict(self._split_signs, idx),
-            parent_margins=parent.index_select(0, idx),
-            lower_bound=lower.index_select(0, idx),
-            node_id=node_id.index_select(0, idx.to(node_id.device)),
-            parent_id=parent_id.index_select(0, idx.to(parent_id.device)),
-        )
-
-    def _restrict(self, idx: torch.Tensor) -> None:
-        kept = self._build(idx)
-        self._lb, self._ub, self._depths = kept.lb, kept.ub, kept.depths
-        self._lower_bound, self._parent_margins = kept.lower_bound, kept.parent_margins
-        self._node_id, self._parent_id = kept.node_id, kept.parent_id
-        self._incremental_alpha, self._incremental_eta, self._split_signs = (
-            kept.incremental_alpha,
-            kept.incremental_eta,
-            kept.split_signs,
-        )
-
-    def _clear(self) -> None:
-        self._lb = self._ub = self._depths = None
-        self._lower_bound = self._parent_margins = None
-        self._node_id = self._parent_id = None
-        self._incremental_alpha = self._incremental_eta = self._split_signs = None
 
     def observe(
         self,
