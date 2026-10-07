@@ -1,0 +1,58 @@
+COMMAND: fse2026/scripts/act_trace_pyhook.sh -m act.back_end --verify --onnx data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx --vnnlib data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_7632_sidx_2106_eps_0.0039.vnnlib --solver dual --bab --device cuda --verbose --dual-stagnation-patience 10 --dual-stop-when-verified --bab-presolve-time-fraction 0.3 --bab-child-n-iters 10 --bab-max-batch-size auto --dtype float32 --bab-preset climb_split_lin --bab-branching fsb --bab-max-batch-size 256 --no-bab-climb-enabled --bab-max-subproblems 1000000000000 --bab-max-depth 1000000000 --timeout 100.0
+[ACT] Auto-detecting project root: .
+[WARN] Gurobi license not found: modules/gurobi/gurobi.lic
+[INFO] Please place gurobi.lic in: modules/gurobi
+CLIMB_TRACE_HOOK function=act.back_end.bab.bab.verify_bab_batched boundary=1396 popped=1433
+✅ Device Manager Initialized: device=cuda:0, dtype=torch.float32, tf32=off
+Resolved BaBConfig: {"alpha_mode": "fixed", "alpha_opt_steps": 1000, "auto_batch_cap": 2048, "auto_batch_floor": 8, "auto_batch_safety": 0.55, "baf": true, "bounding": "depth_bound_blend", "bounding_bound_weight": 0.5, "bounding_depth_weight": 0.5, "branching_method": "fsb", "child_n_iters": 10, "climb_coarsening_enabled": true, "climb_complement_bounding": false, "climb_delta_abs": 1e-09, "climb_delta_rel": 1e-07, "climb_enabled": false, "climb_lin_support_refinement": false, "climb_max_cores": 1024, "climb_merge_enabled": true, "climb_presplit_propagation_enabled": true, "climb_propagate_core_chunk": 4096, "climb_propagation_enabled": true, "climb_recheck_k": 0, "climb_steer": false, "climb_terminal_cores": true, "climb_theta": 0.0, "eps": 1e-05, "eta_only_children": false, "frontier_cap": 0, "frontier_mem_safety": 0.6, "frontier_offload": true, "input_split_fanout": 2, "intermediate_refine": "all", "intermediate_refine_max_tensor_mib": 1024.0, "intermediate_refine_ratio": 10.0, "k": 1, "llm_probe_api_key_env": "", "llm_probe_backend": "mock", "llm_probe_base_url": "", "llm_probe_cadence": 1, "llm_probe_decisions": "split,frontier,refine", "llm_probe_enabled": false, "llm_probe_history": 8, "llm_probe_log": false, "llm_probe_max_candidates": 8, "llm_probe_max_candidates_total": 1024, "llm_probe_max_failures": 3, "llm_probe_model": "", "llm_probe_neuron_topk": 512, "llm_probe_temperature": 0.0, "llm_probe_timeout": 30.0, "max_depth": 1000000000, "max_eps": 0.01, "max_nodes": 1000000000000, "mcts_exploration": 1.0, "mcts_lambda": 0.5, "mcts_virtual_loss": 1.0, "method": null, "multi_split_levels": 1, "num_verify_iters": 5, "p": 2.0, "per_subproblem_refine": "none", "per_subproblem_refine_iters": 0, "per_subproblem_refine_rows_cap": 64, "perturbed_words": 1, "presolve_time_fraction": 0.3, "presplit_levels": 0, "provenance_enabled": false, "root_bounds_reuse": "split_refresh_linear", "sa_cooling_rate": 0.99, "solver_tier": "dual_alpha_eta", "top_k": 0, "verbose": false}
+
+🧬 Synthesizing models from 1 spec result(s)...
+
+🎉 Synthesis Complete:
+   Total specs: 1
+   Wrapped models: 1
+INFO:act.config.backend_cli:Built 43-layer VNN-COMP net in 0.13 s
+WARNING:act.back_end.dual_tf.tf_forward:forward linear bound 3.27 GiB persistent pair exceeds deterministic 1.00 GiB cap for [1, 46656, 9408]; falling back to interval for this layer
+INFO:act.config.backend_cli:BaB budget 98.95 s of --timeout 100.00 s (1.05 s spent before BaB)
+INFO:act.back_end.solver.solver_dual:Intermediate refinement layer=3 lanes=1 rows=1940 width=46656 estimate=345.278 MiB cap=1024.000 MiB action=refined
+WARNING:act.back_end.solver.solver_dual:per-class alpha state estimate 1275.079 MiB exceeds 1024.000 MiB cap for lanes=1 rows=1940; using shared alpha slopes
+INFO:act.back_end.solver.solver_dual:Intermediate refinement layer=5 lanes=1 rows=1482 width=46656 estimate=263.764 MiB cap=1024.000 MiB action=refined
+INFO:act.back_end.solver.solver_dual:Intermediate refinement layer=10 lanes=1 rows=1116 width=46656 estimate=198.624 MiB cap=1024.000 MiB action=refined
+INFO:act.back_end.solver.solver_dual:Intermediate refinement layer=18 lanes=1 rows=70 width=46656 estimate=12.458 MiB cap=1024.000 MiB action=refined
+INFO:act.back_end.solver.solver_dual:Intermediate refinement layer=22 lanes=1 rows=796 width=46656 estimate=141.671 MiB cap=1024.000 MiB action=refined
+INFO:act.back_end.solver.solver_dual:Intermediate refinement layer=40 lanes=1 rows=400 width=46656 estimate=71.191 MiB cap=1024.000 MiB action=refined
+WARNING:act.back_end.solver.solver_dual:incremental alpha state 130.794 MiB exceeds 32.000 MiB per-lane cap for lanes=1; discarding warm start
+CLIMB_TRACE {"K": 0, "climb_enabled": false, "climb_unlearned_shrunk_box_lanes": 0, "event": "initial", "frontier": 1, "native_wave_index": 0, "nodes": 0, "t": 5.771303640678525, "terminal_input_split_lanes": 0, "terminal_lp_calls": 0, "terminal_lp_certified_lanes": 0, "terminal_lp_failed_lanes": 0, "terminal_lp_falsified_lanes": 0, "terminal_lp_skipped_lanes": 0, "terminal_lp_time_ms": 0, "wave": 0}
+INFO:act.pipeline.verification.act2torch:Reconstructed VerifiableModel: body has 40 layer(s), inner_model type=ActGraphModule, INPUT_SPEC=1, BN_fused=0.
+CLIMB_TRACE {"K": 1, "climb_enabled": false, "climb_unlearned_shrunk_box_lanes": 0, "event": "wave", "frontier": 2, "native_wave_index": 0, "nodes": 1, "t": 6.596278773620725, "terminal_input_split_lanes": 0, "terminal_lp_calls": 0, "terminal_lp_certified_lanes": 0, "terminal_lp_failed_lanes": 0, "terminal_lp_falsified_lanes": 0, "terminal_lp_skipped_lanes": 0, "terminal_lp_time_ms": 0, "wave": 1}
+CLIMB_TRACE {"K": 2, "climb_enabled": false, "climb_unlearned_shrunk_box_lanes": 0, "event": "wave", "frontier": 0, "native_wave_index": 0, "nodes": 3, "t": 6.65010448358953, "terminal_input_split_lanes": 0, "terminal_lp_calls": 0, "terminal_lp_certified_lanes": 0, "terminal_lp_failed_lanes": 0, "terminal_lp_falsified_lanes": 0, "terminal_lp_skipped_lanes": 0, "terminal_lp_time_ms": 0, "wave": 2}
+CLIMB_TRACE_FINAL {"alpha_per_row_waves": 2, "alpha_shared_waves": 0, "any_dropped_frontier_cap": false, "bounding_top_k_effective": 0, "exhausted_budget_nodes": false, "exhausted_budget_time": false, "frontier_bytes_peak": 1530544, "frontier_cold_pops": 0, "frontier_evicted_nodes": 0, "frontier_nodes_peak": 2, "frontier_offload_events": 0, "frontier_warmstart_dropped_nodes": 0, "frontier_wave_k_caps": 0, "multi_split_clamped_wave_count": 0, "multi_split_k_requested": 1, "multi_split_k_used": 1, "multi_split_lane_starved_count": 0, "multi_split_wave_count": 0, "nodes": 3, "nodes_minted": 0, "pool_remaining": 0, "spec_rows_kept": 1, "whole_batch_fallback_count": 0}
+CLIMB_TRACE {"K": 2, "climb_enabled": false, "climb_unlearned_shrunk_box_lanes": 0, "event": "final", "frontier": 0, "native_wave_index": 0, "nodes": 3, "status": "VerifyStatus.CERTIFIED", "t": 6.650314450263977, "terminal_input_split_lanes": 0, "terminal_lp_calls": 0, "terminal_lp_certified_lanes": 0, "terminal_lp_failed_lanes": 0, "terminal_lp_falsified_lanes": 0, "terminal_lp_skipped_lanes": 0, "terminal_lp_time_ms": 0, "wave": 2}
+FSE_VERIFY_TIME: 7.558853824
+FSE_TIMEOUT_CLOCK_TIME: 7.696856352
+Loaded 43-layer net; solver=dual
+Lane 0: VerifyStatus.CERTIFIED
+  nodes: 3
+  spec_rows_kept: 1
+  pool_remaining: 0
+  exhausted_budget_time: False
+  exhausted_budget_nodes: False
+  nodes_minted: 0
+  any_dropped_frontier_cap: False
+  multi_split_k_requested: 1
+  multi_split_k_used: 1
+  multi_split_wave_count: 0
+  multi_split_clamped_wave_count: 0
+  multi_split_lane_starved_count: 0
+  alpha_shared_waves: 0
+  alpha_per_row_waves: 2
+  whole_batch_fallback_count: 0
+  bounding_top_k_effective: 0
+  frontier_bytes_peak: 1530544
+  frontier_nodes_peak: 2
+  frontier_offload_events: 0
+  frontier_warmstart_dropped_nodes: 0
+  frontier_wave_k_caps: 0
+  frontier_evicted_nodes: 0
+  frontier_cold_pops: 0
+QV_GPU_PEAK: allocated_mib=3711.5 reserved_mib=4710.0

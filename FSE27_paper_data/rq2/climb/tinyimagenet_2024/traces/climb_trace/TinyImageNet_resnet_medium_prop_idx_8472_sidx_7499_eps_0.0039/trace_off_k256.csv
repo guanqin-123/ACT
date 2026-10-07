@@ -1,0 +1,16 @@
+K,climb_enabled,climb_unlearned_shrunk_box_lanes,event,frontier,native_wave_index,nodes,t,terminal_input_split_lanes,terminal_lp_calls,terminal_lp_certified_lanes,terminal_lp_failed_lanes,terminal_lp_falsified_lanes,terminal_lp_skipped_lanes,terminal_lp_time_ms,wave,status
+0,False,0,initial,1,0,0,4.978123020380735,0,0,0,0,0,0,0,0,
+1,False,0,wave,2,0,1,5.967157997190952,0,0,0,0,0,0,0,1,
+2,False,0,wave,4,0,3,6.392740540206432,0,0,0,0,0,0,0,2,
+4,False,0,wave,8,0,7,6.820435123518109,0,0,0,0,0,0,0,3,
+8,False,0,wave,14,0,15,7.256198801100254,0,0,0,0,0,0,0,4,
+14,False,0,wave,18,0,29,7.687375660985708,0,0,0,0,0,0,0,5,
+18,False,0,wave,24,0,47,8.126908123493195,0,0,0,0,0,0,0,6,
+24,False,0,wave,16,0,71,8.535821946337819,0,0,0,0,0,0,0,7,
+16,False,0,wave,12,0,87,8.930698717013001,0,0,0,0,0,0,0,8,
+12,False,0,wave,8,0,99,9.323756072670221,0,0,0,0,0,0,0,9,
+8,False,0,wave,4,0,107,9.705039812251925,0,0,0,0,0,0,0,10,
+4,False,0,wave,4,0,111,10.07641783170402,0,0,0,0,0,0,0,11,
+4,False,0,wave,4,0,115,10.445783704519272,0,0,0,0,0,0,0,12,
+4,False,0,wave,0,0,119,10.475400580093265,0,0,0,0,0,0,0,13,
+4,False,0,final,0,0,119,10.475600875914097,0,0,0,0,0,0,0,13,VerifyStatus.CERTIFIED

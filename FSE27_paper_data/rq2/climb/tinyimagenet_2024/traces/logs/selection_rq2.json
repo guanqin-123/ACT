@@ -1,0 +1,33 @@
+{
+ "rule_both100": "TinyImageNet RQ2 queries solved by on_k256 and off_k256 within 100 s, both with nodes>0 (all such queries), ordered by off nodes desc",
+ "rule_long": "TinyImageNet RQ2 queries solved by on_k256 within 100 s but not by off_k256 (all such queries); rerun with a 300 s budget for both variants",
+ "both100": [
+  "TinyImageNet_resnet_medium_prop_idx_3218_sidx_5420_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_2212_sidx_6450_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_7026_sidx_3752_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_9396_sidx_3885_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_3417_sidx_7200_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_9542_sidx_2775_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_1126_sidx_4974_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_4361_sidx_106_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_8472_sidx_7499_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_3178_sidx_7992_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_9443_sidx_9318_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_3133_sidx_2042_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_1733_sidx_5415_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_1754_sidx_9786_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_9634_sidx_2838_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_4441_sidx_6620_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_4535_sidx_3722_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_7632_sidx_2106_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_5421_sidx_558_eps_0.0039.vnnlib"
+ ],
+ "long": [
+  "TinyImageNet_resnet_medium_prop_idx_3558_sidx_7280_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_5440_sidx_1808_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_9762_sidx_9367_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_9653_sidx_4967_eps_0.0039.vnnlib",
+  "TinyImageNet_resnet_medium_prop_idx_3511_sidx_721_eps_0.0039.vnnlib"
+ ]
+}

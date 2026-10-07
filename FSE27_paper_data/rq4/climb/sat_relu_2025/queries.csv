@@ -1,0 +1,9 @@
+query,onnx,vnnlib,onnx_path,vnnlib_path
+0,unsat_v6_c30.onnx,unsat_v6_c30.vnnlib,data/vnncomp2025/sat_relu/2.0/onnx/unsat_v6_c30.onnx,data/vnncomp2025/sat_relu/2.0/vnnlib/unsat_v6_c30.vnnlib
+1,unsat_v9_c9.onnx,unsat_v9_c9.vnnlib,data/vnncomp2025/sat_relu/2.0/onnx/unsat_v9_c9.onnx,data/vnncomp2025/sat_relu/2.0/vnnlib/unsat_v9_c9.vnnlib
+2,unsat_v9_c14.onnx,unsat_v9_c14.vnnlib,data/vnncomp2025/sat_relu/2.0/onnx/unsat_v9_c14.onnx,data/vnncomp2025/sat_relu/2.0/vnnlib/unsat_v9_c14.vnnlib
+3,unsat_v10_c26.onnx,unsat_v10_c26.vnnlib,data/vnncomp2025/sat_relu/2.0/onnx/unsat_v10_c26.onnx,data/vnncomp2025/sat_relu/2.0/vnnlib/unsat_v10_c26.vnnlib
+4,unsat_v14_c57.onnx,unsat_v14_c57.vnnlib,data/vnncomp2025/sat_relu/2.0/onnx/unsat_v14_c57.onnx,data/vnncomp2025/sat_relu/2.0/vnnlib/unsat_v14_c57.vnnlib
+5,unsat_v16_c39.onnx,unsat_v16_c39.vnnlib,data/vnncomp2025/sat_relu/2.0/onnx/unsat_v16_c39.onnx,data/vnncomp2025/sat_relu/2.0/vnnlib/unsat_v16_c39.vnnlib
+6,unsat_v18_c88.onnx,unsat_v18_c88.vnnlib,data/vnncomp2025/sat_relu/2.0/onnx/unsat_v18_c88.onnx,data/vnncomp2025/sat_relu/2.0/vnnlib/unsat_v18_c88.vnnlib
+7,unsat_v20_c40.onnx,unsat_v20_c40.vnnlib,data/vnncomp2025/sat_relu/2.0/onnx/unsat_v20_c40.onnx,data/vnncomp2025/sat_relu/2.0/vnnlib/unsat_v20_c40.vnnlib

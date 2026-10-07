@@ -1,0 +1,191 @@
+{
+ "rule": "TinyImageNet queries outside the 30-query RQ2 subset that CLIMB solved in RQ1 (climb_fsb, 100 s) after entering BaB in 20-99 s; off_k256 then on_k256 (fse2026/rq23_fsb/configs.yaml), 300 s budget each, ordered by RQ1 CLIMB time ascending",
+ "queries": [
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_4312_sidx_1349_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 20.726725956,
+   "rq1_nodes": 153
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_7926_sidx_589_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 21.102299208,
+   "rq1_nodes": 138
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_6077_sidx_9485_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 23.471047044,
+   "rq1_nodes": 398
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_6958_sidx_1414_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 23.590973198,
+   "rq1_nodes": 169
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_1134_sidx_5880_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 25.082581976,
+   "rq1_nodes": 426
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_4109_sidx_3134_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 25.368232673,
+   "rq1_nodes": 244
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_208_sidx_4376_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 26.603037719,
+   "rq1_nodes": 886
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_8436_sidx_1112_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 30.321267648,
+   "rq1_nodes": 101
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_5234_sidx_7711_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 30.86675914,
+   "rq1_nodes": 575
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_1777_sidx_439_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 31.904478457,
+   "rq1_nodes": 40
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_2712_sidx_2558_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 32.116003677,
+   "rq1_nodes": 278
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_8041_sidx_395_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 33.911437454,
+   "rq1_nodes": 254
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_5652_sidx_8781_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 34.190728202,
+   "rq1_nodes": 1613
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_8684_sidx_9001_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 34.475290922,
+   "rq1_nodes": 344
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_247_sidx_1124_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 35.159597179,
+   "rq1_nodes": 622
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_5050_sidx_9269_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 37.240987923,
+   "rq1_nodes": 143
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_1731_sidx_6691_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 38.697941516,
+   "rq1_nodes": 95
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_8013_sidx_2238_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 39.61468149,
+   "rq1_nodes": 475
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_670_sidx_7171_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 40.011410302,
+   "rq1_nodes": 2254
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_3139_sidx_2973_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 41.854518319,
+   "rq1_nodes": 222
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_842_sidx_3836_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 43.426532364,
+   "rq1_nodes": 1665
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_736_sidx_8938_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 44.106519394,
+   "rq1_nodes": 1490
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_5442_sidx_6087_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 46.313687431,
+   "rq1_nodes": 409
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_6230_sidx_8544_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 46.802371304,
+   "rq1_nodes": 1691
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_6569_sidx_5110_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 49.685910054,
+   "rq1_nodes": 2096
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_9796_sidx_1847_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 53.721206969,
+   "rq1_nodes": 1258
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_4409_sidx_8244_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 57.922187507,
+   "rq1_nodes": 2855
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_9827_sidx_1673_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 71.946437443,
+   "rq1_nodes": 3099
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_8623_sidx_6019_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 73.806950534,
+   "rq1_nodes": 5665
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_1417_sidx_8632_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 90.468077131,
+   "rq1_nodes": 5305
+  },
+  {
+   "vnnlib": "TinyImageNet_resnet_medium_prop_idx_1247_sidx_5409_eps_0.0039.vnnlib",
+   "rq1_status": "CERTIFIED",
+   "rq1_time_s": 99.198238786,
+   "rq1_nodes": 9430
+  }
+ ]
+}

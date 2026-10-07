@@ -1,0 +1,5 @@
+K,climb_enabled,climb_unlearned_shrunk_box_lanes,event,frontier,native_wave_index,nodes,t,terminal_input_split_lanes,terminal_lp_calls,terminal_lp_certified_lanes,terminal_lp_failed_lanes,terminal_lp_falsified_lanes,terminal_lp_skipped_lanes,terminal_lp_time_ms,wave,status
+0,False,0,initial,1,0,0,5.117584718391299,0,0,0,0,0,0,0,0,
+1,False,0,wave,2,0,1,6.154198836535215,0,0,0,0,0,0,0,1,
+2,False,0,wave,0,0,3,6.201094772666693,0,0,0,0,0,0,0,2,
+2,False,0,final,0,0,3,6.2013071198016405,0,0,0,0,0,0,0,2,VerifyStatus.CERTIFIED

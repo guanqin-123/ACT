@@ -1,0 +1,611 @@
+2026-10-04T09:57:55+11:00 waiting for the earlier tiny_trace20 driver (pid 2428049) to finish
+2026-10-04T10:18:33+11:00 driver start pid=2274083
+2026-10-04T10:18:40+11:00 START TinyImageNet_resnet_medium_prop_idx_3218_sidx_5420_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 20d09f4288cbabdf601f data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3218_sidx_5420_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 20d09f4288cbabdf601f state=completed status=CERTIFIED wall=19.249012619256973
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:18:59+11:00 END TinyImageNet_resnet_medium_prop_idx_3218_sidx_5420_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:19:05+11:00 START TinyImageNet_resnet_medium_prop_idx_9396_sidx_3885_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 647e5b57687b94b72724 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9396_sidx_3885_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 647e5b57687b94b72724 state=completed status=CERTIFIED wall=53.86939552240074
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:19:59+11:00 END TinyImageNet_resnet_medium_prop_idx_9396_sidx_3885_eps_0.0039 on_k256 rc=0 other-user-sm-max=96%
+2026-10-04T10:20:06+11:00 START TinyImageNet_resnet_medium_prop_idx_3417_sidx_7200_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 5ddca64dc41aaf6b054d data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3417_sidx_7200_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 5ddca64dc41aaf6b054d state=completed status=FALSIFIED wall=14.089797299355268
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:20:20+11:00 END TinyImageNet_resnet_medium_prop_idx_3417_sidx_7200_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:21:14+11:00 START TinyImageNet_resnet_medium_prop_idx_9542_sidx_2775_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN ade4a2260a0f81230434 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9542_sidx_2775_eps_0.0039.vnnlib on_k256 timeout=100
+DONE ade4a2260a0f81230434 state=completed status=CERTIFIED wall=17.696792900562286
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:21:32+11:00 END TinyImageNet_resnet_medium_prop_idx_9542_sidx_2775_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:21:41+11:00 START TinyImageNet_resnet_medium_prop_idx_1126_sidx_4974_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 9c5801bdabdec188608a data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1126_sidx_4974_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 9c5801bdabdec188608a state=completed status=CERTIFIED wall=16.29483938589692
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:21:57+11:00 END TinyImageNet_resnet_medium_prop_idx_1126_sidx_4974_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:22:04+11:00 START TinyImageNet_resnet_medium_prop_idx_4361_sidx_106_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 6a6c7aa2044a195c6551 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_4361_sidx_106_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 6a6c7aa2044a195c6551 state=completed status=FALSIFIED wall=30.918248172849417
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:22:35+11:00 END TinyImageNet_resnet_medium_prop_idx_4361_sidx_106_eps_0.0039 on_k256 rc=0 other-user-sm-max=84%
+2026-10-04T10:22:58+11:00 START TinyImageNet_resnet_medium_prop_idx_8472_sidx_7499_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 47519cd890c933596c7d data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_8472_sidx_7499_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 47519cd890c933596c7d state=completed status=CERTIFIED wall=16.643726317211986
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:23:14+11:00 END TinyImageNet_resnet_medium_prop_idx_8472_sidx_7499_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:23:23+11:00 START TinyImageNet_resnet_medium_prop_idx_3178_sidx_7992_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 29cdfb06bb05f95c5021 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3178_sidx_7992_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 29cdfb06bb05f95c5021 state=completed status=CERTIFIED wall=14.289534714072943
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:23:37+11:00 END TinyImageNet_resnet_medium_prop_idx_3178_sidx_7992_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:23:44+11:00 START TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN ae5a905abd749775fe8b data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039.vnnlib on_k256 timeout=100
+DONE ae5a905abd749775fe8b state=completed status=CERTIFIED wall=40.840013451874256
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:24:25+11:00 END TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039 on_k256 rc=0 other-user-sm-max=96%
+2026-10-04T10:24:43+11:00 START TinyImageNet_resnet_medium_prop_idx_9443_sidx_9318_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 3690a9498a41a40a9ae2 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9443_sidx_9318_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 3690a9498a41a40a9ae2 state=completed status=CERTIFIED wall=14.541044225916266
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:24:58+11:00 END TinyImageNet_resnet_medium_prop_idx_9443_sidx_9318_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:25:09+11:00 START TinyImageNet_resnet_medium_prop_idx_3133_sidx_2042_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN ca6da6a6e25814ba90eb data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3133_sidx_2042_eps_0.0039.vnnlib on_k256 timeout=100
+DONE ca6da6a6e25814ba90eb state=completed status=FALSIFIED wall=16.594169225543737
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:25:25+11:00 END TinyImageNet_resnet_medium_prop_idx_3133_sidx_2042_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:25:32+11:00 START TinyImageNet_resnet_medium_prop_idx_1733_sidx_5415_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 3a995cd28328bf2446b4 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1733_sidx_5415_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 3a995cd28328bf2446b4 state=completed status=CERTIFIED wall=37.63746822811663
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:26:10+11:00 END TinyImageNet_resnet_medium_prop_idx_1733_sidx_5415_eps_0.0039 on_k256 rc=0 other-user-sm-max=96%
+2026-10-04T10:26:41+11:00 START TinyImageNet_resnet_medium_prop_idx_1754_sidx_9786_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 30440855a7654aca4254 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1754_sidx_9786_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 30440855a7654aca4254 state=completed status=FALSIFIED wall=14.439076967537403
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:26:55+11:00 END TinyImageNet_resnet_medium_prop_idx_1754_sidx_9786_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:27:02+11:00 START TinyImageNet_resnet_medium_prop_idx_9634_sidx_2838_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 31623ba053c55e2053fa data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9634_sidx_2838_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 31623ba053c55e2053fa state=completed status=CERTIFIED wall=12.185535047203302
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:27:14+11:00 END TinyImageNet_resnet_medium_prop_idx_9634_sidx_2838_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:28:23+11:00 START TinyImageNet_resnet_medium_prop_idx_4441_sidx_6620_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 9a07e601464b94456f18 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_4441_sidx_6620_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 9a07e601464b94456f18 state=completed status=CERTIFIED wall=12.387037141248584
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:28:35+11:00 END TinyImageNet_resnet_medium_prop_idx_4441_sidx_6620_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:28:42+11:00 START TinyImageNet_resnet_medium_prop_idx_4535_sidx_3722_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN b7e4024d2ad1a2c99bb4 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_4535_sidx_3722_eps_0.0039.vnnlib on_k256 timeout=100
+DONE b7e4024d2ad1a2c99bb4 state=completed status=CERTIFIED wall=11.600441733375192
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:28:53+11:00 END TinyImageNet_resnet_medium_prop_idx_4535_sidx_3722_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:29:00+11:00 START TinyImageNet_resnet_medium_prop_idx_7632_sidx_2106_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 75292eff0c0a94d51ffc data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_7632_sidx_2106_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 75292eff0c0a94d51ffc state=completed status=CERTIFIED wall=25.510730616748333
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:29:25+11:00 END TinyImageNet_resnet_medium_prop_idx_7632_sidx_2106_eps_0.0039 on_k256 rc=0 other-user-sm-max=95%
+2026-10-04T10:30:48+11:00 START TinyImageNet_resnet_medium_prop_idx_5421_sidx_558_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN c0317addf5d78042a383 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_5421_sidx_558_eps_0.0039.vnnlib on_k256 timeout=100
+DONE c0317addf5d78042a383 state=completed status=CERTIFIED wall=12.435649693012238
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:31:01+11:00 END TinyImageNet_resnet_medium_prop_idx_5421_sidx_558_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:31:07+11:00 START TinyImageNet_resnet_medium_prop_idx_3218_sidx_5420_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN 3c8ef460599eddcaa8eb data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3218_sidx_5420_eps_0.0039.vnnlib off_k256 timeout=100
+DONE 3c8ef460599eddcaa8eb state=completed status=CERTIFIED wall=92.78215016424656
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:32:40+11:00 END TinyImageNet_resnet_medium_prop_idx_3218_sidx_5420_eps_0.0039 off_k256 rc=0 other-user-sm-max=96%
+2026-10-04T10:32:47+11:00 START TinyImageNet_resnet_medium_prop_idx_9396_sidx_3885_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN b13ee3e5a77f2e038667 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9396_sidx_3885_eps_0.0039.vnnlib off_k256 timeout=100
+DONE b13ee3e5a77f2e038667 state=completed status=CERTIFIED wall=20.150549102574587
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:33:07+11:00 END TinyImageNet_resnet_medium_prop_idx_9396_sidx_3885_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:33:13+11:00 START TinyImageNet_resnet_medium_prop_idx_3417_sidx_7200_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN 6bea57218f43f69eb717 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3417_sidx_7200_eps_0.0039.vnnlib off_k256 timeout=100
+DONE 6bea57218f43f69eb717 state=completed status=FALSIFIED wall=66.5889842864126
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:34:20+11:00 END TinyImageNet_resnet_medium_prop_idx_3417_sidx_7200_eps_0.0039 off_k256 rc=0 other-user-sm-max=99%
+2026-10-04T10:34:26+11:00 START TinyImageNet_resnet_medium_prop_idx_9542_sidx_2775_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN ebe83de6e393a0e381ce data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9542_sidx_2775_eps_0.0039.vnnlib off_k256 timeout=100
+DONE ebe83de6e393a0e381ce state=completed status=CERTIFIED wall=52.761826764792204
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:35:19+11:00 END TinyImageNet_resnet_medium_prop_idx_9542_sidx_2775_eps_0.0039 off_k256 rc=0 other-user-sm-max=98%
+2026-10-04T10:35:42+11:00 START TinyImageNet_resnet_medium_prop_idx_1126_sidx_4974_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN a9dac5eff780df631a7c data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1126_sidx_4974_eps_0.0039.vnnlib off_k256 timeout=100
+DONE a9dac5eff780df631a7c state=completed status=CERTIFIED wall=16.745032131671906
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:35:59+11:00 END TinyImageNet_resnet_medium_prop_idx_1126_sidx_4974_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:36:08+11:00 START TinyImageNet_resnet_medium_prop_idx_4361_sidx_106_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN 31ea6b071dccf965535c data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_4361_sidx_106_eps_0.0039.vnnlib off_k256 timeout=100
+DONE 31ea6b071dccf965535c state=completed status=FALSIFIED wall=14.13905568793416
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:36:22+11:00 END TinyImageNet_resnet_medium_prop_idx_4361_sidx_106_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:37:20+11:00 START TinyImageNet_resnet_medium_prop_idx_8472_sidx_7499_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN 5b0e62166eb70c2c43df data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_8472_sidx_7499_eps_0.0039.vnnlib off_k256 timeout=100
+DONE 5b0e62166eb70c2c43df state=completed status=CERTIFIED wall=16.40122966095805
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:37:37+11:00 END TinyImageNet_resnet_medium_prop_idx_8472_sidx_7499_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:37:45+11:00 START TinyImageNet_resnet_medium_prop_idx_3178_sidx_7992_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN 77042f1265037a5432d8 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3178_sidx_7992_eps_0.0039.vnnlib off_k256 timeout=100
+DONE 77042f1265037a5432d8 state=completed status=CERTIFIED wall=16.805268168449402
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:38:02+11:00 END TinyImageNet_resnet_medium_prop_idx_3178_sidx_7992_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:38:08+11:00 START TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN e1d1ef03b8318863dff3 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039.vnnlib off_k256 timeout=100
+DONE e1d1ef03b8318863dff3 state=completed status=CERTIFIED wall=54.2623742967844
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:39:03+11:00 END TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039 off_k256 rc=0 other-user-sm-max=95%
+2026-10-04T10:39:34+11:00 START TinyImageNet_resnet_medium_prop_idx_9443_sidx_9318_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN cb762b2c53fa75c151c9 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9443_sidx_9318_eps_0.0039.vnnlib off_k256 timeout=100
+DONE cb762b2c53fa75c151c9 state=completed status=CERTIFIED wall=15.3912449516356
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:39:50+11:00 END TinyImageNet_resnet_medium_prop_idx_9443_sidx_9318_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:40:50+11:00 START TinyImageNet_resnet_medium_prop_idx_3133_sidx_2042_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN e4f1bfd28d80a950d6b0 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3133_sidx_2042_eps_0.0039.vnnlib off_k256 timeout=100
+DONE e4f1bfd28d80a950d6b0 state=completed status=FALSIFIED wall=14.289282275363803
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:41:04+11:00 END TinyImageNet_resnet_medium_prop_idx_3133_sidx_2042_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:41:11+11:00 START TinyImageNet_resnet_medium_prop_idx_1733_sidx_5415_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN 3979823237caa01d95e4 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1733_sidx_5415_eps_0.0039.vnnlib off_k256 timeout=100
+DONE 3979823237caa01d95e4 state=completed status=CERTIFIED wall=14.08941469155252
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:41:25+11:00 END TinyImageNet_resnet_medium_prop_idx_1733_sidx_5415_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:41:31+11:00 START TinyImageNet_resnet_medium_prop_idx_1754_sidx_9786_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN 06986396267ad4bc503c data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1754_sidx_9786_eps_0.0039.vnnlib off_k256 timeout=100
+DONE 06986396267ad4bc503c state=completed status=FALSIFIED wall=25.460226271301508
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:41:57+11:00 END TinyImageNet_resnet_medium_prop_idx_1754_sidx_9786_eps_0.0039 off_k256 rc=0 other-user-sm-max=98%
+2026-10-04T10:42:43+11:00 START TinyImageNet_resnet_medium_prop_idx_9634_sidx_2838_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN a81a17dd4e972c2e4a25 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9634_sidx_2838_eps_0.0039.vnnlib off_k256 timeout=100
+DONE a81a17dd4e972c2e4a25 state=completed status=CERTIFIED wall=11.683921871706843
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:42:54+11:00 END TinyImageNet_resnet_medium_prop_idx_9634_sidx_2838_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:43:07+11:00 START TinyImageNet_resnet_medium_prop_idx_4441_sidx_6620_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN 57156572542fa6d8ce16 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_4441_sidx_6620_eps_0.0039.vnnlib off_k256 timeout=100
+DONE 57156572542fa6d8ce16 state=completed status=CERTIFIED wall=12.338812999427319
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:43:19+11:00 END TinyImageNet_resnet_medium_prop_idx_4441_sidx_6620_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:43:26+11:00 START TinyImageNet_resnet_medium_prop_idx_4535_sidx_3722_eps_0.0039 off_k256 T=100 other-user-sm=84%
+RUN e23563efba0b61489a4c data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_4535_sidx_3722_eps_0.0039.vnnlib off_k256 timeout=100
+DONE e23563efba0b61489a4c state=completed status=CERTIFIED wall=52.70871942490339
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:44:19+11:00 END TinyImageNet_resnet_medium_prop_idx_4535_sidx_3722_eps_0.0039 off_k256 rc=0 other-user-sm-max=98%
+2026-10-04T10:44:25+11:00 START TinyImageNet_resnet_medium_prop_idx_7632_sidx_2106_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN f7ccbb13b8430c359a8c data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_7632_sidx_2106_eps_0.0039.vnnlib off_k256 timeout=100
+DONE f7ccbb13b8430c359a8c state=completed status=CERTIFIED wall=13.29098404571414
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:44:38+11:00 END TinyImageNet_resnet_medium_prop_idx_7632_sidx_2106_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:44:47+11:00 START TinyImageNet_resnet_medium_prop_idx_5421_sidx_558_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN 99fdaec96b71aefb0ec9 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_5421_sidx_558_eps_0.0039.vnnlib off_k256 timeout=100
+DONE 99fdaec96b71aefb0ec9 state=completed status=CERTIFIED wall=11.836134243756533
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:44:59+11:00 END TinyImageNet_resnet_medium_prop_idx_5421_sidx_558_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:44:59+11:00 redo contended run TinyImageNet_resnet_medium_prop_idx_3218_sidx_5420_eps_0.0039 off_k256 (other-user SM max 96%)
+2026-10-04T10:45:05+11:00 START TinyImageNet_resnet_medium_prop_idx_3218_sidx_5420_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN 3c8ef460599eddcaa8eb data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3218_sidx_5420_eps_0.0039.vnnlib off_k256 timeout=100
+DONE 3c8ef460599eddcaa8eb state=completed status=CERTIFIED wall=93.03302902728319
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:46:39+11:00 END TinyImageNet_resnet_medium_prop_idx_3218_sidx_5420_eps_0.0039 off_k256 rc=0 other-user-sm-max=98%
+2026-10-04T10:46:39+11:00 redo contended run TinyImageNet_resnet_medium_prop_idx_9396_sidx_3885_eps_0.0039 on_k256 (other-user SM max 96%)
+2026-10-04T10:46:47+11:00 START TinyImageNet_resnet_medium_prop_idx_9396_sidx_3885_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 647e5b57687b94b72724 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9396_sidx_3885_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 647e5b57687b94b72724 state=completed status=CERTIFIED wall=54.36268599703908
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:47:42+11:00 END TinyImageNet_resnet_medium_prop_idx_9396_sidx_3885_eps_0.0039 on_k256 rc=0 other-user-sm-max=97%
+2026-10-04T10:47:42+11:00 redo contended run TinyImageNet_resnet_medium_prop_idx_3417_sidx_7200_eps_0.0039 off_k256 (other-user SM max 99%)
+2026-10-04T10:48:29+11:00 START TinyImageNet_resnet_medium_prop_idx_3417_sidx_7200_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN 6bea57218f43f69eb717 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3417_sidx_7200_eps_0.0039.vnnlib off_k256 timeout=100
+DONE 6bea57218f43f69eb717 state=completed status=FALSIFIED wall=17.5955801717937
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:48:47+11:00 END TinyImageNet_resnet_medium_prop_idx_3417_sidx_7200_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:48:47+11:00 redo contended run TinyImageNet_resnet_medium_prop_idx_9542_sidx_2775_eps_0.0039 off_k256 (other-user SM max 98%)
+2026-10-04T10:48:58+11:00 START TinyImageNet_resnet_medium_prop_idx_9542_sidx_2775_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN ebe83de6e393a0e381ce data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9542_sidx_2775_eps_0.0039.vnnlib off_k256 timeout=100
+DONE ebe83de6e393a0e381ce state=completed status=CERTIFIED wall=18.348331609740853
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:49:16+11:00 END TinyImageNet_resnet_medium_prop_idx_9542_sidx_2775_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:49:16+11:00 redo contended run TinyImageNet_resnet_medium_prop_idx_4361_sidx_106_eps_0.0039 on_k256 (other-user SM max 84%)
+2026-10-04T10:49:22+11:00 START TinyImageNet_resnet_medium_prop_idx_4361_sidx_106_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 6a6c7aa2044a195c6551 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_4361_sidx_106_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 6a6c7aa2044a195c6551 state=completed status=FALSIFIED wall=30.72172749787569
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:49:53+11:00 END TinyImageNet_resnet_medium_prop_idx_4361_sidx_106_eps_0.0039 on_k256 rc=0 other-user-sm-max=97%
+2026-10-04T10:49:54+11:00 redo contended run TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039 on_k256 (other-user SM max 96%)
+2026-10-04T10:50:20+11:00 START TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN ae5a905abd749775fe8b data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039.vnnlib on_k256 timeout=100
+DONE ae5a905abd749775fe8b state=completed status=CERTIFIED wall=15.140695575624704
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:50:36+11:00 END TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:50:36+11:00 redo contended run TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039 off_k256 (other-user SM max 95%)
+2026-10-04T10:50:44+11:00 START TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039 off_k256 T=100 other-user-sm=92%
+RUN e1d1ef03b8318863dff3 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039.vnnlib off_k256 timeout=100
+DONE e1d1ef03b8318863dff3 state=completed status=CERTIFIED wall=69.89634754322469
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:51:54+11:00 END TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039 off_k256 rc=0 other-user-sm-max=98%
+2026-10-04T10:51:54+11:00 redo contended run TinyImageNet_resnet_medium_prop_idx_1733_sidx_5415_eps_0.0039 on_k256 (other-user SM max 96%)
+2026-10-04T10:52:01+11:00 START TinyImageNet_resnet_medium_prop_idx_1733_sidx_5415_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 3a995cd28328bf2446b4 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1733_sidx_5415_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 3a995cd28328bf2446b4 state=completed status=CERTIFIED wall=14.14033217355609
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:52:15+11:00 END TinyImageNet_resnet_medium_prop_idx_1733_sidx_5415_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:52:15+11:00 redo contended run TinyImageNet_resnet_medium_prop_idx_1754_sidx_9786_eps_0.0039 off_k256 (other-user SM max 98%)
+2026-10-04T10:52:21+11:00 START TinyImageNet_resnet_medium_prop_idx_1754_sidx_9786_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN 06986396267ad4bc503c data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1754_sidx_9786_eps_0.0039.vnnlib off_k256 timeout=100
+DONE 06986396267ad4bc503c state=completed status=FALSIFIED wall=65.28456591814756
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:53:27+11:00 END TinyImageNet_resnet_medium_prop_idx_1754_sidx_9786_eps_0.0039 off_k256 rc=0 other-user-sm-max=99%
+2026-10-04T10:53:27+11:00 redo contended run TinyImageNet_resnet_medium_prop_idx_4535_sidx_3722_eps_0.0039 off_k256 (other-user SM max 98%)
+2026-10-04T10:53:33+11:00 START TinyImageNet_resnet_medium_prop_idx_4535_sidx_3722_eps_0.0039 off_k256 T=100 other-user-sm=0%
+RUN e23563efba0b61489a4c data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_4535_sidx_3722_eps_0.0039.vnnlib off_k256 timeout=100
+DONE e23563efba0b61489a4c state=completed status=CERTIFIED wall=12.135739149525762
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:53:45+11:00 END TinyImageNet_resnet_medium_prop_idx_4535_sidx_3722_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:53:46+11:00 redo contended run TinyImageNet_resnet_medium_prop_idx_7632_sidx_2106_eps_0.0039 on_k256 (other-user SM max 95%)
+2026-10-04T10:53:52+11:00 START TinyImageNet_resnet_medium_prop_idx_7632_sidx_2106_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 75292eff0c0a94d51ffc data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_7632_sidx_2106_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 75292eff0c0a94d51ffc state=completed status=CERTIFIED wall=12.636556975543499
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:54:05+11:00 END TinyImageNet_resnet_medium_prop_idx_7632_sidx_2106_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:54:05+11:00 stage 1 complete
+2026-10-04T10:54:11+11:00 START TinyImageNet_resnet_medium_prop_idx_3558_sidx_7280_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 46def757f3b77b8bbc2a data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3558_sidx_7280_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 46def757f3b77b8bbc2a state=completed status=CERTIFIED wall=129.40119453892112
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:56:21+11:00 END TinyImageNet_resnet_medium_prop_idx_3558_sidx_7280_eps_0.0039 on_k256 rc=0 other-user-sm-max=99%
+2026-10-04T10:56:27+11:00 START TinyImageNet_resnet_medium_prop_idx_5440_sidx_1808_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 44a6a5b644ef6bf8f8bb data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_5440_sidx_1808_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 44a6a5b644ef6bf8f8bb state=completed status=CERTIFIED wall=31.670276019722223
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:56:59+11:00 END TinyImageNet_resnet_medium_prop_idx_5440_sidx_1808_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:57:59+11:00 START TinyImageNet_resnet_medium_prop_idx_9762_sidx_9367_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN f4aabfebdccf8d9fab77 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9762_sidx_9367_eps_0.0039.vnnlib on_k256 timeout=100
+DONE f4aabfebdccf8d9fab77 state=completed status=CERTIFIED wall=30.96908177435398
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T10:58:30+11:00 END TinyImageNet_resnet_medium_prop_idx_9762_sidx_9367_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T10:58:36+11:00 START TinyImageNet_resnet_medium_prop_idx_9653_sidx_4967_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 14c5932ac9f9967ac5ce data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9653_sidx_4967_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 14c5932ac9f9967ac5ce state=completed status=CERTIFIED wall=91.67964553274214
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:00:08+11:00 END TinyImageNet_resnet_medium_prop_idx_9653_sidx_4967_eps_0.0039 on_k256 rc=0 other-user-sm-max=97%
+2026-10-04T11:00:15+11:00 START TinyImageNet_resnet_medium_prop_idx_3511_sidx_721_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN fbdebf796a9c9958a442 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3511_sidx_721_eps_0.0039.vnnlib on_k256 timeout=100
+DONE fbdebf796a9c9958a442 state=completed status=CERTIFIED wall=13.439244791865349
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:00:28+11:00 END TinyImageNet_resnet_medium_prop_idx_3511_sidx_721_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:01:12+11:00 START TinyImageNet_resnet_medium_prop_idx_3558_sidx_7280_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN c1fd4e09525727deeb3c data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3558_sidx_7280_eps_0.0039.vnnlib off_k256 timeout=300
+DONE c1fd4e09525727deeb3c state=completed status=CERTIFIED wall=56.66333091631532
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:02:09+11:00 END TinyImageNet_resnet_medium_prop_idx_3558_sidx_7280_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:03:07+11:00 START TinyImageNet_resnet_medium_prop_idx_5440_sidx_1808_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 15ef010fcec74a29adc0 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_5440_sidx_1808_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 15ef010fcec74a29adc0 state=completed status=UNKNOWN wall=311.57255807332695
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:08:18+11:00 END TinyImageNet_resnet_medium_prop_idx_5440_sidx_1808_eps_0.0039 off_k256 rc=0 other-user-sm-max=99%
+2026-10-04T11:08:41+11:00 START TinyImageNet_resnet_medium_prop_idx_9762_sidx_9367_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 917b35121c889d59c9af data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9762_sidx_9367_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 917b35121c889d59c9af state=completed status=UNKNOWN wall=305.1151874549687
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:13:47+11:00 END TinyImageNet_resnet_medium_prop_idx_9762_sidx_9367_eps_0.0039 off_k256 rc=0 other-user-sm-max=99%
+2026-10-04T11:13:53+11:00 START TinyImageNet_resnet_medium_prop_idx_9653_sidx_4967_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 6de16a321e3594dff211 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9653_sidx_4967_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 6de16a321e3594dff211 state=completed status=UNKNOWN wall=305.5153307784349
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:18:59+11:00 END TinyImageNet_resnet_medium_prop_idx_9653_sidx_4967_eps_0.0039 off_k256 rc=0 other-user-sm-max=99%
+2026-10-04T11:19:15+11:00 START TinyImageNet_resnet_medium_prop_idx_3511_sidx_721_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 21daf09886bead3b3311 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3511_sidx_721_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 21daf09886bead3b3311 state=completed status=UNKNOWN wall=304.70185159519315
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:24:20+11:00 END TinyImageNet_resnet_medium_prop_idx_3511_sidx_721_eps_0.0039 off_k256 rc=0 other-user-sm-max=98%
+2026-10-04T11:24:21+11:00 stage 2 complete
+2026-10-04T11:24:58+11:00 START TinyImageNet_resnet_medium_prop_idx_4312_sidx_1349_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 3642d3d87743edb98cf7 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_4312_sidx_1349_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 3642d3d87743edb98cf7 state=completed status=CERTIFIED wall=33.12259962782264
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:25:31+11:00 END TinyImageNet_resnet_medium_prop_idx_4312_sidx_1349_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:25:37+11:00 START TinyImageNet_resnet_medium_prop_idx_7926_sidx_589_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 2ba541c68e29e199a057 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_7926_sidx_589_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 2ba541c68e29e199a057 state=completed status=CERTIFIED wall=93.88511973619461
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:27:11+11:00 END TinyImageNet_resnet_medium_prop_idx_7926_sidx_589_eps_0.0039 off_k256 rc=0 other-user-sm-max=98%
+2026-10-04T11:27:18+11:00 START TinyImageNet_resnet_medium_prop_idx_6077_sidx_9485_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 39cc4944b5006f10d5ab data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_6077_sidx_9485_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 39cc4944b5006f10d5ab state=completed status=UNKNOWN wall=304.87065913155675
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:32:23+11:00 END TinyImageNet_resnet_medium_prop_idx_6077_sidx_9485_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:32:29+11:00 START TinyImageNet_resnet_medium_prop_idx_6958_sidx_1414_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 03946ee84e0ff0f1e6b6 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_6958_sidx_1414_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 03946ee84e0ff0f1e6b6 state=completed status=CERTIFIED wall=40.889031583443284
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:33:10+11:00 END TinyImageNet_resnet_medium_prop_idx_6958_sidx_1414_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:33:17+11:00 START TinyImageNet_resnet_medium_prop_idx_1134_sidx_5880_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 50c650ef3d9ed65648bb data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1134_sidx_5880_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 50c650ef3d9ed65648bb state=completed status=CERTIFIED wall=174.78372319228947
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:36:12+11:00 END TinyImageNet_resnet_medium_prop_idx_1134_sidx_5880_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:36:18+11:00 START TinyImageNet_resnet_medium_prop_idx_4109_sidx_3134_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN efdee4ece45081136cbf data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_4109_sidx_3134_eps_0.0039.vnnlib off_k256 timeout=300
+DONE efdee4ece45081136cbf state=completed status=CERTIFIED wall=51.710908971726894
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:37:10+11:00 END TinyImageNet_resnet_medium_prop_idx_4109_sidx_3134_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:37:16+11:00 START TinyImageNet_resnet_medium_prop_idx_208_sidx_4376_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN fa42710bab3fc12b7ae2 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_208_sidx_4376_eps_0.0039.vnnlib off_k256 timeout=300
+DONE fa42710bab3fc12b7ae2 state=completed status=CERTIFIED wall=115.0258256252855
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:39:11+11:00 END TinyImageNet_resnet_medium_prop_idx_208_sidx_4376_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:39:18+11:00 START TinyImageNet_resnet_medium_prop_idx_8436_sidx_1112_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 6b091cf904e9e3a3d8ea data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_8436_sidx_1112_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 6b091cf904e9e3a3d8ea state=completed status=CERTIFIED wall=21.751350700855255
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:39:40+11:00 END TinyImageNet_resnet_medium_prop_idx_8436_sidx_1112_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:39:46+11:00 START TinyImageNet_resnet_medium_prop_idx_5234_sidx_7711_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN eb051e87c777dc44f227 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_5234_sidx_7711_eps_0.0039.vnnlib off_k256 timeout=300
+DONE eb051e87c777dc44f227 state=completed status=UNKNOWN wall=304.1750412210822
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:44:50+11:00 END TinyImageNet_resnet_medium_prop_idx_5234_sidx_7711_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:44:57+11:00 START TinyImageNet_resnet_medium_prop_idx_1777_sidx_439_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 1402f1fa9e93036d1eeb data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1777_sidx_439_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 1402f1fa9e93036d1eeb state=completed status=CERTIFIED wall=14.99201164022088
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:45:12+11:00 END TinyImageNet_resnet_medium_prop_idx_1777_sidx_439_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:45:18+11:00 START TinyImageNet_resnet_medium_prop_idx_2712_sidx_2558_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 230819cad458eadd55a3 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_2712_sidx_2558_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 230819cad458eadd55a3 state=completed status=CERTIFIED wall=40.689439659938216
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:45:59+11:00 END TinyImageNet_resnet_medium_prop_idx_2712_sidx_2558_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:46:06+11:00 START TinyImageNet_resnet_medium_prop_idx_8041_sidx_395_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 74bef0e0d5f1fc9e8f09 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_8041_sidx_395_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 74bef0e0d5f1fc9e8f09 state=completed status=CERTIFIED wall=25.860666060820222
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:46:32+11:00 END TinyImageNet_resnet_medium_prop_idx_8041_sidx_395_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:46:38+11:00 START TinyImageNet_resnet_medium_prop_idx_5652_sidx_8781_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 9fbb70eab183e7f68c6c data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_5652_sidx_8781_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 9fbb70eab183e7f68c6c state=completed status=UNKNOWN wall=304.12399446591735
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:51:42+11:00 END TinyImageNet_resnet_medium_prop_idx_5652_sidx_8781_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:51:49+11:00 START TinyImageNet_resnet_medium_prop_idx_8684_sidx_9001_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN daa2101dc27a9f5e1129 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_8684_sidx_9001_eps_0.0039.vnnlib off_k256 timeout=300
+DONE daa2101dc27a9f5e1129 state=completed status=CERTIFIED wall=77.6121476944536
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:53:06+11:00 END TinyImageNet_resnet_medium_prop_idx_8684_sidx_9001_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:53:13+11:00 START TinyImageNet_resnet_medium_prop_idx_247_sidx_1124_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN b4e7aa987cae00a9d740 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_247_sidx_1124_eps_0.0039.vnnlib off_k256 timeout=300
+DONE b4e7aa987cae00a9d740 state=completed status=UNKNOWN wall=304.27512378431857
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:58:17+11:00 END TinyImageNet_resnet_medium_prop_idx_247_sidx_1124_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:58:24+11:00 START TinyImageNet_resnet_medium_prop_idx_5050_sidx_9269_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 938508117dcddc0620d4 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_5050_sidx_9269_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 938508117dcddc0620d4 state=completed status=CERTIFIED wall=70.99488584324718
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T11:59:35+11:00 END TinyImageNet_resnet_medium_prop_idx_5050_sidx_9269_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T11:59:41+11:00 START TinyImageNet_resnet_medium_prop_idx_1731_sidx_6691_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 3c14207ed22ed35287b1 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1731_sidx_6691_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 3c14207ed22ed35287b1 state=completed status=CERTIFIED wall=161.95785889588296
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:02:23+11:00 END TinyImageNet_resnet_medium_prop_idx_1731_sidx_6691_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T12:02:30+11:00 START TinyImageNet_resnet_medium_prop_idx_8013_sidx_2238_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN a0e7aa9d299fcea5b50d data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_8013_sidx_2238_eps_0.0039.vnnlib off_k256 timeout=300
+DONE a0e7aa9d299fcea5b50d state=completed status=CERTIFIED wall=100.45256157964468
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:04:10+11:00 END TinyImageNet_resnet_medium_prop_idx_8013_sidx_2238_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T12:04:17+11:00 START TinyImageNet_resnet_medium_prop_idx_670_sidx_7171_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 23370bf7c1d300f7ab5b data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_670_sidx_7171_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 23370bf7c1d300f7ab5b state=completed status=UNKNOWN wall=304.12755869328976
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:09:21+11:00 END TinyImageNet_resnet_medium_prop_idx_670_sidx_7171_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T12:09:27+11:00 START TinyImageNet_resnet_medium_prop_idx_3139_sidx_2973_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 88778d7b920da7999e1d data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3139_sidx_2973_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 88778d7b920da7999e1d state=completed status=UNKNOWN wall=304.2771799005568
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:14:32+11:00 END TinyImageNet_resnet_medium_prop_idx_3139_sidx_2973_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T12:14:38+11:00 START TinyImageNet_resnet_medium_prop_idx_842_sidx_3836_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 558ff7776a7e34378ab5 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_842_sidx_3836_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 558ff7776a7e34378ab5 state=completed status=UNKNOWN wall=304.4734245724976
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:19:43+11:00 END TinyImageNet_resnet_medium_prop_idx_842_sidx_3836_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T12:19:49+11:00 START TinyImageNet_resnet_medium_prop_idx_736_sidx_8938_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 908fd788395b3dd5ee15 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_736_sidx_8938_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 908fd788395b3dd5ee15 state=completed status=UNKNOWN wall=304.48266620375216
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:24:54+11:00 END TinyImageNet_resnet_medium_prop_idx_736_sidx_8938_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T12:25:00+11:00 START TinyImageNet_resnet_medium_prop_idx_5442_sidx_6087_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 0be7355c707baa71efbc data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_5442_sidx_6087_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 0be7355c707baa71efbc state=completed status=CERTIFIED wall=197.32298464514315
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:28:18+11:00 END TinyImageNet_resnet_medium_prop_idx_5442_sidx_6087_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T12:28:24+11:00 START TinyImageNet_resnet_medium_prop_idx_6230_sidx_8544_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN ecf0d5893291b7c8f46b data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_6230_sidx_8544_eps_0.0039.vnnlib off_k256 timeout=300
+DONE ecf0d5893291b7c8f46b state=completed status=UNKNOWN wall=304.16879523545504
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:34:10+11:00 END TinyImageNet_resnet_medium_prop_idx_6230_sidx_8544_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T12:34:16+11:00 START TinyImageNet_resnet_medium_prop_idx_6569_sidx_5110_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 5f6e1a2b22cb20872fdf data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_6569_sidx_5110_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 5f6e1a2b22cb20872fdf state=completed status=UNKNOWN wall=309.32797997817397
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:39:40+11:00 END TinyImageNet_resnet_medium_prop_idx_6569_sidx_5110_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T12:39:46+11:00 START TinyImageNet_resnet_medium_prop_idx_9796_sidx_1847_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN b5016984eb2f6fa9abec data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9796_sidx_1847_eps_0.0039.vnnlib off_k256 timeout=300
+DONE b5016984eb2f6fa9abec state=completed status=UNKNOWN wall=304.17929021827877
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:45:02+11:00 END TinyImageNet_resnet_medium_prop_idx_9796_sidx_1847_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T12:45:09+11:00 START TinyImageNet_resnet_medium_prop_idx_4409_sidx_8244_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 58e8804bf5f6c15f7c73 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_4409_sidx_8244_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 58e8804bf5f6c15f7c73 state=completed status=UNKNOWN wall=304.87105091661215
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:50:29+11:00 END TinyImageNet_resnet_medium_prop_idx_4409_sidx_8244_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T12:50:36+11:00 START TinyImageNet_resnet_medium_prop_idx_9827_sidx_1673_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN beb38963fe87c220a4d3 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9827_sidx_1673_eps_0.0039.vnnlib off_k256 timeout=300
+DONE beb38963fe87c220a4d3 state=completed status=UNKNOWN wall=304.27940353378654
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:55:52+11:00 END TinyImageNet_resnet_medium_prop_idx_9827_sidx_1673_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T12:55:58+11:00 START TinyImageNet_resnet_medium_prop_idx_8623_sidx_6019_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN 7226aeb9183a5852bad1 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_8623_sidx_6019_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 7226aeb9183a5852bad1 state=completed status=UNKNOWN wall=304.32161510922015
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:01:03+11:00 END TinyImageNet_resnet_medium_prop_idx_8623_sidx_6019_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:01:09+11:00 START TinyImageNet_resnet_medium_prop_idx_1417_sidx_8632_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN c03d043ab7c827723642 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1417_sidx_8632_eps_0.0039.vnnlib off_k256 timeout=300
+DONE c03d043ab7c827723642 state=watchdog status=WATCHDOG wall=340.0007766019553
+SUMMARY attempted=1 skipped=0 failures=1
+2026-10-04T13:06:49+11:00 END TinyImageNet_resnet_medium_prop_idx_1417_sidx_8632_eps_0.0039 off_k256 rc=1 other-user-sm-max=0%
+2026-10-04T13:06:56+11:00 START TinyImageNet_resnet_medium_prop_idx_1247_sidx_5409_eps_0.0039 off_k256 T=300 other-user-sm=0%
+RUN b8b2846cae8a6d8c6745 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1247_sidx_5409_eps_0.0039.vnnlib off_k256 timeout=300
+DONE b8b2846cae8a6d8c6745 state=completed status=UNKNOWN wall=304.22262288071215
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:12:00+11:00 END TinyImageNet_resnet_medium_prop_idx_1247_sidx_5409_eps_0.0039 off_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:12:07+11:00 START TinyImageNet_resnet_medium_prop_idx_4312_sidx_1349_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 4a58135b3cf3cae5c7cb data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_4312_sidx_1349_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 4a58135b3cf3cae5c7cb state=completed status=CERTIFIED wall=21.955307425931096
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:12:29+11:00 END TinyImageNet_resnet_medium_prop_idx_4312_sidx_1349_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:12:35+11:00 START TinyImageNet_resnet_medium_prop_idx_7926_sidx_589_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 058b08ce740126a90568 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_7926_sidx_589_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 058b08ce740126a90568 state=completed status=CERTIFIED wall=20.903092972934246
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:12:56+11:00 END TinyImageNet_resnet_medium_prop_idx_7926_sidx_589_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:13:03+11:00 START TinyImageNet_resnet_medium_prop_idx_6958_sidx_1414_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 50ce4b0b70c123c4c650 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_6958_sidx_1414_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 50ce4b0b70c123c4c650 state=completed status=CERTIFIED wall=24.758789708837867
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:13:28+11:00 END TinyImageNet_resnet_medium_prop_idx_6958_sidx_1414_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:13:34+11:00 START TinyImageNet_resnet_medium_prop_idx_1134_sidx_5880_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 1150635d2e97c55b4aac data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1134_sidx_5880_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 1150635d2e97c55b4aac state=completed status=CERTIFIED wall=24.51022594794631
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:13:59+11:00 END TinyImageNet_resnet_medium_prop_idx_1134_sidx_5880_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:14:05+11:00 START TinyImageNet_resnet_medium_prop_idx_4109_sidx_3134_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN e09d0cd8a9af59607c55 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_4109_sidx_3134_eps_0.0039.vnnlib on_k256 timeout=100
+DONE e09d0cd8a9af59607c55 state=completed status=CERTIFIED wall=23.762734960764647
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:14:29+11:00 END TinyImageNet_resnet_medium_prop_idx_4109_sidx_3134_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:14:35+11:00 START TinyImageNet_resnet_medium_prop_idx_208_sidx_4376_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 8ab4bb3c78df830f7ba7 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_208_sidx_4376_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 8ab4bb3c78df830f7ba7 state=completed status=CERTIFIED wall=24.813408287242055
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:15:00+11:00 END TinyImageNet_resnet_medium_prop_idx_208_sidx_4376_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:15:07+11:00 START TinyImageNet_resnet_medium_prop_idx_8436_sidx_1112_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN b192c4186ad8e9ff273d data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_8436_sidx_1112_eps_0.0039.vnnlib on_k256 timeout=100
+DONE b192c4186ad8e9ff273d state=completed status=CERTIFIED wall=20.072264758870006
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:15:27+11:00 END TinyImageNet_resnet_medium_prop_idx_8436_sidx_1112_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:15:34+11:00 START TinyImageNet_resnet_medium_prop_idx_1777_sidx_439_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 09fc636220ba20359f8c data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1777_sidx_439_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 09fc636220ba20359f8c state=completed status=CERTIFIED wall=13.488177128136158
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:15:47+11:00 END TinyImageNet_resnet_medium_prop_idx_1777_sidx_439_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:15:54+11:00 START TinyImageNet_resnet_medium_prop_idx_2712_sidx_2558_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 9a7b29a8758c3486e642 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_2712_sidx_2558_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 9a7b29a8758c3486e642 state=completed status=CERTIFIED wall=22.35910264775157
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:16:16+11:00 END TinyImageNet_resnet_medium_prop_idx_2712_sidx_2558_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:16:22+11:00 START TinyImageNet_resnet_medium_prop_idx_8041_sidx_395_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 7e1d14a69beff357578a data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_8041_sidx_395_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 7e1d14a69beff357578a state=completed status=CERTIFIED wall=19.449882593005896
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:16:42+11:00 END TinyImageNet_resnet_medium_prop_idx_8041_sidx_395_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:16:49+11:00 START TinyImageNet_resnet_medium_prop_idx_8684_sidx_9001_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 8d36661d156f8b00fee7 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_8684_sidx_9001_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 8d36661d156f8b00fee7 state=completed status=CERTIFIED wall=22.65985373966396
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:17:11+11:00 END TinyImageNet_resnet_medium_prop_idx_8684_sidx_9001_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:17:18+11:00 START TinyImageNet_resnet_medium_prop_idx_5050_sidx_9269_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 8b840dc8b494dade6d1b data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_5050_sidx_9269_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 8b840dc8b494dade6d1b state=completed status=CERTIFIED wall=20.69846123084426
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:17:39+11:00 END TinyImageNet_resnet_medium_prop_idx_5050_sidx_9269_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:17:45+11:00 START TinyImageNet_resnet_medium_prop_idx_1731_sidx_6691_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 9a8cd40c1a293968ebc5 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1731_sidx_6691_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 9a8cd40c1a293968ebc5 state=completed status=CERTIFIED wall=21.40577538497746
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:18:07+11:00 END TinyImageNet_resnet_medium_prop_idx_1731_sidx_6691_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:18:13+11:00 START TinyImageNet_resnet_medium_prop_idx_8013_sidx_2238_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 05c31a5afe173200693a data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_8013_sidx_2238_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 05c31a5afe173200693a state=completed status=CERTIFIED wall=29.415912022814155
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:18:43+11:00 END TinyImageNet_resnet_medium_prop_idx_8013_sidx_2238_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:18:49+11:00 START TinyImageNet_resnet_medium_prop_idx_5442_sidx_6087_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN f23ec2a07091c1de3ff3 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_5442_sidx_6087_eps_0.0039.vnnlib on_k256 timeout=100
+DONE f23ec2a07091c1de3ff3 state=completed status=CERTIFIED wall=24.058435196056962
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:19:13+11:00 END TinyImageNet_resnet_medium_prop_idx_5442_sidx_6087_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:19:20+11:00 START TinyImageNet_resnet_medium_prop_idx_6077_sidx_9485_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN b10141cc9ee9ce42f898 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_6077_sidx_9485_eps_0.0039.vnnlib on_k256 timeout=100
+DONE b10141cc9ee9ce42f898 state=completed status=CERTIFIED wall=27.716221403330564
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:19:48+11:00 END TinyImageNet_resnet_medium_prop_idx_6077_sidx_9485_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:19:54+11:00 START TinyImageNet_resnet_medium_prop_idx_5234_sidx_7711_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 614a2a4e430eb7771157 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_5234_sidx_7711_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 614a2a4e430eb7771157 state=completed status=CERTIFIED wall=26.363133227452636
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:20:21+11:00 END TinyImageNet_resnet_medium_prop_idx_5234_sidx_7711_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:20:27+11:00 START TinyImageNet_resnet_medium_prop_idx_5652_sidx_8781_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN a4bc936c93231ab3c81f data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_5652_sidx_8781_eps_0.0039.vnnlib on_k256 timeout=100
+DONE a4bc936c93231ab3c81f state=completed status=CERTIFIED wall=35.53257589228451
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:21:03+11:00 END TinyImageNet_resnet_medium_prop_idx_5652_sidx_8781_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:21:09+11:00 START TinyImageNet_resnet_medium_prop_idx_247_sidx_1124_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 8793bc776a1074fa08f0 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_247_sidx_1124_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 8793bc776a1074fa08f0 state=completed status=CERTIFIED wall=32.020738277584314
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:21:41+11:00 END TinyImageNet_resnet_medium_prop_idx_247_sidx_1124_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:21:48+11:00 START TinyImageNet_resnet_medium_prop_idx_670_sidx_7171_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN ae0fdb72899de283e7f9 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_670_sidx_7171_eps_0.0039.vnnlib on_k256 timeout=100
+DONE ae0fdb72899de283e7f9 state=completed status=CERTIFIED wall=40.637484949082136
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:22:29+11:00 END TinyImageNet_resnet_medium_prop_idx_670_sidx_7171_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:22:35+11:00 START TinyImageNet_resnet_medium_prop_idx_3139_sidx_2973_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 1ec04469413e88553a96 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3139_sidx_2973_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 1ec04469413e88553a96 state=completed status=CERTIFIED wall=23.00709288008511
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:22:58+11:00 END TinyImageNet_resnet_medium_prop_idx_3139_sidx_2973_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:23:05+11:00 START TinyImageNet_resnet_medium_prop_idx_842_sidx_3836_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN bc50b758958171740508 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_842_sidx_3836_eps_0.0039.vnnlib on_k256 timeout=100
+DONE bc50b758958171740508 state=completed status=CERTIFIED wall=38.63564930856228
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:23:44+11:00 END TinyImageNet_resnet_medium_prop_idx_842_sidx_3836_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:23:50+11:00 START TinyImageNet_resnet_medium_prop_idx_736_sidx_8938_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 283246db1728717e0667 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_736_sidx_8938_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 283246db1728717e0667 state=completed status=CERTIFIED wall=39.939366878941655
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:24:30+11:00 END TinyImageNet_resnet_medium_prop_idx_736_sidx_8938_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:24:37+11:00 START TinyImageNet_resnet_medium_prop_idx_6230_sidx_8544_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN d0e1cc0ac314e9b8e4e6 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_6230_sidx_8544_eps_0.0039.vnnlib on_k256 timeout=100
+DONE d0e1cc0ac314e9b8e4e6 state=completed status=CERTIFIED wall=45.54983440041542
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:25:22+11:00 END TinyImageNet_resnet_medium_prop_idx_6230_sidx_8544_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:25:29+11:00 START TinyImageNet_resnet_medium_prop_idx_6569_sidx_5110_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN ec46d99361b2ef1cb654 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_6569_sidx_5110_eps_0.0039.vnnlib on_k256 timeout=100
+DONE ec46d99361b2ef1cb654 state=completed status=CERTIFIED wall=39.84060217626393
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:26:09+11:00 END TinyImageNet_resnet_medium_prop_idx_6569_sidx_5110_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:26:15+11:00 START TinyImageNet_resnet_medium_prop_idx_9796_sidx_1847_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 2c6d29e0819d70fef043 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9796_sidx_1847_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 2c6d29e0819d70fef043 state=completed status=CERTIFIED wall=35.07848113961518
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:26:50+11:00 END TinyImageNet_resnet_medium_prop_idx_9796_sidx_1847_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:26:57+11:00 START TinyImageNet_resnet_medium_prop_idx_4409_sidx_8244_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN b5c2246490ca1eff1b3b data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_4409_sidx_8244_eps_0.0039.vnnlib on_k256 timeout=100
+DONE b5c2246490ca1eff1b3b state=completed status=CERTIFIED wall=49.05392309464514
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:27:46+11:00 END TinyImageNet_resnet_medium_prop_idx_4409_sidx_8244_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:27:52+11:00 START TinyImageNet_resnet_medium_prop_idx_9827_sidx_1673_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 53cc897e2a3460e7e529 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9827_sidx_1673_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 53cc897e2a3460e7e529 state=completed status=CERTIFIED wall=46.20242251269519
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:28:39+11:00 END TinyImageNet_resnet_medium_prop_idx_9827_sidx_1673_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:28:45+11:00 START TinyImageNet_resnet_medium_prop_idx_8623_sidx_6019_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 8052d2ec3fbc088b48b0 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_8623_sidx_6019_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 8052d2ec3fbc088b48b0 state=completed status=CERTIFIED wall=64.53247884474695
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:29:50+11:00 END TinyImageNet_resnet_medium_prop_idx_8623_sidx_6019_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:29:56+11:00 START TinyImageNet_resnet_medium_prop_idx_1417_sidx_8632_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN c2861b848aae547b8967 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1417_sidx_8632_eps_0.0039.vnnlib on_k256 timeout=100
+DONE c2861b848aae547b8967 state=completed status=CERTIFIED wall=66.23767208866775
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:31:03+11:00 END TinyImageNet_resnet_medium_prop_idx_1417_sidx_8632_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:31:09+11:00 START TinyImageNet_resnet_medium_prop_idx_1247_sidx_5409_eps_0.0039 on_k256 T=100 other-user-sm=0%
+RUN 38643f22380843f05701 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1247_sidx_5409_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 38643f22380843f05701 state=completed status=CERTIFIED wall=86.97622270323336
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T13:32:36+11:00 END TinyImageNet_resnet_medium_prop_idx_1247_sidx_5409_eps_0.0039 on_k256 rc=0 other-user-sm-max=0%
+2026-10-04T13:32:37+11:00 driver done

@@ -1,0 +1,72 @@
+2026-10-04T12:27:50+11:00 redo start pid=45390
+2026-10-04T12:28:24+11:00 REDO TinyImageNet_resnet_medium_prop_idx_3218_sidx_5420_eps_0.0039 off_k256 attempt 1
+RUN 3c8ef460599eddcaa8eb data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3218_sidx_5420_eps_0.0039.vnnlib off_k256 timeout=100
+DONE 3c8ef460599eddcaa8eb state=completed status=CERTIFIED wall=41.59075194597244
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:29:06+11:00 END TinyImageNet_resnet_medium_prop_idx_3218_sidx_5420_eps_0.0039 off_k256 other-user-sm-max=0%
+2026-10-04T12:34:16+11:00 REDO TinyImageNet_resnet_medium_prop_idx_9396_sidx_3885_eps_0.0039 on_k256 attempt 1
+RUN 647e5b57687b94b72724 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9396_sidx_3885_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 647e5b57687b94b72724 state=completed status=CERTIFIED wall=14.591650357469916
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:34:31+11:00 END TinyImageNet_resnet_medium_prop_idx_9396_sidx_3885_eps_0.0039 on_k256 other-user-sm-max=0%
+2026-10-04T12:39:46+11:00 REDO TinyImageNet_resnet_medium_prop_idx_4361_sidx_106_eps_0.0039 on_k256 attempt 1
+RUN 6a6c7aa2044a195c6551 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_4361_sidx_106_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 6a6c7aa2044a195c6551 state=completed status=FALSIFIED wall=11.889637902379036
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:39:58+11:00 END TinyImageNet_resnet_medium_prop_idx_4361_sidx_106_eps_0.0039 on_k256 other-user-sm-max=0%
+2026-10-04T12:45:08+11:00 REDO TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039 off_k256 attempt 1
+RUN e1d1ef03b8318863dff3 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039.vnnlib off_k256 timeout=100
+DONE e1d1ef03b8318863dff3 state=completed status=CERTIFIED wall=15.847162684425712
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:45:25+11:00 END TinyImageNet_resnet_medium_prop_idx_9586_sidx_1970_eps_0.0039 off_k256 other-user-sm-max=0%
+2026-10-04T12:50:35+11:00 REDO TinyImageNet_resnet_medium_prop_idx_1754_sidx_9786_eps_0.0039 off_k256 attempt 1
+RUN 06986396267ad4bc503c data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_1754_sidx_9786_eps_0.0039.vnnlib off_k256 timeout=100
+DONE 06986396267ad4bc503c state=completed status=FALSIFIED wall=12.240922678261995
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T12:50:48+11:00 END TinyImageNet_resnet_medium_prop_idx_1754_sidx_9786_eps_0.0039 off_k256 other-user-sm-max=0%
+2026-10-04T12:50:48+11:00 redo done
+2026-10-04T14:31:30+11:00 redo start pid=1420472 queue=scratch/rq1_2026_tmp/trace_campaign/queries_long.txt out=fse2026/climb_trace_t300 budgets on=100 off=300
+2026-10-04T15:24:12+11:00 REDO TinyImageNet_resnet_medium_prop_idx_3558_sidx_7280_eps_0.0039 on_k256 attempt 1
+RUN 46def757f3b77b8bbc2a data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3558_sidx_7280_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 46def757f3b77b8bbc2a state=completed status=CERTIFIED wall=22.75531565397978
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T15:24:36+11:00 END TinyImageNet_resnet_medium_prop_idx_3558_sidx_7280_eps_0.0039 on_k256 other-user-sm-max=0%
+2026-10-04T15:36:03+11:00 REDO TinyImageNet_resnet_medium_prop_idx_5440_sidx_1808_eps_0.0039 off_k256 attempt 1
+RUN 15ef010fcec74a29adc0 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_5440_sidx_1808_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 15ef010fcec74a29adc0 state=completed status=UNKNOWN wall=305.4088348671794
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T15:41:09+11:00 END TinyImageNet_resnet_medium_prop_idx_5440_sidx_1808_eps_0.0039 off_k256 other-user-sm-max=0%
+2026-10-04T15:41:15+11:00 REDO TinyImageNet_resnet_medium_prop_idx_9762_sidx_9367_eps_0.0039 off_k256 attempt 1
+RUN 917b35121c889d59c9af data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9762_sidx_9367_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 917b35121c889d59c9af state=completed status=CERTIFIED wall=264.93804002925754
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T15:45:40+11:00 END TinyImageNet_resnet_medium_prop_idx_9762_sidx_9367_eps_0.0039 off_k256 other-user-sm-max=62%
+2026-10-04T15:57:30+11:00 REDO TinyImageNet_resnet_medium_prop_idx_9762_sidx_9367_eps_0.0039 off_k256 attempt 2
+RUN 917b35121c889d59c9af data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9762_sidx_9367_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 917b35121c889d59c9af state=completed status=CERTIFIED wall=155.49692062847316
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T16:00:06+11:00 END TinyImageNet_resnet_medium_prop_idx_9762_sidx_9367_eps_0.0039 off_k256 other-user-sm-max=0%
+2026-10-04T16:00:12+11:00 REDO TinyImageNet_resnet_medium_prop_idx_9653_sidx_4967_eps_0.0039 on_k256 attempt 1
+RUN 14c5932ac9f9967ac5ce data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9653_sidx_4967_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 14c5932ac9f9967ac5ce state=completed status=CERTIFIED wall=28.063685528934002
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T16:00:40+11:00 END TinyImageNet_resnet_medium_prop_idx_9653_sidx_4967_eps_0.0039 on_k256 other-user-sm-max=0%
+2026-10-04T16:00:47+11:00 REDO TinyImageNet_resnet_medium_prop_idx_9653_sidx_4967_eps_0.0039 off_k256 attempt 1
+RUN 6de16a321e3594dff211 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_9653_sidx_4967_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 6de16a321e3594dff211 state=completed status=UNKNOWN wall=304.2228165753186
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T16:05:51+11:00 END TinyImageNet_resnet_medium_prop_idx_9653_sidx_4967_eps_0.0039 off_k256 other-user-sm-max=0%
+2026-10-04T16:05:57+11:00 REDO TinyImageNet_resnet_medium_prop_idx_3511_sidx_721_eps_0.0039 off_k256 attempt 1
+RUN 21daf09886bead3b3311 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_3511_sidx_721_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 21daf09886bead3b3311 state=completed status=UNKNOWN wall=304.16218370199203
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T16:11:02+11:00 END TinyImageNet_resnet_medium_prop_idx_3511_sidx_721_eps_0.0039 off_k256 other-user-sm-max=0%
+2026-10-04T16:11:02+11:00 redo done
+2026-10-04T16:11:02+11:00 redo already running
+2026-10-04T16:13:39+11:00 redo start pid=3889623 queue=scratch/rq1_2026_tmp/trace_campaign/queue_rq1.txt out=fse2026/climb_trace_t300 budgets on=100 off=300
+2026-10-04T16:13:45+11:00 REDO TinyImageNet_resnet_medium_prop_idx_7926_sidx_589_eps_0.0039 off_k256 attempt 1
+RUN 2ba541c68e29e199a057 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_7926_sidx_589_eps_0.0039.vnnlib off_k256 timeout=300
+DONE 2ba541c68e29e199a057 state=completed status=CERTIFIED wall=33.57442603074014
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-04T16:14:19+11:00 END TinyImageNet_resnet_medium_prop_idx_7926_sidx_589_eps_0.0039 off_k256 other-user-sm-max=0%
+2026-10-04T16:14:19+11:00 redo done

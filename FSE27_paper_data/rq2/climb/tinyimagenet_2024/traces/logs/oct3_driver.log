@@ -1,0 +1,22 @@
+2026-10-03T20:51:06+10:00 driver start pid=1213581 python=~/miniconda3/envs/act-py312/bin/python
+2026-10-03T20:51:06+10:00 START TinyImageNet_resnet_medium_prop_idx_2212_sidx_6450_eps_0.0039 on_k256 (waiting for gpu.lock)
+RUN 7e4bc3284736fe86fe3d data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_2212_sidx_6450_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 7e4bc3284736fe86fe3d state=completed status=CERTIFIED wall=29.142212299630046
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-03T20:51:36+10:00 END TinyImageNet_resnet_medium_prop_idx_2212_sidx_6450_eps_0.0039 on_k256 rc=0
+2026-10-03T20:51:36+10:00 START TinyImageNet_resnet_medium_prop_idx_2212_sidx_6450_eps_0.0039 off_k256 (waiting for gpu.lock)
+RUN 5a10e0975dca03ebbdce data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_2212_sidx_6450_eps_0.0039.vnnlib off_k256 timeout=100
+DONE 5a10e0975dca03ebbdce state=completed status=CERTIFIED wall=40.40596338547766
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-03T20:52:16+10:00 END TinyImageNet_resnet_medium_prop_idx_2212_sidx_6450_eps_0.0039 off_k256 rc=0
+2026-10-03T20:52:16+10:00 START TinyImageNet_resnet_medium_prop_idx_7026_sidx_3752_eps_0.0039 on_k256 (waiting for gpu.lock)
+RUN 31fdbe17be62ba43fa14 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_7026_sidx_3752_eps_0.0039.vnnlib on_k256 timeout=100
+DONE 31fdbe17be62ba43fa14 state=completed status=CERTIFIED wall=34.225386906415224
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-03T20:52:50+10:00 END TinyImageNet_resnet_medium_prop_idx_7026_sidx_3752_eps_0.0039 on_k256 rc=0
+2026-10-03T20:52:50+10:00 START TinyImageNet_resnet_medium_prop_idx_7026_sidx_3752_eps_0.0039 off_k256 (waiting for gpu.lock)
+RUN 58b17b3054c98f7b4920 data/vnncomp2026/tinyimagenet_2024/2.0/onnx/TinyImageNet_resnet_medium.onnx+data/vnncomp2026/tinyimagenet_2024/2.0/vnnlib/TinyImageNet_resnet_medium_prop_idx_7026_sidx_3752_eps_0.0039.vnnlib off_k256 timeout=100
+DONE 58b17b3054c98f7b4920 state=completed status=CERTIFIED wall=42.982369204983115
+SUMMARY attempted=1 skipped=0 failures=0
+2026-10-03T20:53:33+10:00 END TinyImageNet_resnet_medium_prop_idx_7026_sidx_3752_eps_0.0039 off_k256 rc=0
+2026-10-03T20:53:33+10:00 driver done

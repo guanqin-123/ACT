@@ -1,0 +1,29 @@
+dataset,verifier,source,n,solved,certified,falsified,mean_s,median_s,vnncomp_penalties,time_basis,note
+tinyimagenet_2024,climb,ours,200,144,112,32,17.655654133020832,11.33243808,,our local verification time,no VNN-COMP 2026 entry
+tinyimagenet_2024,abcrown,ours,200,136,136,0,8.478016981307197,6.133096933364868,,our local verification time,
+tinyimagenet_2024,abcrown,vnncomp2026,200,177,139,38,24.69412715155932,27.915739619,0,VNN-COMP raw run time (includes tool start-up; overhead 5.65 s),official V/F/penalty match SCORING/latex/scored.tex
+tinyimagenet_2024,neuralsat,ours,200,127,127,0,29.940203937007873,26.3184,,our local verification time,
+tinyimagenet_2024,neuralsat,vnncomp2026,200,136,100,36,46.615392090632355,44.24296811799999,0,VNN-COMP raw run time (includes tool start-up; overhead 3.18 s),official V/F/penalty match SCORING/latex/scored.tex
+tinyimagenet_2024,nnenum,ours,3,0,0,0,,,,our local verification time,3 of 200 queries run; unsupported_op on every query run (N/A in Table 2)
+tinyimagenet_2024,nnenum,vnncomp2026,200,0,0,0,,,0,VNN-COMP raw run time (includes tool start-up; overhead 0.88 s),no row in SCORING/latex/scored.tex
+cifar100_2024,climb,ours,200,132,101,31,16.431379115196968,11.778757365499999,,our local verification time,no VNN-COMP 2026 entry
+cifar100_2024,abcrown,ours,200,120,120,0,7.396966087818146,3.8982999324798584,,our local verification time,
+cifar100_2024,abcrown,vnncomp2026,200,160,127,33,21.24627058599375,24.559687407,0,VNN-COMP raw run time (includes tool start-up; overhead 5.65 s),official V/F/penalty match SCORING/latex/scored.tex
+cifar100_2024,neuralsat,ours,200,111,111,0,21.7831981981982,14.2244,,our local verification time,
+cifar100_2024,neuralsat,vnncomp2026,200,137,104,33,39.3158857789562,34.534096649,0,VNN-COMP raw run time (includes tool start-up; overhead 3.18 s),official V/F/penalty match SCORING/latex/scored.tex
+cifar100_2024,nnenum,ours,200,0,0,0,,,,our local verification time,unsupported_op on every query run (N/A in Table 2)
+cifar100_2024,nnenum,vnncomp2026,200,0,0,0,,,0,VNN-COMP raw run time (includes tool start-up; overhead 0.88 s),no row in SCORING/latex/scored.tex
+cora_2024,climb,ours,180,146,24,122,1.9977074671369863,1.3190473875,,our local verification time,no VNN-COMP 2026 entry
+cora_2024,abcrown,ours,180,25,25,0,0.879172191619873,0.4006989002227783,,our local verification time,
+cora_2024,abcrown,vnncomp2026,180,152,25,127,6.092549513157895,5.9235430615,0,VNN-COMP raw run time (includes tool start-up; overhead 5.65 s),official V/F/penalty match SCORING/latex/scored.tex
+cora_2024,neuralsat,ours,180,25,25,0,2.34434,0.7506,,our local verification time,
+cora_2024,neuralsat,vnncomp2026,180,151,24,127,5.176258900443709,4.601107243,0,VNN-COMP raw run time (includes tool start-up; overhead 3.18 s),official V/F/penalty match SCORING/latex/scored.tex
+cora_2024,nnenum,ours,180,22,21,1,0.5890814137899063,0.47923591919243336,,our local verification time,
+cora_2024,nnenum,vnncomp2026,180,22,21,1,2.4395132461818183,1.7519763469999998,0,VNN-COMP raw run time (includes tool start-up; overhead 0.88 s),official V/F/penalty match SCORING/latex/scored.tex
+safenlp_2024,climb,ours,1080,1064,404,660,1.1264288689351505,0.37360789250000004,,our local verification time,no VNN-COMP 2026 entry
+safenlp_2024,abcrown,ours,1080,1079,418,661,1.0916375945960073,0.7701389789581299,,our local verification time,
+safenlp_2024,abcrown,vnncomp2026,1080,1080,418,662,6.400489772981481,6.261495720499999,0,VNN-COMP raw run time (includes tool start-up; overhead 5.65 s),official V/F/penalty match SCORING/latex/scored.tex
+safenlp_2024,neuralsat,ours,1080,856,400,456,0.7990643691588785,0.38970000000000005,,our local verification time,
+safenlp_2024,neuralsat,vnncomp2026,1080,963,390,573,5.332255880410176,5.396694362,86,VNN-COMP raw run time (includes tool start-up; overhead 3.18 s),official V/F/penalty match SCORING/latex/scored.tex
+safenlp_2024,nnenum,ours,1080,809,296,513,1.4113651081753897,0.2622135207056999,,our local verification time,
+safenlp_2024,nnenum,vnncomp2026,1080,841,262,579,1.758305747589774,1.292784201,54,VNN-COMP raw run time (includes tool start-up; overhead 0.88 s),official V/F/penalty match SCORING/latex/scored.tex
