@@ -1,0 +1,457 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# ACT Back-End Configuration
+# ═══════════════════════════════════════════════════════════════════════════
+# Canonical source for ALL back-end settings (runtime, verification, generation).
+# CI (.github/workflows/act-bab.yml) relies on these defaults.
+#
+# Precedence:  CLI flag > env var > BaB preset > this file > code default
+# Env vars:    ACT_SOLVER / ACT_DEVICE / ACT_DTYPE
+#
+# Layout:
+#   bab_presets – named sparse BaB configurations
+#   backend     – runtime selectors → verification cascade → torchlp → gurobi
+#                 → hybridz → dual → bab (branch-and-bound)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Branch-and-Bound presets
+# ─────────────────────────────────────────────────────────────────────────────
+# A preset is a named, sparse set of backend.bab overrides. Select one with
+# backend.bab_preset or --bab-preset NAME; --solver dual applies "dual" when no
+# preset is named. Preset values replace the backend.bab values below, except
+# for BaB fields set by explicit CLI flags, which keep the flag's value.
+bab_presets:
+  dual:
+    # Optimize the relaxation slopes (alpha) and the split multipliers (eta).
+    solver_tier: "dual_alpha_eta"
+    # Split the neuron with the best measured child-bound gain (babsr fallback).
+    branching_method: "gain"
+    # Children reuse the root's forward bounds, hardened by the split-derived
+    # interval refresh, instead of running a forward pass per node.
+    root_bounds_reuse: "split_refresh"
+    # Tighten the root's pre-activation bounds on every unstable layer.
+    intermediate_refine: "all"
+    # Split 4 neurons jointly: each lane gets 2^4 = 16 children.
+    multi_split_levels: 4
+
+  # CLIMB: query-local certificate replay, core learning and phase propagation.
+  # When the dual bound certifies a subproblem, its alpha/eta certificate is
+  # replayed to measure what each split decision (ReLU phase literal) it relied
+  # on contributes, and literals are dropped while the budget
+  # theta * slack - delta covers them (the first recheck_k lanes get one extra
+  # replay). The surviving literals form a core, kept in a per-query library of
+  # at most max_cores cores (subsumption, resolution, eviction). Pending
+  # subproblems whose split signs contain a core are discharged before
+  # bounding, and unresolved ones before splitting.
+  # validate_climb_config raises ConfigError unless solver_tier is
+  # dual_alpha_eta, bounding is a TopKBounding pool, branching splits neurons,
+  # root_bounds_reuse is "none" or "plain" and per_subproblem_refine is "none"
+  # (root-level intermediate_refine is allowed: it runs once on the root box,
+  # so replayed reference bounds still depend only on the lane input box).
+  climb:
+    # Replay needs the alpha/eta dual certificate.
+    solver_tier: "dual_alpha_eta"
+    # Cores are ReLU phase literals; an input-axis split would break the
+    # shared-box premise of core reuse.
+    branching_method: "babsr"
+    # CLIMB prunes the pending pool, which must be a TopKBounding pool.
+    bounding: "depth_bound_blend"
+    # Prerequisite: children re-run the forward pass (no root-bound reuse).
+    root_bounds_reuse: "none"
+    # Prerequisite: no intermediate-bound refinement at the root.
+    intermediate_refine: "none"
+    # Prerequisite: no per-subproblem intermediate-bound refinement.
+    per_subproblem_refine: "none"
+    # Turn CLIMB on (off in the backend.bab defaults).
+    climb_enabled: true
+    climb_merge_enabled: true
+    # Paper default (theta, K) = (0, 0): drop only exact zero-cost literals, no rechecks.
+    climb_theta: 0.0
+    climb_recheck_k: 0
+    # One split per step, so small nets still learn cores.
+    multi_split_levels: 1
+
+  # CLIMB with root-tightened, reused bounds (D7): the climb preset plus a
+  # single root-level refinement of every unstable layer, handed unchanged to
+  # every descendant with the lane box swapped in. Reference bounds still
+  # depend only on the lane input box, so cores stay reusable.
+  climb_refined:
+    solver_tier: "dual_alpha_eta"
+    branching_method: "babsr"
+    bounding: "depth_bound_blend"
+    # Descendants reuse the root forward dict (lane box swapped in) instead of
+    # re-running the forward pass; no split-derived hardening.
+    root_bounds_reuse: "plain"
+    # Tighten the root's pre-activation bounds on every unstable layer once.
+    intermediate_refine: "all"
+    # Prerequisite: no per-subproblem (split-dependent) refinement.
+    per_subproblem_refine: "none"
+    climb_enabled: true
+    climb_merge_enabled: true
+    climb_theta: 0.0
+    climb_recheck_k: 0
+    multi_split_levels: 1
+
+  # CLIMB with split-dependent bounds (D21 amends D7): climb_refined plus the
+  # split-derived interval refresh on every lane. Candidate cores are rechecked
+  # and replayed with bounds refreshed from the core's own literals, and
+  # literal costs include the E_i support costs. Paper configuration theta=0, K=0.
+  climb_split:
+    solver_tier: "dual_alpha_eta"
+    branching_method: "babsr"
+    bounding: "depth_bound_blend"
+    # Descendants reuse the root forward dict, hardened by their own splits.
+    root_bounds_reuse: "split_refresh"
+    intermediate_refine: "all"
+    # Prerequisite: no per-subproblem (split-dependent) refinement.
+    per_subproblem_refine: "none"
+    climb_enabled: true
+    climb_merge_enabled: true
+    # S6 speculative complement bounding (off the frontier; paper extension).
+    climb_complement_bounding: true
+    # Delete only literals whose total cost is certified exactly zero.
+    climb_theta: 0.0
+    climb_recheck_k: 0
+    multi_split_levels: 1
+
+  # G2 (D23): climb_split with the split-aware linear (CROWN-style backward)
+  # refresh; neurons it stabilizes are implied literals (not split by BaBSR),
+  # cores stay in decision literals and replay under the same refresh.
+  climb_split_lin:
+    solver_tier: "dual_alpha_eta"
+    branching_method: "babsr"
+    bounding: "depth_bound_blend"
+    # Descendants reuse the root forward dict, hardened by their own splits.
+    root_bounds_reuse: "split_refresh_linear"
+    intermediate_refine: "all"
+    # Prerequisite: no per-subproblem (split-dependent) refinement.
+    per_subproblem_refine: "none"
+    climb_enabled: true
+    climb_merge_enabled: true
+    # Delete only literals whose total cost is certified exactly zero.
+    climb_theta: 0.0
+    climb_recheck_k: 0
+    multi_split_levels: 1
+    # Z3 ladder ablation (experiments/climb_ladder/ablation_z3.md): N2 terminal-LP cores on
+    # (inherited) with N3's support refinement off had the best completed-pair wall.
+    climb_lin_support_refinement: false
+
+backend:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Runtime selectors  (apply to every back-end command)
+  # ─────────────────────────────────────────────────────────────────────────
+
+  # Solver backend for LP/MILP verification.
+  #   "auto"    – try Gurobi first, fall back to TorchLP
+  #   "gurobi"  – exact MILP/LP via Gurobi (requires license)
+  #   "torchlp" – PyTorch-tensor LP (Adam + penalty + box projection,
+  #               GPU-capable, no license)
+  #   "dual"    – linear-relaxation dual certified bounds
+  #   "hybridz" – HybridZ zonotope solver
+  # This selects WHICH solver runs; each solver's own tuning lives in its block
+  # below (torchlp:/gurobi:/hybridz:/dual:).  "auto" reuses gurobi + torchlp.
+  solver: "torchlp"
+
+  # Compute device.
+  #   "cpu"  – run on CPU (CI default, always available)
+  #   "cuda" – run on NVIDIA GPU (requires CUDA toolkit)
+  #   "gpu"  – alias for "cuda"
+  device: "cpu"
+
+  # Floating-point precision for all tensors.
+  #   "float64" – double precision (more accurate, slower)
+  #   "float32" – single precision (faster, may cause numerical drift)
+  dtype: "float64"
+
+  # Print extra diagnostic output across all commands.
+  verbose: false
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Verification cascade  (single-shot → LP-batched → BaB)
+  # ─────────────────────────────────────────────────────────────────────────
+
+  # Wall-clock budget in seconds for one net's --verify. The LP-batched tier
+  # gets the full budget; each BaB run gets what is left after the net build
+  # and the single-shot / LP tiers (the same remainder for every lane), and
+  # its clock starts at its entry, so its root refinement and pre-solve count.
+  # BaB may overshoot by at most one bounding unit (one dual batch call,
+  # reported as budget_longest_unit_s when the budget runs out). With solver
+  # hybridz it also bounds the single-shot solve unless hybridz.timeout is set.
+  timeout: 60.0
+
+  # Optional exact Gurobi MILP escalation after root tiers remain UNKNOWN and
+  # before BaB. Disabled by default; size/time guards fail closed to UNKNOWN.
+  milp_escalation: false
+  milp_max_variables: 2000
+  milp_max_constraints: 2000
+  milp_timeout: 60.0
+
+  # Named bab_presets entry; null auto-selects "dual" when solver = "dual".
+  bab_preset: null
+
+  # Enable the batched LP cascade tier (tier 2) before BaB. It runs on lanes still
+  # UNKNOWN after the single-shot tier and is skipped for solver dual / hybridz.
+  # Must be false when solver = "gurobi" (Gurobi solve_batch is N=1 only).
+  lp_enabled: true
+
+  # Maximum BaB subproblems solved in one batch (tier 3).
+  # Must be 1 when solver = "gurobi" (same N=1 restriction as lp_enabled).
+  bab_max_batch_size: 8
+
+  # Text-verification settings. When `method` is set, these overwrite the
+  # corresponding bab.* values (bab.method/p/perturbed_words/eps/max_eps/
+  # num_verify_iters/k/alpha_opt_steps) and bab.solver_tier.
+  method: null                  # SST/Yelp method: planar, rule, alpha, ibp or discrete
+  p: 2.0                        # text embedding perturbation norm metadata (2 or inf)
+  perturbed_words: 1            # token positions perturbed together (1 or 2)
+  eps: 0.00001                  # initial verification radius (>= 0)
+  max_eps: 0.01                 # maximum radius for the certified-radius search (>= 0)
+  num_verify_iters: 5           # binary-search iterations for the certified radius (>= 0)
+  k: 1                          # rule threshold for the rule-slope attention alpha
+  alpha_opt_steps: 1000         # optimization steps for optimized-alpha refinement
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TorchLP solver tuning  (torchlp)
+  # ─────────────────────────────────────────────────────────────────────────
+  torchlp:
+    # -- Penalty weights (objective adds rho * sum of squared violations) --
+    rho_eq: 10.0              # weight on sum((A_eq x - b_eq)^2)
+    rho_ineq: 10.0            # weight on sum(relu(A_le x - b_le)^2)
+    # -- Adam optimizer (torch.optim.Adam over the LP variables x) --
+    max_iter: 2000            # max Adam iterations per solve
+    lr: 0.01                  # Adam learning rate
+    beta1: 0.9                # Adam beta1 (first-moment decay)
+    beta2: 0.999              # Adam beta2 (second-moment decay)
+    weight_decay: 0.0         # Adam weight decay (L2 penalty on x)
+    tol_feas: 0.0001          # a lane is SAT if its max constraint violation <= this
+    # -- Large-N mode (when batch size x variables per LP > large_n_threshold) --
+    large_n_threshold: 20000  # batch size x variables per LP that triggers large-N mode
+    large_n_max_iter: 800     # large-N: max_iter is capped at this
+    large_n_tol: 0.001        # large-N: tol_feas is raised to at least this
+    # -- Stagnation early-stop --
+    stagnation_patience: 300  # stop after this many iterations without improvement
+    stagnation_tol: 0.00001   # min drop in max violation that counts as improvement
+    feas_check_stride: 5      # iterations between max-violation checks
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Gurobi solver tuning  (gurobi)
+  # ─────────────────────────────────────────────────────────────────────────
+  gurobi:
+    time_limit: null           # Gurobi TimeLimit in seconds; null = the caller's time limit
+    mip_gap: 0.0001            # Gurobi MIPGap (relative MIP optimality gap)
+    threads: 0                 # Gurobi Threads; 0 = Gurobi chooses automatically
+    output_flag: 0             # Gurobi OutputFlag; 0 = silent, 1 = print the solver log
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # HybridZ  (hybridz)
+  # ─────────────────────────────────────────────────────────────────────────
+  hybridz:
+    # Wall-clock seconds per HybridZ spec evaluation; null or 0 = backend.timeout.
+    timeout: null
+    # MILP feasibility/spec tolerance for HybridZ verdict decisions.
+    tolerance: 0.0000001
+    # A layer whose output width or generator count (continuous + binary) exceeds
+    # this keeps its interval bounds instead of a hybrid zonotope.
+    max_input_dim: 1024
+    # Sigmoid only: linear segments on each side of the inflection point (>= 1).
+    sigmoid_segments: 2
+    # Project eligible Sigmoid -> Dense chains without materializing Sigmoid HZ rows.
+    fuse_sigmoid_affine: false
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Dual 
+  # ─────────────────────────────────────────────────────────────────────────
+  dual:
+    n_iters: 50                     # Adam iterations for alpha/eta optimization (dual tiers)
+    lr_alpha: 0.1                   # Adam learning rate for alpha (relaxation slopes)
+    lr_beta: 0.1                    # Adam learning rate for eta (split-constraint multipliers)
+    lr_decay: 0.98                  # multiplicative learning-rate decay per Adam iteration
+    per_class_alpha: true           # separate alpha tensors per output class
+    incremental_start_enabled: true # children start from the parent's alpha/eta
+    # Linear forward bounds are kept up to this many perturbed input dims;
+    # above it the forward pass is interval-only.
+    forward_lin_max_perturbed: 100
+    # Early stopping of the alpha/eta loop (all off by default; the first
+    # iteration always completes and the keep-best bound is returned).
+    stagnation_patience: 0          # stop after this many iterations without a row gain > tol (0 = off)
+    stagnation_tol: 0.00001         # min per-row dual-bound gain that counts as improvement (finite, >= 0; used only when stagnation_patience > 0)
+    stop_when_verified: false       # stop once every lane certifies by its spec rule on the keep-best bound (UNSAFE_LINEAR: one row > 0); verify/BaB solves only
+    max_time: 0.0                   # wall-clock cap in seconds on one alpha/eta loop (0 = off)
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # Branch-and-Bound refinement  (bab)
+  # ═════════════════════════════════════════════════════════════════════════
+  bab:
+
+    # -- General BaB --------------------------------------------------------
+    # Run BaB (tier 3) on lanes still UNKNOWN after the earlier tiers; skipped
+    # for solver hybridz.
+    enabled: true
+    # Max tree depth. Unresolved subproblems at this depth are dropped instead
+    # of split, so the verdict can then no longer be CERTIFIED.
+    max_depth: 3
+    # BaB stops after bounding this many subproblems in total; any left
+    # unproven make the verdict UNKNOWN.
+    max_nodes: 10
+    # Max pending subproblems; above it the lowest-priority ones are evicted,
+    # which also rules out CERTIFIED. 0 = no cap.
+    frontier_cap: 0
+    frontier_mem_safety: 0.6
+    frontier_offload: true
+    # Pieces per input-axis split (values below 2 are raised to 2).
+    input_split_fanout: 2
+    # -- Branching: which over-approximated activation (or input axis) to split
+    #
+    #   branching_method  | selects            | score                          | needs dual tier
+    #   ------------------|--------------------|--------------------------------|----------------
+    #   random            | input axis         | uniform over eligible dims     | no
+    #   width             | input axis         | widest current domain          | no
+    #   babsr             | unstable ReLU      | area x |nu| (Bunel 1909.06588) | yes
+    #   fsb               | unstable ReLU      | babsr shortlist, then filtered | yes
+    #                     |                    | by a real dual solve per cand. |
+    #   gain              | unstable ReLU      | measured child bounds; falls   | yes
+    #                     |                    | back to babsr when unavailable |
+    #   witness_residual  | unstable ReLU      | relaxation gap realised at the | yes
+    #                     |                    | dual solver's spurious CE      |
+    #
+    # "needs dual tier" = requires solver_tier dual_alpha or dual_alpha_eta;
+    # otherwise the neuron scores (nu coefficients) are not produced and the
+    # verifier falls back to input splitting.
+    # multi_split_levels below is ORTHOGONAL to this choice: it controls how
+    # many neurons are split at once, not which ones are picked.
+    branching_method: "random"
+
+    # -- Pool selection: which pending subproblems the next wave expands -----
+    #
+    #   bounding             | pool class          | order function                 | selection
+    #   ---------------------|---------------------|--------------------------------|--------------
+    #   depth_bound_blend    | TopKBounding        | 0.5*norm(depth)+0.5*urgency    | deterministic
+    #   greedy               | TopKBounding        | best-first on |lb|             | deterministic
+    #   annealed             | TopKBounding        | Gumbel, cooling_rate**step     | stochastic
+    #   diverse_split_signs  | DiverseTopKBounding | order + split-sign repulsion   | deterministic
+    #   random               | RandomBounding      | uniform sampling               | stochastic
+    #   mcts                 | MCTSBounding        | depth_bound_blend, pinned      | deterministic
+    #
+    # Only annealed and random draw from an RNG, so only those two can give
+    # different verdicts run-to-run under a fixed budget. top_k below applies to
+    # the four TopKBounding-family rows.
+    # greedy and annealed are the Oliva order-leading strategies (ECOOP 2025,
+    # arXiv:2507.17453); mcts is specified in docs/design/mcts_bab.md.
+    bounding: "random"
+    # depth_bound_blend priority (higher pops first) = depth_weight * d + bound_weight * u,
+    # d = depth min-max normalized over the pool, u = (max lb - lb) / (max lb - min lb).
+    bounding_depth_weight: 0.5    # weight on the normalized depth d
+    bounding_bound_weight: 0.5    # weight on the bound urgency u
+
+    # Cap on subproblems popped per wave, independent of the batch size.
+    # 0 = unbounded. Honoured by the four TopKBounding-family strategies above;
+    # rejected for random / mcts, which do not rank the pool by an order
+    # function. Unlike frontier_cap this discards nothing — the remainder stays
+    # pooled, so a smaller top_k only re-sorts priorities more often.
+    top_k: 0
+
+    # annealed: priority = u / T + Gumbel noise with T = max(sa_cooling_rate**wave, 1e-6),
+    # so selection becomes greedier as waves pass.
+    sa_cooling_rate: 0.99
+
+    # -- MCTS pool (bounding: mcts) -------------------------------------------
+    mcts_exploration: 1.0         # UCB1 exploration constant (reserved: pop is top-k for now)
+    mcts_lambda: 0.5              # reward = lambda*depth/n_unstable + (1-lambda)*lb rank
+    mcts_virtual_loss: 1.0        # virtual loss for batched selection (reserved)
+
+    # -- Intermediate-bound refinement and root-bound reuse (dual tiers) -----
+    intermediate_refine: "none"           # root pre-activation refinement: none/auto/all
+    intermediate_refine_ratio: 10.0       # auto mode: refine layers wider than ratio x median
+    # Skip a whole selected layer when one dense backward tensor would exceed
+    # this deterministic cap: lane chunk x +/- rows x max ancestor width x itemsize.
+    intermediate_refine_max_tensor_mib: 1024.0
+    root_bounds_reuse: "none"             # children reuse root bounds: none/plain/split_refresh
+    eta_only_children: false              # children keep the parent's alpha, optimize only eta
+    presplit_levels: 0                    # pre-split k root neurons into 2^k sign combinations
+    per_subproblem_refine: "none"         # per-subproblem refinement: none/tail/all (needs reuse)
+    per_subproblem_refine_iters: 0        # Adam iterations (0 = one fixed-slope backward pass)
+    per_subproblem_refine_rows_cap: 64    # max refined neurons per layer per batch (widest first)
+    presolve_time_fraction: 0.0           # root time window in [0, 1] as a fraction of timeout, from BaB entry (0 = remaining timeout)
+    child_n_iters: 0                      # alpha/eta iterations on non-root batches (0 = dual.n_iters)
+
+    # Automatic BaB batch sizing. Used only when verify_bab_batched is called with
+    # max_batch_size="auto"; the CLI passes the integer bab_max_batch_size.
+    auto_batch_safety: 0.55       # fraction of total GPU memory the sizer may target
+    auto_batch_cap: 2048          # upper bound on the auto batch size (also the CPU fallback)
+    auto_batch_floor: 8           # lower bound on the auto batch size
+
+    # Neurons split jointly per branching step; each lane fans out into all 2^k
+    # sign combinations (verdict-boundary joint splitting). 1 = single split.
+    # Requires solver_tier dual_alpha or dual_alpha_eta and a neuron-branching
+    # method (babsr / fsb / gain). The k neurons are always
+    # chosen by the BaBSR heuristic (area x |nu|), whatever branching_method is.
+    multi_split_levels: 1
+
+    # Tag each subproblem with node_id + parent_id so the search tree survives
+    # the flat push/pop batching. bounding: mcts enables it anyway (it credits
+    # rewards up the ancestor chain); bounding: random raises ValueError, since
+    # that pool drops the ids on pop.
+    provenance_enabled: false
+
+    # -- Dual-tier selector (solver_tier != lp) ----------------------------
+    # How BaB bounds each wave: lp = the backend.solver LP; dual = dual bounds
+    # with un-optimized slopes; dual_alpha = Adam-optimized slopes (alpha);
+    # dual_alpha_eta = optimized alpha and split multipliers (eta). See dual:.
+    solver_tier: "lp"
+
+    # -- CLIMB certificate reuse (ReLU neuron branching only) ---------------
+    climb_enabled: false          # enable CLIMB (see bab_presets.climb above)
+    # Ablation gates default on, preserving the existing CLIMB algorithm.
+    climb_coarsening_enabled: true  # false admits full replay-certified literal rows
+    climb_propagation_enabled: true # false learns cores but does not prune/infer with them
+    climb_merge_enabled: false    # merge complementary unresolved rows on unseen cores (Alg. 1)
+    climb_complement_bounding: false  # S6: bound the complement of each new core's deepest decision once
+    climb_presplit_propagation_enabled: true  # false = pre-bound only ablation
+    climb_steer: false            # C5 core-steered BaBSR bias
+    climb_theta: 0.0              # fraction of replay slack spent on dropping literals
+    # Deletion-budget safety margin: delta = climb_delta_abs + climb_delta_rel * |slack|.
+    climb_delta_abs: 0.000000001  # absolute part of delta
+    climb_delta_rel: 0.0000001    # relative part of delta (scaled by |slack|)
+    climb_recheck_k: 0            # lanes that get one extra replay after coarsening
+    climb_max_cores: 1024         # max cores kept (after subsumption, then eviction)
+    # Cores per propagate matmul chunk (memory only; fixpoint is chunk-independent).
+    climb_propagate_core_chunk: 4096
+    climb_terminal_cores: true    # N2: learn cores from terminal-LP-certified root-box lanes (false = Kraft record only)
+    # N3, split_refresh_linear only: same-layer halfspace E_i supports, effective lower
+    # slopes and warm-witness replay (false = pre-N3 costs and replay).
+    climb_lin_support_refinement: true
+
+    # -- LLM-probe controller ----------------------------------------------
+    llm_probe_enabled: false              # enable the LLM-probe BaB controller
+    llm_probe_backend: "mock"             # mock, openrouter, openai, glm, minimax or claude_cli
+    llm_probe_model: ""                   # model name; claude_cli defaults to "sonnet" if empty
+    llm_probe_base_url: ""                # OpenAI-compatible URL; "" = the provider's preset URL
+    llm_probe_api_key_env: ""             # env var holding the API key; "" = provider preset
+    llm_probe_temperature: 0.0            # sampling temperature (OpenAI-compatible backends)
+    llm_probe_timeout: 30.0               # per-call timeout (s); a slow wave falls back to baseline
+    llm_probe_max_candidates: 8           # max unstable-neuron candidates per domain
+    llm_probe_max_candidates_total: 1024  # with neuron_topk = 0: above this many, fall back to FSB
+    llm_probe_neuron_topk: 512            # >0: send only the top-K scored candidates, never FSB
+    llm_probe_cadence: 1                  # consult the LLM every N waves
+    llm_probe_history: 8                  # past wave outcomes included in the prompt
+    llm_probe_max_failures: 3             # consecutive failures before the controller is disabled
+    # Decisions the LLM may steer: split (joint split depth), frontier (wave
+    # width), refine (per-subproblem refinement), neuron (joint neuron-group
+    # selection), input_split (axis and fanout; input-splitting BaB only).
+    llm_probe_decisions: "split,frontier,refine"
+    llm_probe_log: false                  # append per-wave JSONL to act/pipeline/log/llm_probe/
+
+    # Reserved: BaB does not read this yet (use backend.verbose for diagnostics).
+    verbose: false
+
+    # -- BERT/text method ---------------------------------------------------
+    method: null                  # SST/Yelp method: planar, rule, alpha, ibp or discrete
+    baf: true                     # BaF flag; true for planar/rule/alpha, false for ibp/discrete
+    alpha_mode: "fixed"           # attention alpha: fixed (planar), rule, optimized (alpha), none
+    p: 2.0                        # text embedding perturbation norm metadata (2 or inf)
+    perturbed_words: 1            # token positions perturbed together (1 or 2)
+    eps: 0.00001                  # initial verification radius (>= 0)
+    max_eps: 0.01                 # maximum radius for the certified-radius search (>= 0)
+    num_verify_iters: 5           # binary-search iterations for the certified radius (>= 0)
+    k: 1                          # rule threshold for the rule-slope attention alpha
+    alpha_opt_steps: 1000         # optimization steps for optimized-alpha refinement
