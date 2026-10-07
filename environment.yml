@@ -1,0 +1,37 @@
+name: act-py312
+channels:
+  - gurobi
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - onnx
+  - onnxruntime
+  - pandas
+  - numpy
+  - networkx
+  - tqdm
+  - gurobi
+  - ipykernel
+  - ipywidgets  # Interactive trace explorer in Jupyter notebooks
+  - matplotlib>=3.9
+  - pyyaml  # Config loading (specs, models)
+  - psutil  # Memory monitoring in pipeline
+  - pip
+  - pip:
+      # PyTorch via pip: the default Linux wheels are CUDA-enabled (cu124), whereas the
+      # conda 'pytorch' channel yields a CPU-only build when this env is created on a
+      # machine with no NVIDIA driver (the VNN-COMP installer). Installing via pip instead
+      # of conda so the GPU build works on standard AWS run instances.
+      - torch>=2.8
+      - torchvision>=0.23
+      # ONNX ecosystem - for VNNLib benchmarks
+      - onnx2torch
+      - onnxconverter-common
+      - onnxscript
+      - onnx-simplifier  # Optional optimizer, may have build issues on some systems
+      - onnxsim==0.6.5
+      # ML frameworks (pipeline/llm_probe.py)
+      - transformers
+      - nltk==3.10.3  # BUFFET-compatible SST/Yelp tokenization
+      - scikit-learn
