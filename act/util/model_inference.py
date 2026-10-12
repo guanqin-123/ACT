@@ -42,10 +42,14 @@ def infer_single_model(combo_id: Union[str, Tuple], model: nn.Module, input_tens
             output = model(input_tensor)
             # Extract tensor if model returns dict (VerifiableModel)
             if isinstance(output, dict):
+                if 'output' not in output:
+                    raise KeyError(
+                        f"Model {combo_id!r} returned a dictionary without an 'output' entry"
+                    )
                 output = output['output']
             return True, output, None
-    except Exception as e:
-        return False, None, str(e)[:100]
+    except Exception as exc:
+        raise RuntimeError(f"Model inference failed for {combo_id!r}: {exc}") from exc
 
 
 # Main model inference function
@@ -65,8 +69,9 @@ def model_inference(models: Dict[Union[str, Tuple], nn.Module]) -> Dict[Union[st
     
     # Handle case where no models were generated
     if not models:
-        print("⚠️  No models to test - check spec generation and synthesis configuration")
-        return {}
+        raise ValueError(
+            "No models to test; check spec generation and synthesis configuration"
+        )
     
     success_count = 0
     failure_count = 0
@@ -78,15 +83,17 @@ def model_inference(models: Dict[Union[str, Tuple], nn.Module]) -> Dict[Union[st
         # Extract input and label from InputLayer (named child on VerifiableModel)
         input_layer = model.input_layer
         if not hasattr(input_layer, 'input_tensor'):
-            print(f"⚠️  Model {combo_id} missing input_tensor in InputLayer")
-            failure_count += 1
-            continue
+            raise AttributeError(
+                f"Model {combo_id!r} InputLayer is missing input_tensor"
+            )
         
         test_input = input_layer.input_tensor
         test_label = input_layer.label
         
         # Move input to same device as model
-        model_device = next(model.parameters()).device
+        # Parameter-free models (e.g. pure-constant ONNX nets) keep the input's device.
+        first_param = next(model.parameters(), None)
+        model_device = first_param.device if first_param is not None else test_input.device
         test_input = test_input.to(model_device)
         
         # Parse combo_id: handle tuple keys (dataset, model, in_kind, out_kind)
@@ -107,9 +114,12 @@ def model_inference(models: Dict[Union[str, Tuple], nn.Module]) -> Dict[Union[st
         success, output, error_msg = infer_single_model(combo_id, model, test_input)
         
         if success:
-            # Validate prediction against ground truth label tensor (N,), output is (N, num_classes)
-            pred_classes = output.argmax(dim=1)  # (N,)
-            is_correct = (pred_classes == test_label).all().item()
+            # Validate prediction against ground truth label tensor (N,), output is (N, num_classes).
+            # Unlabelled or non-classification outputs (e.g. VNNLIB safety nets) have no accuracy.
+            is_correct = False
+            if test_label is not None and test_label.numel() > 0 and output.dim() >= 2:
+                pred_classes = output.argmax(dim=1)  # (N,)
+                is_correct = (pred_classes == test_label).all().item()
             
             success_count += 1
             if is_correct:
@@ -137,4 +147,3 @@ def model_inference(models: Dict[Union[str, Tuple], nn.Module]) -> Dict[Union[st
         print(f"   💡 Tip: Use domain-matched combinations (mnist+mnist, cifar+cifar) for 100% success")
     
     return successful_models
-

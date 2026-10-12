@@ -2,6 +2,11 @@
 """
 ACT Pipeline Command-Line Interface.
 
+Exit statuses:
+- 0: command completed successfully
+- 1: runtime, verification, or unexpected error
+- 3: unsupported model/specification
+
 Provides fuzzing capabilities for neural network verification with support for:
 - VNNLib verification benchmarks (default)
 - TorchVision datasets (alternative)
@@ -26,15 +31,18 @@ from act.config.config import VALID_BOUNDINGS, VALID_SOLVER_TIERS
 logger = logging.getLogger(__name__)
 from act.front_end.specs import OutputSpec
 from act.front_end.vnnlib_loader.create_specs import VNNLibSpecCreator
+from act.front_end.vnnlib_loader.vnnlib_parser import UnsupportedSpecError
 from act.front_end.vnnlib_loader import data_model_loader as vnnlib_loader
-from act.front_end.vnnlib_loader import category_mapping as vnnlib_mapping
 from act.front_end.torchvision_loader.create_specs import TorchVisionSpecCreator
 from act.front_end.torchvision_loader import data_model_loader as tv_loader
-from act.front_end.torchvision_loader import data_model_mapping as tv_mapping
 from act.front_end.model_synthesis import synthesize_models_and_seeds_from_specs
+from act.config.frontend_cli import (
+    print_unified_list, print_unified_search, print_unified_info,
+    handle_unified_download, print_list_downloads,
+)
 from act.pipeline.fuzzing.actfuzzer import ACTFuzzer, FuzzingConfig
 from act.pipeline.verification.per_neuron_bounds import PerNeuronCheckConfig
-from act.config.config import PipelineConfig
+from act.config.config import BackendConfig, PipelineConfig
 
 
 _FUZZ_MUTATION_WEIGHT_KEYS = frozenset(
@@ -271,7 +279,6 @@ def _apply_pipeline_config_defaults(args: Any) -> PipelineConfig:
     return config
 
 
-
 def print_header():
     """Print simple header."""
     print(f"\n{rule()}")
@@ -281,256 +288,11 @@ def print_header():
 
 
 # ============================================================================
-# Data-Model Pair Management Commands
-# ============================================================================
-
-
-def cmd_list_available(creator: str):
-    """List available datasets/categories."""
-    print(f"\n{rule()}")
-    print(f"AVAILABLE DATA-MODEL PAIRS ({creator.upper()})")
-    print(f"{rule()}\n")
-
-    if creator == "vnnlib":
-        categories = vnnlib_mapping.list_categories()
-        print(f"VNNLIB Categories ({len(categories)}):")
-        print(rule(80, "-"))
-        for cat_name in sorted(categories):
-            info = vnnlib_mapping.get_category_info(cat_name)
-            print(f"  {cat_name:30s} ({info['type']}) - {info['description']}")
-            print(f"    └─ Models: {info['models']}, Properties: {info['properties']}")
-
-    elif creator == "torchvision":
-        datasets = sorted(tv_mapping.DATASET_MODEL_MAPPING.keys())
-        print(f"TorchVision Datasets ({len(datasets)}):")
-        print(rule(80, "-"))
-        for ds_name in datasets:
-            info = tv_mapping.DATASET_MODEL_MAPPING[ds_name]
-            models = info.get("models", [])
-            print(f"  {ds_name:30s} [{info.get('category', 'N/A')}]")
-            if models:
-                print(
-                    f"    └─ Models: {', '.join(models[:5])}{'...' if len(models) > 5 else ''}"
-                )
-
-    print(f"\n{rule()}\n")
-
-
-def cmd_search(query: str, creator: str):
-    """Search for datasets/categories."""
-    print(f"\n{rule()}")
-    print(f"SEARCH RESULTS: '{query}' ({creator.upper()})")
-    print(f"{rule()}\n")
-
-    if creator == "vnnlib":
-        matches = vnnlib_mapping.search_categories(query)
-        if matches:
-            print(f"Found {len(matches)} VNNLIB categories:")
-            print(rule(80, "-"))
-            for cat_name in sorted(matches):
-                info = vnnlib_mapping.get_category_info(cat_name)
-                print(f"  {cat_name:30s} ({info['type']}) - {info['description']}")
-        else:
-            print(f"No VNNLIB categories found for '{query}'")
-
-    elif creator == "torchvision":
-        matches = tv_mapping.search_datasets(query)
-        if matches:
-            print(f"Found {len(matches)} TorchVision datasets:")
-            print(rule(80, "-"))
-            for ds_name in sorted(matches):
-                info = tv_mapping.DATASET_MODEL_MAPPING[ds_name]
-                print(f"  {ds_name:30s} [{info.get('category', 'N/A')}]")
-        else:
-            print(f"No TorchVision datasets found for '{query}'")
-
-    print(f"\n{rule()}\n")
-
-
-def cmd_info(name: str, creator: str):
-    """Show detailed information about dataset/category."""
-    print(f"\n{rule()}")
-    print(f"INFO: {name} ({creator.upper()})")
-    print(f"{rule()}\n")
-
-    if creator == "vnnlib":
-        try:
-            info = vnnlib_mapping.get_category_info(name)
-            print(f"Category: {name}")
-            print(f"Type: {info['type']}")
-            print(f"Year: {info['year']}")
-            print(f"Description: {info['description']}")
-            print(f"\nModel Information:")
-            print(f"  • Models: {info['models']}")
-            print(f"  • Properties: {info['properties']}")
-            print(f"  • Input Dim: {info['input_dim']}")
-            print(f"  • Output Dim: {info['output_dim']}")
-
-            # Check if downloaded
-            downloaded = vnnlib_loader.list_downloaded_pairs()
-            matching = [p for p in downloaded if p["category"] == name]
-            if matching:
-                print(f"\n✓ Downloaded: {len(matching)} instances")
-            else:
-                print(f"\n⚠ Not downloaded (use --download {name})")
-        except ValueError as e:
-            print(f"Error: {e}")
-
-    elif creator == "torchvision":
-        try:
-            info = tv_mapping.get_dataset_info(name)
-            print(f"Dataset: {name}")
-            print(f"Category: {info.get('category', 'N/A')}")
-            print(f"Input Size: {info.get('input_size', 'N/A')}")
-            print(f"Classes: {info.get('num_classes', 'N/A')}")
-
-            models = info.get("models", [])
-            if models:
-                print(f"\nRecommended Models ({len(models)}):")
-                for model in models:
-                    print(f"  • {model}")
-
-            # Check if downloaded
-            downloaded = tv_loader.list_downloaded_pairs()
-            matching = [p for p in downloaded if p["dataset"] == name]
-            if matching:
-                print(f"\n✓ Downloaded: {len(matching)} model pairs")
-            else:
-                print(
-                    f"\n⚠ Not downloaded (use --download {name} --creator torchvision)"
-                )
-        except ValueError as e:
-            print(f"Error: {e}")
-
-    print(f"\n{rule()}\n")
-
-
-def cmd_download(name: str, creator: str):
-    """Download dataset/category."""
-    print(f"\n{rule()}")
-    print(f"DOWNLOADING: {name} ({creator.upper()})")
-    print(f"{rule()}\n")
-
-    if creator == "vnnlib":
-        try:
-            result = vnnlib_loader.download_vnnlib_category(name)
-
-            if result["status"] == "success":
-                print(f"✓ Successfully downloaded: {name}")
-                print(f"  Location: {result['category_path']}")
-                print(f"  Instances: {result['num_instances']}")
-            else:
-                print(f"✗ Download failed: {result['message']}")
-                print(
-                    f"\nNote: VNNLIB benchmarks must be downloaded manually from VNN-COMP."
-                )
-                print(f"Expected location: data/vnnlib/{name}/")
-                print(f"\nManual steps:")
-                print(
-                    f"  1. Visit: https://github.com/ChristopherBrix/vnncomp_benchmarks"
-                )
-                print(f"  2. Download '{name}' benchmark")
-                print(f"  3. Extract to: data/vnnlib/{name}/")
-                print(f"  4. Ensure structure:")
-                print(f"     - onnx/         (ONNX model files)")
-                print(f"     - vnnlib/       (VNNLIB property files)")
-                print(f"     - instances.csv (benchmark instances)")
-        except Exception as e:
-            print(f"✗ Download error: {e}")
-
-    elif creator == "torchvision":
-        try:
-            info = tv_mapping.get_dataset_info(name)
-            models = info.get("models", [])
-
-            if not models:
-                print(f"⚠ No models available for {name}")
-                return
-
-            print(f"Downloading {name} with {len(models)} models...\n")
-
-            success_count = 0
-            for model in models:
-                result = tv_loader.download_dataset_model_pair(name, model)
-                if result["status"] == "success":
-                    print(f"✓ {name} + {model}")
-                    success_count += 1
-                else:
-                    print(f"✗ {name} + {model} - {result['message']}")
-
-            print(f"\n{rule()}")
-            print(f"Downloaded {success_count}/{len(models)} model pairs")
-            print(f"{rule()}")
-        except Exception as e:
-            print(f"✗ Download error: {e}")
-
-    print()
-
-
-def cmd_list_downloaded(creator: str):
-    """List downloaded data-model pairs."""
-    print(f"\n{rule()}")
-    print(f"DOWNLOADED DATA-MODEL PAIRS ({creator.upper()})")
-    print(f"{rule()}\n")
-
-    if creator == "vnnlib":
-        downloaded = vnnlib_loader.list_downloaded_pairs()
-        if downloaded:
-            # Group by category
-            categories = {}
-            for item in downloaded:
-                cat = item["category"]
-                if cat not in categories:
-                    categories[cat] = []
-                categories[cat].append(item)
-
-            print(f"VNNLIB Downloads ({len(downloaded)} instances):")
-            print(rule(80, "-"))
-            for cat in sorted(categories.keys()):
-                instances = categories[cat]
-                print(f"  {cat:30s} ({len(instances)} instances)")
-                if len(instances) <= 5:
-                    for inst in instances:
-                        print(
-                            f"    └─ {inst['instance_id']}: {inst['onnx_model']} + {inst['vnnlib_spec']}"
-                        )
-        else:
-            print("No VNNLIB downloads found")
-            print("Use --download <category> to download benchmarks")
-
-    elif creator == "torchvision":
-        downloaded = tv_loader.list_downloaded_pairs()
-        if downloaded:
-            # Group by dataset
-            datasets = {}
-            for item in downloaded:
-                ds = item["dataset"]
-                if ds not in datasets:
-                    datasets[ds] = []
-                datasets[ds].append(item["model"])
-
-            print(f"TorchVision Downloads ({len(downloaded)} pairs):")
-            print(rule(80, "-"))
-            for ds in sorted(datasets.keys()):
-                models = datasets[ds]
-                print(f"  {ds:30s} ({len(models)} models)")
-                for model in sorted(models):
-                    print(f"    └─ {model}")
-        else:
-            print("No TorchVision downloads found")
-            print(
-                "Use --download <dataset> --creator torchvision to download data-model pairs"
-            )
-
-    print(f"\n{rule()}\n")
-
-
-# ============================================================================
 # Fuzzing Commands
 # ============================================================================
 
 
-def cmd_fuzz(args):
+def cmd_fuzz(args) -> int:
     """Run ACTFuzzer."""
     print_header()
 
@@ -566,7 +328,7 @@ def cmd_fuzz(args):
                 if not downloaded:
                     print("❌ No VNNLIB categories downloaded!")
                     print("Use: python -m act.pipeline --download <category>")
-                    return
+                    return 1
                 categories = list(set(p["category"] for p in downloaded))
 
             print(f"Loading {len(categories)} VNNLIB category(ies):")
@@ -592,7 +354,7 @@ def cmd_fuzz(args):
                     print(
                         "Use: python -m act.pipeline --download <dataset> --creator torchvision"
                     )
-                    return
+                    return 1
                 datasets = list(set(p["dataset"] for p in downloaded))
 
             print(f"Loading {len(datasets)} TorchVision dataset(s):")
@@ -615,7 +377,7 @@ def cmd_fuzz(args):
 
             if not model_names:
                 print("❌ No models found for selected datasets!")
-                return
+                return 1
 
             spec_results = spec_creator.create_specs_for_data_model_pairs(
                 dataset_names=datasets,
@@ -644,11 +406,11 @@ def cmd_fuzz(args):
         import traceback
 
         traceback.print_exc()
-        return
+        return 1
 
     if not spec_results:
         print("❌ No spec results generated!")
-        return
+        return 1
 
     print(f"✓ Generated {len(spec_results)} spec result(s)\n")
 
@@ -671,11 +433,11 @@ def cmd_fuzz(args):
         import traceback
 
         traceback.print_exc()
-        return
+        return 1
 
     if not wrapped_models:
         print("❌ No models synthesized!")
-        return
+        return 1
 
     print(f"✓ Synthesized {len(wrapped_models)} wrapped model(s)\n")
 
@@ -689,7 +451,7 @@ def cmd_fuzz(args):
 
     if not initial_seeds:
         print("❌ No initial seeds extracted!")
-        return
+        return 1
 
     print(f"✓ Extracted {len(initial_seeds)} initial seeds\n")
 
@@ -722,15 +484,12 @@ def cmd_fuzz(args):
 
         if report.counterexamples and config.save_counterexamples:
             import os
-            import torch as _torch
             from act.front_end.vnnlib_loader.vnnlib_parser import write_vnncomp_result
 
             os.makedirs(config.output_dir, exist_ok=True)
             ce0 = report.counterexamples[0]
-            x = cast(Any, getattr(ce0, "input", ce0))
-            with _torch.no_grad():
-                y_raw = wrapped_model(x)
-            y = cast(Any, y_raw["output"] if isinstance(y_raw, dict) else y_raw)
+            x = ce0.input.unsqueeze(0)
+            y = ce0.output.unsqueeze(0)
             fname = "_".join(map(str, model_id)) if isinstance(model_id, tuple) else str(model_id)
             write_vnncomp_result(
                 os.path.join(config.output_dir, f"{fname}_result.txt"),
@@ -745,7 +504,9 @@ def cmd_fuzz(args):
         import traceback
 
         traceback.print_exc()
-        return
+        return 1
+
+    return 0
 
 
 # ============================================================================
@@ -1023,6 +784,7 @@ def _run_bab_on_net(net, args, bab_first_sample_only: bool = False):
     pipeline_config = PipelineConfig.from_yaml(**_collect_pipeline_config_overrides(args))
     config = pipeline_config.bab
     dual_config = pipeline_config.dual
+    max_batch_size = BackendConfig.from_yaml().bab_max_batch_size
     budget = float(getattr(args, "timeout", 60.0) or 60.0)
 
     spec_layers = gather_input_spec_layers(net)
@@ -1034,7 +796,7 @@ def _run_bab_on_net(net, args, bab_first_sample_only: bool = False):
             net=net,
             solver_factory=TorchLPSolver,
             config=config,
-            max_batch_size=None,
+            max_batch_size=max_batch_size,
             time_budget_s=budget,
             dual_config=dual_config,
         )
@@ -1049,7 +811,7 @@ def _run_bab_on_net(net, args, bab_first_sample_only: bool = False):
                 net=sliced_net,
                 solver_factory=TorchLPSolver,
                 config=config,
-                max_batch_size=None,
+                max_batch_size=max_batch_size,
                 time_budget_s=budget,
                 dual_config=dual_config,
             )
@@ -1285,6 +1047,8 @@ def cmd_verify(target: str, args):
             try:
                 soundness_failed = _run_vnnlib_verify(args)
                 results[test_name] = "FAILED" if soundness_failed else "PASSED"
+            except UnsupportedSpecError:
+                raise
             except Exception as e:
                 print(f"\n❌ Test failed: {e}")
                 import traceback
@@ -1391,6 +1155,11 @@ Examples:
   python -m act.pipeline --verify netfactory --solvers torchlp --tf-modes interval --validate-soundness
   python -m act.pipeline --verify vnnlib --category acasxu_2023 --max-instances 3 --validate-soundness
   python -m act.pipeline --verify torchvision --dataset MNIST --model simple_cnn --num-samples 2 --validate-soundness
+
+Exit statuses:
+  0  Command completed successfully
+  1  Runtime, verification, or unexpected error
+  3  Unsupported model/specification
         """,
     )
 
@@ -1784,22 +1553,25 @@ Examples:
     # Execute command
     try:
         if args.list:
-            cmd_list_available(args.creator)
+            print_unified_list(args.creator)
         elif args.search:
-            cmd_search(args.search, args.creator)
+            print_unified_search(args.search, args.creator)
         elif args.info:
-            cmd_info(args.info, args.creator)
+            print_unified_info(args.info, explicit_creator=args.creator)
         elif args.download:
-            cmd_download(args.download, args.creator)
+            handle_unified_download(args.download, explicit_creator=args.creator)
         elif args.list_downloaded:
-            cmd_list_downloaded(args.creator)
+            print_list_downloads(args.creator)
         elif args.fuzz:
-            cmd_fuzz(args)
+            sys.exit(cmd_fuzz(args))
         elif args.verify:
             cmd_verify(args.verify, args)
     except KeyboardInterrupt:
         print("\n\n⚠️  Interrupted by user")
         sys.exit(1)
+    except UnsupportedSpecError as e:
+        print(f"\n❌ Unsupported model/specification: {e}")
+        sys.exit(3)
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback

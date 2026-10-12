@@ -167,6 +167,7 @@ def _matmul_term_rows(L, batch: int):
     y_shape = tuple(int(d) for d in L.params["y_shape"])
     if len(x_shape) < 2 or len(y_shape) < 2 or x_shape[-1] != y_shape[-2]:
         return None
+    rows = None
     try:
         batch_shape = np.broadcast_shapes(x_shape[:-2], y_shape[:-2])
         m, reduction, n = x_shape[-2], x_shape[-1], y_shape[-1]
@@ -185,8 +186,13 @@ def _matmul_term_rows(L, batch: int):
             np.swapaxes(y_local, -2, -1)[..., None, :, :],
             (*batch_shape, m, n, reduction),
         ).reshape(-1, reduction)
+        rows = (x_terms, y_terms, reduction)
     except (ValueError, TypeError):
+        # Non-broadcastable MATMUL metadata is not applicable to sparse lifting.
+        rows = None
+    if rows is None:
         return None
+    x_terms, y_terms, reduction = rows
     x_size, y_size = _prod(x_shape), _prod(y_shape)
     offsets = np.arange(int(batch), dtype=np.int64)[:, None, None]
     return (
@@ -1169,12 +1175,14 @@ def _row_indices_expand(L, n: int):
     if per == 0 or int(n) % per != 0:
         return None
     batch = int(n) // per
-    try:
-        return torch.arange(int(n)).view(batch, *in_shape).broadcast_to(
-            batch, *out_shape
-        ).reshape(-1)
-    except RuntimeError:
+    source_shape = (batch, *in_shape)
+    target_shape = (batch, *out_shape)
+    if len(source_shape) > len(target_shape) or any(
+        source not in (1, target)
+        for source, target in zip(reversed(source_shape), reversed(target_shape))
+    ):
         return None
+    return torch.arange(int(n)).view(source_shape).broadcast_to(target_shape).reshape(-1)
 
 
 def _row_indices_reduce(L, n_in: int, n_out: int, axes_key: str, keepdims_key: str):

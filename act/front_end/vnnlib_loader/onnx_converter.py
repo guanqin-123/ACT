@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 from pathlib import Path
-from typing import Tuple, Optional
+from typing import Tuple
 import logging
 import torch
 import torch.nn as nn
@@ -458,46 +458,41 @@ def get_onnx_metadata(onnx_path: Path) -> dict:
     Returns:
         Dict with model metadata (producer, version, shapes, etc.)
     """
-    try:
-        import onnx
-        
-        onnx_model = onnx.load(str(onnx_path))
-        
-        metadata = {
-            'producer_name': onnx_model.producer_name,
-            'producer_version': onnx_model.producer_version,
-            'ir_version': onnx_model.ir_version,
-            'opset_version': None,
-            'input_shapes': [],
-            'output_shapes': []
-        }
-        
-        # Get opset version
-        if onnx_model.opset_import:
-            metadata['opset_version'] = onnx_model.opset_import[0].version
-        
-        # Get input/output shapes
-        graph = onnx_model.graph
-        
-        for inp in graph.input:
-            shape = _extract_shape_from_tensor(inp)
-            metadata['input_shapes'].append({
-                'name': inp.name,
-                'shape': shape
-            })
-        
-        for out in graph.output:
-            shape = _extract_shape_from_tensor(out)
-            metadata['output_shapes'].append({
-                'name': out.name,
-                'shape': shape
-            })
-        
-        return metadata
-        
-    except Exception as e:
-        logger.error(f"Failed to extract ONNX metadata: {e}")
-        return {}
+    import onnx
+    
+    onnx_model = onnx.load(str(onnx_path))
+    
+    metadata = {
+        'producer_name': onnx_model.producer_name,
+        'producer_version': onnx_model.producer_version,
+        'ir_version': onnx_model.ir_version,
+        'opset_version': None,
+        'input_shapes': [],
+        'output_shapes': []
+    }
+    
+    # Get opset version
+    if onnx_model.opset_import:
+        metadata['opset_version'] = onnx_model.opset_import[0].version
+    
+    # Get input/output shapes
+    graph = onnx_model.graph
+    
+    for inp in graph.input:
+        shape = _extract_shape_from_tensor(inp)
+        metadata['input_shapes'].append({
+            'name': inp.name,
+            'shape': shape
+        })
+    
+    for out in graph.output:
+        shape = _extract_shape_from_tensor(out)
+        metadata['output_shapes'].append({
+            'name': out.name,
+            'shape': shape
+        })
+    
+    return metadata
 
 
 def validate_onnx_file(onnx_path: Path) -> bool:
@@ -508,53 +503,18 @@ def validate_onnx_file(onnx_path: Path) -> bool:
         onnx_path: Path to .onnx file
         
     Returns:
-        True if valid, False otherwise
+        True if the model passes the ONNX checker, False if it is malformed.
+        Load errors (missing file, unreadable protobuf) are raised.
     """
-    try:
-        import onnx
-        
-        onnx_model = onnx.load(str(onnx_path))
-        onnx.checker.check_model(onnx_model)
-        logger.info(f"ONNX model validated: {onnx_path.name}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"ONNX validation failed: {e}")
-        return False
-
-
-def convert_and_save_pytorch(
-    onnx_path: Path,
-    output_path: Optional[Path] = None,
-    simplify: bool = True
-) -> Path:
-    """
-    Convert ONNX model to PyTorch and save as .pt file.
+    import onnx
     
-    Args:
-        onnx_path: Path to .onnx file
-        output_path: Path for .pt file (defaults to same dir as ONNX)
-        simplify: Whether to simplify ONNX before conversion
-        
-    Returns:
-        Path to saved .pt file
-        
-    Raises:
-        ONNXConversionError: If conversion or saving fails
-    """
+    onnx_model = onnx.load(str(onnx_path))
     try:
-        # Convert to PyTorch
-        pytorch_model = convert_onnx_to_pytorch(onnx_path, simplify=simplify)
-        
-        # Determine output path
-        if output_path is None:
-            output_path = onnx_path.with_suffix('.pt')
-        
-        # Save model
-        torch.save(pytorch_model.state_dict(), output_path)
-        logger.info(f"Saved PyTorch model to {output_path}")
-        
-        return output_path
-        
-    except Exception as e:
-        raise ONNXConversionError(f"Failed to convert and save: {str(e)}")
+        onnx.checker.check_model(onnx_model)
+    except onnx.checker.ValidationError as e:
+        logger.warning(f"ONNX validation failed for {onnx_path.name}: {e}")
+        return False
+    logger.info(f"ONNX model validated: {onnx_path.name}")
+    return True
+
+

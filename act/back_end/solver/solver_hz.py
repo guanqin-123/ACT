@@ -969,40 +969,18 @@ def softmax_ratio_weighted_extreme(
     ordered_upper = np.take_along_axis(score_upper, order, axis=1).astype(
         np.longdouble
     )
-    shift = np.max(ordered_upper, axis=1, keepdims=True)
-    exp_lower = np.exp(ordered_lower - shift)
-    exp_upper = np.exp(ordered_upper - shift)
-    prefix_num = np.concatenate(
-        [
-            np.zeros((values.shape[0], 1), dtype=np.longdouble),
-            np.cumsum(ordered_objective * exp_upper, axis=1),
-        ],
-        axis=1,
+    candidates = np.empty(
+        (values.shape[0], values.shape[1] + 1), dtype=np.longdouble
     )
-    prefix_den = np.concatenate(
-        [
-            np.zeros((values.shape[0], 1), dtype=np.longdouble),
-            np.cumsum(exp_upper, axis=1),
-        ],
-        axis=1,
-    )
-    lower_num = np.concatenate(
-        [
-            np.zeros((values.shape[0], 1), dtype=np.longdouble),
-            np.cumsum(ordered_objective * exp_lower, axis=1),
-        ],
-        axis=1,
-    )
-    lower_den = np.concatenate(
-        [
-            np.zeros((values.shape[0], 1), dtype=np.longdouble),
-            np.cumsum(exp_lower, axis=1),
-        ],
-        axis=1,
-    )
-    candidates = (prefix_num + lower_num[:, -1:] - lower_num) / (
-        prefix_den + lower_den[:, -1:] - lower_den
-    )
+    for split in range(values.shape[1] + 1):
+        vertex_scores = np.concatenate(
+            [ordered_upper[:, :split], ordered_lower[:, split:]], axis=1
+        )
+        vertex_shift = np.max(vertex_scores, axis=1, keepdims=True)
+        vertex_exp = np.exp(vertex_scores - vertex_shift)
+        candidates[:, split] = np.sum(
+            ordered_objective * vertex_exp, axis=1
+        ) / np.sum(vertex_exp, axis=1)
     vertex = np.asarray(np.min(candidates, axis=1), dtype=np.float64)
     vertex -= 32.0 * np.finfo(np.float64).eps * (1.0 + np.abs(vertex))
     if minimize:
@@ -1548,6 +1526,10 @@ def _softmax_value_cross_radius(
         inequalities = np.empty((signs.shape[0], width + 1), dtype=np.float64)
         inequalities[:, :width] = -signed_weights[row]
         inequalities[:, -1] = -1.0
+        assert np.all(np.isfinite(extrema[row])), (
+            "HybridZ softmax invariant violated: non-finite weighted extrema "
+            f"at row {row}"
+        )
         result = linprog(
             objective,
             A_ub=inequalities,
@@ -2019,7 +2001,7 @@ def _hz_bounds_unconstrained(hz: HZono) -> Bounds:
     return Bounds(lb=(hz.c - rad).reshape(1, -1), ub=(hz.c + rad).reshape(1, -1))
 
 
-def _hz_compute_bounds_scipy(hz: HZono) -> Bounds:
+def _hz_compute_bounds_scipy(hz: HZono) -> Optional[Bounds]:
     model = _lower_hz_milp(hz)
     if model.n_var == 0:
         LB = UB = model.value_center.copy()
@@ -2049,7 +2031,7 @@ def _hz_compute_bounds_scipy(hz: HZono) -> Bounds:
                 options=options,
             )
             if not res_min.success or not res_max.success:
-                raise RuntimeError(f"HybridZ bound MILP failed at output {i}")
+                return None
             LB[i] = model.value_center[i] + res_min.fun
             UB[i] = model.value_center[i] - res_max.fun
 
@@ -2080,11 +2062,9 @@ def hz_compute_bounds(hz: HZono, *, exact: bool = False) -> Bounds:
     if not exact:
         return _hz_bounds_unconstrained(hz)
     if _HAS_SCIPY:
-        try:
-            return _hz_compute_bounds_scipy(hz)
-        except Exception as e:
-            # Intentional: scipy linprog failures fall back to the unconstrained bounds estimate.
-            logger.debug("suppressed: %s", e)
+        exact_bounds = _hz_compute_bounds_scipy(hz)
+        if exact_bounds is not None:
+            return exact_bounds
     return _hz_bounds_unconstrained(hz)
 
 
@@ -2310,21 +2290,17 @@ def _solve_hz_feasibility(
     constraints = (
         LinearConstraint(A, row_lb, row_ub) if A.shape[0] else None
     )
-    try:
-        result = milp(
-            c=np.zeros(model.n_var, dtype=np.float64),
-            integrality=model.integrality,
-            bounds=SciPyBounds(model.var_lb, model.var_ub),
-            constraints=constraints,
-            options={
-                "presolve": True,
-                "time_limit": max(1e-3, remaining),
-                "mip_rel_gap": 0.0,
-            },
-        )
-    except Exception as exc:
-        logger.debug("HybridZ MILP failed: %s", exc)
-        return _MILPResult("unknown", None)
+    result = milp(
+        c=np.zeros(model.n_var, dtype=np.float64),
+        integrality=model.integrality,
+        bounds=SciPyBounds(model.var_lb, model.var_ub),
+        constraints=constraints,
+        options={
+            "presolve": True,
+            "time_limit": max(1e-3, remaining),
+            "mip_rel_gap": 0.0,
+        },
+    )
     nodes = int(getattr(result, "mip_node_count", 0) or 0)
     x = getattr(result, "x", None)
     if x is not None and _valid_milp_point(
@@ -2614,10 +2590,7 @@ class HZSolver(Solver):
             return self._unknown_results(B, "missing_hz_state")
         if not _HAS_SCIPY:
             return self._unknown_results(B, "scipy_unavailable")
-        try:
-            model = _lower_hz_milp(output_hz)
-        except Exception as exc:
-            return self._unknown_results(B, f"lowering_failed:{type(exc).__name__}")
+        model = _lower_hz_milp(output_hz)
         if model.value_center.size != B * int(n_out):
             return self._unknown_results(B, "output_shape_mismatch")
 
@@ -2642,8 +2615,9 @@ class HZSolver(Solver):
         if not is_unsafe_linear and highspy is not None:
             try:
                 warm_lp = _HighsLPRelaxation(model)
-            except Exception as exc:
-                logger.debug("HybridZ warm LP setup failed: %s", exc)
+            except RuntimeError:
+                # HiGHS setup can reject a model; MILP remains a sound fallback.
+                warm_lp = None
 
         def solve(extra_A=None, extra_lb=None, extra_ub=None) -> _MILPResult:
             nonlocal solves, nodes

@@ -296,15 +296,6 @@ def append_binary_op(layers, *, op_kind: str, x_idx: int, y_idx: int) -> None:
     )
 
 
-def append_concat(layers, *, input_indices: List[int], concat_dim: int = 0) -> None:
-    _append_layer(
-        layers,
-        LayerKind.CONCAT.value,
-        params={"concat_dim": concat_dim},
-        preds=input_indices,
-    )
-
-
 def append_flatten(layers) -> None:
     _append_layer(layers, LayerKind.FLATTEN.value, params={"start_dim": 1})
 
@@ -1186,11 +1177,7 @@ class NetFactory:
         self.total_generated = 0
 
     def _compute_allowed_layers(self, tf_targets, mode):
-        try:
-            return _get_allowed_layers(tf_targets, mode)
-        except Exception as e:
-            logger.warning("TF capabilities unavailable: %s. Using defaults.", e)
-            return frozenset(_DEFAULT_COVERAGE_LAYERS)
+        return _get_allowed_layers(tf_targets, mode)
 
     def _init_coverage(self):
         skip = {
