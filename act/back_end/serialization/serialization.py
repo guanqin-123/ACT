@@ -142,34 +142,14 @@ class LayerSerializer:
                 # This is a regular value
                 cache_decoded[name] = value
         
-        try:
-            layer = Layer(
-                id=layer_dict["id"],
-                kind=layer_dict["kind"],
-                params=params_decoded,
-                in_vars=layer_dict["in_vars"],
-                out_vars=layer_dict["out_vars"],
-                cache=cache_decoded
-            )
-        except ValueError as e:
-            # If core validation fails during deserialization, create the Layer
-            # without validation for template/example usage
-            if "schema violation" in str(e):
-                print(f"⚠️  Creating example/template layer {layer_dict['kind']}(id={layer_dict['id']}) without validation")
-                
-                # Create Layer without validation
-                layer = object.__new__(Layer)
-                layer.id = layer_dict["id"]
-                layer.kind = layer_dict["kind"]
-                layer.params = params_decoded
-                layer.in_vars = layer_dict["in_vars"]
-                layer.out_vars = layer_dict["out_vars"]
-                layer.cache = cache_decoded
-            else:
-                # Re-raise for other types of errors
-                raise
-
-        return layer
+        return Layer(
+            id=layer_dict["id"],
+            kind=layer_dict["kind"],
+            params=params_decoded,
+            in_vars=layer_dict["in_vars"],
+            out_vars=layer_dict["out_vars"],
+            cache=cache_decoded
+        )
 
 
 class NetSerializer:
@@ -213,22 +193,8 @@ class NetSerializer:
         preds = {int(k): v for k, v in graph.get("preds", {}).items()}
         succs = {int(k): v for k, v in graph.get("succs", {}).items()}
         
-        # Create Net object with validation
-        try:
-            return Net(layers=layers, preds=preds, succs=succs)
-        except ValueError as e:
-            # If validation fails during deserialization, create the Net
-            # without validation for template/example usage
-            if "schema violation" in str(e) or "validation" in str(e).lower():
-                print(f"Warning: Creating net without validation")
-                net = object.__new__(Net)
-                net.layers = layers
-                net.preds = preds
-                net.succs = succs
-                net.by_id = {L.id: L for L in layers}
-                return net
-            else:
-                raise
+        # Create Net object with validation; malformed serialized graphs are errors.
+        return Net(layers=layers, preds=preds, succs=succs)
 
 class ACTJSONEncoder(json.JSONEncoder):
     """Custom JSON encoder for ACT objects."""

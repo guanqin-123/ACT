@@ -9,7 +9,7 @@ License: AGPLv3+
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Tuple, Dict, Any, Optional, Callable, Union
+from typing import List, Tuple, Dict, Any, Optional, Union
 import logging
 import torch
 
@@ -244,20 +244,7 @@ class BaseSpecCreator(ABC):
     
     def _load_config(self, config_name: Optional[str] = None) -> Dict[str, Any]:
         """Load a named spec configuration from the front-end config."""
-        try:
-            return FrontEndConfig.from_yaml().spec_config(config_name)
-        except Exception as e:
-            print(f"⚠️  Could not load config: {e}, using defaults")
-            return self._get_default_config()
-    
-    def _get_default_config(self) -> Dict[str, Any]:
-        """Fallback default configuration"""
-        return {
-            'input_spec_types': ['BOX', 'LINF_BALL'],
-            'output_spec_types': ['MARGIN_ROBUST', 'TOP1_ROBUST'],
-            'perturbation': {'epsilon_values': [0.01, 0.03], 'norm': 'inf'},
-            'combination_strategy': 'balanced'
-        }
+        return FrontEndConfig.from_yaml().spec_config(config_name)
     
     # ==================== SHAPE VALIDATION ==================== #
     
@@ -355,16 +342,12 @@ class BaseSpecCreator(ABC):
         errors = []
         
         # Get model I/O shapes
-        try:
-            input_shape, output_shape = self._get_model_io_shapes(model, sample_input)
-            # Assume last dimension is classes for classification
-            if len(output_shape) > 1:
-                num_classes = output_shape[-1]
-            else:
-                num_classes = output_shape[0]
-        except Exception as e:
-            errors.append(f"Failed to infer model shapes: {e}")
-            return False, errors
+        input_shape, output_shape = self._get_model_io_shapes(model, sample_input)
+        # Assume last dimension is classes for classification
+        if len(output_shape) > 1:
+            num_classes = output_shape[-1]
+        else:
+            num_classes = output_shape[0]
         
         # Validate input spec
         input_valid, input_err = self._validate_input_spec_shape(input_spec, input_shape)
@@ -387,19 +370,16 @@ class BaseSpecCreator(ABC):
         """Validate spec pairs against model and filter invalid ones."""
         valid_pairs = []
         for input_spec, output_spec in spec_pairs:
-            try:
-                is_valid, errors = self.validate_spec_pair_with_model(
-                    input_spec, output_spec, pytorch_model, sample_input
+            is_valid, errors = self.validate_spec_pair_with_model(
+                input_spec, output_spec, pytorch_model, sample_input
+            )
+            if is_valid:
+                valid_pairs.append((input_spec, output_spec))
+            else:
+                logger.debug(
+                    "Spec pair validation failed: %s, %s, with errors:\n%s",
+                    input_spec.kind, output_spec.kind, "\n".join(errors),
                 )
-                if is_valid:
-                    valid_pairs.append((input_spec, output_spec))
-                else:
-                    logger.debug(
-                        "Spec pair validation failed: %s, %s, with errors:\n%s",
-                        input_spec.kind, output_spec.kind, "\n".join(errors),
-                    )
-            except Exception as e:
-                logger.debug("Spec validation error: %s", e)
         return valid_pairs
 
     # ==================== SPEC COMBINATION ==================== #
@@ -439,17 +419,13 @@ class BaseSpecCreator(ABC):
     @abstractmethod
     def create_specs_for_data_model_pairs(
         self,
-        max_samples: Optional[int] = None,
-        filter_fn: Optional[Callable] = None,
-        validate_shapes: bool = True
-    ) -> List[Tuple[str, str, torch.nn.Module, List[torch.Tensor], List[Tuple[InputSpec, OutputSpec]]]]:
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
         """
         Create specs for data-model pairs (must be implemented by subclasses).
-        
-        Args:
-            max_samples: Maximum number of samples/instances to process
-            filter_fn: Optional filter function (source, model) -> bool
-            validate_shapes: Whether to validate spec shapes with model
+
+        Concrete creators expose source-specific selection and limit options.
         
         Returns:
             List of (data_source, model_name, pytorch_model, input_tensors, spec_pairs) tuples

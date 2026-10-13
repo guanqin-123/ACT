@@ -32,9 +32,87 @@ class VNNLibParseError(Exception):
     pass
 
 
-class UnsupportedSpecError(Exception):
+class UnsupportedSpecError(ValueError):
     """Exception raised for soundly unsupported VNNLIB features."""
     pass
+
+
+_DECLARE_NETWORK_RE = re.compile(r"\(\s*declare-network\s+([A-Za-z_]\w*)\b")
+_DECLARE_INPUT_RE = re.compile(
+    r"\(\s*declare-input\s+([A-Za-z_]\w*)\s+\S+\s+\[([^\]]+)\]\s*\)",
+    re.MULTILINE,
+)
+_ASSERT_RE = re.compile(r"\(\s*assert\b")
+
+
+def _declaration_prefix(vnnlib_path: Path) -> str:
+    """Read only the declarations preceding the first VNNLIB assertion."""
+    lines: List[str] = []
+    try:
+        with open(vnnlib_path, "r") as source:
+            for line in source:
+                assert_match = _ASSERT_RE.search(line)
+                lines.append(line if assert_match is None else line[:assert_match.start()])
+                if assert_match is not None:
+                    break
+    except OSError as exc:
+        raise VNNLibParseError(f"Failed to read {vnnlib_path}: {exc}") from exc
+    return "".join(lines)
+
+
+def _network_declaration_blocks(prefix: str) -> List[Tuple[str, str]]:
+    """Return complete ``declare-network`` forms from a declaration prefix."""
+    uncommented = re.sub(r";[^\n]*", "", prefix)
+    blocks: List[Tuple[str, str]] = []
+    for match in _DECLARE_NETWORK_RE.finditer(uncommented):
+        depth = 0
+        for index in range(match.start(), len(uncommented)):
+            char = uncommented[index]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    blocks.append((match.group(1), uncommented[match.start():index + 1]))
+                    break
+    return blocks
+
+
+def reject_multi_input_vnnlib(vnnlib_path: Path) -> None:
+    """Reject VNNLIB 2.0 networks declaring multiple input tensors.
+
+    The scan stops at the first assertion, so even very large properties are
+    rejected without tokenizing or constructing their assertion AST. Separate
+    one-input ``declare-network`` blocks remain supported for isomorphic specs.
+    Legacy VNNLIB 1.0 ``declare-const X_i`` declarations denote one flat input
+    tensor and therefore do not trigger this check.
+    """
+    prefix = _declaration_prefix(vnnlib_path)
+    network_blocks = _network_declaration_blocks(prefix)
+    if not network_blocks:
+        network_blocks = [("<unnamed>", prefix)]
+
+    for network_name, block in network_blocks:
+        declarations = []
+        for match in _DECLARE_INPUT_RE.finditer(block):
+            raw_shape = match.group(2)
+            try:
+                shape = tuple(int(part.strip()) for part in raw_shape.split(",") if part.strip())
+            except ValueError as exc:
+                raise VNNLibParseError(
+                    f"Invalid VNNLIB 2.0 declare-input shape: {raw_shape}"
+                ) from exc
+            declarations.append((match.group(1), shape))
+
+        if len(declarations) > 1:
+            rendered = ", ".join(
+                f"{name} [{', '.join(str(dim) for dim in shape)}]"
+                for name, shape in declarations
+            )
+            raise UnsupportedSpecError(
+                f"{vnnlib_path}: multiple input tensors are unsupported; "
+                f"network {network_name!r} declares {len(declarations)} inputs: {rendered}"
+            )
 
 
 # -------------------------------------------------------------------------
@@ -67,6 +145,8 @@ def parse_vnnlib_to_tensors(
     """
     if not vnnlib_path.exists():
         raise VNNLibParseError(f"VNNLIB file not found: {vnnlib_path}")
+
+    reject_multi_input_vnnlib(vnnlib_path)
     
     try:
         with open(vnnlib_path, 'r') as f:
@@ -96,15 +176,12 @@ def parse_vnnlib_to_tensors(
         # Constraints inside (or ...) branches must not be intersected here —
         # that would produce empty boxes for disjunctive-input properties
         # (e.g. ACAS Xu prop_5..10).
-        try:
-            forms = _parse_all_forms(content)
-            simple_bodies = [
-                f[1] for f in forms
-                if isinstance(f, list) and len(f) >= 2 and f[0] == "assert"
-                and _is_simple_x_bound(f[1])
-            ]
-        except Exception:
-            simple_bodies = []
+        forms = _parse_all_forms(content)
+        simple_bodies = [
+            f[1] for f in forms
+            if isinstance(f, list) and len(f) >= 2 and f[0] == "assert"
+            and _is_simple_x_bound(f[1])
+        ]
         input_bounds = _extract_input_bounds(simple_bodies, num_inputs)
         
         # Create input tensor from bounds center
@@ -238,23 +315,19 @@ def extract_label_from_vnnlib(vnnlib_path: Path) -> Optional[int]:
         >>> print(label)
         14
     """
-    try:
-        with open(vnnlib_path, 'r') as f:
-            # Read first few lines (label is typically in first comment)
-            for _ in range(5):
-                line = f.readline()
-                if not line:
-                    break
-                
-                # Match patterns like: ; CIFAR100 property with label: 14.
-                match = re.search(r'label:\s*(\d+)', line, re.IGNORECASE)
-                if match:
-                    return int(match.group(1))
-        
-        return None
-    except Exception as e:
-        logger.debug(f"Failed to extract label from {vnnlib_path}: {e}")
-        return None
+    with open(vnnlib_path, 'r') as f:
+        # Read first few lines (label is typically in first comment)
+        for _ in range(5):
+            line = f.readline()
+            if not line:
+                break
+            
+            # Match patterns like: ; CIFAR100 property with label: 14.
+            match = re.search(r'label:\s*(\d+)', line, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+    
+    return None
 
 
 # -------------------------------------------------------------------------
@@ -280,6 +353,7 @@ def parse_vnnlib_2_0(
     """Parse VNNLIB 2.0 by ravel-rewriting bracket variables to legacy names."""
     if not vnnlib_path.exists():
         raise VNNLibParseError(f"VNNLIB file not found: {vnnlib_path}")
+    reject_multi_input_vnnlib(vnnlib_path)
     try:
         with open(vnnlib_path, 'r') as f:
             content = f.read()
@@ -597,16 +671,12 @@ def _extract_input_bounds(
             continue
         x_tok = left if x_is_left else right
         lit_tok = right if x_is_left else left
-        try:
-            val = float(lit_tok)
-        except (TypeError, ValueError):
-            continue
+        val = float(lit_tok)  # _is_simple_x_bound admitted only numeric literals
         x_match = _X_RE.fullmatch(x_tok)
         if x_match is None:
             continue
         idx = int(x_match.group(1))
-        if idx >= num_inputs:
-            continue
+        assert idx < num_inputs, f"X_{idx} is bounded but the property declares {num_inputs} inputs"
         # (<= X val)  -> X <= val   (upper)
         # (>= X val)  -> X >= val   (lower)
         # (<= val X)  -> val <= X   -> X >= val (lower)

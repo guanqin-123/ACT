@@ -44,11 +44,8 @@ if TYPE_CHECKING:
         # Will import at runtime when needed to avoid circular import
         pass
 
-try:
-    import torch
-    Tensor = torch.Tensor
-except Exception:  # typing only
-    Tensor = "torch.Tensor"  # type: ignore
+import torch
+Tensor = torch.Tensor
 
 # ------------------------------
 # Strict validation & helpers
@@ -250,54 +247,49 @@ def create_layer(id: int, kind: str, params: Dict[str, Any],
 # Tiny example (run file)
 # ---------------------
 if __name__ == "__main__":
-    try:
-        import torch  # type: ignore
-        import sys
-        import os
-        # Add parent directory to path for absolute imports
-        from act.util.path_config import get_project_root
-        project_root = get_project_root()
-        sys.path.insert(0, project_root)
+    import sys
+    # Add parent directory to path for absolute imports
+    from act.util.path_config import get_project_root
+    project_root = get_project_root()
+    sys.path.insert(0, project_root)
         
-        from act.back_end.core import Layer
-        from act.back_end.layer_schema import LayerKind
-        from typing import List
-        layers: List[Layer] = []
+    from act.back_end.core import Layer
+    from act.back_end.layer_schema import LayerKind
+    from typing import List
+    layers: List[Layer] = []
 
-        # INPUT
-        layers.append(create_layer(
+    # INPUT
+    layers.append(create_layer(
             id=0, kind=LayerKind.INPUT.value,
             params={},
             in_vars=[0], out_vars=[0],
-        ))
-        # SPEC (directly after INPUT - no adapters)
-        lb_tensor = torch.full((1,3,32,32), -1.0)
-        ub_tensor = torch.full((1,3,32,32), 1.0)
-        layers.append(create_layer(
+    ))
+    # SPEC (directly after INPUT - no adapters)
+    lb_tensor = torch.full((1,3,32,32), -1.0)
+    ub_tensor = torch.full((1,3,32,32), 1.0)
+    layers.append(create_layer(
             id=1, kind=LayerKind.INPUT_SPEC.value,
             params={"kind": InKind.BOX, "lb": lb_tensor, "ub": ub_tensor},
             in_vars=[0], out_vars=[0],
-        ))
-        # Model toy
-        layers.append(create_layer(
+    ))
+    # Model toy
+    layers.append(create_layer(
             id=2, kind=LayerKind.FLATTEN.value,
             params={},
             in_vars=[0], out_vars=[1],
-        ))
-        W, b = torch.randn(10, 3072), torch.randn(10)
-        layers.append(create_layer(
+    ))
+    W, b = torch.randn(10, 3072), torch.randn(10)
+    layers.append(create_layer(
             id=3, kind=LayerKind.DENSE.value,
             params={"W": W, "b": b},
             in_vars=[1], out_vars=[2],
-        ))
-        layers.append(create_layer(
+    ))
+    layers.append(create_layer(
             id=4, kind=LayerKind.ASSERT.value,
             params={},
             in_vars=[2], out_vars=[2],
-        ))
+    ))
 
-        validate_graph(layers)
-        validate_wrapper_graph(layers)
-        print("OK — wrapper model passes with", len(layers), "layers.")
-    except Exception as e:
-        print("Example failed:\n", e)
+    validate_graph(layers)
+    validate_wrapper_graph(layers)
+    print("OK — wrapper model passes with", len(layers), "layers.")

@@ -5,10 +5,8 @@
 import torch
 from typing import Tuple, Optional
 
-try:
+if hasattr(torch.sparse, "check_sparse_tensor_invariants"):
     torch.sparse.check_sparse_tensor_invariants.disable()
-except Exception:
-    pass
 
 # Global initialization state
 _INITIALIZED = False
@@ -66,61 +64,50 @@ def initialize_device(device: str, dtype: str) -> None:
     """
     global _INITIALIZED
     
-    try:
-        # Handle gpu/cuda aliasing
-        if device == 'gpu':
-            device = 'cuda'
-            print(f"🔄 Device alias: 'gpu' → 'cuda'")
+    # Handle gpu/cuda aliasing
+    if device == 'gpu':
+        device = 'cuda'
+        print(f"🔄 Device alias: 'gpu' → 'cuda'")
         
-        # Determine target device
-        if device == 'cpu':
-            target_device = torch.device("cpu")
-        elif device == 'cuda':
-            if torch.cuda.is_available():
-                target_device = torch.device("cuda:0")
-            else:
-                target_device = torch.device("cpu")
-                print(f"⚠️ CUDA not available, falling back to CPU")
-        elif device == 'mps':
-            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                target_device = torch.device("mps")
-            else:
-                target_device = torch.device("cpu")
-                print(f"⚠️ MPS not available, falling back to CPU")
-        else:
-            # Unknown device, default to CPU
-            target_device = torch.device("cpu")
-            print(f"⚠️ Unknown device '{device}', using CPU")
-        
-        # Determine target dtype
-        if dtype == 'float32':
-            target_dtype = torch.float32
-        elif dtype == 'float64':
-            target_dtype = torch.float64
-        else:
-            # Unknown dtype, default to float64
-            target_dtype = torch.float64
-            print(f"⚠️ Unknown dtype '{dtype}', using float64")
-        
-        # Set PyTorch global defaults
-        torch.set_default_dtype(target_dtype)
-        if hasattr(torch, 'set_default_device'):
-            torch.set_default_device(target_device)
-
-        precision = _apply_precision_policy()
-
-        print(
-            f"✅ Device Manager Initialized: device={target_device}, "
-            f"dtype={target_dtype}, {precision}"
+    # Determine target device. CLI defaults already select an available device,
+    # so an unavailable explicit request is a configuration error.
+    if device == 'cpu':
+        target_device = torch.device("cpu")
+    elif device == 'cuda':
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA device requested but CUDA is not available")
+        target_device = torch.device("cuda:0")
+    elif device == 'mps':
+        if not hasattr(torch.backends, 'mps') or not torch.backends.mps.is_available():
+            raise RuntimeError("MPS device requested but MPS is not available")
+        target_device = torch.device("mps")
+    else:
+        raise ValueError(
+            f"Unknown device {device!r}; expected one of 'cpu', 'cuda', 'gpu', or 'mps'"
         )
-        _INITIALIZED = True
         
-    except Exception as e:
-        print(f"❌ Device initialization failed: {e}")
-        print(f"   Falling back to CPU + float64")
-        torch.set_default_dtype(torch.float64)
-        _apply_precision_policy()
-        _INITIALIZED = True
+    # Determine target dtype.
+    if dtype == 'float32':
+        target_dtype = torch.float32
+    elif dtype == 'float64':
+        target_dtype = torch.float64
+    else:
+        raise ValueError(
+            f"Unknown dtype {dtype!r}; expected 'float32' or 'float64'"
+        )
+        
+    # Set PyTorch global defaults
+    torch.set_default_dtype(target_dtype)
+    if hasattr(torch, 'set_default_device'):
+        torch.set_default_device(target_device)
+
+    precision = _apply_precision_policy()
+
+    print(
+        f"✅ Device Manager Initialized: device={target_device}, "
+        f"dtype={target_dtype}, {precision}"
+    )
+    _INITIALIZED = True
 
 
 def get_default_device() -> torch.device:
@@ -133,10 +120,7 @@ def get_default_device() -> torch.device:
     _ensure_initialized()
     
     if hasattr(torch, 'get_default_device'):
-        try:
-            return torch.get_default_device()
-        except:
-            return torch.device("cpu")
+        return torch.get_default_device()
     else:
         # For older PyTorch versions, check where a test tensor is created
         test_tensor = torch.zeros(1)
@@ -186,19 +170,13 @@ def _ensure_initialized():
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         dtype = 'float64'
         
-        # Initialize with defaults (no print statements for lazy init)
-        try:
-            target_device = torch.device("cuda:0") if device == 'cuda' else torch.device("cpu")
-            target_dtype = torch.float64
-            
-            torch.set_default_dtype(target_dtype)
-            if hasattr(torch, 'set_default_device'):
-                torch.set_default_device(target_device)
-            
-            _apply_precision_policy()
-            _INITIALIZED = True
-        except Exception:
-            # Silent fallback to CPU + float64
-            torch.set_default_dtype(torch.float64)
-            _apply_precision_policy()
-            _INITIALIZED = True
+        # Initialize with defaults (no print statements for lazy init).
+        target_device = torch.device("cuda:0") if device == 'cuda' else torch.device("cpu")
+        target_dtype = torch.float64
+
+        torch.set_default_dtype(target_dtype)
+        if hasattr(torch, 'set_default_device'):
+            torch.set_default_device(target_device)
+
+        _apply_precision_policy()
+        _INITIALIZED = True
