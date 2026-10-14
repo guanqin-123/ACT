@@ -796,8 +796,7 @@ class DualSolver(Solver):
         if k != LayerKind.RELU.value:
             return None
         b = bounds_dict.get(layer.id)
-        if b is None:
-            return None
+        assert b is not None, f"_init_alpha: no bounds for RELU layer {layer.id}"
         if incremental_alphas is not None and layer.id in incremental_alphas:
             alpha_init = (
                 incremental_alphas[layer.id]
@@ -1152,8 +1151,7 @@ class DualSolver(Solver):
                 continue
             if k in (LayerKind.INPUT.value, LayerKind.INPUT_SPEC.value):
                 b = out.get(lid)
-                if b is None:
-                    return None
+                assert b is not None, f"_interval_refresh_bounds: no bounds for {k} layer {lid}"
                 vals[lid] = (b.lb.flatten(start_dim=1), b.ub.flatten(start_dim=1))
                 continue
             preds = net.preds.get(lid, [])
@@ -1164,8 +1162,9 @@ class DualSolver(Solver):
             elif k == LayerKind.DENSE.value:
                 w = layer.params["weight"]
                 bias = layer.params.get("bias")
-                if not isinstance(w, torch.Tensor):
-                    return None
+                assert isinstance(w, torch.Tensor), (
+                    f"_interval_refresh_bounds: DENSE layer {lid} weight is {type(w).__name__}"
+                )
                 plb, pub = vals[preds[0]]
                 c = (plb + pub) * 0.5
                 r = (pub - plb) * 0.5
@@ -1514,11 +1513,11 @@ class DualSolver(Solver):
 
         device, dtype = c.device, c.dtype
         input_lid = self._find_input_layer_id(net)
-        if input_lid is None:
-            return bounds_dict, None
+        assert input_lid is not None, "recompute_bounds_and_nu: net has no INPUT layer"
         input_bounds = bounds_dict.get(input_lid)
-        if input_bounds is None:
-            return bounds_dict, None
+        assert input_bounds is not None, (
+            f"recompute_bounds_and_nu: no bounds for INPUT layer {input_lid}"
+        )
         input_lb = input_bounds.lb.to(device=device, dtype=dtype)
         input_ub = input_bounds.ub.to(device=device, dtype=dtype)
 

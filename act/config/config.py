@@ -782,18 +782,9 @@ class BackendConfig:
 if __name__ == "__main__":
     import sys
 
-    passed = 0
-    failed = 0
-
     def _check(label: str, fn) -> None:  # pragma: no cover
-        global passed, failed
-        try:
-            fn()
-            print(f"  PASS  {label}")
-            passed += 1
-        except Exception as exc:
-            print(f"  FAIL  {label}: {exc}")
-            failed += 1
+        fn()
+        print(f"  PASS  {label}")
 
     print("BackendConfig.__post_init__ rejection tests")
 
@@ -827,8 +818,7 @@ if __name__ == "__main__":
     _check("gurobi + lp_enabled=False + bab_max_batch_size=1 succeeds", _t3)
     _check("default config has lp_enabled=True, bab_max_batch_size=8", _t4)
 
-    print(f"\n{passed}/{passed + failed} passed")
-    sys.exit(0 if failed == 0 else 1)
+    sys.exit(0)
 
 
 def build_vnncomp_bab_config(

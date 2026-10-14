@@ -418,6 +418,12 @@ def split_neurons(
                 signs[layer_id][rows, :, neuron_selection] = sign_value
 
     children.split_signs = signs
+    assert children.batch_size == n_children * n_lanes, (
+        f"split_neurons: {children.batch_size} children for {n_lanes} lanes x {n_children} sign combinations"
+    )
+    assert parent_index.numel() == children.batch_size, (
+        f"split_neurons: parent_index has {parent_index.numel()} entries for {children.batch_size} children"
+    )
     return children, parent_index
 
 

@@ -598,8 +598,9 @@ def certificate_replay(
     if out_kind == OutKind.UNSAFE_LINEAR:
         passing = torch.isfinite(slack) & (slack > 0)
         pinned_rows = passing.to(torch.int64).argmax(dim=1)
-    if result.nu_per_layer is None:
-        return None
+    assert result.nu_per_layer is not None, (
+        "certificate_replay: solver returned no nu_per_layer despite return_nu_per_layer=True"
+    )
     nu: Dict[int, torch.Tensor] = {}
     for layer_id, value in result.nu_per_layer.items():
         if value.shape[0] == n_lanes * m_specs:
