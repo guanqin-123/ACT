@@ -18,16 +18,20 @@ with activation bounds stored PRE-activation unless ``post_activation=True``.
 
 # pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownArgumentType=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false, reportMissingParameterType=false, reportUntypedFunctionDecorator=false, reportDeprecated=false
 
+import logging
 from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, cast
 
 from act.back_end.core import Bounds, Layer, Net, topological_sort
 from act.back_end.layer_schema import LayerKind
-from act.back_end.utils import affine_bounds, split_weight
+from act.back_end.utils import pair_2d
+from act.config.config import DualConfig
 from act.util.device_manager import get_default_device, get_default_dtype
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -45,6 +49,107 @@ Frame = Tuple[torch.Tensor, torch.Tensor]  # (x_L, x_U) over which lin is define
 # interval-only via ``_box_X`` + ``_reset_forward_box``. Sound (interval
 # is always sound), looser bounds at the bailed layer.
 _DENSE_LIN_BOUND_MAX_DIM: int = 10_000
+
+
+_LIN_BOUND_FREE_FRACTION: float = 0.8
+
+# Peak transient working set of one lane of the symbolic composition, as a
+# multiple of that lane's persistent coefficient pair
+# ``2 * n_out * n_sym * itemsize``. Measured as ``max_memory_allocated()``
+# deltas over the three helpers on toy CUDA layers (float32, B=4): CONV2D 2.38
+# (3->64 channels, VGG conv1 shape) and 3.45 (64->64), DENSE 2.25 (widening)
+# and 4.02 (square), MAXPOOL2D 2.51 — each rounded up to the next integer.
+# Allocations that do NOT scale with the lane count sit outside this model and
+# no lane split can shrink them: ``W.abs()`` plus the einsum's weight copies
+# for DENSE (they follow ``n_out * n_in``, and dominate whenever
+# ``n_in >> n_out``), and the im2col buffer for spatially tiny convolutions.
+_LIN_BOUND_CHUNK_TRANSIENT_CONV2D: int = 4
+_LIN_BOUND_CHUNK_TRANSIENT_DENSE: int = 4
+_LIN_BOUND_CHUNK_TRANSIENT_MAXPOOL2D: int = 3
+
+_LIN_BOUND_REPORTED: set[Tuple[int, str]] = set()
+
+
+def _report_lin_bound_once(layer_id: int, mode: str, level: int, msg: str, *args: object) -> None:
+    """Emit ``msg`` the first time a ``(layer id, mode)`` pair degrades.
+
+    Forward bounds are recomputed for every BaB node, so an unconditional log
+    call here produces one line per node per layer.
+    """
+    key = (layer_id, mode)
+    if key in _LIN_BOUND_REPORTED:
+        return
+    _LIN_BOUND_REPORTED.add(key)
+    log.log(level, msg, *args)
+
+
+def _lin_bound_lane_chunk(B: int, n_out: int, n_sym: int, ref: torch.Tensor,
+                          k_transient: int, layer_id: int, mode: str) -> Optional[int]:
+    """Plan how many lanes a symbolic ``[B, n_out, n_sym]`` layer may do at once.
+
+    Returns ``B`` when the whole batch fits ~80% of the free CUDA memory (the
+    unguarded path, bit-for-bit unchanged), a chunk size ``1 <= c < B`` when the
+    batch must be split lane-wise, or ``None`` when even a single lane's working
+    set overruns the budget or the concatenated result cannot fit at all — the
+    caller then returns ``None`` and ``forward_X`` degrades that layer to the
+    interval box. CPU allocations are never split.
+
+    Chunking only moves the *transient* peak: the result ``[B, n_out, n_sym]``
+    pair is concatenated back and stays resident either way, so it is checked
+    against the full free memory separately.
+    """
+    if not ref.is_cuda:
+        return B
+    pair_bytes = 2 * n_out * n_sym * ref.element_size()
+    if pair_bytes <= 0:
+        return B
+    free_bytes, _ = torch.cuda.mem_get_info(ref.device)
+    budget = free_bytes * _LIN_BOUND_FREE_FRACTION
+    persistent = B * pair_bytes
+    if persistent <= budget:
+        return B
+
+    chunk = min(B, int(budget // (pair_bytes * k_transient)))
+    if chunk >= 1 and persistent <= free_bytes:
+        _report_lin_bound_once(
+            layer_id, mode, logging.INFO,
+            "forward linear bound splits %d lanes into chunks of %d for a "
+            "[%d, %d, %d] coefficient pair (%.2f GiB resident, %.2f GiB CUDA free)",
+            B, chunk, B, n_out, n_sym, persistent / 2 ** 30, free_bytes / 2 ** 30,
+        )
+        return chunk
+
+    _report_lin_bound_once(
+        layer_id, mode, logging.WARNING,
+        "forward linear bound needs ~%.2f GiB for a [%d, %d, %d] coefficient pair "
+        "(%.3f GiB for a single lane) with only %.2f GiB CUDA free; falling back "
+        "to interval for this layer",
+        persistent / 2 ** 30, B, n_out, n_sym,
+        pair_bytes * k_transient / 2 ** 30, free_bytes / 2 ** 30,
+    )
+    return None
+
+
+def _lin_lanes(lin: LinearBound, start: int, end: int) -> LinearBound:
+    """View of lanes ``[start, end)`` — slices, so no copy is made."""
+    return LinearBound(
+        A_lb=None if lin.A_lb is None else lin.A_lb[start:end],
+        b_lb=lin.b_lb[start:end],
+        A_ub=None if lin.A_ub is None else lin.A_ub[start:end],
+        b_ub=lin.b_ub[start:end],
+    )
+
+
+def _cat_lanes(parts: List[LinearBound]) -> LinearBound:
+    """Reassemble lane chunks along the batch axis."""
+    return LinearBound(
+        A_lb=None if parts[0].A_lb is None else torch.cat(
+            [cast(torch.Tensor, part.A_lb) for part in parts], dim=0),
+        b_lb=torch.cat([part.b_lb for part in parts], dim=0),
+        A_ub=None if parts[0].A_ub is None else torch.cat(
+            [cast(torch.Tensor, part.A_ub) for part in parts], dim=0),
+        b_ub=torch.cat([part.b_ub for part in parts], dim=0),
+    )
 
 
 def _concretize(lin: LinearBound, x_L: torch.Tensor, x_U: torch.Tensor
@@ -105,6 +210,33 @@ def _reset_lin(lb: torch.Tensor, ub: torch.Tensor, device, dtype
     B, n = lb.shape[0], lb.shape[1]
     return _identity_lin(B, n, device, dtype), lb.clone(), ub.clone()
 
+def _entry_lin_frame(lb_in: torch.Tensor, ub_in: torch.Tensor,
+                     max_perturbed: int, device, dtype
+                     ) -> Tuple[LinearBound, Frame]:
+    """Entry LinearBound/Frame, symbolic only in the perturbed input dims.
+
+    ``pert`` is the union over the batch of dims with ``ub > lb``. When
+    ``0 < n_pert <= max_perturbed``, the entry bound is the explicit one-hot
+    selection ``A[:, i, k] = 1`` iff input dim ``i`` is the ``k``-th perturbed
+    dim; unperturbed dims fold into the constant term ``b`` and the frame
+    shrinks to the perturbed columns. Downstream ``_fwd_X`` handlers then see
+    ``A is not None`` and never take the ``_DENSE_LIN_BOUND_MAX_DIM`` bail,
+    so e.g. VGG16 with <=100 perturbed pixels keeps linear bounds at every
+    conv. Otherwise (``n_pert == 0`` or above the cap) fall back to the lazy
+    identity over all dims, preserving the previous behaviour exactly.
+    """
+    B, input_dim = lb_in.shape
+    pert = (ub_in > lb_in).any(dim=0)
+    n_pert = int(pert.sum().item())
+    if n_pert == 0 or n_pert > max_perturbed:
+        return _identity_lin(B, input_dim, device, dtype), (lb_in, ub_in)
+    selection = torch.zeros(input_dim, n_pert, device=device, dtype=dtype)
+    selection[pert.nonzero(as_tuple=True)[0], torch.arange(n_pert, device=device)] = 1.0
+    A = selection.unsqueeze(0).expand(B, input_dim, n_pert)
+    b = torch.where(pert, torch.zeros_like(lb_in), lb_in)
+    lin = LinearBound(A_lb=A, b_lb=b, A_ub=A, b_ub=b.clone())
+    return lin, (lb_in[:, pert], ub_in[:, pert])
+
 def _match_lin_input_dim(lin: LinearBound, n_in: int) -> LinearBound:
     """Pad or truncate the current output-feature axis to size n_in.
 
@@ -158,7 +290,31 @@ def _match_lin_input_dim(lin: LinearBound, n_in: int) -> LinearBound:
 
 def _intersect_boxes(lb_a: torch.Tensor, ub_a: torch.Tensor,
                      lb_b: torch.Tensor, ub_b: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    return torch.maximum(lb_a, lb_b), torch.minimum(ub_a, ub_b)
+    """Intersect two sound boxes; EVERY crossing degrades to box ``b`` per entry.
+
+    Both boxes enclose the same true value set, so in exact arithmetic they
+    overlap and ``max(lbs) <= min(ubs)``. In float32 the linear-track
+    concretization (box ``a``) and the interval track (box ``b``) are
+    independent accumulations; when the true width is below the accumulation
+    noise the pair can cross (RC2) — on layers whose partial sums dwarf the
+    cancelled result (late VGG convs / FC, partials 1e5-1e7 vs results
+    O(1-100)) by a small multiple of the PARTIAL-sum ulp. Any crossed entry,
+    whatever its magnitude, falls back to box ``b`` verbatim (the
+    centre-radius interval track, ordered by construction), which is sound
+    and merely looser. A tolerance-gated "repair" that swaps the crossed pair
+    to ``[min(ubs), max(lbs)]`` is UNSOUND: that interval lies between the two
+    boxes and may contain points of neither — e.g. true range [1.0, 2.0],
+    interval box [1.0001, 2.0001], linear box [0.0, 1.0] (1 ulp low at 1e5
+    partial sums) swapped to [1.0, 1.0001], excluding the true value 2.0.
+    Genuine producer bugs that emit inverted boxes directly remain visible to
+    the downstream degenerate-interval check.
+    """
+    lb = torch.maximum(lb_a, lb_b)
+    ub = torch.minimum(ub_a, ub_b)
+    crossed = lb > ub
+    out_lb = torch.where(crossed, lb_b, lb)
+    out_ub = torch.where(crossed, ub_b, ub)
+    return out_lb, out_ub
 
 def _align_batch(a: torch.Tensor, n: int) -> torch.Tensor:
     if a.shape[1] == n:
@@ -178,14 +334,23 @@ def _int_param(value: object, default: int) -> int:
 
 
 def _box_dense(layer: Layer, lb: torch.Tensor, ub: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Interval DENSE as ``m = c Wᵀ + b``, ``rho = r |W|ᵀ``, ``[m-rho, m+rho]``.
+
+    ``rho >= 0`` structurally, so ``ub - lb = 2*rho >= 0`` per neuron whatever
+    the rounding; the ``W⁺l + W⁻u`` / ``W⁺u + W⁻l`` form sums two independent
+    accumulations that float32 cancellation can order the wrong way.
+    """
     W = layer.params["weight"]
     b = layer.params.get("bias")
     lb = _align_batch(lb, W.shape[1])
     ub = _align_batch(ub, W.shape[1])
-    W_pos, W_neg = split_weight(W)
-    bias_vec = lb.new_zeros(W.shape[0]) if b is None else _align(b.flatten(), W.shape[0])
-    out = affine_bounds(W_pos, W_neg, bias_vec, Bounds(lb, ub))
-    return out.lb, out.ub
+    centre = (lb + ub) * 0.5
+    radius = (ub - lb) * 0.5
+    mid = centre @ W.T
+    spread = radius @ W.abs().T
+    if b is not None:
+        mid = mid + _align(b.flatten(), W.shape[0])
+    return mid - spread, mid + spread
 
 
 def _box_bias(layer: Layer, lb: torch.Tensor, ub: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -298,10 +463,21 @@ def _sum_linear_bounds(lins: List[LinearBound]) -> LinearBound:
 @torch.no_grad()
 def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Tensor,
                            post_activation: bool = False,
-                           alphas: Optional[Dict[int, torch.Tensor]] = None) -> Dict[int, Bounds]:
-    """Forward bounds, natively batched with singleton auto-promotion."""
+                           alphas: Optional[Dict[int, torch.Tensor]] = None,
+                           forward_lin_max_perturbed: Optional[int] = None,
+                           ) -> Dict[int, Bounds]:
+    """Forward bounds, natively batched with singleton auto-promotion.
+
+    ``forward_lin_max_perturbed`` caps the number of perturbed input dims for
+    which the linear track stays symbolic (see :func:`_entry_lin_frame`);
+    ``None`` resolves to the DualConfig default at call time rather than being
+    frozen at import time.
+    """
     # Lazy import to break circular dep (dual_tf imports compute_forward_bounds)
     from .dual_tf import DualTF
+
+    if forward_lin_max_perturbed is None:
+        forward_lin_max_perturbed = DualConfig().forward_lin_max_perturbed
 
     device, dtype = get_default_device(), get_default_dtype()
     if (
@@ -318,7 +494,6 @@ def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Ten
     B = input_lb.shape[0]
     lb_in = input_lb.reshape(B, -1)
     ub_in = input_ub.reshape(B, -1)
-    input_dim = lb_in.shape[1]
 
     bounds_dict: Dict[int, Bounds] = {}
     box_state: Dict[int, Bounds] = {}
@@ -327,8 +502,9 @@ def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Ten
     topo_order = topological_sort(net)
     by_id = getattr(net, "by_id", {layer.id: layer for layer in net.layers})
     entry_box = Bounds(lb_in, ub_in)
-    entry_lin = _identity_lin(B, input_dim, device, dtype)
-    entry_frame = (lb_in, ub_in)
+    entry_lin, entry_frame = _entry_lin_frame(
+        lb_in, ub_in, forward_lin_max_perturbed, device, dtype,
+    )
 
     for lid in topo_order:
         layer = by_id[lid]
@@ -444,32 +620,64 @@ def _fwd_dense(layer: Layer, lin: LinearBound) -> Optional[LinearBound]:
     the caller to fall back to interval-only forward via
     :func:`_reset_forward_box`. Same pattern as :func:`_fwd_conv2d` and
     :func:`_fwd_relu`.
+
+    Under CUDA memory pressure the batch is composed in lane chunks (see
+    :func:`_lin_bound_lane_chunk`) and reassembled; interval fallback is kept
+    only for the case where a single lane does not fit.
     """
     W = layer.params["weight"]
-    b = layer.params.get("bias")
     lin = _match_lin_input_dim(lin, W.shape[1])
-    W_pos = W.clamp(min=0)
-    W_neg = W.clamp(max=0)
+    B = lin.b_lb.shape[0]
+    n_sym = W.shape[1] if lin.A_lb is None else lin.A_lb.shape[2]
+    chunk = _lin_bound_lane_chunk(B, W.shape[0], n_sym, lin.b_lb,
+                                  _LIN_BOUND_CHUNK_TRANSIENT_DENSE, layer.id, "dense")
+    if chunk is None:
+        return None
+    if chunk >= B:
+        return _fwd_dense_lanes(layer, lin)
+
+    parts: List[LinearBound] = []
+    for start in range(0, B, chunk):
+        part = _fwd_dense_lanes(layer, _lin_lanes(lin, start, min(start + chunk, B)))
+        if part is None:
+            return None
+        parts.append(part)
+    return _cat_lanes(parts)
+
+
+def _fwd_dense_lanes(layer: Layer, lin: LinearBound) -> Optional[LinearBound]:
+    """Dense composition for one lane chunk; ``lin`` must already be dim-matched."""
+    W = layer.params["weight"]
+    b = layer.params.get("bias")
     B = lin.b_lb.shape[0]
     bias_vec = torch.zeros(W.shape[0], device=lin.b_lb.device, dtype=lin.b_lb.dtype)
     if b is not None:
         bias_vec = _align(b.flatten(), W.shape[0])
+
+    # Centre-radius composition; see _fwd_conv2d for the identity and the
+    # float32 cancellation rationale.
+    b_centre = (lin.b_lb + lin.b_ub) * 0.5
+    b_radius = (lin.b_ub - lin.b_lb) * 0.5
+    b_mid = torch.einsum("oc,bc->bo", W, b_centre) + bias_vec
+    b_spread = torch.einsum("oc,bc->bo", W.abs(), b_radius)
 
     if lin.A_lb is None and lin.A_ub is None:
         if W.shape[1] > _DENSE_LIN_BOUND_MAX_DIM:
             return None
         W_broadcast_lb = W.unsqueeze(0).expand(B, -1, -1).contiguous()
         W_broadcast_ub = W.unsqueeze(0).expand(B, -1, -1).contiguous()
-        b_lb_new = torch.einsum("oc,bc->bo", W_pos, lin.b_lb) + torch.einsum("oc,bc->bo", W_neg, lin.b_ub) + bias_vec
-        b_ub_new = torch.einsum("oc,bc->bo", W_pos, lin.b_ub) + torch.einsum("oc,bc->bo", W_neg, lin.b_lb) + bias_vec
-        return LinearBound(A_lb=W_broadcast_lb, b_lb=b_lb_new,
-                           A_ub=W_broadcast_ub, b_ub=b_ub_new)
+        return LinearBound(A_lb=W_broadcast_lb, b_lb=b_mid - b_spread,
+                           A_ub=W_broadcast_ub, b_ub=b_mid + b_spread)
 
+    A_centre = (lin.A_lb + lin.A_ub) * 0.5
+    A_radius = (lin.A_ub - lin.A_lb) * 0.5
+    A_mid = torch.einsum("oc,bci->boi", W, A_centre)
+    A_spread = torch.einsum("oc,bci->boi", W.abs(), A_radius)
     return LinearBound(
-        A_lb=torch.einsum("oc,bci->boi", W_pos, lin.A_lb) + torch.einsum("oc,bci->boi", W_neg, lin.A_ub),
-        b_lb=torch.einsum("oc,bc->bo", W_pos, lin.b_lb) + torch.einsum("oc,bc->bo", W_neg, lin.b_ub) + bias_vec,
-        A_ub=torch.einsum("oc,bci->boi", W_pos, lin.A_ub) + torch.einsum("oc,bci->boi", W_neg, lin.A_lb),
-        b_ub=torch.einsum("oc,bc->bo", W_pos, lin.b_ub) + torch.einsum("oc,bc->bo", W_neg, lin.b_lb) + bias_vec,
+        A_lb=A_mid - A_spread,
+        b_lb=b_mid - b_spread,
+        A_ub=A_mid + A_spread,
+        b_ub=b_mid + b_spread,
     )
 
 
@@ -647,8 +855,13 @@ def _fwd_lrelu(lin: LinearBound, lb: torch.Tensor, ub: torch.Tensor, alpha: floa
 
 
 def _fwd_conv2d(layer: Layer, lin: LinearBound) -> Optional[LinearBound]:
-    """Propagate dual-track affine bounds through Conv2D via batched F.conv2d."""
-    weight = layer.params["weight"]
+    """Propagate dual-track affine bounds through Conv2D via batched F.conv2d.
+
+    Under CUDA memory pressure the batch is convolved in lane chunks (see
+    :func:`_lin_bound_lane_chunk`) and reassembled; interval fallback is kept
+    only for the case where a single lane does not fit.
+    """
+    weight = cast(torch.Tensor, layer.params["weight"])
     bias = layer.params.get("bias")
     stride = layer.params.get("stride", 1)
     padding = layer.params.get("padding", 0)
@@ -697,36 +910,85 @@ def _fwd_conv2d(layer: Layer, lin: LinearBound) -> Optional[LinearBound]:
     if in_h == 0 or in_w == 0:
         return None
 
-    W_pos = weight.clamp(min=0)
-    W_neg = weight.clamp(max=0)
+    k_h, k_w = int(weight.shape[2]), int(weight.shape[3])
+    stride_i = cast(int, stride)
+    padding_i = cast(int, padding)
+    dilation_i = cast(int, dilation)
+    out_h = (in_h + 2 * padding_i - dilation_i * (k_h - 1) - 1) // stride_i + 1
+    out_w = (in_w + 2 * padding_i - dilation_i * (k_w - 1) - 1) // stride_i + 1
+    chunk = _lin_bound_lane_chunk(B, out_c * out_h * out_w, input_dim, lin.b_lb,
+                                  _LIN_BOUND_CHUNK_TRANSIENT_CONV2D, layer.id, "conv2d")
+    if chunk is None:
+        return None
 
     def conv_A(A_mat: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
-        A_t = A_mat.transpose(1, 2).contiguous().view(B * input_dim, in_c, in_h, in_w)
+        lanes = A_mat.shape[0]
+        A_t = A_mat.transpose(1, 2).contiguous().view(lanes * input_dim, in_c, in_h, in_w)
         out = F.conv2d(A_t, kernel, None, stride, padding, dilation, groups)
-        return out.flatten(start_dim=1).reshape(B, input_dim, -1).transpose(1, 2).contiguous()
+        return out.flatten(start_dim=1).reshape(lanes, input_dim, -1).transpose(1, 2).contiguous()
 
     def conv_b(vec: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
-        b_4d = vec.view(B, in_c, in_h, in_w)
+        b_4d = vec.view(vec.shape[0], in_c, in_h, in_w)
         return F.conv2d(b_4d, kernel, None, stride, padding, dilation, groups).flatten(start_dim=1)
 
-    A_lb_new = conv_A(lin.A_lb, W_pos) + conv_A(lin.A_ub, W_neg)
-    A_ub_new = conv_A(lin.A_ub, W_pos) + conv_A(lin.A_lb, W_neg)
-    b_lb_new = conv_b(lin.b_lb, W_pos) + conv_b(lin.b_ub, W_neg)
-    b_ub_new = conv_b(lin.b_ub, W_pos) + conv_b(lin.b_lb, W_neg)
+    # Centre-radius composition, algebraically identical to the split-sign
+    # form: W+ @ A_lb + W- @ A_ub == W @ Ac - |W| @ Ar with Ac=(A_lb+A_ub)/2,
+    # Ar=(A_ub-A_lb)/2 (and the mirrored identity for the upper track). The
+    # split-sign form runs four INDEPENDENT accumulations whose float32
+    # rounding crosses by ~n*eps*sum|W||b| once the tracks nearly coincide
+    # (RC2's linear-track sibling; vgg spec2 inverted by 1e2 at ~1e5
+    # magnitudes). Sharing the centre term keeps bit-equal input tracks
+    # bit-equal on output, so concretized boxes cannot invert along affine
+    # chains. cuDNN is disabled for the radius convs: Winograd's subtractive
+    # transforms emit small negatives for a zero/nonnegative radius (see
+    # _fwd_conv2d_interval).
+    def compose(sub: LinearBound) -> LinearBound:
+        A_centre = (sub.A_lb + sub.A_ub) * 0.5
+        A_radius = (sub.A_ub - sub.A_lb) * 0.5
+        b_centre = (sub.b_lb + sub.b_ub) * 0.5
+        b_radius = (sub.b_ub - sub.b_lb) * 0.5
+        A_mid = conv_A(A_centre, weight)
+        b_mid = conv_b(b_centre, weight)
+        with torch.backends.cudnn.flags(enabled=False):
+            A_spread = conv_A(A_radius, weight.abs())
+            b_spread = conv_b(b_radius, weight.abs())
+        A_lb_new = A_mid - A_spread
+        A_ub_new = A_mid + A_spread
+        b_lb_new = b_mid - b_spread
+        b_ub_new = b_mid + b_spread
 
-    if bias is not None:
-        out_spatial = b_lb_new.shape[1] // out_c
-        bias_bc = bias.view(out_c, 1).expand(out_c, out_spatial).reshape(-1)
-        b_lb_new = b_lb_new + bias_bc
-        b_ub_new = b_ub_new + bias_bc
+        if bias is not None:
+            out_spatial = b_lb_new.shape[1] // out_c
+            bias_bc = bias.view(out_c, 1).expand(out_c, out_spatial).reshape(-1)
+            b_lb_new = b_lb_new + bias_bc
+            b_ub_new = b_ub_new + bias_bc
 
-    return LinearBound(A_lb=A_lb_new, b_lb=b_lb_new, A_ub=A_ub_new, b_ub=b_ub_new)
+        return LinearBound(A_lb=A_lb_new, b_lb=b_lb_new, A_ub=A_ub_new, b_ub=b_ub_new)
+
+    if chunk >= B:
+        return compose(lin)
+    return _cat_lanes([
+        compose(_lin_lanes(lin, start, min(start + chunk, B)))
+        for start in range(0, B, chunk)
+    ])
 
 
 def _fwd_conv2d_interval(layer: Layer, lb: torch.Tensor, ub: torch.Tensor
                          ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Fallback interval Conv2D for when the linear-relaxation path cannot infer shape."""
-    weight = layer.params["weight"]
+    """Fallback interval Conv2D for when the linear-relaxation path cannot infer shape.
+
+    Centre-radius form: ``m = c ⊛ W + b``, ``rho = r ⊛ |W|``, ``[m-rho, m+rho]``.
+    ``rho >= 0`` structurally, so ``ub - lb = 2*rho >= 0`` per neuron whatever
+    the rounding; the ``W⁺l + W⁻u`` / ``W⁺u + W⁻l`` form sums two independent
+    4608-term accumulations that float32 cancellation can order the wrong way
+    (VGG16 L30: 11 515 inverted neurons, worst excess 3.9e-1). Two convs, not four.
+
+    The radius conv runs with cuDNN disabled: cuDNN picks Winograd for 3x3, whose
+    transforms contain subtractions, so it returns small *negative* values for a
+    non-negative input/kernel pair (measured -1.3 where neighbouring tiles carry a
+    large radius). Plain accumulation keeps ``rho >= 0`` exact, hence ``ub >= lb``.
+    """
+    weight = cast(torch.Tensor, layer.params["weight"])
     bias = layer.params.get("bias")
     stride = layer.params.get("stride", 1)
     padding = layer.params.get("padding", 0)
@@ -761,23 +1023,21 @@ def _fwd_conv2d_interval(layer: Layer, lb: torch.Tensor, ub: torch.Tensor
         in_h = in_w = side
 
     try:
-        lb_4d = lb.view(B, in_c, in_h, in_w)
-        ub_4d = ub.view(B, in_c, in_h, in_w)
+        centre = ((lb + ub) * 0.5).view(B, in_c, in_h, in_w)
+        radius = ((ub - lb) * 0.5).view(B, in_c, in_h, in_w)
     except RuntimeError as e:
         raise ValueError(
             f"_fwd_conv2d_interval: reshape to [B={B}, {in_c}, {in_h}, {in_w}] "
             f"failed for lb.shape={tuple(lb.shape)}"
         ) from e
 
-    W_pos, W_neg = split_weight(weight)
     conv_kw = dict(stride=stride, padding=padding, dilation=dilation, groups=groups)
-    lb_out = F.conv2d(lb_4d, W_pos, None, **conv_kw) + F.conv2d(ub_4d, W_neg, None, **conv_kw)
-    ub_out = F.conv2d(ub_4d, W_pos, None, **conv_kw) + F.conv2d(lb_4d, W_neg, None, **conv_kw)
+    mid = F.conv2d(centre, weight, None, **conv_kw)
+    with torch.backends.cudnn.flags(enabled=False):
+        spread = F.conv2d(radius, weight.abs(), None, **conv_kw)
     if bias is not None:
-        bias_4d = bias.view(1, -1, 1, 1)
-        lb_out = lb_out + bias_4d
-        ub_out = ub_out + bias_4d
-    return lb_out.flatten(start_dim=1), ub_out.flatten(start_dim=1)
+        mid = mid + bias.view(1, -1, 1, 1)
+    return (mid - spread).flatten(start_dim=1), (mid + spread).flatten(start_dim=1)
 
 
 def _fwd_maxpool2d(layer: Layer, lb: torch.Tensor, ub: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -801,6 +1061,135 @@ def _fwd_maxpool2d(layer: Layer, lb: torch.Tensor, ub: torch.Tensor) -> Tuple[to
     lb_out = F.max_pool2d(lb.view(B, c, h, w), kernel_size, stride, padding, dilation)
     ub_out = F.max_pool2d(ub.view(B, c, h, w), kernel_size, stride, padding, dilation)
     return lb_out.flatten(start_dim=1), ub_out.flatten(start_dim=1)
+
+
+def _fwd_maxpool2d_lin(
+    layer: Layer, lin: LinearBound, lb: torch.Tensor, ub: torch.Tensor,
+    frame: Frame,
+) -> Optional[Tuple[LinearBound, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """DeepPoly MaxPool2D on the dual-track affine bounds (explicit ``A`` only).
+
+    Per window let ``i*`` be the argmax of the interval lower bounds. Since
+    ``max(x_window) >= x_{i*}`` always, input ``i*``'s affine lower bound is a
+    sound lower bound for the pool output. When ``i*`` dominates —
+    ``lb_{i*} >= max_{j != i*} ub_j`` — the pool output *is* ``x_{i*}``, so its
+    affine upper bound is exact; otherwise the constant ``max_j ub_j`` is used,
+    lifted to also cover the concretized max of the gathered lower row over
+    ``frame``. ``ub_max`` comes from the interval track while the lower row
+    comes from the linear track; once the box width collapses (deep input
+    splits) the two independent float32 accumulations can cross by a few ulps,
+    and a crossed (lower_fn, upper_const) pair is amplified by every following
+    affine layer's |W| mass until the backward's degenerate-interval check
+    raises. Raising the upper constant to ``max(ub_max, max_frame lower_fn)``
+    is sound (uppers may only grow) and restores the exact-arithmetic
+    invariant ``upper >= lower`` pointwise on the frame.
+    ``ub_second`` (largest ub among the window's other inputs) is computed via
+    ``F.unfold`` with the argmax slot and zero-filled padding slots masked to
+    ``-inf``.
+
+    Under CUDA memory pressure the gathers run in lane chunks (see
+    :func:`_lin_bound_lane_chunk`); the window statistics above them do not
+    scale with ``n_sym`` and stay batched.
+
+    Returns ``None`` on the lazy-identity path (``A is None``), on a feature
+    width mismatch, or when a single lane's gathered ``[1, n_out, n_sym]``
+    coefficients would overrun CUDA memory — the caller then keeps the
+    interval-reset behaviour. Otherwise returns ``(lin_out, idx_flat, dominant, lb_max,
+    ub_max)`` where ``idx_flat`` is the flat argmax index per output (long
+    ``[B, n_out]``), ``dominant`` is a bool ``[B, n_out]`` mask, and
+    ``lb_max``/``ub_max`` are the interval pool box ``[B, n_out]``.
+    """
+    if lin.A_lb is None or lin.A_ub is None:
+        return None
+    kernel_size = pair_2d(layer.params.get("kernel_size", 2))
+    stride = pair_2d(layer.params.get("stride", layer.params.get("kernel_size", 2)))
+    padding = pair_2d(layer.params.get("padding", 0))
+    dilation = pair_2d(layer.params.get("dilation", 1))
+    input_shape = _shape_list(layer.params.get("input_shape"))
+    if input_shape is None:
+        raise ValueError(
+            f"_fwd_maxpool2d_lin: layer {layer.id} missing required 'input_shape' param"
+        )
+    shape = input_shape
+    if len(shape) == 4:
+        _, c, h, w = shape
+    else:
+        c, h, w = shape[-3], shape[-2], shape[-1]
+    B, n_in = lb.shape
+    if n_in != c * h * w or lin.A_lb.shape[1] != n_in or lin.b_lb.shape[1] != n_in:
+        return None
+
+    lb_4d = lb.view(B, c, h, w)
+    ub_4d = ub.view(B, c, h, w)
+    lb_max_4d, idx_plane = F.max_pool2d(
+        lb_4d, kernel_size, stride, padding, dilation, return_indices=True
+    )
+    ub_max_4d = F.max_pool2d(ub_4d, kernel_size, stride, padding, dilation)
+    n_out = c * lb_max_4d.shape[2] * lb_max_4d.shape[3]
+    n_sym = lin.A_lb.shape[2]
+    chunk = _lin_bound_lane_chunk(B, n_out, n_sym, lin.b_lb,
+                                  _LIN_BOUND_CHUNK_TRANSIENT_MAXPOOL2D, layer.id, "maxpool2d")
+    if chunk is None:
+        return None
+
+    # Window membership via im2col: map each kernel slot to its input plane
+    # index. Unfold zero-fills padding, so shift indices by one to tell a
+    # padded slot (0) from plane position 0; float64 keeps indices exact.
+    plane = torch.arange(
+        1, h * w + 1, device=lb.device, dtype=torch.float64
+    ).view(1, 1, h, w)
+    plane_unf = F.unfold(
+        plane, kernel_size, dilation=dilation, padding=padding, stride=stride
+    )
+    pad_slot = plane_unf == 0
+    slot_plane = plane_unf.long() - 1
+    k2, spatial_out = plane_unf.shape[1], plane_unf.shape[2]
+
+    # Largest ub among the window's OTHER inputs: mask the argmax-lb slot and
+    # the padded slots (unfold zero-fill) to -inf, then reduce over the kernel.
+    ub_unf = F.unfold(
+        ub_4d, kernel_size, dilation=dilation, padding=padding, stride=stride
+    ).view(B, c, k2, spatial_out)
+    is_argmax = slot_plane.view(1, 1, k2, spatial_out) == idx_plane.view(B, c, 1, spatial_out)
+    ub_second = ub_unf.masked_fill(
+        is_argmax | pad_slot.view(1, 1, k2, spatial_out), float("-inf")
+    ).amax(dim=2)
+
+    lb_max = lb_max_4d.flatten(start_dim=1)
+    ub_max = ub_max_4d.flatten(start_dim=1)
+    dominant = (lb_max_4d.view(B, c, spatial_out) >= ub_second).view(B, n_out)
+
+    channel_base = (torch.arange(c, device=lb.device) * (h * w)).view(1, c, 1)
+    idx_flat = (idx_plane.view(B, c, spatial_out) + channel_base).view(B, n_out)
+
+    x_L, x_U = frame
+
+    def gather_lanes(start: int, end: int) -> LinearBound:
+        idx = idx_flat[start:end]
+        gather_idx = idx.unsqueeze(-1).expand(end - start, n_out, n_sym)
+        dom = dominant[start:end]
+        A_lb_out = cast(torch.Tensor, lin.A_lb)[start:end].gather(1, gather_idx)
+        b_lb_out = lin.b_lb[start:end].gather(1, idx)
+        A_ub_out = cast(torch.Tensor, lin.A_ub)[start:end].gather(1, gather_idx).masked_fill(
+            ~dom.unsqueeze(-1), 0.0)
+        lower_row_max = (
+            torch.einsum("boi,bi->bo", A_lb_out.clamp(min=0), x_U[start:end])
+            + torch.einsum("boi,bi->bo", A_lb_out.clamp(max=0), x_L[start:end])
+            + b_lb_out
+        )
+        b_ub_out = torch.where(
+            dom, lin.b_ub[start:end].gather(1, idx),
+            torch.maximum(ub_max[start:end], lower_row_max),
+        )
+        return LinearBound(A_lb=A_lb_out, b_lb=b_lb_out, A_ub=A_ub_out, b_ub=b_ub_out)
+
+    if chunk >= B:
+        lin_out = gather_lanes(0, B)
+    else:
+        lin_out = _cat_lanes([
+            gather_lanes(start, min(start + chunk, B)) for start in range(0, B, chunk)
+        ])
+    return lin_out, idx_flat, dominant, lb_max, ub_max
 
 
 def _fwd_avgpool2d(layer: Layer, lb: torch.Tensor, ub: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

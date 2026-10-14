@@ -112,6 +112,9 @@ backend:
     lr_alpha: 0.1
     per_class_alpha: true
     incremental_start_enabled: true
+    # Linear forward bounds are kept up to this many perturbed input dims;
+    # above it the forward pass is interval-only.
+    forward_lin_max_perturbed: 100
 
   # ═════════════════════════════════════════════════════════════════════════
   # Branch-and-Bound refinement  (bab)

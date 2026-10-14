@@ -392,6 +392,15 @@ jobs:
             --bab-max-depth 3 --bab-max-nodes 10 --device cpu --dtype float64
 
       # ── Coverage ───────────────────────────────────────────────────────
+      - name: Dual MaxPool — symbolic forward and one-hot backward
+        run: |
+          cd ${{ github.workspace }}
+          for net in layer_testing_cnn_pool cnn2d_plain_4x1x8x8_32x8x16_4023708073; do
+            coverage run -p -m act.back_end --verify \
+              --network "$ACT_NETS_DIR/$net.json" --solver dual --bab \
+              --bab-branching babsr --bab-multi-split-levels 1 --verbose
+          done
+
       - name: Combine coverage data
         if: always()
         run: |

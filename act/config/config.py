@@ -391,6 +391,17 @@ class DualConfig:
     incremental_start_enabled: bool = True
     """Reuse α/η tensors from the parent subproblem as the child initialization."""
 
+    forward_lin_max_perturbed: int = 100
+    """Cap on the number of perturbed input dims for which the forward pass
+    keeps an explicit linear bound; above it, interval-only."""
+
+    def __post_init__(self) -> None:
+        if self.forward_lin_max_perturbed < 0:
+            raise ValueError(
+                "forward_lin_max_perturbed must be non-negative, got "
+                f"{self.forward_lin_max_perturbed}"
+            )
+
 
 @dataclass
 class TorchLPConfig:
