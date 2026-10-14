@@ -8,12 +8,17 @@ Provides CLI tools for core verification operations:
 - Network serialization (save/load ACT Net structures)
 - Analysis and constraint inspection
 
+Exit status (--verify):
+  0  every lane received a verdict (CERTIFIED / FALSIFIED / UNKNOWN / TIMEOUT)
+  1  error, no verdict, or a network the selected solver cannot handle
+  2  invalid configuration (ConfigError), reported as "❌ <network>: <message>"
+
 Copyright (C) 2025 SVF-tools/ACT
 License: AGPLv3+
 """
 
 import argparse
-from dataclasses import fields
+from dataclasses import fields, replace
 import datetime
 import glob
 import json
@@ -25,7 +30,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Union, cast, get_args, get_origin, get_type_hints
 
-from act.config.config import DualConfig, GurobiConfig, TorchLPConfig, VALID_BERT_METHODS, VALID_BOUNDINGS, VALID_SOLVER_TIERS, _VALID_SOLVERS
+from act.config.config import ConfigError, GurobiConfig, TorchLPConfig, VALID_BERT_METHODS, VALID_BOUNDINGS, VALID_ROOT_BOUNDS_REUSE, VALID_SOLVER_TIERS, _VALID_SOLVERS
 from act.back_end.layer_schema import LayerKind
 from act.front_end.specs import OutKind
 from act.util.cli_utils import add_device_args, initialize_from_args
@@ -196,43 +201,51 @@ def _make_solver(
         return GurobiSolver(config=gurobi_config)
     if solver_name == "torchlp":
         return TorchLPSolver(config=torchlp_config)
-    # "auto": try Gurobi, fall back to TorchLP
-    try:
-        from act.back_end.solver.solver_gurobi import GurobiSolver
+    # "auto": Gurobi when gurobipy is importable, otherwise TorchLP
+    from act.back_end.solver.solver_gurobi import GurobiSolver, is_gurobi_available
 
+    if is_gurobi_available():
         return GurobiSolver(config=gurobi_config)
-    except Exception:
-        return TorchLPSolver(config=torchlp_config)
+    return TorchLPSolver(config=torchlp_config)
 
 
-_DUAL_BAB_PRESET: dict[str, Any] = {
-    "solver_tier": "dual_alpha_eta",
-    "branching_method": "gain",
-    "reuse_root_bounds": True,
-    "intermediate_refine": "all",
-    "multi_split_levels": 4,
-}
-
-_DUAL_PRESET_ARG_DESTS: dict[str, str] = {
-    "solver_tier": "bab_solver_tier",
-    "branching_method": "bab_branching",
-    "reuse_root_bounds": "bab_reuse_root_bounds",
-    "intermediate_refine": "bab_intermediate_refine",
-    "multi_split_levels": "bab_multi_split_levels",
-}
-
-
-def explicit_dual_preset_fields(args: argparse.Namespace) -> set[str]:
-    """BaB preset fields the user pinned on the command line.
+def explicit_bab_fields(args: argparse.Namespace) -> set[str]:
+    """BaB fields the user pinned on the command line.
 
     Every BaB override flag parses with ``default=None``, so a non-None value is
-    proof the user typed it. The dual preset must yield on exactly those fields.
+    proof the user typed it. A named preset must yield on exactly those fields.
     """
-    return {
-        field
-        for field, dest in _DUAL_PRESET_ARG_DESTS.items()
-        if getattr(args, dest, None) is not None
+    from act.config.config import BaBConfig
+
+    bab_fields = {fld.name for fld in fields(BaBConfig)}
+    destinations = {
+        key[4:]: attr
+        for key, attr, *_ in _BACKEND_OVERRIDE_SPEC
+        if key.startswith("bab_") and key[4:] in bab_fields
     }
+    return {
+        field_name
+        for field_name, destination in destinations.items()
+        if getattr(args, destination, None) is not None
+    }
+
+
+def _resolve_bab_config(
+    backend_cfg: Any,
+    pinned_fields: set[str],
+    *,
+    is_dual: bool,
+) -> Any:
+    """Apply the selected BaB preset below explicit CLI overrides."""
+    preset_name = backend_cfg.bab_preset or ("dual" if is_dual else None)
+    if preset_name is None:
+        return backend_cfg.bab
+    preset_values = {
+        field_name: value
+        for field_name, value in backend_cfg.bab_preset_values(preset_name).items()
+        if field_name not in pinned_fields
+    }
+    return replace(backend_cfg.bab, **preset_values) if preset_values else backend_cfg.bab
 
 
 def _verify_one_net(
@@ -242,12 +255,18 @@ def _verify_one_net(
 ) -> tuple[list[Any], Optional[Union[_SkipUnsupported, str]], Optional[int]]:
     """[BATCHED-API] Verify *net_path* via 3-tier cascade.
 
+    Named BaB presets yield to fields pinned by CLI flags.
+
     Returns ``(results, err, n_layers)`` where ``err`` is one of:
       * ``None`` on success
       * ``_SkipUnsupported(tf_name, kinds)`` when the active TF cannot handle
         the net (unsupported layer kinds and/or unsupported ASSERT spec).
-        Treated as a clean skip by callers, NOT as a verifier bug.
+        Reported distinctly from verifier bugs, but still a nonzero outcome
+        because no lane received a verdict.
       * ``str`` for any other exception (genuine error).
+
+    Raises ``ConfigError`` when the resolved configuration is invalid (BaB
+    preset application, CLIMB prerequisites) so the caller can exit with 2.
 
     Tier 1 — interval (verify_once): always runs; certifies or falsifies via
               pure-tensor bounds propagation.
@@ -258,7 +277,7 @@ def _verify_one_net(
               backend_cfg.bab_enabled is True AND active TF propagates LP
               constraints. bab_max_batch_size=1 disables K-batching.
     """
-    from act.back_end.bab.bab import clear_violation_check_module_cache
+    from act.back_end.bab.violation import clear_violation_check_module_cache
     from act.back_end.serialization.serialization import load_net_from_file
     from act.back_end.transfer_functions import (
         ensure_active_tf,
@@ -360,22 +379,12 @@ def _verify_one_net(
             from act.back_end.bab.bab import verify_bab_batched as _vbb
             from act.back_end.verifier import slice_net_to_sample
 
-            bab_cfg = backend_cfg.bab
-            if is_dual:
-                # Convenience preset, NOT a mandate: --solver dual fills in
-                # optimized alpha/eta bounds with gain-tested joint multi-neuron
-                # (verdict-boundary) branching for users who pass no BaB flags,
-                # and yields on every field the user pinned explicitly.
-                import dataclasses
-
-                pinned = explicit_bab_fields or set()
-                preset = {
-                    field: value
-                    for field, value in _DUAL_BAB_PRESET.items()
-                    if field not in pinned
-                }
-                if preset:
-                    bab_cfg = dataclasses.replace(bab_cfg, **preset)
+            pinned = explicit_bab_fields or set()
+            bab_cfg = _resolve_bab_config(
+                backend_cfg,
+                pinned,
+                is_dual=is_dual,
+            )
 
             try:
                 results = [
@@ -403,25 +412,44 @@ def _verify_one_net(
                     raise
 
         return results, None, n_layers
+    except ConfigError:
+        raise
     except Exception as e:  # noqa: BLE001 — surface per-net error, keep iterating
         return [], str(e), None
 
 
+def _report_config_error(label: str, err: ConfigError) -> int:
+    """Print *err* in the CLI error format and return exit status 2."""
+    print(f"❌ {label}: {err}")
+    return 2
+
+
 def run_verification(args, backend_cfg):
-    """Run verification on a network using *backend_cfg*."""
+    """Run verification on a network using *backend_cfg*.
+
+    Returns 0 when every lane received a verdict, 1 on error / no verdict /
+    unsupported network, and 2 on invalid configuration.
+    """
     from act.util.stats import VerifyStatus
 
-    results, err, n_layers = _verify_one_net(
-        args.network, backend_cfg, explicit_dual_preset_fields(args)
-    )
+    pinned_bab_fields = explicit_bab_fields(args)
+    try:
+        results, err, n_layers = _verify_one_net(
+            args.network, backend_cfg, pinned_bab_fields
+        )
+    except ConfigError as e:
+        return _report_config_error(args.network, e)
     if err is not None:
         if isinstance(err, _SkipUnsupported):
             print(
                 f"⏭️  {args.network}: {err.tf_name} cannot handle: "
                 f"{','.join(err.kinds)}"
             )
-            return 0
+            return 1
         print(f"❌ {args.network}: {err}")
+        return 1
+    if not results:
+        print(f"❌ {args.network}: no verdict")
         return 1
     print(f"Loaded {n_layers}-layer net; solver={backend_cfg.solver}")
 
@@ -930,6 +958,11 @@ Examples:
   
   # Use GPU with float64
   python -m act.back_end --verify --network cifar.json --device cuda --dtype float64
+
+Exit status (--verify):
+  0  every lane received a verdict (CERTIFIED / FALSIFIED / UNKNOWN / TIMEOUT)
+  1  error, no verdict, or a network the selected solver cannot handle
+  2  invalid configuration (ConfigError)
         """,
     )
 
@@ -1174,6 +1207,21 @@ Examples:
         help="Solver tier for BaB bound computation (default: from config.yaml)",
     )
     verify_group.add_argument(
+        "--bab-root-bounds-reuse",
+        type=str,
+        default=None,
+        choices=VALID_ROOT_BOUNDS_REUSE,
+        dest="bab_root_bounds_reuse",
+        help=(
+            "Descendant reuse of the root box's forward bounds (dual tiers): "
+            "none = every node re-propagates; "
+            "plain = children get the root dict untouched; "
+            "split_refresh = root dict hardened by the split-derived interval "
+            "refresh and --bab-per-subproblem-refine "
+            "(default: from config.yaml)"
+        ),
+    )
+    verify_group.add_argument(
         "--bab-branching",
         type=str,
         default=None,
@@ -1222,7 +1270,7 @@ Examples:
     verify_group.add_argument(
         "--bab-llm-probe-enabled",
         action="store_true",
-        default=False,
+        default=None,
         dest="bab_llm_probe_enabled",
         help="Enable the LLM-probe BaB controller (default: from config.yaml)",
     )
@@ -1323,7 +1371,7 @@ Examples:
     verify_group.add_argument(
         "--bab-llm-probe-log",
         action="store_true",
-        default=False,
+        default=None,
         dest="bab_llm_probe_log",
         help="Enable per-wave LLM-probe decision logging (default: from config.yaml)",
     )
@@ -1398,14 +1446,17 @@ Examples:
         return run_diff_nets(args)
 
     # ── Build BackendConfig ──────────────────────────────────────────────
-    # Load YAML as baseline, then overlay env vars and CLI flags on top.
-    # Precedence: CLI flag > env var > config.yaml > dataclass default
+    # Load YAML, then apply env vars and CLI flags. BaB presets are resolved at
+    # verification time so explicit BaB flags remain the highest precedence.
     from act.config.config import BackendConfig
 
-    backend_cfg = BackendConfig.from_yaml(
-        config_path=args.backend_config,
-        **_collect_backend_overrides(args, _user_set),
-    )
+    try:
+        backend_cfg = BackendConfig.from_yaml(
+            config_path=args.backend_config,
+            **_collect_backend_overrides(args, _user_set),
+        )
+    except ConfigError as e:
+        return _report_config_error(args.network or "Error", e)
 
     # Initialize device manager from the resolved config
     import argparse as _ap
@@ -1458,7 +1509,7 @@ Examples:
         return 130
     except Exception as e:
         print(f"\n❌ Error: {e}")
-        if args.verbose:
+        if backend_cfg.verbose:
             import traceback
 
             traceback.print_exc()
@@ -1471,6 +1522,7 @@ _BACKEND_ALIAS_OVERRIDE_SPEC: list[tuple[str, str, Optional[str], Any, str]] = [
     ("solver",               "solver",              "ACT_SOLVER",     None, "not_none"),
     ("device",               "device",              "ACT_DEVICE",     None, "user_set"),
     ("dtype",                "dtype",               "ACT_DTYPE",      None, "user_set"),
+    ("verbose",              "verbose",             None,             None, "user_set"),
     ("timeout",              "timeout",             None,             None, "not_none"),
     ("method",               "method",              None,             None, "not_none"),
     ("p",                    "p",                   None,             None, "not_none"),
@@ -1525,7 +1577,10 @@ _BACKEND_OVERRIDE_SPEC = _build_backend_override_spec()
 
 
 def _collect_backend_overrides(args: Any, _user_set: Any) -> dict[str, Any]:
-    """Build overrides dict from CLI flags + env vars (precedence: CLI > env > yaml)."""
+    """Build overrides dict from CLI flags + env vars.
+
+    Precedence before BaB preset resolution: CLI > env > backend.yaml.
+    """
     overrides: dict[str, Any] = {}
     for key, attr, env, env_cast, check in _BACKEND_OVERRIDE_SPEC:
         cli_val = getattr(args, attr, None)
@@ -1538,9 +1593,6 @@ def _collect_backend_overrides(args: Any, _user_set: Any) -> dict[str, Any]:
             overrides[key] = cli_val
         elif env is not None and os.environ.get(env):
             overrides[key] = env_cast(os.environ[env]) if env_cast else os.environ[env]
-
-    if args.verbose:
-        overrides["verbose"] = True
 
     return overrides
 
