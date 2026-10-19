@@ -71,7 +71,7 @@ def normalize_position_mask(
     return mask
 
 
-class InKind:
+class InKind(str, Enum):
     """Supported input-constraint kinds for :class:`InputSpec`.
 
     Members:
@@ -132,7 +132,7 @@ class InputSpec:
       LP_EMBEDDING = localized per-token balls at chosen sequence positions in
       EMBEDDING space (rest fixed) — perturbs token embeddings, not pixels.
     """
-    kind: str
+    kind: InKind
     lb: Optional[torch.Tensor] = None
     ub: Optional[torch.Tensor] = None
     center: Optional[torch.Tensor] = None
