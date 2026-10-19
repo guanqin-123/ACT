@@ -61,8 +61,8 @@ def _merge_specs_to_batch(
     lts: List[LabeledInputTensor],
     in_specs: List[InputSpec],
     out_specs: List[OutputSpec],
-    in_kind: str,
-    out_kind: str
+    in_kind: InKind,
+    out_kind: OutKind,
 ) -> Tuple[LabeledInputTensor, InputSpec, OutputSpec]:
     """
     Merge multiple single-sample specs into batched specs for efficient verification.
