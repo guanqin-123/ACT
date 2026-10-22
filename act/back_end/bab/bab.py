@@ -386,7 +386,7 @@ def verify_bab_batched(
     time_budget_s: Optional[float] = None,
     dual_config: Optional[DualConfig] = None,
     verbose: bool = False,
-    _k_log: Optional[List[int]] = None,
+    trace: Optional[List[Dict[str, Any]]] = None,
 ) -> VerifyResult:
     """[BATCHED-API] K-batched Branch-and-Bound verification (single instance).
 
@@ -419,8 +419,9 @@ def verify_bab_batched(
             ``BackendConfig.bab_max_batch_size`` or an explicit value.
         time_budget_s: wall-clock budget (default 300 s).
         verbose: reserved.
-        _k_log: diagnostic only — if supplied, the actual K used per iteration
-            is appended. Tests use this to verify K fluctuates per D4.
+        trace: if a list is supplied, one dict per iteration is appended with
+            keys iter, K, pool_before, pool_after, pruned_unsat, branched,
+            falsified_lane, max_depth, spec_rows_kept, elapsed_s.
     """
     if config is None:
         config = BaBConfig()
@@ -595,6 +596,7 @@ def verify_bab_batched(
                     VerifyStatus.CERTIFIED,
                     metadata={
                         "nodes": root_batch.batch_size,
+                        "iterations": 0,
                         "pool_remaining": 0,
                         "spec_rows_total": total_rows,
                         "spec_rows_kept": 0,
@@ -640,6 +642,31 @@ def verify_bab_batched(
 
     start = time.time()
     processed = 0
+    iteration = 0
+
+    def _trace_row(
+        k: int,
+        pool_before: int,
+        pruned_unsat: int,
+        branched: int,
+        falsified_lane: Optional[int],
+        max_depth: int,
+    ) -> Dict[str, Any]:
+        return {
+            "iter": iteration,
+            "K": k,
+            "pool_before": pool_before,
+            "pool_after": len(pool),
+            "pruned_unsat": pruned_unsat,
+            "branched": branched,
+            "falsified_lane": falsified_lane,
+            "max_depth": max_depth,
+            "spec_rows_kept": (
+                int(spec_keep_rows.numel()) if spec_keep_rows is not None else None
+            ),
+            "elapsed_s": time.time() - start,
+        }
+
     any_dropped_max_depth = False
     _last_input_widths: Optional[list[float]] = None
 
@@ -677,8 +704,8 @@ def verify_bab_batched(
 
         batch = pool.pop(batch_size=k_requested)
         k_actual = batch.batch_size
-        if _k_log is not None:
-            _k_log.append(k_actual)
+        iteration += 1
+        batch_max_depth = int(batch.depths.max().item()) if trace is not None else 0
         if climb is not None:
             climb.after_pop(len(pool) + k_actual)
 
@@ -742,6 +769,8 @@ def verify_bab_batched(
         if climb is not None:
             climb.after_main_bound(k_actual)
 
+        n_unsat = sum(1 for s in solution.statuses if s == SolveStatus.UNSAT)
+        branched_lanes = 0
         node_lower_bound = (-solution.max_viol).detach()
         if batch.lower_bound is not None:
             # Bound inheritance: a child region is a subset of its parent, so
@@ -774,11 +803,16 @@ def verify_bab_batched(
             violations = check_violations_batched(net, x_input_shaped, assert_layer) & in_region
             for j, lane in enumerate(sat_lane_idx):
                 if bool(violations[j].item()):
+                    if trace is not None:
+                        trace.append(_trace_row(
+                            k_actual, _pool_before, n_unsat, 0, lane, batch_max_depth,
+                        ))
                     return VerifyResult(
                         VerifyStatus.FALSIFIED,
                         counterexample=x_input_shaped[j].detach().cpu().clone(),
                         metadata={
                             "nodes": processed + k_actual,
+                            "iterations": iteration,
                             "lane": lane,
                             "K": k_actual,
                             "nodes_minted": node_counter,
@@ -828,6 +862,7 @@ def verify_bab_batched(
             if bool((~branch_mask).any().item()):
                 any_dropped_max_depth = True
             branch_idx = torch.where(branch_mask)[0]
+            branched_lanes = int(branch_idx.numel())
             if int(branch_idx.numel()) > 0:
                 branch_batch = unresolved.select(branch_idx)
                 if neuron_branching_supported:
@@ -1032,6 +1067,11 @@ def verify_bab_batched(
 
         processed += k_actual
 
+        if trace is not None:
+            trace.append(_trace_row(
+                k_actual, _pool_before, n_unsat, branched_lanes, None, batch_max_depth,
+            ))
+
         if isinstance(pool, MCTSBounding):
             log.info(
                 "mcts: nodes=%d n_tot=%d frontier N[parent] histogram=%s",
@@ -1080,6 +1120,7 @@ def verify_bab_batched(
                 "nodes": processed,
                 "spec_rows_kept": spec_rows_kept,
                 "pool_remaining": 0,
+                "iterations": iteration,
                 "exhausted_budget_time": exhausted_time,
                 "exhausted_budget_nodes": exhausted_nodes,
                 "nodes_minted": node_counter,
@@ -1094,6 +1135,7 @@ def verify_bab_batched(
             "nodes": processed,
             "spec_rows_kept": spec_rows_kept,
             "pool_remaining": pool_remaining,
+            "iterations": iteration,
             "exhausted_budget_time": exhausted_time,
             "exhausted_budget_nodes": exhausted_nodes,
             "nodes_minted": node_counter,
@@ -1117,6 +1159,7 @@ def verify_bab(
     timelimit: Optional[float] = None,
     verbose: bool = False,
     dual_config: Optional[DualConfig] = None,
+    trace: Optional[List[Dict[str, Any]]] = None,
 ) -> VerifyResult:
     """Single-solver Branch-and-Bound entry: one subproblem per iteration.
 
@@ -1148,4 +1191,5 @@ def verify_bab(
         time_budget_s=budget,
         verbose=verbose,
         dual_config=dual_config,
+        trace=trace,
     )

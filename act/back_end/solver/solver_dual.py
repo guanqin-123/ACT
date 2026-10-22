@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import torch
 from act.back_end.core import Bounds, Layer, Net, get_topo_order
@@ -28,9 +28,6 @@ from act.back_end.solver.solver_base import (
 from act.front_end.specs import OutputSpec, OutKind
 from act.util.device_manager import get_default_device, get_default_dtype
 from act.util.stats import SpecBatchResult
-
-if TYPE_CHECKING:
-    from act.back_end.dual_tf.dual_tf import DualTF
 
 
 @dataclass(frozen=True)

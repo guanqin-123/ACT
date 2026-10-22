@@ -31,7 +31,6 @@ from act.util.path_config import get_vnnlib_data_root
 from act.front_end.vnnlib_loader.onnx_converter import (
     convert_onnx_to_pytorch,
     get_onnx_input_shape,
-    get_onnx_output_shape,
     ONNXConversionError
 )
 from act.front_end.vnnlib_loader.vnnlib_parser import (

@@ -556,7 +556,6 @@ def verify_once(
         for FALSIFIED lanes.
     """
     from act.back_end.analyze import analyze
-    from act.back_end.transfer_functions import get_transfer_function
 
     # 1. Extract structure and seed.
     entry_id = find_entry_layer_id(net)

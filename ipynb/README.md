@@ -115,6 +115,26 @@ code ipynb/vnnlib_fuzzer.ipynb
 - Adjust `trace_sample_rate` (1=every iteration, 10=every 10th) to control file size
 - Select `trace_storage` ("json" or "hdf5") based on performance needs
 
+### `tensor_bab.ipynb`
+
+**Purpose**: Demonstrates K-batched ("tensor") branch-and-bound (`verify_bab_batched`) on three VNN-COMP instances: ACAS Xu (one CERTIFIED, one FALSIFIED) and a CIFAR-100 ResNet (CERTIFIED).
+
+**Contents**:
+1. **Setup and helpers**: ONNX + VNNLIB to an ACT net, then BaB with a per-iteration trace.
+2. **Certified case (prop_3 / net 2_4)**: one iteration table showing K, pruning, branching, pool size and seconds.
+3. **Falsified case (prop_2 / net 1_2)**: a counterexample checked on the concrete network and against its input box.
+4. **CIFAR-100 ResNet (needs a CUDA GPU)**: ReLU-neuron splitting with the alpha-eta dual, automatic K and a 100 s budget; skipped on CPU.
+5. **Summary**: one row per run (verdict, ground truth, iterations, sub-problems, max K, seconds).
+
+**Key Features**:
+- Plain dual bounds on up to 1024 sub-boxes per iteration, splitting the widest input dimension (ACAS Xu).
+- The ACAS Xu cases run in seconds on GPU or CPU; fetch missing files with `python -m act.front_end --download acasxu_2023` (and `cifar100_2024`).
+
+**Usage**:
+```bash
+jupyter notebook ipynb/tensor_bab.ipynb
+```
+
 ## Running Notebooks
 
 ### Prerequisites

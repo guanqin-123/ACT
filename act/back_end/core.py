@@ -17,7 +17,6 @@ import torch
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Any, Union
-import importlib
 
 # Import validation functions
 from act.back_end.layer_util import validate_layer, validate_graph, validate_wrapper_graph
@@ -40,28 +39,6 @@ class Layer:
 
     def is_validation(self) -> bool:
         return self.kind == "ASSERT"
-    
-    def get_bounds_for_var(self, fact: 'Fact', var_id: int, is_output: bool = True) -> Tuple[float, float]:
-        """Get (lb, ub) for variable var_id from fact. Use is_output=True for out_vars, False for in_vars."""
-        var_list = self.out_vars if is_output else self.in_vars
-        
-        if var_id not in var_list:
-            raise ValueError(
-                f"Variable {var_id} not in layer {self.id} "
-                f"{'output' if is_output else 'input'} vars {var_list}"
-            )
-        
-        # Find position of var_id in the list
-        position = var_list.index(var_id)
-        
-        # Retrieve bounds at that position
-        lb = fact.bounds.lb[position].item()
-        ub = fact.bounds.ub[position].item()
-        
-        return lb, ub
-    
-    
-    
     
     def get_tensor(self, key: str, default: Optional[torch.Tensor] = None) -> Optional[torch.Tensor]:
         """Get tensor parameter. Returns default if missing or not a tensor."""
@@ -217,17 +194,6 @@ class ConSet:
                           "ub": B.ub.detach().reshape(-1).clone()}))
         
     
-    @staticmethod
-    def _is_op_supported_by_exporter(op: str) -> bool:
-        """Validate an operator against the exporter registry."""
-        mod = importlib.import_module("act.back_end.layer_util")
-        fn = getattr(mod, "is_supported_op", None)
-        if fn is None:
-            raise RuntimeError(
-                f"Exporter capability function is_supported_op is missing while checking {op!r}"
-            )
-        return bool(fn(op))
-
     def __iter__(self):
         """Iterate over constraints (Con objects). Makes ConSet iterable."""
         return iter(self.S.values())

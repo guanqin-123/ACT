@@ -55,9 +55,6 @@ from .hybridz_tf import HybridzTF
 # Analysis algorithms
 from .analyze import analyze, initialize_tf_mode
 
-# Analysis algorithms
-from .analyze import dispatch_tf, analyze
-
 # Solver interfaces
 from .solver.solver_base import Solver, SolverCaps, SolveStatus
 from .solver.solver_gurobi import GurobiSolver

@@ -751,7 +751,7 @@ def model_inference_with_dataset(
     for batch in dataloader:
         if isinstance(batch, (tuple, list)) and len(batch) >= 2:
             # Standard (image, label) tuple
-            input_tensor, labels = batch[0], batch[1]
+            input_tensor = batch[0]
         elif isinstance(batch, (tuple, list)) and len(batch) == 1:
             input_tensor = batch[0]
         else:

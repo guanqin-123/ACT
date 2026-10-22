@@ -499,7 +499,6 @@ def run_network_info(args):
     print(f"{rule()}\n")
 
     from act.back_end.serialization.serialization import load_net_from_file
-    from act.back_end.layer_schema import LayerKind
 
     print(f"Loading network from: {args.network}\n")
     net = load_net_from_file(args.network)
@@ -1564,7 +1563,7 @@ def _collect_backend_overrides(args: Any, _user_set: Any) -> dict[str, Any]:
 def _run_cli_cascade_smoke() -> int:
     """Light integration smoke: build a tiny net, run the 3-tier cascade, verify dispatch."""
     import torch
-    from act.back_end.core import Layer, Net, Bounds, Fact, ConSet
+    from act.back_end.core import Layer, Net
     from act.back_end.layer_schema import LayerKind
     from act.front_end.specs import OutputSpec
     from act.config.config import BackendConfig

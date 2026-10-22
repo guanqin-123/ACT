@@ -30,7 +30,7 @@ from act.pipeline.fuzzing.mutations import MutationEngine
 from act.pipeline.fuzzing.coverage import CoverageTracker
 from act.pipeline.fuzzing.corpus import SeedCorpus, FuzzingSeed
 from act.pipeline.fuzzing.checker import Counterexample, PropertyChecker
-from act.util.path_config import get_pipeline_log_dir, get_project_root
+from act.util.path_config import get_pipeline_log_dir
 from act.util.device_manager import get_default_device
 from act.util.format_utils import rule
 

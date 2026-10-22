@@ -149,11 +149,11 @@ def dual_conv2d_backward(
     if input_shape is not None:
         shape = list(input_shape)
         if len(shape) >= 4:
-            iH, iW = shape[-2], shape[-1]
+            iH = shape[-2]
         elif len(shape) == 3:
-            iH, iW = shape[-2], shape[-1]
+            iH = shape[-2]
         else:
-            iH = iW = None
+            iH = None
         if iH is not None:
             computed_h = (v_4d.shape[-2] - 1) * stride - 2 * padding + kH
             op_h = iH - computed_h

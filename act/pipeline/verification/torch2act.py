@@ -69,9 +69,7 @@ from act.back_end.layer_schema import ACT_TO_TORCH, LayerKind
 from act.back_end.layer_util import create_layer
 from act.back_end.utils import avgpool2d_output_hw
 from act.pipeline.verification.utils import (
-    _prod, _normalize_tuple, _assert_dag, _assert_dataflow, _broadcast_const_to_size,
-    _normalize_axes, _reduce_output_shape, _compute_slice_output_shape,
-    ONNX_HANDLERS,
+    _prod, _normalize_tuple, _assert_dag, _assert_dataflow, ONNX_HANDLERS,
 )
 
 # Imports needed for main() test harness
@@ -2188,7 +2186,6 @@ class TorchToACT:
         
         # Connect wrapper to first model layer
         if self._wrapper_offset > 0 and self._wrapper_offset < n:
-            first_model = self._wrapper_offset
             last_wrapper = self._wrapper_offset - 1
             for model_id in range(self._wrapper_offset, n - 1):
                 if preds[model_id]:
