@@ -71,14 +71,6 @@ class VerifyResult:
     counterexample: Optional[torch.Tensor] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     
-    def is_conclusive(self) -> bool:
-        """Return True if verification reached a definite conclusion."""
-        return self.status in (VerifyStatus.CERTIFIED, VerifyStatus.FALSIFIED)
-    
-    def is_safe(self) -> bool:
-        """Return True if property was proven safe."""
-        return self.status == VerifyStatus.CERTIFIED
-
 
 @dataclass(frozen=True)
 class SpecBatchResult:
@@ -119,13 +111,6 @@ class SpecBatchResult:
         inf_fill = torch.full_like(self.slack, float("inf"))
         masked = torch.where(self.active_mask, self.slack, inf_fill)
         return masked.min(dim=-1).values
-
-    @property
-    def worst_violation(self) -> torch.Tensor:
-        """[B] - min of clamp(slack, max=0) over active cells. Zero if all pass."""
-        inf_fill = torch.full_like(self.slack, float("inf"))
-        masked = torch.where(self.active_mask, self.slack, inf_fill)
-        return masked.clamp(max=0.0).min(dim=-1).values
 
     def to_verify_results(self, *, source: str = "dual_bound") -> List["VerifyResult"]:
         """Convert per-sample to ``List[VerifyResult]``.

@@ -14,6 +14,7 @@ from typing import Optional
 
 from act.util.cli_utils import add_device_args, initialize_from_args
 from act.util.format_utils import rule
+from act.util.download_utils import UNAVAILABLE, report_unavailable
 
 from act.front_end.torchvision_loader.data_model_mapping import (
     DATASET_MODEL_MAPPING,
@@ -337,8 +338,11 @@ For Common Operations (list, search, download, info):
             split=args.split
         )
         
-        assert result['status'] == 'success', f"Download failed: {result['message']}"
-        # Success message already printed by download function
+        if result['status'] == UNAVAILABLE:
+            report_unavailable(f"{dataset_name} + {model_name}", result['message'])
+        else:
+            assert result['status'] == 'success', f"Download failed: {result['message']}"
+            # Success message already printed by download function
     
     elif args.list_downloads:
         # List all downloaded pairs

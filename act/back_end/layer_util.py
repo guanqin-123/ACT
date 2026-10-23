@@ -23,17 +23,16 @@ logger = logging.getLogger(__name__)
 try:
     # Try relative import first (when used as module)
     from .layer_schema import REGISTRY, LayerKind, SUPPORTED_EXPORT_OPS
-    from act.front_end.specs import InKind, OutKind
+    from act.front_end.specs import InKind
 except ImportError:
     # Fallback to absolute import (when run standalone)
     import sys
-    import os
     # Use path_config for consistent project root detection
     from act.util.path_config import get_project_root
     project_root = get_project_root()
     sys.path.insert(0, project_root)
     from act.back_end.layer_schema import REGISTRY, LayerKind, SUPPORTED_EXPORT_OPS
-    from act.front_end.specs import InKind, OutKind
+    from act.front_end.specs import InKind
 
 # Import Layer from core to avoid circular import issues
 from typing import TYPE_CHECKING
@@ -232,7 +231,6 @@ def create_layer(id: int, kind: str, params: Dict[str, Any],
         from .core import Layer
     except ImportError:
         import sys
-        import os
         # Use path_config for consistent project root detection
         from act.util.path_config import get_project_root
         project_root = get_project_root()

@@ -17,14 +17,11 @@ from __future__ import annotations
 import json
 import base64
 import io
-from typing import Dict, List, Any, Optional, Union, Tuple
-from datetime import datetime
+from typing import Dict, List, Any, Optional
 import numpy as np
 import torch
 
 from act.back_end.core import Layer, Net
-from act.back_end.layer_schema import REGISTRY, LayerKind
-from act.back_end.layer_util import validate_layer
 
 SERIALIZATION_VERSION = "2.0"
 

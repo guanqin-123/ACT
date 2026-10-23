@@ -404,9 +404,9 @@ def verify_lp_batched(
     )
     violations = torch.zeros(batch_size, device=x_candidates.device, dtype=torch.bool)
     if bool(sat_mask.any().item()):
-        bab_module = importlib.import_module("act.back_end.bab.bab")
+        violation_module = importlib.import_module("act.back_end.bab.violation")
         sat_idx = torch.where(sat_mask)[0]
-        checked_sat = bab_module.check_violations_batched(
+        checked_sat = violation_module.check_violations_batched(
             net, x_candidates.index_select(0, sat_idx), assert_layer,
         )
         if checked_sat.shape != (int(sat_idx.numel()),):
@@ -556,7 +556,6 @@ def verify_once(
         for FALSIFIED lanes.
     """
     from act.back_end.analyze import analyze
-    from act.back_end.transfer_functions import get_transfer_function
 
     # 1. Extract structure and seed.
     entry_id = find_entry_layer_id(net)

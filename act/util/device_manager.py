@@ -3,7 +3,7 @@
 # Now with explicit initialization API (no argparse dependency).
 
 import torch
-from typing import Tuple, Optional
+from typing import Tuple
 
 if hasattr(torch.sparse, "check_sparse_tensor_invariants"):
     torch.sparse.check_sparse_tensor_invariants.disable()
@@ -168,7 +168,6 @@ def _ensure_initialized():
     if not _INITIALIZED:
         # Auto-detect best device
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        dtype = 'float64'
         
         # Initialize with defaults (no print statements for lazy init).
         target_device = torch.device("cuda:0") if device == 'cuda' else torch.device("cpu")

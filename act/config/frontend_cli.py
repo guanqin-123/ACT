@@ -15,6 +15,7 @@ from typing import Any, Optional, cast
 from act.front_end.creator_registry import detect_creator, list_creators, get_creator
 from act.util.cli_utils import add_device_args, initialize_from_args
 from act.util.format_utils import rule
+from act.util.download_utils import UNAVAILABLE, report_unavailable
 
 # Import domain-specific CLIs for delegation
 from act.front_end.torchvision_loader import data_model_mapping as tv_mapping
@@ -226,7 +227,8 @@ def print_unified_info(name: str, explicit_creator: Optional[str] = None):
 
 def handle_unified_download(name: str, explicit_creator: Optional[str] = None):
     """
-    Download a dataset/category with auto-detection.
+    Download a dataset/category with auto-detection. A source that cannot be
+    reached is reported as skipped (status 'unavailable'), not as a failure.
     
     Args:
         name: Name of dataset or category
@@ -251,6 +253,9 @@ def handle_unified_download(name: str, explicit_creator: Optional[str] = None):
             success_count = 0
             for model in models:
                 result = tv_loader.download_dataset_model_pair(normalized_name, model)
+                if result['status'] == UNAVAILABLE:
+                    report_unavailable(normalized_name, result['message'])
+                    return
                 assert result['status'] == 'success', f"{normalized_name} + {model}: {result['message']}"
                 print(f"✓ {normalized_name} + {model}")
                 success_count += 1
@@ -270,6 +275,9 @@ def handle_unified_download(name: str, explicit_creator: Optional[str] = None):
             print(f"  • instances.csv mapping\n")
             
             result = vnnlib_loader.download_vnnlib_category(normalized_name)
+            if result['status'] == UNAVAILABLE:
+                report_unavailable(normalized_name, result['message'])
+                return
             
             if result['status'] != 'success':
                 print(f"\n{rule(100)}")

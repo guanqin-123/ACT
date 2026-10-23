@@ -28,10 +28,10 @@ import torch
 import torch.nn as nn
 
 from act.util.path_config import get_vnnlib_data_root
+from act.util.download_utils import UNAVAILABLE, is_source_unreachable
 from act.front_end.vnnlib_loader.onnx_converter import (
     convert_onnx_to_pytorch,
     get_onnx_input_shape,
-    get_onnx_output_shape,
     ONNXConversionError
 )
 from act.front_end.vnnlib_loader.vnnlib_parser import (
@@ -50,6 +50,18 @@ VNNCOMP_REPO_URLS = os.environ.get(
     "https://raw.githubusercontent.com/VNN-COMP/vnncomp2026_benchmarks/main/benchmarks",
 ).split(",")
 DEFAULT_BENCHMARK_VERSION = "2.0"
+
+
+def _unavailable_category(
+    category: str, category_dir: Path, created: bool, error: Exception
+) -> Dict[str, Any]:
+    """Remove the partial category this call created and report its source as unavailable."""
+    if created:
+        shutil.rmtree(category_dir)
+    return {
+        'status': UNAVAILABLE,
+        'message': f"Cannot reach the VNN-COMP source for '{category}': {error}",
+    }
 
 
 def _normalize_rel_path(rel_path: str) -> str:
@@ -108,7 +120,7 @@ def download_vnnlib_category(
         
     Returns:
         Dict with download status and paths:
-        - status: 'success' or 'error'
+        - status: 'success', 'error', or 'unavailable' (source unreachable)
         - message: Status message
         - category_path: Path to category directory
         - num_instances: Number of instances downloaded
@@ -155,6 +167,7 @@ def download_vnnlib_category(
         }
     
     # Create directories
+    category_is_new = not category_dir.exists()
     onnx_dir.mkdir(parents=True, exist_ok=True)
     vnnlib_dir.mkdir(parents=True, exist_ok=True)
     
@@ -162,6 +175,7 @@ def download_vnnlib_category(
     
     # Try multiple repository URLs
     successful_base_url = None
+    source_errors: List[Exception] = []
     for base_url in VNNCOMP_REPO_URLS:
         instances_url = f"{base_url}/{repo_prefix}/instances.csv"
         logger.info(f"Trying: {instances_url}")
@@ -173,9 +187,12 @@ def download_vnnlib_category(
             break
         except Exception as e:
             logger.debug(f"Failed to download from {base_url}: {e}")
+            source_errors.append(e)
             continue
     
     if successful_base_url is None:
+        if all(is_source_unreachable(e) for e in source_errors):
+            return _unavailable_category(category, category_dir, category_is_new, source_errors[-1])
         return {
             'status': 'error',
             'message': f"Failed to download instances.csv from all sources. Tried {len(VNNCOMP_REPO_URLS)} repositories."
@@ -219,6 +236,7 @@ def download_vnnlib_category(
         
         # Try compressed first, then uncompressed.
         tried_urls = []
+        file_errors: List[Exception] = []
         success = False
         
         for extension in ['.gz', '']:
@@ -250,8 +268,11 @@ def download_vnnlib_category(
                 break
             except Exception as e:
                 logger.debug(f"  Failed with {extension}: {e}")
+                file_errors.append(e)
                 continue
         
+        if not success and all(is_source_unreachable(e) for e in file_errors):
+            return _unavailable_category(category, category_dir, category_is_new, file_errors[-1])
         assert success, f"Failed to download {rel_path} from any of {tried_urls}"
     
     # Create metadata

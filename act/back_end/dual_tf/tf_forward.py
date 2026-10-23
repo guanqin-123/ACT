@@ -441,14 +441,12 @@ def _sum_linear_bounds(lins: List[LinearBound]) -> LinearBound:
     if all(A is None for A in A_lbs):
         A_lb_sum = None
     else:
-        any_real = next(A for A in A_lbs if A is not None)
         A_lb_sum = sum((_materialize(A, lins[i].b_lb) for i, A in enumerate(A_lbs[1:], 1)),
                        _materialize(A_lbs[0], lins[0].b_lb))
 
     if all(A is None for A in A_ubs):
         A_ub_sum = None
     else:
-        any_real = next(A for A in A_ubs if A is not None)
         A_ub_sum = sum((_materialize(A, lins[i].b_ub) for i, A in enumerate(A_ubs[1:], 1)),
                        _materialize(A_ubs[0], lins[0].b_ub))
 
