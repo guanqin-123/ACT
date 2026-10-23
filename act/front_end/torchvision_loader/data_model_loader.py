@@ -11,6 +11,7 @@ License: AGPLv3+
 """
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -19,6 +20,7 @@ import torch
 # Import path configuration
 from act.util.path_config import get_torchvision_data_root
 from act.util.format_utils import format_bytes as _format_size, dir_size as _get_directory_size, rule
+from act.util.download_utils import UNAVAILABLE, is_source_unreachable
 
 # Import from data_model_mapping
 from act.front_end.torchvision_loader.data_model_mapping import (
@@ -190,7 +192,8 @@ def download_dataset_model_pair(
         - dataset_path: Path to downloaded dataset
         - model_path: Path to saved model architecture
         - info_path: Path to metadata JSON file
-        - status: 'success' or 'error'
+        - status: 'success', 'error', or 'unavailable' (source unreachable;
+          the directories this call created are removed)
         - message: Status message
         
     Raises:
@@ -229,6 +232,7 @@ def download_dataset_model_pair(
     dataset_exists = dataset_dir.exists() and raw_dir.exists()
     model_file_path = models_dir / f"{model_name}.py"
     model_already_exists = model_file_path.exists()
+    new_dirs = [d for d in (dataset_dir, raw_dir, models_dir) if not d.exists()]
     
     if dataset_exists:
         if model_already_exists:
@@ -272,7 +276,19 @@ def download_dataset_model_pair(
     if not dataset_exists:
         print(f"\n[1/3] Downloading dataset...")
 
-        downloaded_splits, errors = _download_dataset(root_dir, dataset_name, dataset_info, split)
+        try:
+            downloaded_splits, errors = _download_dataset(root_dir, dataset_name, dataset_info, split)
+        except Exception as exc:
+            if not is_source_unreachable(exc):
+                raise
+            # An empty raw/ left behind would make the next call treat the dataset as downloaded.
+            for new_dir in new_dirs:
+                if new_dir.exists():
+                    shutil.rmtree(new_dir)
+            return {
+                'status': UNAVAILABLE,
+                'message': f"Cannot reach the {dataset_name} download source: {exc}",
+            }
 
         assert downloaded_splits and not errors, (
             f"Failed to download {dataset_name}: {'; '.join(errors)}"

@@ -14,6 +14,7 @@ from typing import Optional
 
 from act.util.cli_utils import add_device_args, initialize_from_args
 from act.util.format_utils import rule
+from act.util.download_utils import UNAVAILABLE, report_unavailable
 
 from act.front_end.vnnlib_loader.category_mapping import (
     CATEGORY_MAPPING,
@@ -262,6 +263,9 @@ def main():
                 category=actual_name,
                 force_redownload=args.force
             )
+            if result['status'] == UNAVAILABLE:
+                report_unavailable(actual_name, result['message'])
+                return
             
             if result['status'] != 'success':
                 print(f"\n{rule(100)}")
