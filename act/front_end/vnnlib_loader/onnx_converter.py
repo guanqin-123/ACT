@@ -315,7 +315,7 @@ def convert_onnx_to_pytorch(
     except ImportError as e:
         raise ONNXConversionError(
             f"Missing dependency for ONNX conversion: {e}\n"
-            "Install with: pip install onnx onnx2torch onnx-simplifier"
+            "Install with: pip install onnx onnx2torch onnxsim"
         )
     except Exception as e:
         raise ONNXConversionError(f"Failed to convert {onnx_path}: {str(e)}")
