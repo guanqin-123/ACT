@@ -2,11 +2,14 @@ name: act-py312
 channels:
   - gurobi
   - conda-forge
+  - conda-pypi
   - nodefaults
 dependencies:
   - python=3.12
   - onnx
   - onnxruntime
+  - onnxconverter-common
+  - onnxscript
   - pandas
   - numpy
   - networkx
@@ -17,6 +20,9 @@ dependencies:
   - matplotlib>=3.9
   - pyyaml  # Config loading (specs, models)
   - psutil  # Memory monitoring in pipeline
+  # ML frameworks (pipeline/llm_probe.py)
+  - transformers
+  - scikit-learn
   - pip
   - pip:
       # PyTorch via pip: the default Linux wheels are CUDA-enabled (cu124), whereas the
@@ -26,11 +32,5 @@ dependencies:
       - torch>=2.8
       - torchvision>=0.23
       # ONNX ecosystem - for VNNLib benchmarks
-      - onnx2torch
-      - onnxconverter-common
-      - onnxscript
-      - onnx-simplifier  # Optional optimizer, may have build issues on some systems
       - onnxsim==0.6.5
-      # ML frameworks (pipeline/llm_probe.py)
-      - transformers
-      - scikit-learn
+      - onnx2torch
