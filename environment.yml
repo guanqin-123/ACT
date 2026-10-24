@@ -23,6 +23,9 @@ dependencies:
   # ML frameworks (pipeline/llm_probe.py)
   - transformers
   - scikit-learn
+  # Required for Mac OS X systems - `libopenblas` uses `llvm-openmp` by default,
+  # which messes with `pip`-installed PyTorch.
+  - "libopenblas=*=*pthreads*"
   - pip
   - pip:
       # PyTorch via pip: the default Linux wheels are CUDA-enabled (cu124), whereas the
