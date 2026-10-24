@@ -24,7 +24,7 @@ dependencies:
   - transformers
   - scikit-learn
   # Required for Mac OS X systems - `libopenblas` uses `llvm-openmp` by default,
-  # which messes with `pip`-installed PyTorch.
+  # which causes errors when using `pip`-installed PyTorch.
   - "libopenblas=*=*pthreads*"
   - pip
   - pip:
