@@ -390,6 +390,22 @@ net_factory:
   # manifest-driven netfactory sweep exercises them without workflow changes.
 
   layer_testing:
+    tokenwise_dense_2:
+      architecture: tokenwise_dense
+      tokens: 2
+      perturbed_tokens: 1
+      with_bias: true
+      input_spec: {kind: LP_EMBEDDING, center_val: 0.0, eps: 1.0, p_norm: 1.0}
+      weight: [[1.0, -1.0], [0.5, 1.0]]
+      assert_threshold: 100.0
+    tokenwise_dense_60:
+      architecture: tokenwise_dense
+      tokens: 60
+      perturbed_tokens: 60
+      with_bias: false
+      input_spec: {kind: LP_EMBEDDING, center_val: 0.0, eps: 1.0, p_norm: 1.0}
+      weight: [[1.0, -1.0], [0.5, 1.0]]
+      assert_threshold: 100.0
     mha_roles:
       sweep: false  # MHA_JOIN hybrid-zonotope bounds do not support batched mixed widths.
       sequence_length: 2

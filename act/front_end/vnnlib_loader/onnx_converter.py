@@ -203,6 +203,47 @@ def _preprocess_onnx_for_onnx2torch(onnx_model):
     return onnx_model
 
 
+def _upgrade_onnx_opset_for_onnx2torch(onnx_model, target_opset: int = 13):
+    """Upgrade the default ONNX domain to the oldest fully supported opset."""
+    from onnx import version_converter
+
+    current_opset = max(
+        (op.version for op in onnx_model.opset_import
+         if not op.domain or op.domain == "ai.onnx"),
+        default=0,
+    )
+    if 0 < current_opset < target_opset:
+        logger.info("Upgrading ONNX opset %d → %d", current_opset, target_opset)
+        return version_converter.convert_version(onnx_model, target_opset)
+    return onnx_model
+
+
+def _ensure_unique_onnx_node_names(onnx_model):
+    """Give every ONNX node a globally unique non-empty name.
+
+    ``onnx2torch.OnnxGraph`` invents names such as ``Slice_4`` for unnamed
+    nodes without reserving explicit names already present in the graph.  An
+    optimizer-created unnamed node can therefore overwrite an earlier node in
+    its ordered map and leave a valid tensor input unresolved.  Node names are
+    metadata, so making them unique does not change graph semantics.
+    """
+    reserved = {node.name for node in onnx_model.graph.node if node.name}
+    used = set()
+    for index, node in enumerate(onnx_model.graph.node):
+        if node.name and node.name not in used:
+            used.add(node.name)
+            continue
+        base = f"act_{node.op_type}_{index}"
+        candidate = base
+        suffix = 1
+        while candidate in reserved or candidate in used:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        node.name = candidate
+        used.add(candidate)
+    return onnx_model
+
+
 def convert_onnx_to_pytorch(
     onnx_path: Path,
     simplify: bool = True
@@ -233,13 +274,10 @@ def convert_onnx_to_pytorch(
         logger.info(f"Loading ONNX model from {onnx_path}")
         onnx_model = onnx.load(str(onnx_path))
         
-        # Upgrade old opsets for onnx2torch compatibility (e.g. ACAS Xu ships opset 8)
+        # Upgrade old opsets for onnx2torch compatibility (e.g. ACAS Xu ships opset 8).
+        # The same operation is repeated on the raw retry model below.
         try:
-            from onnx import version_converter
-            current_opset = max((op.version for op in onnx_model.opset_import if not op.domain or op.domain == 'ai.onnx'), default=0)
-            if 0 < current_opset < 13:
-                logger.info(f"Upgrading ONNX opset {current_opset} → 13")
-                onnx_model = version_converter.convert_version(onnx_model, 13)
+            onnx_model = _upgrade_onnx_opset_for_onnx2torch(onnx_model)
         except Exception as e:
             logger.warning(f"Opset upgrade failed ({e}), proceeding with original opset")
         
@@ -267,6 +305,7 @@ def convert_onnx_to_pytorch(
             onnx_model = shape_inference.infer_shapes(onnx_model)
         except Exception as e:
             logger.warning(f"ONNX shape inference failed ({e}); proceeding without it")
+        onnx_model = _ensure_unique_onnx_node_names(onnx_model)
 
         # Convert to PyTorch. Simplification occasionally leaves intermediate
         # values with ValueType.UNKNOWN (nn4sys); only retry-without-simplify
@@ -282,6 +321,10 @@ def convert_onnx_to_pytorch(
                     f"retrying with simplify=False"
                 )
                 raw_model = onnx.load(str(onnx_path))
+                try:
+                    raw_model = _upgrade_onnx_opset_for_onnx2torch(raw_model)
+                except Exception as e:
+                    logger.warning(f"Opset upgrade failed on retry ({e}), proceeding with original opset")
                 # Apply the same preprocessing here too -- without it, the
                 # fallback can hit the very issues the main path's
                 # _preprocess_onnx_for_onnx2torch was added to fix.
@@ -292,6 +335,7 @@ def convert_onnx_to_pytorch(
                 except Exception as e:
                     # Intentional: shape inference is best-effort; converter handles missing shapes downstream.
                     logger.debug("suppressed: %s", e)
+                raw_model = _ensure_unique_onnx_node_names(raw_model)
                 pytorch_model = convert(raw_model)
             else:
                 raise

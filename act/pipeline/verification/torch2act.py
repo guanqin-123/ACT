@@ -46,6 +46,7 @@
 
 from __future__ import annotations
 import logging
+import operator
 from typing import Any, ClassVar, Dict, List, Optional, Set, Tuple, Union, cast
 import torch
 import torch.nn as nn
@@ -89,10 +90,10 @@ _TORCH_TO_ACT_EXACT = {module_cls: kind for kind, module_cls in ACT_TO_TORCH.ite
 class _LayerGraphBuilder:
     """
     Build ACT layer graph from nn.Module using torch.fx for graph extraction.
-    
+
     The resulting graph is a DAG supporting skip connections (ResNet, etc.).
     """
-    
+
     # Dispatch tables for FX call_method operations
     _METADATA_METHODS = frozenset({'size', 'dim', 'numel'})
     _PASSTHROUGH_METHODS = frozenset({'contiguous', 'to', 'float', 'double', 'half', 'cpu', 'cuda', 'detach'})
@@ -101,7 +102,7 @@ class _LayerGraphBuilder:
 
     # ONNX Shape spec; DeviceManager is float-only so we can't derive this from self.dtype.
     _ONNX_SHAPE_DTYPE: ClassVar[torch.dtype] = torch.int64
-    
+
     def __init__(
         self, model: nn.Module, input_shape: Tuple[int, ...],
         dtype: torch.dtype = torch.float64,
@@ -159,7 +160,7 @@ class _LayerGraphBuilder:
     # -------------------------------------------------------------------------
     # Public API
     # -------------------------------------------------------------------------
-    
+
     def build_layer_graph(self) -> Tuple[List[Layer], Dict[int, List[int]], Dict[int, List[int]]]:
         """
         Build ACT layer graph from the model.
@@ -193,17 +194,17 @@ class _LayerGraphBuilder:
     # -------------------------------------------------------------------------
     # Helper Methods
     # -------------------------------------------------------------------------
-    
+
     def _alloc_ids(self, n: int) -> List[int]:
         """Allocate n consecutive variable IDs."""
         ids = list(range(self.next_var, self.next_var + n))
         self.next_var += n
         return ids
-    
+
     def _same_size_forward(self) -> List[int]:
         """Allocate same number of output vars as current prev_out."""
         return self._alloc_ids(len(self.prev_out))
-    
+
     def _add_layer(self, kind: str, params: Dict[str, Any],
                    in_vars: List[int], out_vars: List[int]) -> int:
         """Add a layer and return its ID."""
@@ -767,13 +768,13 @@ class _LayerGraphBuilder:
             return True
         name = getattr(act, "__name__", "").lower()
         return "gelu" in name
-    
+
     def _register_node(self, name: str, layer_id: Optional[int] = None) -> None:
         """Register node's output vars, shape, and layer mapping."""
         self.node_outputs[name] = self.prev_out.copy()
         self.node_shapes[name] = self.shape
         self.node_to_layer_id[name] = layer_id if layer_id is not None else (len(self.layers) - 1)
-    
+
     def _pre_register_nodes(self) -> None:
         """Pre-register placeholder nodes so successor nodes can look up input vars."""
         if self.fx_graph is None:
@@ -1008,7 +1009,7 @@ class _LayerGraphBuilder:
     
     def _handle_call_module(self, node: fx.Node) -> None:
         """Handle call_module node."""
-        module = self.modules.get(node.target)
+        module = self.modules.get(cast(str, node.target))
         if module is None:
             raise ValueError(f"Module '{node.target}' not found in traced model")
 
@@ -1031,7 +1032,13 @@ class _LayerGraphBuilder:
         if node.target is nn.functional.adaptive_avg_pool2d:
             self._process_adaptive_avg_pool2d_function(node)
             return
-        
+        if node.target is torch.matmul or node.target is operator.matmul:
+            self._process_matmul_operation(node)
+            return
+        if node.target is operator.truediv:
+            self._process_div_operation(node)
+            return
+
         target_name = str(node.target).lower()
         
         handlers = {
@@ -1079,6 +1086,9 @@ class _LayerGraphBuilder:
         elif method_name in self._TRANSPOSE_METHODS:
             if self._get_predecessor_state(node):
                 self._create_transpose_method_layer(node)
+
+        elif method_name == 'mean':
+            self._process_mean_operation(node)
 
         elif method_name == 'expand':
             if self._get_predecessor_state(node):
@@ -1199,7 +1209,8 @@ class _LayerGraphBuilder:
         """Convert a PyTorch module to ACT layer(s)."""
         # No-op modules (identity during inference)
         if isinstance(mod, nn.Dropout) or (
-            _HAS_STOCHASTIC_DEPTH and isinstance(mod, StochasticDepth)
+            _HAS_STOCHASTIC_DEPTH and StochasticDepth is not None
+            and isinstance(mod, StochasticDepth)
         ):
             return
 
@@ -1219,6 +1230,9 @@ class _LayerGraphBuilder:
             return
         if kind == LayerKind.RELU6.value:
             self._convert_activation(mod, LayerKind.RELU6)
+            return
+        if kind == LayerKind.CONV1D.value and isinstance(mod, nn.Conv1d):
+            self._convert_conv1d(mod)
             return
         if kind == LayerKind.CONV2D.value and isinstance(mod, nn.Conv2d):
             self._convert_conv2d(mod)
@@ -1365,8 +1379,8 @@ class _LayerGraphBuilder:
         if node.target == 'transpose':
             if len(node.args) < 3:
                 raise ValueError(f"transpose at {node.name} requires two dimensions.")
-            dim0 = int(node.args[1])
-            dim1 = int(node.args[2])
+            dim0 = int(cast(Any, node.args[1]))
+            dim1 = int(cast(Any, node.args[2]))
             if dim0 < 0:
                 dim0 += rank
             if dim1 < 0:
@@ -1377,7 +1391,7 @@ class _LayerGraphBuilder:
             perm_args = node.args[1:]
             if len(perm_args) == 1 and isinstance(perm_args[0], (list, tuple)):
                 perm_args = tuple(perm_args[0])
-            perm = [int(p) + rank if int(p) < 0 else int(p) for p in perm_args]
+            perm = [int(cast(Any, p)) + rank if int(cast(Any, p)) < 0 else int(cast(Any, p)) for p in perm_args]
         if len(perm) != rank:
             raise ValueError(f"transpose rank {len(perm)} does not match input rank {rank}.")
         output_shape = tuple(self.shape[p] for p in perm)
@@ -1442,17 +1456,33 @@ class _LayerGraphBuilder:
         in_features = int(mod.in_features)
         out_features = int(mod.out_features)
         has_bias = mod.bias is not None
-        
-        W = mod.weight.detach()
-        b = mod.bias.detach() if has_bias else torch.zeros(out_features)
-        
-        out_vars = self._alloc_ids(out_features)
-        
+
+        if not self.shape or int(self.shape[-1]) != in_features:
+            raise ValueError(
+                f"Linear input shape {self.shape} does not end in in_features={in_features}."
+            )
+        weight = mod.weight.detach()
+        b = mod.bias.detach() if has_bias else None
+        if len(self.shape) <= 2:
+            token_count = 1
+            output_shape = (1, out_features)
+            out_vars = self._alloc_ids(out_features)
+        else:
+            token_count = len(self.prev_out) // in_features
+            if token_count * in_features != len(self.prev_out):
+                raise ValueError(
+                    f"Linear input size {len(self.prev_out)} is not divisible by in_features={in_features}."
+                )
+            output_shape = (*self.shape[:-1], out_features)
+            out_vars = self._alloc_ids(_prod(output_shape) or 1)
+
         params = {
-            "weight": W,
-            "input_shape": self.shape, "output_shape": (1, out_features),
-            "in_features": in_features, "out_features": out_features
+            "weight": weight,
+            "input_shape": self.shape, "output_shape": output_shape,
+            "in_features": in_features, "out_features": out_features,
         }
+        if token_count > 1:
+            params["token_wise"] = True
         if b is not None:
             params["bias"] = b
         self._add_layer(
@@ -1460,15 +1490,70 @@ class _LayerGraphBuilder:
             params,
             self.prev_out, out_vars
         )
-        self.shape = (1, out_features)
+        self.shape = output_shape
         self.prev_out = out_vars
     
+    def _convert_conv1d(self, mod: nn.Conv1d) -> None:
+        """Convert nn.Conv1d to the native ACT CONV1D layer."""
+        if len(self.shape) != 3:
+            raise ValueError(f"Conv1d requires 3D input shape, got {self.shape}")
+        batch, in_channels, input_width = (int(d) for d in self.shape)
+        if batch != 1:
+            raise ValueError(f"Conv1d conversion requires batch size 1, got {batch}")
+        if in_channels != int(mod.in_channels):
+            raise ValueError(
+                f"Conv1d input shape has {in_channels} channels, expected {mod.in_channels}"
+            )
+
+        kernel_size = tuple(int(d) for d in mod.kernel_size)
+        stride = tuple(int(d) for d in mod.stride)
+        if isinstance(mod.padding, str):
+            raise NotImplementedError(
+                f"Conv1d string padding {mod.padding!r} is not supported"
+            )
+        padding = tuple(int(d) for d in mod.padding)
+        dilation = tuple(int(d) for d in mod.dilation)
+        output_width = (
+            input_width + 2 * padding[0] - dilation[0] * (kernel_size[0] - 1) - 1
+        ) // stride[0] + 1
+        if output_width <= 0:
+            raise ValueError(
+                f"Conv1d produces invalid output width {output_width} from shape {self.shape}"
+            )
+
+        out_channels = int(mod.out_channels)
+        output_shape = (batch, out_channels, output_width)
+        params = {
+            "weight": mod.weight.detach(),
+            "input_shape": self.shape,
+            "output_shape": output_shape,
+            "in_channels": in_channels,
+            "out_channels": out_channels,
+            "kernel_size": kernel_size,
+            "stride": stride,
+            "padding": padding,
+            "dilation": dilation,
+            "groups": int(mod.groups),
+            "padding_mode": mod.padding_mode,
+        }
+        if mod.bias is not None:
+            params["bias"] = mod.bias.detach()
+
+        out_vars = self._alloc_ids(out_channels * output_width)
+        self._add_layer(
+            LayerKind.CONV1D.value,
+            params,
+            self.prev_out,
+            out_vars,
+        )
+        self.shape = output_shape
+        self.prev_out = out_vars
+
     def _convert_conv2d(self, mod: nn.Conv2d) -> None:
         """Convert nn.Conv2d."""
         weight = mod.weight.detach()
         bias = mod.bias.detach() if mod.bias is not None else None
-        
-        # Infer input shape if flattened
+
         if len(self.shape) == 2:
             n_features = self.shape[1]
             channels = mod.in_channels
@@ -1476,7 +1561,7 @@ class _LayerGraphBuilder:
             input_shape = (1, channels, spatial, spatial)
         else:
             input_shape = tuple(int(d) for d in self.shape)
-        
+
         batch, in_c, in_h, in_w = (int(d) for d in input_shape)
         out_c = int(mod.out_channels)
         kernel_size = tuple(int(d) for d in _normalize_tuple(mod.kernel_size))
@@ -1486,8 +1571,7 @@ class _LayerGraphBuilder:
         out_h = (in_h + 2 * padding[0] - dilation[0] * (kernel_size[0] - 1) - 1) // stride[0] + 1
         out_w = (in_w + 2 * padding[1] - dilation[1] * (kernel_size[1] - 1) - 1) // stride[1] + 1
         output_shape = (1, out_c, out_h, out_w)
-        
-        
+
         params = {
             "weight": weight,
             "input_shape": input_shape, "output_shape": output_shape,
@@ -1497,7 +1581,7 @@ class _LayerGraphBuilder:
         }
         if bias is not None:
             params["bias"] = bias
-        
+
         out_vars = self._alloc_ids(out_c * out_h * out_w)
         self._add_layer(
             LayerKind.CONV2D.value, params,
@@ -1555,7 +1639,7 @@ class _LayerGraphBuilder:
             out_w = (in_w + 2 * pad[1] - ks[1]) // st[1] + 1
         else:
             out_h, out_w = avgpool2d_output_hw(
-                (in_h, in_w), ks, st, pad, bool(mod.ceil_mode)
+                (in_h, in_w), ks, st, cast(Any, pad), bool(mod.ceil_mode)
             )
         output_shape = (1, in_c, out_h, out_w)
         
@@ -1584,6 +1668,8 @@ class _LayerGraphBuilder:
         
         batch, in_c, in_h, in_w = (int(d) for d in self.shape)
         out_size = mod.output_size
+        if out_size is None:
+            raise ValueError("AdaptiveAvgPool2d output_size cannot be None")
         out_h_raw, out_w_raw = (out_size, out_size) if isinstance(out_size, int) else tuple(out_size)
         out_h = in_h if out_h_raw is None else int(out_h_raw)
         out_w = in_w if out_w_raw is None else int(out_w_raw)
@@ -1599,13 +1685,17 @@ class _LayerGraphBuilder:
     
     def _convert_batchnorm(self, mod: _BatchNorm) -> None:
         """Convert BatchNorm to SCALE + BIAS layers with restoration params."""
+        running_mean = mod.running_mean
+        running_var = mod.running_var
+        if running_mean is None or running_var is None:
+            raise ValueError("BatchNorm conversion requires tracked running statistics")
         gamma = mod.weight.detach() if mod.weight is not None else torch.ones(
-            mod.num_features, dtype=mod.running_mean.dtype, device=mod.running_mean.device)
+            mod.num_features, dtype=running_mean.dtype, device=running_mean.device)
         beta = mod.bias.detach() if mod.bias is not None else torch.zeros(
-            mod.num_features, dtype=mod.running_mean.dtype, device=mod.running_mean.device)
+            mod.num_features, dtype=running_mean.dtype, device=running_mean.device)
         
-        scale = gamma / torch.sqrt(mod.running_var.detach() + mod.eps)
-        bias = beta - scale * mod.running_mean.detach()
+        scale = gamma / torch.sqrt(running_var.detach() + mod.eps)
+        bias = beta - scale * running_mean.detach()
         
         n_channels = mod.num_features
         actual_size = len(self.prev_out)
@@ -1630,8 +1720,8 @@ class _LayerGraphBuilder:
         batchnorm_state = {
             "weight": gamma,
             "bias": beta,
-            "running_mean": mod.running_mean.detach(),
-            "running_var": mod.running_var.detach(),
+            "running_mean": running_mean.detach(),
+            "running_var": running_var.detach(),
             "num_batches_tracked": mod.num_batches_tracked.detach() if mod.num_batches_tracked is not None else torch.tensor(0),
         }
 
@@ -1720,13 +1810,17 @@ class _LayerGraphBuilder:
         axis = getattr(mod, 'dim', None)
         if axis is None:
             axis = -1
+        params = {
+            "axis": int(axis),
+            "input_shape": self.shape,
+            "output_shape": self.shape,
+        }
+        normalized_axis = int(axis) if int(axis) >= 0 else len(self.shape) + int(axis)
+        if normalized_axis == len(self.shape) - 1:
+            params["rowsize"] = int(self.shape[-1])
         self._add_layer(
             LayerKind.SOFTMAX.value,
-            {
-                "axis": int(axis),
-                "input_shape": self.shape,
-                "output_shape": self.shape,
-            },
+            params,
             self.prev_out,
             out_vars,
         )
@@ -1738,35 +1832,42 @@ class _LayerGraphBuilder:
     
     def _process_add_operation(self, node: fx.Node) -> None:
         """Process ADD operation (skip connection merge)."""
-        inputs = [a for a in node.args if isinstance(a, fx.Node)]
-        if len(inputs) < 2:
+        if len(node.args) < 2:
+            raise NotImplementedError(f"add at {node.name} expects 2 operands")
+        a, b = node.args[0], node.args[1]
+        a_node = a if isinstance(a, fx.Node) else None
+        b_node = b if isinstance(b, fx.Node) else None
+        a_var = a_node is not None and a_node.name in self.node_outputs
+        b_var = b_node is not None and b_node.name in self.node_outputs
+        if a_var and b_var and a_node is not None and b_node is not None:
+            x_vars = self.node_outputs[a_node.name]
+            y_vars = self.node_outputs[b_node.name]
+            x_shape = self.node_shapes[a_node.name]
+            if self.node_shapes[b_node.name] != x_shape:
+                raise NotImplementedError(f"add var-var broadcasting is unsupported at {node.name}")
+            out_vars = self._alloc_ids(len(x_vars))
+            params = {"x_vars": x_vars, "y_vars": y_vars, "input_shape": x_shape, "output_shape": x_shape}
+            layer_id = self._add_layer(
+                LayerKind.ADD.value, params, x_vars + y_vars, out_vars
+            )
+            self.prev_out = out_vars
+            self.shape = x_shape
+            self._register_node(node.name, layer_id)
             return
-        
-        x_name, y_name = inputs[0].name, inputs[1].name
-        if x_name not in self.node_outputs or y_name not in self.node_outputs:
+        if a_var and not b_var and a_node is not None:
+            self._emit_const_bias(node, a_node, self._resolve_const_tensor(b), negate=False)
             return
-        
-        x_vars = self.node_outputs[x_name]
-        y_vars = self.node_outputs[y_name]
-        x_shape = self.node_shapes[x_name]
-        
-        out_vars = self._alloc_ids(len(x_vars))
-        
-        params = {"x_vars": x_vars, "y_vars": y_vars, "input_shape": x_shape, "output_shape": x_shape}
-        layer_id = self._add_layer(
-            LayerKind.ADD.value, params,
-            x_vars + y_vars, out_vars
-        )
-        self.prev_out = out_vars
-        self.shape = x_shape
-        self._register_node(node.name, layer_id)
+        if b_var and not a_var and b_node is not None:
+            self._emit_const_bias(node, b_node, self._resolve_const_tensor(a), negate=False)
+            return
+        raise NotImplementedError(f"add with no variable operand at {node.name}")
 
     def _resolve_const_tensor(self, val: Any) -> torch.Tensor:
         """Resolve a non-variable operand (literal / get_attr buffer) to a tensor."""
         if isinstance(val, torch.Tensor):
             return val
         if isinstance(val, (int, float)):
-            return torch.tensor(float(val), dtype=torch.get_default_dtype())
+            return torch.tensor(float(val), dtype=self.dtype)
         if isinstance(val, fx.Node) and val.op == 'get_attr':
             obj: Any = self.traced_model
             for part in str(val.target).split('.'):
@@ -1775,20 +1876,24 @@ class _LayerGraphBuilder:
                 return obj
         raise NotImplementedError(f"Cannot resolve constant operand: {val}")
 
+    def _broadcast_const(self, const: torch.Tensor, shape: Tuple[int, ...], node_name: str) -> torch.Tensor:
+        """Broadcast a compile-time constant to a flattened ACT tensor shape."""
+        value = const.detach().to(dtype=self.dtype)
+        try:
+            return torch.broadcast_to(value, shape).reshape(-1).clone()
+        except RuntimeError as exc:
+            raise NotImplementedError(
+                f"constant shape {tuple(value.shape)} cannot broadcast to {shape} at {node_name}"
+            ) from exc
+
     def _emit_const_bias(self, node: fx.Node, var_node: fx.Node,
                          const: torch.Tensor, negate: bool) -> None:
         """Emit a BIAS layer (y = x + c). For x - c pass negate=True (c -> -c)."""
         in_vars = self.node_outputs[var_node.name]
         shape = self.node_shapes[var_node.name]
-        c = const.flatten().to(dtype=torch.get_default_dtype())
+        c = self._broadcast_const(const, shape, node.name)
         if negate:
             c = -c
-        if c.numel() == 1:
-            c = c.expand(len(in_vars)).clone()
-        if c.numel() != len(in_vars):
-            raise NotImplementedError(
-                f"sub/bias const numel {c.numel()} != vars {len(in_vars)} at {node.name}"
-            )
         out_vars = self._alloc_ids(len(in_vars))
         layer_id = self._add_layer(
             LayerKind.BIAS.value,
@@ -1837,11 +1942,7 @@ class _LayerGraphBuilder:
                 {"a": neg, "input_shape": shape, "output_shape": shape},
                 in_vars, scale_vars,
             )
-            c = self._resolve_const_tensor(a).flatten().to(dtype=torch.get_default_dtype())
-            if c.numel() == 1:
-                c = c.expand(len(in_vars)).clone()
-            if c.numel() != len(in_vars):
-                raise NotImplementedError(f"sub const-var numel {c.numel()} != vars {len(in_vars)} at {node.name}")
+            c = self._broadcast_const(self._resolve_const_tensor(a), shape, node.name)
             out_vars = self._alloc_ids(len(in_vars))
             layer_id = self._add_layer(
                 LayerKind.BIAS.value,
@@ -1895,46 +1996,98 @@ class _LayerGraphBuilder:
     
     def _process_mul_operation(self, node: fx.Node) -> None:
         """Process MUL operation."""
-        inputs = [a for a in node.args if isinstance(a, fx.Node)]
-        
-        if len(inputs) >= 2:
-            x_name, y_name = inputs[0].name, inputs[1].name
-            if x_name in self.node_outputs and y_name in self.node_outputs:
-                x_vars = self.node_outputs[x_name]
-                y_vars = self.node_outputs[y_name]
-                x_shape = self.node_shapes[x_name]
-                
-                out_vars = self._alloc_ids(len(x_vars))
+        if len(node.args) < 2:
+            raise NotImplementedError(f"mul at {node.name} expects 2 operands")
+        a, b = node.args[0], node.args[1]
+        a_node = a if isinstance(a, fx.Node) else None
+        b_node = b if isinstance(b, fx.Node) else None
+        a_var = a_node is not None and a_node.name in self.node_outputs
+        b_var = b_node is not None and b_node.name in self.node_outputs
+        if a_var and b_var and a_node is not None and b_node is not None:
+            x_vars = self.node_outputs[a_node.name]
+            y_vars = self.node_outputs[b_node.name]
+            x_shape = self.node_shapes[a_node.name]
+            y_shape = self.node_shapes[b_node.name]
+            mul_preds = None
+            if y_shape != x_shape:
+                try:
+                    out_shape = tuple(int(d) for d in torch.broadcast_shapes(x_shape, y_shape))
+                except RuntimeError as exc:
+                    raise NotImplementedError(
+                        f"mul var-var shapes {x_shape} and {y_shape} do not broadcast at {node.name}"
+                    ) from exc
+                x_vars, x_pred = self._broadcast_operand(a_node, out_shape, node.name)
+                y_vars, y_pred = self._broadcast_operand(b_node, out_shape, node.name)
+                mul_preds = [x_pred, y_pred]
+                x_shape = out_shape
+            out_vars = self._alloc_ids(len(x_vars))
+            params = {"x_vars": x_vars, "y_vars": y_vars,
+                      "input_shape": x_shape, "output_shape": x_shape}
+            layer_id = self._add_layer(
+                LayerKind.MUL.value, params, x_vars + y_vars, out_vars
+            )
+            if mul_preds is not None:
+                self._fx_pred_override[layer_id] = mul_preds
+            self.prev_out = out_vars
+            self.shape = x_shape
+            self._register_node(node.name, layer_id)
+            return
+        if a_var != b_var:
+            var_node = a_node if a_var else b_node
+            const_value = b if a_var else a
+            assert var_node is not None
+            x_vars = self.node_outputs[var_node.name]
+            x_shape = self.node_shapes[var_node.name]
+            scale = self._broadcast_const(self._resolve_const_tensor(const_value), x_shape, node.name)
+            out_vars = self._alloc_ids(len(x_vars))
+            layer_id = self._add_layer(
+                LayerKind.SCALE.value,
+                {"a": scale, "input_shape": x_shape, "output_shape": x_shape},
+                x_vars, out_vars,
+            )
+            self.prev_out = out_vars
+            self.shape = x_shape
+            self._register_node(node.name, layer_id)
+            return
+        raise NotImplementedError(f"mul with no variable operand at {node.name}")
 
-                params = {"x_vars": x_vars, "y_vars": y_vars,
-                          "input_shape": x_shape, "output_shape": x_shape}
-                layer_id = self._add_layer(
-                    LayerKind.MUL.value, params,
-                    x_vars + y_vars, out_vars
-                )
-                self.prev_out = out_vars
-                self.shape = x_shape
-                self._register_node(node.name, layer_id)
-        
-        elif len(inputs) == 1:
-            x_name = inputs[0].name
-            if x_name in self.node_outputs:
-                x_vars = self.node_outputs[x_name]
-                x_shape = self.node_shapes[x_name]
-                scalar = node.args[1] if len(node.args) > 1 else 1.0
-                if not isinstance(scalar, (int, float)):
-                    scalar = 1.0
-                
-                scale_tensor = torch.full((len(x_vars),), float(scalar), dtype=self.dtype)
-                out_vars = self._alloc_ids(len(x_vars))
-                layer_id = self._add_layer(
-                    "SCALE",
-                    {"a": scale_tensor, "input_shape": x_shape, "output_shape": x_shape},
-                    x_vars, out_vars
-                )
-                self.prev_out = out_vars
-                self.shape = x_shape
-                self._register_node(node.name, layer_id)
+    def _broadcast_operand(self, src: fx.Node, shape: Tuple[int, ...], node_name: str) -> Tuple[List[int], int]:
+        """Return ``src``'s vars broadcast to ``shape`` (via an EXPAND layer) and their producer layer id."""
+        src_layer = self.node_to_layer_id.get(src.name, -1)
+        if src_layer < 0:
+            raise NotImplementedError(f"mul var-var broadcasting of a network input is unsupported at {node_name}")
+        if self.node_shapes[src.name] == shape:
+            return self.node_outputs[src.name], src_layer
+        out_vars = self._alloc_ids(_prod(shape) or 1)
+        layer_id = self._add_layer(
+            LayerKind.EXPAND.value,
+            {"shape": shape, "input_shape": self.node_shapes[src.name], "output_shape": shape},
+            self.node_outputs[src.name], out_vars,
+        )
+        self._fx_pred_override[layer_id] = [src_layer]
+        return out_vars, layer_id
+
+
+
+    def _mean_spec(
+        self, node: fx.Node, input_shape: Tuple[int, ...]
+    ) -> Tuple[Tuple[int, ...], bool, Tuple[int, ...]]:
+        """Resolve a torch mean node's axes, keepdim flag, and output shape."""
+        dim_value = node.kwargs.get('dim', node.args[1] if len(node.args) > 1 else None)
+        keepdim = bool(node.kwargs.get('keepdim', node.args[2] if len(node.args) > 2 else False))
+        raw_dims = tuple(range(len(input_shape))) if dim_value is None else (
+            tuple(int(cast(Any, d)) for d in dim_value)
+            if isinstance(dim_value, (list, tuple)) else (int(cast(Any, dim_value)),)
+        )
+        dims = tuple(sorted(d + len(input_shape) if d < 0 else d for d in raw_dims))
+        if any(d < 0 or d >= len(input_shape) for d in dims):
+            raise ValueError(f"mean dimensions {raw_dims} out of range for {input_shape}")
+        output_shape = tuple(
+            1 if index in dims and keepdim else size
+            for index, size in enumerate(input_shape)
+            if keepdim or index not in dims
+        )
+        return dims, keepdim, output_shape or (1,)
     
     def _process_adaptive_avg_pool2d_function(self, node: fx.Node) -> None:
         """Process F.adaptive_avg_pool2d() via the nn.AdaptiveAvgPool2d converter."""
@@ -1945,15 +2098,18 @@ class _LayerGraphBuilder:
         self._register_node(node.name)
     
     def _process_mean_operation(self, node: fx.Node) -> None:
-        """Process torch.mean()."""
+        """Process torch.mean() while preserving axes and keepdim."""
         if not self._get_predecessor_state(node):
             return
-        
-        out_vars = self._alloc_ids(1)
-        output_shape = (1, 1)
+
+        dims, keepdim, output_shape = self._mean_spec(node, self.shape)
+        out_vars = self._alloc_ids(_prod(output_shape) or 1)
         layer_id = self._add_layer(
             LayerKind.MEAN.value,
-            {"input_shape": self.shape, "output_shape": output_shape},
+            {
+                "dim": list(dims), "keepdim": keepdim,
+                "input_shape": self.shape, "output_shape": output_shape,
+            },
             self.prev_out, out_vars
         )
         self.prev_out = out_vars
@@ -1961,7 +2117,7 @@ class _LayerGraphBuilder:
         self._register_node(node.name, layer_id)
     
     def _process_getitem_operation(self, node: fx.Node) -> None:
-        """Process indexing operation (passthrough).
+        """Process indexing, including the BERT ``x[:, 0]`` CLS gather.
 
         If the node is already registered (e.g. by OnnxSplit13's handler, which
         pre-registers each ``getitem(split, i)`` child to point at the i-th
@@ -1972,9 +2128,120 @@ class _LayerGraphBuilder:
             self.prev_out = self.node_outputs[node.name]
             self.shape = self.node_shapes[node.name]
             return
-        inputs = [a for a in node.args if isinstance(a, fx.Node)]
-        if inputs:
-            self._propagate_node_state(node.name, inputs[0].name)
+        if len(node.args) < 2 or not isinstance(node.args[0], fx.Node):
+            raise NotImplementedError(f"getitem at {node.name} has no tensor operand")
+        source = node.args[0]
+        if source.name not in self.node_outputs:
+            raise NotImplementedError(f"getitem source {source.name} is not a tensor")
+        index = node.args[1]
+        shape = self.node_shapes[source.name]
+        index_tuple = index if isinstance(index, tuple) else (index,)
+        index_tuple = (*index_tuple, *([slice(None)] * (len(shape) - len(index_tuple))))
+        integer_axes = [axis for axis, item in enumerate(index_tuple) if isinstance(item, int)]
+        full_slices = all(
+            isinstance(item, int)
+            or (isinstance(item, slice) and item.start is None and item.stop is None and item.step is None)
+            for item in index_tuple
+        )
+        if len(integer_axes) != 1 or not full_slices:
+            raise NotImplementedError(f"getitem index {index!r} is unsupported at {node.name}")
+        axis = integer_axes[0]
+        selected = int(cast(Any, index_tuple[axis]))
+        if selected < 0:
+            selected += int(shape[axis])
+        if selected < 0 or selected >= int(shape[axis]):
+            raise IndexError(f"getitem index {selected} out of range for axis {axis} of {shape}")
+        gather_shape = list(shape)
+        gather_shape[axis] = 1
+        in_vars = self.node_outputs[source.name]
+        gather_vars = self._alloc_ids(_prod(tuple(gather_shape)) or 1)
+        gather_id = self._add_layer(
+            LayerKind.GATHER.value,
+            {
+                "indices": torch.tensor([selected], dtype=torch.long),
+                "axis": axis,
+                "input_shape": shape,
+                "output_shape": tuple(gather_shape),
+            },
+            in_vars,
+            gather_vars,
+        )
+        source_id = self.node_to_layer_id.get(source.name, -1)
+        if source_id >= 0:
+            self._fx_pred_override[gather_id] = [source_id]
+        output_shape = tuple(size for i, size in enumerate(shape) if i != axis) or (1,)
+        out_vars = self._alloc_ids(len(gather_vars))
+        reshape_id = self._add_layer(
+            LayerKind.RESHAPE.value,
+            {
+                "target_shape": output_shape,
+                "input_shape": tuple(gather_shape),
+                "output_shape": output_shape,
+            },
+            gather_vars,
+            out_vars,
+        )
+        self._fx_pred_override[reshape_id] = [gather_id]
+        self.prev_out = out_vars
+        self.shape = output_shape
+        self._register_node(node.name, reshape_id)
+
+    def _process_matmul_operation(self, node: fx.Node) -> None:
+        """Lower a variable-variable torch.matmul to whole-tensor MATMUL."""
+        if len(node.args) < 2 or not all(isinstance(arg, fx.Node) for arg in node.args[:2]):
+            raise NotImplementedError(f"matmul at {node.name} requires two tensor operands")
+        x_node, y_node = cast(Tuple[fx.Node, fx.Node], node.args[:2])
+        if x_node.name not in self.node_outputs or y_node.name not in self.node_outputs:
+            raise NotImplementedError(f"matmul at {node.name} requires two variable operands")
+        x_shape = self.node_shapes[x_node.name]
+        y_shape = self.node_shapes[y_node.name]
+        if len(x_shape) < 2 or len(y_shape) < 2 or x_shape[-1] != y_shape[-2]:
+            raise ValueError(f"matmul shape mismatch at {node.name}: {x_shape} @ {y_shape}")
+        if x_shape[:-2] != y_shape[:-2]:
+            raise NotImplementedError(
+                f"matmul batch broadcasting is unsupported at {node.name}: {x_shape} @ {y_shape}"
+            )
+        output_shape = (*x_shape[:-2], x_shape[-2], y_shape[-1])
+        x_vars = self.node_outputs[x_node.name]
+        y_vars = self.node_outputs[y_node.name]
+        out_vars = self._alloc_ids(_prod(output_shape) or 1)
+        layer_id = self._add_layer(
+            LayerKind.MATMUL.value,
+            {
+                "x_vars": x_vars, "y_vars": y_vars,
+                "x_shape": x_shape, "y_shape": y_shape,
+                "input_shape": x_shape, "output_shape": output_shape,
+            },
+            x_vars + y_vars,
+            out_vars,
+        )
+        self.prev_out = out_vars
+        self.shape = output_shape
+        self._register_node(node.name, layer_id)
+
+    def _process_div_operation(self, node: fx.Node) -> None:
+        """Lower division by a compile-time constant to SCALE."""
+        if len(node.args) < 2 or not isinstance(node.args[0], fx.Node):
+            raise NotImplementedError(f"division at {node.name} requires a variable numerator")
+        numerator = node.args[0]
+        if numerator.name not in self.node_outputs:
+            raise NotImplementedError(f"division numerator at {node.name} is not variable")
+        denominator = self._resolve_const_tensor(node.args[1])
+        if bool((denominator == 0).any()):
+            raise ZeroDivisionError(f"division by zero at {node.name}")
+        shape = self.node_shapes[numerator.name]
+        scale = self._broadcast_const(denominator.reciprocal(), shape, node.name)
+        in_vars = self.node_outputs[numerator.name]
+        out_vars = self._alloc_ids(len(in_vars))
+        layer_id = self._add_layer(
+            LayerKind.SCALE.value,
+            {"a": scale, "input_shape": shape, "output_shape": shape},
+            in_vars,
+            out_vars,
+        )
+        self.prev_out = out_vars
+        self.shape = shape
+        self._register_node(node.name, layer_id)
     
     def _process_passthrough_function(self, node: fx.Node) -> None:
         """Process no-op functions (dropout, stochastic_depth)."""
@@ -1987,7 +2254,6 @@ class _LayerGraphBuilder:
 # this file manageable; ``self`` inside each handler is a _LayerGraphBuilder.
 for _cls_name, _fn in ONNX_HANDLERS.items():
     setattr(_LayerGraphBuilder, _fn.__name__, _fn)
-del _cls_name, _fn
 
 
 # -----------------------------------------------------------------------------
@@ -2090,16 +2356,29 @@ class TorchToACT:
     
     def run(self) -> Net:
         """Convert wrapped PyTorch model to ACT Net."""
-        new_layers, out_vars = self.input_layer.to_act_layers(len(self.layers), [])
+        input_layer = cast(Any, self.input_layer)
+        new_layers, out_vars = input_layer.to_act_layers(len(self.layers), [])
         self.layers.extend(new_layers)
         self.prev_out = out_vars
-        # Capture batch dim from InputLayer for downstream spec encoding.
-        B = self.input_layer.shape[0]
+        # InputSpec bounds carry the verifier-lane axis.  It normally matches
+        # InputLayer.shape[0], but fixed-batch ONNX tensors are one verification
+        # instance whose structural leading dimension can be greater than one.
+        batch_size = input_layer.shape[0]
+        for mod in self.m.children():
+            if type(mod).__name__ != "InputSpecLayer":
+                continue
+            spec = getattr(mod, "spec", None)
+            for field in ("lb", "ub", "center"):
+                value = getattr(spec, field, None)
+                if isinstance(value, torch.Tensor) and value.dim() >= 1:
+                    batch_size = int(value.shape[0])
+                    break
+            break
 
         for mod in self.m.children():
             if type(mod).__name__ == "InputSpecLayer" and hasattr(mod, 'to_act_layers'):
-                new_layers, out_vars = mod.to_act_layers(
-                    len(self.layers), self.prev_out, B
+                new_layers, out_vars = cast(Any, mod).to_act_layers(
+                    len(self.layers), self.prev_out, batch_size
                 )
                 self.layers.extend(new_layers)
                 self.prev_out = out_vars
@@ -2108,8 +2387,8 @@ class TorchToACT:
 
         for mod in self.m.children():
             if type(mod).__name__ == "OutputSpecLayer" and hasattr(mod, 'to_act_layers'):
-                new_layers, out_vars = mod.to_act_layers(
-                    len(self.layers), self.prev_out, B
+                new_layers, out_vars = cast(Any, mod).to_act_layers(
+                    len(self.layers), self.prev_out, batch_size
                 )
                 self.layers.extend(new_layers)
                 self.prev_out = out_vars
@@ -2281,7 +2560,7 @@ def main():
     
     # Step 2: Test all models with inference (each wrapped model carries its own input data).
     print("\n Step 2: Testing model inference...")
-    successful_models = model_inference(wrapped_models)
+    successful_models = model_inference(cast(Any, wrapped_models))
     print(f"  {len(successful_models)} models passed inference tests")
     
     if not successful_models:

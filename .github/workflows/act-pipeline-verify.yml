@@ -20,6 +20,7 @@ env:
   PYTHONPATH: ${{ github.workspace }}
   TF_ENABLE_ONEDNN_OPTS: "0"
   ACT_CI_MODE: "true"
+  ACT_NETS_DIR: act/back_end/examples/nets
 
 jobs:
   pipeline-verify:
@@ -136,6 +137,22 @@ jobs:
           cd ${{ github.workspace }}
           coverage run -p -m act.pipeline --verify torchvision --dataset MNIST --model simple_cnn --num-samples 1 \
             --solvers dual --bab --bab-solver-tier dual --bab-max-depth 1 --bab-max-nodes 1 \
+            --device cpu --dtype float64
+
+      - name: Token-wise frames and small ONNX operator conversion
+        run: |
+          cd ${{ github.workspace }}
+          coverage run -p -m act.back_end --generate --device cpu --dtype float64
+          coverage run -p -m act.back_end.examples.fixtures.generate_coverage_ops
+          mkdir -p data/vnnlib
+          cp -R act/back_end/examples/fixtures/coverage_ops data/vnnlib/
+          for tokens in 2 60; do
+            coverage run -p -m act.back_end --verify \
+              --network "$ACT_NETS_DIR/layer_testing_tokenwise_dense_${tokens}.json" \
+              --solver dual --device cpu --dtype float64
+          done
+          coverage run -p -m act.pipeline --verify vnnlib --category coverage_ops \
+            --max-instances 2 --solvers dual --validate-soundness \
             --device cpu --dtype float64
 
       - name: Combine coverage data

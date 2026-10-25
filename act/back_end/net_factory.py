@@ -898,7 +898,9 @@ def _generate_layer_variables(kind, i, vc, params, layers):
     in_vars = list(layers[i - 1].out_vars)
 
     # Determine output count from params
-    if "out_features" in params:
+    if kind == LayerKind.DENSE.value and params.get("token_wise"):
+        n_out = math.prod(params["output_shape"][1:])
+    elif "out_features" in params:
         n_out = int(params["out_features"])
     elif "output_shape" in params:
         n_out = torch.Size(params["output_shape"]).numel()
@@ -1483,7 +1485,7 @@ class NetFactory:
             input_from = ls.get("input_from")
             if input_from is not None:
                 in_vars = list(layers[int(input_from)].out_vars)
-                n_out = int(params.get(
+                n_out = math.prod(params["output_shape"][1:]) if params.get("token_wise") else int(params.get(
                     "out_features", math.prod(params["output_shape"][1:])
                     if "output_shape" in params else len(in_vars),
                 ))
@@ -1616,6 +1618,7 @@ class NetFactory:
         self._record(net)
 
     def generate(self) -> List[str]:
+        torch.manual_seed(self.base_seed)
         for old in (self.output_dir / "standalone").glob("*.json"):
             old.unlink()
         for old in self.output_dir.glob("*.json"):
@@ -1772,6 +1775,25 @@ def _lt_spec_mha_roles(cfg: Dict[str, Any]) -> Dict[str, Any]:
         _lt_assert_le([1.0] * joined, float(cfg["assert_threshold"])),
     ])
     return {"layers": layers}
+
+
+def _lt_spec_tokenwise_dense(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply a shared dense projection to every embedding token."""
+    tokens = int(cfg["tokens"])
+    weight = torch.tensor(cfg["weight"], dtype=get_default_dtype())
+    outputs, inputs = weight.shape
+    shape = [1, tokens, inputs]
+    spec = dict(cfg["input_spec"], perturbed_positions=list(range(int(cfg["perturbed_tokens"]))))
+    params = {
+        "weight": weight, "in_features": inputs, "out_features": outputs,
+        "token_wise": True, "input_shape": shape, "output_shape": [1, tokens, outputs],
+    }
+    if cfg["with_bias"]:
+        params["bias"] = torch.zeros(outputs, dtype=get_default_dtype())
+    return {"layers": _lt_input_lp(shape, spec) + [
+        {"kind": LayerKind.DENSE.value, "params": params},
+        _lt_assert_le([1.0] * (tokens * outputs), float(cfg["assert_threshold"])),
+    ]}
 
 
 def _lt_input_with_lin_poly(
@@ -2759,6 +2781,7 @@ LAYER_TESTING_BUILDERS = {
     "attention": _lt_spec_attention,
     "lp_dense": _lt_spec_lp_dense,
     "mha_roles": _lt_spec_mha_roles,
+    "tokenwise_dense": _lt_spec_tokenwise_dense,
 }
 
 

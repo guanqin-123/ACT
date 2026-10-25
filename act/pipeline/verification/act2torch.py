@@ -20,7 +20,7 @@
 #
 # ===---------------------------------------------------------------------===#
 
-from typing import Optional, Dict, Any, Tuple, cast
+from typing import Optional, Dict, Any, cast
 from collections import deque
 from typing import Set, List
 import importlib
@@ -140,8 +140,18 @@ class ACTLayerNorm(nn.Module):
         gamma = self.get_buffer("gamma").to(device=x.device, dtype=x.dtype)
         beta = self.get_buffer("beta").to(device=x.device, dtype=x.dtype)
         if self.variant == "no_var":
-            dims = tuple(range(1, x.dim()))
-            return (x - x.mean(dim=dims, keepdim=True)) * gamma + beta
+            width = int(gamma.numel())
+            features = int(x.shape[1:].numel())
+            if width == 0 or features % width:
+                raise ValueError(
+                    f"ACTLayerNorm: gamma width {width} does not divide the flattened input width {features}"
+                )
+            if width == features:
+                dims = tuple(range(1, x.dim()))
+                return (x - x.mean(dim=dims, keepdim=True)) * gamma + beta
+            rows = x.reshape(x.shape[0], features // width, width)
+            centered = rows - rows.mean(dim=-1, keepdim=True)
+            return (centered * gamma.reshape(width) + beta.reshape(width)).reshape(x.shape)
         import torch.nn.functional as F
 
         return F.layer_norm(x, gamma.shape, weight=gamma, bias=beta, eps=self.eps)
@@ -180,7 +190,7 @@ class ACTMHASplit(nn.Module):
         if bias is not None:
             bias = bias.to(device=x.device, dtype=x.dtype)
         projected = F.linear(x.reshape(x.shape[0], -1, weight.shape[1]), weight, bias)
-        hidden = self.hidden_size or int(projected.shape[-1])
+        hidden = int(weight.shape[0])
         sequence_length = projected.shape[1]
         projected = projected.reshape(x.shape[0], sequence_length, hidden)
         if self.role in {"query", "key"}:
@@ -307,7 +317,12 @@ class ActGraphModule(nn.Module):
             if mod is None:
                 out = self._apply_functional(layer, inp_tensors)
             else:
-                if layer.kind == LayerKind.DENSE.value and inp_tensors[0].dim() >= 3:
+                if (
+                    layer.kind == LayerKind.DENSE.value
+                    and layer.params.get("token_wise")
+                ):
+                    out = mod(inp_tensors[0])
+                elif layer.kind == LayerKind.DENSE.value and inp_tensors[0].dim() >= 3:
                     import torch.nn.functional as F
                     output_shape = layer.params.get("output_shape")
                     if output_shape is not None and len(output_shape) >= 3:
@@ -396,13 +411,11 @@ class ActGraphModule(nn.Module):
             target = layer.params.get("target_shape") or layer.params.get("output_shape")
             if target is None:
                 return inputs[0]
-            # target encodes a per-sample shape (leading dim is conceptual
-            # batch slot = 1 in the template). At runtime the input carries
-            # the actual batch B from VerifiableModel batchification, so
-            # substitute B for the leading dim rather than reshaping literally
-            # — otherwise B>1 fails with "shape '[1, n]' invalid for input of
-            # size B*n".
-            return inputs[0].reshape(inputs[0].shape[0], *target[1:])
+            target_shape = tuple(int(d) for d in target)
+            input_shape = layer.params.get("input_shape")
+            if input_shape is not None and tuple(inputs[0].shape) == tuple(input_shape):
+                return inputs[0].reshape(target_shape)
+            return inputs[0].reshape(inputs[0].shape[0], *target_shape[1:])
         if kind == LayerKind.MAX.value:
             if len(inputs) < 2:
                 raise RuntimeError(
@@ -727,7 +740,9 @@ class ActGraphModule(nn.Module):
             # Same axis convention as SLICE (see _axis_shift).
             shift = _axis_shift(layer.params.get("input_shape"), inputs[0])
             idx = torch.as_tensor(indices, dtype=torch.long, device=inputs[0].device)
-            return torch.index_select(inputs[0], dim=axis + shift, index=idx)
+            dim = axis + shift
+            output = torch.index_select(inputs[0], dim=dim, index=idx)
+            return output.squeeze(dim) if layer.params.get("scalar_indices") else output
         if kind == LayerKind.MEAN.value:
             keepdim = bool(layer.params.get("keepdim", 0))
             shift = _axis_shift(layer.params.get("input_shape"), inputs[0])
