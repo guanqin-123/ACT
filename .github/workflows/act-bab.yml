@@ -372,6 +372,20 @@ jobs:
               --bab-branching babsr --bab-multi-split-levels 1 --verbose
           done
 
+      - name: Finite Lp frames and dual stopping
+        run: |
+          cd ${{ github.workspace }}
+          coverage run -p -m act.back_end --verify \
+            --network "$ACT_NETS_DIR/layer_testing_lp_dense.json" \
+            --solver dual --device cpu --dtype float64
+          coverage run -p -m act.back_end --verify \
+            --network "$ACT_NETS_DIR/layer_testing_bab_deep.json" \
+            --solver dual --bab --bab-solver-tier dual_alpha_eta \
+            --dual-stagnation-patience 1 --dual-stagnation-tol 1 \
+            --dual-stop-when-verified --dual-max-time 5 \
+            --bab-max-depth 4 --bab-max-subproblems 40 --timeout 30 \
+            --device cpu --dtype float64
+
       # ── Coverage ───────────────────────────────────────────────────────
       - name: Combine coverage data
         if: always()

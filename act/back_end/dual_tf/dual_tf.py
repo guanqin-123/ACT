@@ -12,8 +12,8 @@
 
 
 import torch
-from typing import Dict, List, Optional, Sequence, Tuple, cast
-from act.back_end.core import Bounds, Layer, Net
+from typing import Dict, List, Sequence, Tuple, cast
+from act.back_end.core import Bounds, Layer
 from act.back_end.layer_schema import LayerKind
 from .tf_mlp import (
     backward_dense, backward_relu, backward_bias, backward_scale,
@@ -41,7 +41,7 @@ from .tf_transformer import (
     forward_gelu, backward_gelu,
 )
 from .tf_forward import (
-    compute_forward_bounds, LinearBound, Frame,
+    LinearBound, Frame,
     _sum_linear_bounds, _sum_interval_bounds, _concretize,
     _reset_forward_box, _align, _int_param,
 )
@@ -318,7 +318,7 @@ def forward_add(
                 b_ub=lin.b_ub + bias_vec,
             )
         frame = parent_frames[0]
-        lb, ub = _concretize(lin, *frame)
+        lb, ub = _concretize(lin, frame)
     else:
         summed = _sum_interval_bounds(parent_boxes)
         lb, ub = summed.lb, summed.ub
@@ -421,7 +421,7 @@ def forward_concat(
             b_ub=torch.cat([lin.b_ub for lin in parent_lins], dim=1),
         )
         frame = parent_frames[0]
-        lb, ub = _concretize(lin, *frame)
+        lb, ub = _concretize(lin, frame)
     else:
         lb = torch.cat([box.lb for box in parent_boxes], dim=concat_dim)
         ub = torch.cat([box.ub for box in parent_boxes], dim=concat_dim)

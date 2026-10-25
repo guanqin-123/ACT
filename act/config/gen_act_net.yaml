@@ -390,6 +390,13 @@ net_factory:
   # manifest-driven netfactory sweep exercises them without workflow changes.
 
   layer_testing:
+    lp_dense:
+      sequence_length: 2
+      embedding_dim: 2
+      input_spec: {kind: LP_EMBEDDING, center_val: 0.0, eps: 1.0, p_norm: 1.0, perturbed_positions: [0]}
+      weight: [[1.0, -1.0, 0.0, 0.0], [0.5, 1.0, 0.0, 0.0]]
+      bias: [0.0, 0.0]
+      assert_threshold: 100.0
     attention:
       batch_size: 1
       sequence_length: 2

@@ -504,11 +504,40 @@ class DualConfig:
     """Cap on the number of perturbed input dims for which the forward pass
     keeps an explicit linear bound; above it, interval-only."""
 
+    stagnation_patience: int = 0
+    """Stop the alpha/eta loop after this many consecutive iterations in which
+    no row's keep-best dual bound improved by more than ``stagnation_tol``
+    (same semantics as ``TorchLPConfig``). 0 = run all ``n_iters``."""
+
+    stagnation_tol: float = 1e-5
+    """Minimum per-row dual-bound gain that counts as an improvement for
+    ``stagnation_patience``."""
+
+    stop_when_verified: bool = False
+    """Stop the alpha/eta loop once every row's keep-best bound certifies its
+    spec row (alpha,beta-CROWN stop criterion)."""
+
+    max_time: float = 0.0
+    """Wall-clock cap in seconds on one alpha/eta loop; the first iteration
+    always completes and keep-best is returned. 0.0 = no cap."""
+
     def __post_init__(self) -> None:
         if self.forward_lin_max_perturbed < 0:
             raise ConfigError(
                 "forward_lin_max_perturbed must be non-negative, got "
                 f"{self.forward_lin_max_perturbed}"
+            )
+        if self.stagnation_patience < 0:
+            raise ConfigError(
+                f"stagnation_patience must be non-negative, got {self.stagnation_patience}"
+            )
+        if not math.isfinite(self.stagnation_tol) or self.stagnation_tol < 0.0:
+            raise ConfigError(
+                f"stagnation_tol must be finite and non-negative, got {self.stagnation_tol}"
+            )
+        if not math.isfinite(self.max_time) or self.max_time < 0.0:
+            raise ConfigError(
+                f"max_time must be finite and non-negative, got {self.max_time}"
             )
 
 

@@ -37,6 +37,8 @@ import logging
 from act.back_end.core import Net
 from act.back_end.serialization.serialization import NetSerializer
 from act.pipeline.verification.act2torch import ACTToTorch
+from act.pipeline.verification.per_neuron_bounds import project_into_input_spec
+from act.front_end.specs import normalize_position_mask
 from act.util.device_manager import get_default_dtype, get_default_device
 from act.util.path_config import get_examples_nets_dir
 from act.util.format_utils import rule
@@ -273,6 +275,27 @@ class ModelFactory:
                 else:
                     raise ValueError(f"Unknown test_case '{test_case}'")
             
+            elif spec_kind == 'LP_EMBEDDING':
+                center = torch.as_tensor(spec_params['center'], dtype=dtype, device=device)
+                eps = torch.as_tensor(spec_params['eps'], dtype=dtype, device=device)
+                match test_case:
+                    case 'center':
+                        tensor = center.clone()
+                    case 'boundary':
+                        mask = normalize_position_mask(
+                            spec_params.get('perturbed_positions'), center.shape[-2],
+                            batch_shape=tuple(center.shape[:-2]), device=device,
+                        )
+                        first = mask & (mask.to(torch.long).cumsum(dim=-1) == 1)
+                        delta = torch.zeros_like(center)
+                        delta[..., 0] = first
+                        tensor = center + delta * (eps - 0.001).clamp_min(0)
+                    case 'random':
+                        tensor = center + (2 * torch.rand_like(center) - 1) * eps
+                    case _:
+                        raise ValueError(f"Unknown test_case '{test_case}'")
+                tensor = project_into_input_spec(tensor, input_spec_layer)
+
             elif spec_kind == 'LINF_BALL':
                 center_val = spec_params.get('center_val', 0.5)
                 eps = spec_params.get('eps', 0.1)

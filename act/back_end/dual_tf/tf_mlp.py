@@ -257,7 +257,7 @@ def forward_dense(
         lin, frame = _reset_forward_box(lb, ub, device, dtype)
         return stored, out, lin, frame
     lin = new_lin
-    lin_lb, lin_ub = _concretize(lin, x_L, x_U)
+    lin_lb, lin_ub = _concretize(lin, parent_frame)
     lb, ub = _intersect_boxes(lin_lb, lin_ub, int_lb, int_ub)
     out = Bounds(lb, ub)
     stored = out
@@ -267,7 +267,9 @@ def forward_dense(
 def backward_dense(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
                    preds: List[int], M: int = 1, alpha=None
                    ) -> Tuple[List[torch.Tensor], torch.Tensor]:
-    nu_out, contrib = dual_dense_backward(nu, L.params["weight"], L.params.get("bias"))
+    weight = L.params["weight"]
+    bias = L.params.get("bias")
+    nu_out, contrib = dual_dense_backward(nu, weight, bias)
     assert len(preds) == 1, f"DENSE expects 1 predecessor, got {len(preds)}"
     return [nu_out], contrib
 
@@ -332,7 +334,7 @@ def forward_relu(
         lin, frame = _reset_forward_box(lb, ub, device, dtype)
         return stored, out, lin, frame
     lin = new_lin
-    lin_lb, lin_ub = _concretize(lin, x_L, x_U)
+    lin_lb, lin_ub = _concretize(lin, parent_frame)
     lb, ub = _intersect_boxes(lin_lb, lin_ub, int_lb, int_ub)
     out = Bounds(lb, ub)
     stored = out if post_activation else Bounds(pre_lb, pre_ub)
@@ -373,7 +375,7 @@ def forward_lrelu(
         stored = out if post_activation else Bounds(pre_lb, pre_ub)
         lin, frame = _reset_forward_box(int_lb, int_ub, device, dtype)
         return stored, out, lin, frame
-    lin_lb, lin_ub = _concretize(lin, x_L, x_U)
+    lin_lb, lin_ub = _concretize(lin, parent_frame)
     lb, ub = _intersect_boxes(lin_lb, lin_ub, int_lb, int_ub)
     out = Bounds(lb, ub)
     stored = out if post_activation else Bounds(pre_lb, pre_ub)
@@ -541,7 +543,7 @@ def forward_bias(
     x_L, x_U = parent_frame
     prev_lb, prev_ub = parent_box.lb, parent_box.ub
     lin = _fwd_bias(L, parent_lin)
-    lin_lb, lin_ub = _concretize(lin, x_L, x_U)
+    lin_lb, lin_ub = _concretize(lin, parent_frame)
     int_lb, int_ub = _box_bias(L, prev_lb, prev_ub)
     lb, ub = _intersect_boxes(lin_lb, lin_ub, int_lb, int_ub)
     out = Bounds(lb, ub)
@@ -593,7 +595,7 @@ def forward_scale(
         out = Bounds(int_lb, int_ub)
         lin, frame = _reset_forward_box(int_lb, int_ub, device, dtype)
         return out, out, lin, frame
-    lin_lb, lin_ub = _concretize(lin, x_L, x_U)
+    lin_lb, lin_ub = _concretize(lin, parent_frame)
     lb, ub = _intersect_boxes(lin_lb, lin_ub, int_lb, int_ub)
     out = Bounds(lb, ub)
     stored = out
@@ -646,7 +648,7 @@ def forward_bn(
         out = Bounds(int_lb, int_ub)
         lin, frame = _reset_forward_box(int_lb, int_ub, device, dtype)
         return out, out, lin, frame
-    lin_lb, lin_ub = _concretize(lin, x_L, x_U)
+    lin_lb, lin_ub = _concretize(lin, parent_frame)
     lb, ub = _intersect_boxes(lin_lb, lin_ub, int_lb, int_ub)
     out = Bounds(lb, ub)
     stored = out
@@ -664,7 +666,6 @@ def backward_bn(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
 def dual_bn_backward(nu: torch.Tensor, A: torch.Tensor, c: torch.Tensor
                      ) -> Tuple[torch.Tensor, torch.Tensor]:
     """y = A*x + c ; v_out = A*nu, contrib = -(v * c_flat).sum(dim=-1)."""
-    B = nu.shape[0]
     v = nu.flatten(start_dim=1)
     A_aligned = _align(A, v.shape[-1])
     c_aligned = _align(c, v.shape[-1])

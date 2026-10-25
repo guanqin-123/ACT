@@ -194,6 +194,12 @@ backend:
     # Linear forward bounds are kept up to this many perturbed input dims;
     # above it the forward pass is interval-only.
     forward_lin_max_perturbed: 100
+    # Early stopping of the alpha/eta loop (all off by default; the first
+    # iteration always completes and the keep-best bound is returned).
+    stagnation_patience: 0          # stop after this many iterations without a row gain > tol (0 = off)
+    stagnation_tol: 0.00001         # min per-row dual-bound gain that counts as improvement (finite, >= 0; used only when stagnation_patience > 0)
+    stop_when_verified: false       # stop once every lane certifies by its spec rule on the keep-best bound (UNSAFE_LINEAR: one row > 0); verify/BaB solves only
+    max_time: 0.0                   # wall-clock cap in seconds on one alpha/eta loop (0 = off)
 
   # ═════════════════════════════════════════════════════════════════════════
   # Branch-and-Bound refinement  (bab)

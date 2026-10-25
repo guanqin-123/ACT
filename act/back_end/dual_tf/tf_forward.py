@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from typing import Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple, cast
 
 from act.back_end.core import Bounds, Layer, Net, topological_sort
 from act.back_end.layer_schema import LayerKind
@@ -41,7 +41,18 @@ class LinearBound:
     A_ub: Optional[torch.Tensor]
     b_ub: torch.Tensor
 
-Frame = Tuple[torch.Tensor, torch.Tensor]  # (x_L, x_U) over which lin is defined
+@dataclass(frozen=True)
+class Frame:
+    """Symbolic box over which a linear bound is defined."""
+
+    x_L: torch.Tensor
+    x_U: torch.Tensor
+    ball: Optional["InputBall"] = None
+
+    def __iter__(self):
+        """Unpack the box coordinates while retaining the ball on the frame."""
+        yield self.x_L
+        yield self.x_U
 
 
 # Above this layer input dim, ``_fwd_X`` returns ``None`` to skip the
@@ -152,7 +163,185 @@ def _cat_lanes(parts: List[LinearBound]) -> LinearBound:
     )
 
 
-def _concretize(lin: LinearBound, x_L: torch.Tensor, x_U: torch.Tensor
+def _resolve_perturbation_norm(value: Any) -> float:
+    """Normalize a spec ``p_norm`` field to a float, defaulting to ``inf``.
+
+    LP_EMBEDDING carries the input perturbation norm ``p``; box / L_inf specs
+    omit it. A missing field (``None``) maps to ``inf`` so every box path keeps
+    the exact box concretization with zero behavior change.
+    """
+    if value is None:
+        return float("inf")
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in ("inf", "+inf", "infinity", "linf", "l_inf"):
+            return float("inf")
+        return float(token)
+    return float(value)
+
+
+def _dual_norm_exponent(p: float) -> float:
+    """Return the Hölder dual exponent ``q`` with ``1/p + 1/q = 1``.
+
+    Used to evaluate the exact ``min`` of a linear form over an Lp input ball
+    (``min_{‖δ‖_p ≤ ε} ν·δ = −ε‖ν‖_q``): p=inf→q=1 (box), p=2→q=2, p=1→q=inf.
+    """
+    if p == float("inf"):
+        return 1.0
+    if p == 1.0:
+        return float("inf")
+    return p / (p - 1.0)
+
+
+def input_block_slices(params: Dict[str, Any], orig_shape: torch.Size, n: int
+                       ) -> List[Tuple[int, int]]:
+    """Coordinate ranges ``[start, end)`` of each per-word embedding block.
+
+    Each word occupies ``embed_dim`` contiguous embedding coordinates, so the
+    dual norm is taken over those ``D`` coordinates independently and word
+    balls do not couple. Splitting every token (not only perturbed ones) is
+    sound and format-agnostic: a non-perturbed token has zero half-width, so
+    its block penalty ``‖0 ⊙ nu_block‖_q`` is exactly 0 — the box already
+    encodes which coordinates carry width, so ``perturbed_positions`` (index
+    list or bool mask, possibly per-sample) need not be parsed here. The block
+    size is read from ``embed_dim`` or, failing that, the trailing
+    ``[..., L, D]`` axis of the spec ``center`` (or of ``orig_shape``) when
+    ``perturbed_positions`` flags an embedding spec. The spec ``center`` is
+    preferred because forward state and stored input boxes are flattened to
+    ``[B, L*D]``, whose trailing axis is not the embedding width. Otherwise the
+    whole input is one Lp ball (e.g. an image L2 spec).
+    """
+    embed_dim = params.get("embed_dim")
+    if embed_dim is None and params.get("perturbed_positions") is not None:
+        center = params.get("center")
+        if isinstance(center, torch.Tensor) and center.dim() >= 2:
+            embed_dim = int(center.shape[-1])
+        elif len(orig_shape) >= 2:
+            embed_dim = int(orig_shape[-1])
+    if embed_dim is None:
+        return [(0, n)]
+    d = int(embed_dim)
+    if d <= 0 or n % d != 0:
+        return [(0, n)]
+    return [(i * d, (i + 1) * d) for i in range(n // d)]
+
+
+def lp_ball_support(a: torch.Tensor, center: torch.Tensor, half: torch.Tensor,
+                    blocks: Iterable[Tuple[int, int]], q: float,
+                    block_eps: Optional[torch.Tensor] = None,
+                    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Support of the per-block Lp ball along every coefficient row of ``a``.
+
+    Returns ``(dot, penalty)`` with ``dot = a·center`` and
+    ``penalty = Σ_block ‖radius_block ⊙ a_block‖_q`` over the last axis, so
+    ``min_{x ∈ ball} a·x = dot − penalty`` and ``max = dot + penalty``. The
+    radius is the half-width of the frame (``half``) or, for BaB input-split
+    lanes, the explicit per-lane table ``block_eps[b, j]`` of block ``j``.
+    ``center`` / ``half`` broadcast against ``a`` (``[B|1, 1, n]`` against
+    ``[B, M, n]``, or ``[1, n]`` against ``[BM, n]``). This is the single dual-norm
+    concretization shared by the backward input contribution, the forward
+    frame concretization and the spec-row frame bounds.
+    """
+    dot = (center * a).sum(dim=-1)
+    penalty = torch.zeros_like(dot)
+    if block_eps is not None:
+        eps_b = block_eps.to(device=a.device, dtype=a.dtype)
+        for block_idx, (s, e) in enumerate(blocks):
+            penalty = penalty + eps_b[:, block_idx].unsqueeze(1) * torch.linalg.vector_norm(
+                a[..., s:e], ord=q, dim=-1
+            )
+    else:
+        for s, e in blocks:
+            penalty = penalty + torch.linalg.vector_norm(
+                half[..., s:e] * a[..., s:e], ord=q, dim=-1
+            )
+    return dot, penalty
+
+
+@dataclass(frozen=True)
+class InputBall:
+    """Finite-p Lp-ball structure attached to an entry frame w.r.t. the INPUT.
+
+    ``blocks`` are the per-word ``[start, end)`` column ranges in frame
+    coordinates, ``q`` is the Hölder dual exponent, and ``block_eps`` is the
+    optional per-lane radius table installed by BaB input splits.
+    """
+
+    q: float
+    blocks: Tuple[Tuple[int, int], ...]
+    block_eps: Optional[torch.Tensor] = None
+
+    def _support(
+        self,
+        a: torch.Tensor,
+        x_L: torch.Tensor,
+        x_U: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        center = ((x_L + x_U) * 0.5).unsqueeze(1)
+        half = ((x_U - x_L) * 0.5).unsqueeze(1)
+        return lp_ball_support(a, center, half, self.blocks, self.q, self.block_eps)
+
+    def lower(self, a: torch.Tensor, x_L: torch.Tensor, x_U: torch.Tensor) -> torch.Tensor:
+        """``min_{x ∈ ball} a·x`` for coefficients ``a`` of shape ``[B, M, n]``."""
+        dot, penalty = self._support(a, x_L, x_U)
+        return dot - penalty
+
+    def upper(self, a: torch.Tensor, x_L: torch.Tensor, x_U: torch.Tensor) -> torch.Tensor:
+        """``max_{x ∈ ball} a·x`` for coefficients ``a`` of shape ``[B, M, n]``."""
+        dot, penalty = self._support(a, x_L, x_U)
+        return dot + penalty
+
+
+def _input_spec_params(net: Net) -> Dict[str, Any]:
+    spec_params: Optional[Dict[str, Any]] = None
+    input_params: Dict[str, Any] = {}
+    for layer in net.layers:
+        kind = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
+        if kind == LayerKind.INPUT_SPEC.value:
+            spec_params = layer.params
+        elif kind == LayerKind.INPUT.value:
+            input_params = layer.params
+    return spec_params if spec_params is not None else input_params
+
+
+def input_ball_for_frame(net: Net, lb_in: torch.Tensor, ub_in: torch.Tensor,
+                         frame: Frame, orig_shape: Optional[torch.Size] = None,
+                         ) -> Optional[InputBall]:
+    """Build the finite-p ball of the entry frame, ``None`` for box / L_inf specs.
+
+    ``frame`` is either the shrunk frame ``(lb_in[:, pert], ub_in[:, pert])`` of
+    :func:`_entry_lin_frame` or the full box ``(lb_in, ub_in)``; the input blocks
+    of :func:`input_block_slices` are mapped onto the frame columns (a word
+    block that has no perturbed column is dropped, its penalty being zero).
+    """
+    params = _input_spec_params(net)
+    p_norm = _resolve_perturbation_norm(params.get("p_norm"))
+    if p_norm == float("inf"):
+        return None
+    x_L, x_U = frame
+    n = lb_in.shape[1]
+    input_blocks = input_block_slices(params, lb_in.shape if orig_shape is None else orig_shape, n)
+    if x_L.shape[1] == n:
+        frame_cols = torch.arange(n, device=lb_in.device)
+    else:
+        frame_cols = (ub_in > lb_in).any(dim=0).nonzero(as_tuple=True)[0]
+    blocks: List[Tuple[int, int]] = []
+    present: List[int] = []
+    for token, (s, e) in enumerate(input_blocks):
+        lo = int(torch.searchsorted(frame_cols, torch.tensor(s, device=frame_cols.device)).item())
+        hi = int(torch.searchsorted(frame_cols, torch.tensor(e, device=frame_cols.device)).item())
+        if hi > lo:
+            blocks.append((lo, hi))
+            present.append(token)
+    block_eps = params.get("bab_block_eps")
+    if isinstance(block_eps, torch.Tensor):
+        block_eps = block_eps[:, present]
+    else:
+        block_eps = None
+    return InputBall(q=_dual_norm_exponent(p_norm), blocks=tuple(blocks), block_eps=block_eps)
+
+
+def _concretize(lin: LinearBound, frame: Frame
                 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Concretize dual-track affine bounds over a batched input box.
 
@@ -160,7 +349,27 @@ def _concretize(lin: LinearBound, x_L: torch.Tensor, x_U: torch.Tensor
     so ``lb = x_L + b_lb`` (and analogously for ub). This avoids materializing
     a dense ``[B, n, n]`` eye matrix at the INPUT layer, which for 224×224×3
     input would request 181 GB.
+
+    When the frame is the entry frame of a finite-p spec (the ball registered
+    by the running forward pass owns ``x_L`` / ``x_U``), the explicit tracks
+    are additionally concretized over the per-word Lp ball and intersected with
+    the box result, so the output is never looser than the box. Box / L_inf
+    specs register no ball and take exactly the box path.
     """
+    x_L, x_U = frame
+    lb, ub = _concretize_box(lin, x_L, x_U)
+    if frame.ball is None or lin.A_lb is None or lin.A_ub is None:
+        return lb, ub
+    return _intersect_boxes(
+        frame.ball.lower(lin.A_lb, x_L, x_U) + lin.b_lb,
+        frame.ball.upper(lin.A_ub, x_L, x_U) + lin.b_ub,
+        lb,
+        ub,
+    )
+
+
+def _concretize_box(lin: LinearBound, x_L: torch.Tensor, x_U: torch.Tensor
+                    ) -> Tuple[torch.Tensor, torch.Tensor]:
     n_x = x_L.shape[1]
     if lin.A_lb is None:
         b_lb = lin.b_lb
@@ -229,13 +438,13 @@ def _entry_lin_frame(lb_in: torch.Tensor, ub_in: torch.Tensor,
     pert = (ub_in > lb_in).any(dim=0)
     n_pert = int(pert.sum().item())
     if n_pert == 0 or n_pert > max_perturbed:
-        return _identity_lin(B, input_dim, device, dtype), (lb_in, ub_in)
+        return _identity_lin(B, input_dim, device, dtype), Frame(lb_in, ub_in)
     selection = torch.zeros(input_dim, n_pert, device=device, dtype=dtype)
     selection[pert.nonzero(as_tuple=True)[0], torch.arange(n_pert, device=device)] = 1.0
     A = selection.unsqueeze(0).expand(B, input_dim, n_pert)
     b = torch.where(pert, torch.zeros_like(lb_in), lb_in)
     lin = LinearBound(A_lb=A, b_lb=b, A_ub=A, b_ub=b.clone())
-    return lin, (lb_in[:, pert], ub_in[:, pert])
+    return lin, Frame(lb_in[:, pert], ub_in[:, pert])
 
 def _match_lin_input_dim(lin: LinearBound, n_in: int) -> LinearBound:
     """Pad or truncate the current output-feature axis to size n_in.
@@ -403,10 +612,10 @@ def _store_forward_state(bounds_dict: Dict[int, Bounds],
 
 
 def _reset_forward_box(lb: torch.Tensor, ub: torch.Tensor, device, dtype
-                       ) -> Tuple[LinearBound, Tuple[torch.Tensor, torch.Tensor]]:
+                       ) -> Tuple[LinearBound, Frame]:
     """Reset dual-track state on a concrete box."""
     lin, x_L, x_U = _reset_lin(lb, ub, device, dtype)
-    return lin, (x_L, x_U)
+    return lin, Frame(x_L, x_U)
 
 
 def _sum_interval_bounds(boxes: List[Bounds]) -> Bounds:
@@ -458,11 +667,314 @@ def _sum_linear_bounds(lins: List[LinearBound]) -> LinearBound:
     )
 
 
+@dataclass(frozen=True)
+class ForwardFrame:
+    """Explicit forward linear frame of one layer's output.
+
+    ``lin`` bounds the layer output ``y`` by ``A_lb x + b_lb <= y <= A_ub x + b_ub``
+    for every symbolic input ``x`` in the box ``[x_L, x_U]`` (the perturbed
+    input dims, see :func:`_entry_lin_frame`). The relation is valid for every
+    input of the box it was computed on, so concretizing it over any sub-box is
+    sound. Only explicit frames (``A_lb is not None``) are wrapped; a lazy
+    identity frame carries no information beyond the stored box. ``ball`` is
+    the finite-p :class:`InputBall` when the frame is the entry frame of an
+    LP_EMBEDDING spec (``None`` for box / L_inf specs and for reset frames).
+    """
+
+    lid: int
+    lin: LinearBound
+    x_L: torch.Tensor
+    x_U: torch.Tensor
+    ball: Optional[InputBall] = None
+
+
+@dataclass(frozen=True)
+class ForwardPassStats:
+    """Frame-level LP-ball accounting for one forward bound pass."""
+
+    lp_spec: bool
+    layers: int
+    ball_frames: int
+    box_frames: int
+    frame_resets: int
+
+
+def _canonical_input_box(
+    input_lb: torch.Tensor, input_ub: torch.Tensor,
+    device: torch.device, dtype: torch.dtype,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Normalize an input box exactly as the forward pass does."""
+    if (
+        input_lb.dtype != dtype or input_lb.device != device
+        or input_ub.dtype != dtype or input_ub.device != device
+    ):
+        input_lb = input_lb.to(device=device, dtype=dtype)
+        input_ub = input_ub.to(device=device, dtype=dtype)
+    if input_lb.dim() < 2:
+        input_lb = input_lb.unsqueeze(0)
+        input_ub = input_ub.unsqueeze(0)
+    batch_size = input_lb.shape[0]
+    return input_lb.reshape(batch_size, -1), input_ub.reshape(batch_size, -1)
+
+
+def _clone_cache_tensor(
+    tensor: torch.Tensor, memo: Dict[int, torch.Tensor],
+) -> torch.Tensor:
+    """Clone a cache tensor once while preserving zero-stride broadcast views."""
+    cached = memo.get(id(tensor))
+    if cached is not None:
+        return cached
+    base = tensor._base
+    if base is not None and 0 in tensor.stride():
+        base_copy = _clone_cache_tensor(base, memo)
+        relative_offset = tensor.storage_offset() - base.storage_offset()
+        if relative_offset >= 0 and base_copy.stride() == base.stride():
+            try:
+                copied = base_copy.as_strided(tensor.shape, tensor.stride(), relative_offset)
+            except RuntimeError:
+                copied = tensor.clone()
+        else:
+            copied = tensor.clone()
+    else:
+        copied = tensor.clone()
+    memo[id(tensor)] = copied
+    return copied
+
+
+def _clone_linear_bound(
+    lin: LinearBound, memo: Optional[Dict[int, torch.Tensor]] = None,
+) -> LinearBound:
+    """Clone every tensor in a linear bound for private cache ownership."""
+    tensor_memo = {} if memo is None else memo
+    return LinearBound(
+        A_lb=None if lin.A_lb is None else _clone_cache_tensor(lin.A_lb, tensor_memo),
+        b_lb=_clone_cache_tensor(lin.b_lb, tensor_memo),
+        A_ub=None if lin.A_ub is None else _clone_cache_tensor(lin.A_ub, tensor_memo),
+        b_ub=_clone_cache_tensor(lin.b_ub, tensor_memo),
+    )
+
+
+_MAXPOOL_CACHE_KEYS = (
+    "maxpool_argmax_flat", "maxpool_dominant", "maxpool_lb", "maxpool_ub",
+)
+
+
+class ForwardPrefixCache:
+    """Immutable alpha-independent forward state for one optimization loop.
+
+    The cache owns states of every layer that is *not* reachable from any
+    ``alpha_relu_ids`` entry. :func:`compute_forward_bounds` can then seed the
+    normal state maps from this object and execute only the ReLU descendants in
+    the original topological order. No transfer function or arithmetic order is
+    changed.
+
+    The key is the ``net`` object, normalized input-box values, alpha-carrying
+    ReLU id set, ``post_activation``, ``forward_lin_max_perturbed``, and current
+    forward device/dtype. Every resume validates that key and raises
+    ``ValueError`` on a mismatch. Cached tensors are privately cloned once and
+    are only ever read by resumed passes. Returned public bounds are fresh
+    copies, and cached MAXPOOL2D metadata is restored before each resume so an
+    intervening forward on the same ``Net`` cannot alter the certificate.
+
+    Example::
+
+        cache = ForwardPrefixCache(
+            net, input_lb, input_ub,
+            alpha_relu_ids=forward_alphas.keys(),
+            post_activation=False,
+            forward_lin_max_perturbed=dual_config.forward_lin_max_perturbed,
+        )
+        for forward_alphas in alpha_steps:
+            bounds = compute_forward_bounds(
+                net, input_lb, input_ub, alphas=forward_alphas,
+                forward_lin_max_perturbed=dual_config.forward_lin_max_perturbed,
+                prefix_cache=cache,
+            )
+    """
+
+    @torch.no_grad()
+    def __init__(
+        self,
+        net: Net,
+        input_lb: torch.Tensor,
+        input_ub: torch.Tensor,
+        *,
+        alpha_relu_ids: Iterable[int],
+        post_activation: bool = False,
+        forward_lin_max_perturbed: Optional[int] = None,
+    ) -> None:
+        if forward_lin_max_perturbed is None:
+            forward_lin_max_perturbed = DualConfig().forward_lin_max_perturbed
+        device, dtype = get_default_device(), get_default_dtype()
+        lb_key, ub_key = _canonical_input_box(input_lb, input_ub, device, dtype)
+        alpha_ids = tuple(sorted({int(lid) for lid in alpha_relu_ids}))
+        by_id = getattr(net, "by_id", {layer.id: layer for layer in net.layers})
+        invalid = [
+            lid for lid in alpha_ids
+            if lid not in by_id or by_id[lid].kind.upper() != LayerKind.RELU.value
+        ]
+        if invalid:
+            raise ValueError(
+                "ForwardPrefixCache alpha_relu_ids must name ReLU layers; "
+                f"invalid ids {invalid}"
+            )
+
+        descendants = set(alpha_ids)
+        stack = list(alpha_ids)
+        while stack:
+            for successor in net.succs.get(stack.pop(), []):
+                if successor not in descendants:
+                    descendants.add(successor)
+                    stack.append(successor)
+        topo_order = topological_sort(net)
+        independent = frozenset(lid for lid in topo_order if lid not in descendants)
+
+        box_state: Dict[int, Bounds] = {}
+        bounds_dict, lin_state, frame_dict, _stats = _forward_pass(
+            net,
+            lb_key,
+            ub_key,
+            post_activation,
+            None,
+            forward_lin_max_perturbed,
+            _active_lids=independent,
+            _box_state_out=box_state,
+        )
+
+        tensor_copies: Dict[int, torch.Tensor] = {}
+        frame_copies: Dict[int, Frame] = {}
+        self._frame_dict: Dict[int, Frame] = {}
+        for lid, frame in frame_dict.items():
+            copied = frame_copies.get(id(frame))
+            if copied is None:
+                copied = Frame(
+                    _clone_cache_tensor(frame.x_L, tensor_copies),
+                    _clone_cache_tensor(frame.x_U, tensor_copies),
+                    frame.ball,
+                )
+                frame_copies[id(frame)] = copied
+            self._frame_dict[lid] = copied
+        self._bounds_dict: Dict[int, Bounds] = {
+            lid: Bounds(
+                _clone_cache_tensor(bounds.lb, tensor_copies),
+                _clone_cache_tensor(bounds.ub, tensor_copies),
+            )
+            for lid, bounds in bounds_dict.items()
+        }
+        self._box_state: Dict[int, Bounds] = {
+            lid: Bounds(
+                _clone_cache_tensor(bounds.lb, tensor_copies),
+                _clone_cache_tensor(bounds.ub, tensor_copies),
+            )
+            for lid, bounds in box_state.items()
+        }
+        self._lin_state: Dict[int, LinearBound] = {
+            lid: _clone_linear_bound(lin, tensor_copies) for lid, lin in lin_state.items()
+        }
+        self._layer_cache_state: Dict[int, Dict[str, Optional[torch.Tensor]]] = {}
+        for lid in independent:
+            layer = by_id[lid]
+            if layer.kind.upper() != LayerKind.MAXPOOL2D.value:
+                continue
+            self._layer_cache_state[lid] = {
+                key: (
+                    value.clone() if isinstance(value := layer.cache.get(key), torch.Tensor)
+                    else None
+                )
+                for key in _MAXPOOL_CACHE_KEYS
+            }
+
+        self._net: Net = net
+        self._input_lb: torch.Tensor = lb_key.clone()
+        self._input_ub: torch.Tensor = ub_key.clone()
+        self._alpha_relu_ids: Tuple[int, ...] = alpha_ids
+        self._post_activation: bool = post_activation
+        self._forward_lin_max_perturbed: int = forward_lin_max_perturbed
+        self._device: torch.device = device
+        self._dtype: torch.dtype = dtype
+        self._recompute_lids: FrozenSet[int] = frozenset(descendants)
+        self.cached_layer_ids: FrozenSet[int] = independent
+
+    def _validate_key(
+        self,
+        net: Net,
+        input_lb: torch.Tensor,
+        input_ub: torch.Tensor,
+        post_activation: bool,
+        alphas: Optional[Dict[int, torch.Tensor]],
+        forward_lin_max_perturbed: Optional[int],
+    ) -> Tuple[torch.Tensor, torch.Tensor, int]:
+        """Validate a resume request and return its normalized box/settings."""
+        if forward_lin_max_perturbed is None:
+            forward_lin_max_perturbed = DualConfig().forward_lin_max_perturbed
+        device, dtype = get_default_device(), get_default_dtype()
+        lb_key, ub_key = _canonical_input_box(input_lb, input_ub, device, dtype)
+        alpha_ids = tuple(sorted(int(lid) for lid in (alphas or {})))
+        matches = (
+            net is self._net
+            and device == self._device
+            and dtype == self._dtype
+            and post_activation == self._post_activation
+            and forward_lin_max_perturbed == self._forward_lin_max_perturbed
+            and alpha_ids == self._alpha_relu_ids
+            and torch.equal(lb_key, self._input_lb)
+            and torch.equal(ub_key, self._input_ub)
+        )
+        if not matches:
+            raise ValueError("ForwardPrefixCache key mismatch")
+        return lb_key, ub_key, forward_lin_max_perturbed
+
+    @torch.no_grad()
+    def _restore_layer_cache_state(self) -> None:
+        """Restore forward side state needed by cached layers' backward handlers."""
+        for lid, state in self._layer_cache_state.items():
+            cache = self._net.by_id[lid].cache
+            for key, value in state.items():
+                if value is None:
+                    cache.pop(key, None)
+                else:
+                    cache[key] = value.clone()
+
+    @torch.no_grad()
+    def _resume(
+        self,
+        net: Net,
+        input_lb: torch.Tensor,
+        input_ub: torch.Tensor,
+        post_activation: bool,
+        alphas: Optional[Dict[int, torch.Tensor]],
+        forward_lin_max_perturbed: Optional[int],
+    ) -> Tuple[Dict[int, Bounds], Dict[int, LinearBound], Dict[int, Frame], ForwardPassStats]:
+        """Resume the standard pass from the immutable cached state."""
+        lb_key, ub_key, resolved_cap = self._validate_key(
+            net, input_lb, input_ub, post_activation, alphas,
+            forward_lin_max_perturbed,
+        )
+        self._restore_layer_cache_state()
+        public_bounds = {lid: bounds.copy() for lid, bounds in self._bounds_dict.items()}
+        return _forward_pass(
+            net,
+            lb_key,
+            ub_key,
+            post_activation,
+            alphas,
+            resolved_cap,
+            _initial_state=(
+                public_bounds,
+                self._box_state,
+                self._lin_state,
+                self._frame_dict,
+            ),
+            _active_lids=self._recompute_lids,
+        )
+
+
 @torch.no_grad()
 def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Tensor,
                            post_activation: bool = False,
                            alphas: Optional[Dict[int, torch.Tensor]] = None,
                            forward_lin_max_perturbed: Optional[int] = None,
+                           prefix_cache: Optional[ForwardPrefixCache] = None,
                            ) -> Dict[int, Bounds]:
     """Forward bounds, natively batched with singleton auto-promotion.
 
@@ -471,6 +983,112 @@ def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Ten
     ``None`` resolves to the DualConfig default at call time rather than being
     frozen at import time.
     """
+    if prefix_cache is None:
+        bounds_dict, _lin_state, _frame_dict, _stats = _forward_pass(
+            net, input_lb, input_ub, post_activation, alphas, forward_lin_max_perturbed,
+        )
+    else:
+        bounds_dict, _lin_state, _frame_dict, _stats = prefix_cache._resume(
+            net, input_lb, input_ub, post_activation, alphas, forward_lin_max_perturbed,
+        )
+    return bounds_dict
+
+
+@torch.no_grad()
+def compute_forward_bounds_with_frame(
+    net: Net, input_lb: torch.Tensor, input_ub: torch.Tensor,
+    *,
+    frame_lid: int,
+    post_activation: bool = False,
+    alphas: Optional[Dict[int, torch.Tensor]] = None,
+    forward_lin_max_perturbed: Optional[int] = None,
+    prefix_cache: Optional[ForwardPrefixCache] = None,
+) -> Tuple[Dict[int, Bounds], Optional[ForwardFrame], ForwardPassStats]:
+    """Forward bounds plus the explicit linear frame of layer ``frame_lid``.
+
+    Same arithmetic as :func:`compute_forward_bounds`; additionally returns the
+    :class:`ForwardFrame` of ``frame_lid`` when its forward state carries an
+    explicit frame, else ``None`` (the stored box is then the best forward
+    information for that layer).
+    """
+    if prefix_cache is None:
+        bounds_dict, lin_state, frame_dict, stats = _forward_pass(
+            net, input_lb, input_ub, post_activation, alphas, forward_lin_max_perturbed,
+        )
+    else:
+        bounds_dict, lin_state, frame_dict, stats = prefix_cache._resume(
+            net, input_lb, input_ub, post_activation, alphas, forward_lin_max_perturbed,
+        )
+    frame: Optional[ForwardFrame] = None
+    lin = lin_state.get(frame_lid)
+    if lin is not None and lin.A_lb is not None and lin.A_ub is not None:
+        source_frame = frame_dict[frame_lid]
+        x_L, x_U = source_frame
+        ball = source_frame.ball
+        if prefix_cache is not None:
+            lin = _clone_linear_bound(lin)
+            x_L, x_U = x_L.clone(), x_U.clone()
+        frame = ForwardFrame(lid=frame_lid, lin=lin, x_L=x_L, x_U=x_U, ball=ball)
+    return bounds_dict, frame, stats
+
+
+def forward_frame_row_lower_bounds(frame: ForwardFrame, c: torch.Tensor, M: int
+                                   ) -> torch.Tensor:
+    """Lower bound of every spec row ``c_i . y`` from an explicit output frame.
+
+    ``c`` is ``[B*M, n_out]`` sample-major (row ``b*M+j`` belongs to sample
+    ``b``) while the frame is ``[B, ...]`` or ``[1, ...]`` (broadcast over the
+    samples). Each row is composed with the signed tracks,
+    ``a = c+ A_lb + c- A_ub`` and ``k = c+ . b_lb + c- . b_ub``, so that
+    ``c . y >= a . x + k`` on the frame box; concretizing ``a`` over
+    ``[x_L, x_U]`` keeps the correlation between the output coordinates that a
+    box difference of the logits loses.
+    """
+    A_lb = cast(torch.Tensor, frame.lin.A_lb)
+    A_ub = cast(torch.Tensor, frame.lin.A_ub)
+    BM = c.shape[0]
+    if BM % M != 0:
+        raise ValueError(f"forward_frame_row_lower_bounds: c rows {BM} not divisible by M={M}")
+    B = BM // M
+    frame_B = A_lb.shape[0]
+    if frame_B not in (1, B):
+        raise ValueError(
+            f"forward_frame_row_lower_bounds: frame batch {frame_B} incompatible with B={B}"
+        )
+    c_view = c.view(B, M, -1).to(device=A_lb.device, dtype=A_lb.dtype)
+    if c_view.shape[-1] != A_lb.shape[1]:
+        raise ValueError(
+            f"forward_frame_row_lower_bounds: c has {c_view.shape[-1]} outputs, "
+            f"frame has {A_lb.shape[1]}"
+        )
+    c_pos = c_view.clamp(min=0)
+    c_neg = c_view.clamp(max=0)
+    a = torch.einsum("bmo,bos->bms", c_pos, A_lb) + torch.einsum("bmo,bos->bms", c_neg, A_ub)
+    const = (
+        torch.einsum("bmo,bo->bm", c_pos, frame.lin.b_lb)
+        + torch.einsum("bmo,bo->bm", c_neg, frame.lin.b_ub)
+    )
+    x_L = frame.x_L.unsqueeze(1)
+    x_U = frame.x_U.unsqueeze(1)
+    lower = (a.clamp(min=0) * x_L).sum(dim=-1) + (a.clamp(max=0) * x_U).sum(dim=-1) + const
+    if frame.ball is not None:
+        lower = torch.maximum(lower, frame.ball.lower(a, frame.x_L, frame.x_U) + const)
+    return lower.reshape(BM)
+
+
+def _forward_pass(net: Net, input_lb: torch.Tensor, input_ub: torch.Tensor,
+                  post_activation: bool,
+                  alphas: Optional[Dict[int, torch.Tensor]],
+                  forward_lin_max_perturbed: Optional[int],
+                  *,
+                  _initial_state: Optional[Tuple[
+                      Dict[int, Bounds], Dict[int, Bounds],
+                      Dict[int, LinearBound], Dict[int, Frame],
+                  ]] = None,
+                  _active_lids: Optional[FrozenSet[int]] = None,
+                  _box_state_out: Optional[Dict[int, Bounds]] = None,
+                  ) -> Tuple[Dict[int, Bounds], Dict[int, LinearBound], Dict[int, Frame], ForwardPassStats]:
+    """Run the forward pass and return stored bounds, frames, and frame statistics."""
     # Lazy import to break circular dep (dual_tf imports compute_forward_bounds)
     from .dual_tf import DualTF
 
@@ -478,39 +1096,78 @@ def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Ten
         forward_lin_max_perturbed = DualConfig().forward_lin_max_perturbed
 
     device, dtype = get_default_device(), get_default_dtype()
-    if (
-        input_lb.dtype != dtype or input_lb.device != device
-        or input_ub.dtype != dtype or input_ub.device != device
-    ):
-        input_lb = input_lb.to(device=device, dtype=dtype)
-        input_ub = input_ub.to(device=device, dtype=dtype)
+    lb_in, ub_in = _canonical_input_box(input_lb, input_ub, device, dtype)
 
-    if input_lb.dim() < 2:
-        input_lb = input_lb.unsqueeze(0)
-        input_ub = input_ub.unsqueeze(0)
-
-    B = input_lb.shape[0]
-    lb_in = input_lb.reshape(B, -1)
-    ub_in = input_ub.reshape(B, -1)
-
-    bounds_dict: Dict[int, Bounds] = {}
-    box_state: Dict[int, Bounds] = {}
-    lin_state: Dict[int, LinearBound] = {}
-    frame_dict: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+    if _initial_state is None:
+        bounds_dict: Dict[int, Bounds] = {}
+        box_state: Dict[int, Bounds] = {}
+        lin_state: Dict[int, LinearBound] = {}
+        frame_dict: Dict[int, Frame] = {}
+    else:
+        initial_bounds, initial_boxes, initial_lins, initial_frames = _initial_state
+        bounds_dict = dict(initial_bounds)
+        box_state = dict(initial_boxes)
+        lin_state = dict(initial_lins)
+        frame_dict = dict(initial_frames)
     topo_order = topological_sort(net)
     by_id = getattr(net, "by_id", {layer.id: layer for layer in net.layers})
     entry_box = Bounds(lb_in, ub_in)
-    entry_lin, entry_frame = _entry_lin_frame(
-        lb_in, ub_in, forward_lin_max_perturbed, device, dtype,
+    entry_lin: Optional[LinearBound] = None
+    entry_frame: Optional[Frame] = None
+    if _initial_state is None:
+        entry_lin, entry_frame = _entry_lin_frame(
+            lb_in, ub_in, forward_lin_max_perturbed, device, dtype,
+        )
+        entry_ball = input_ball_for_frame(net, lb_in, ub_in, entry_frame, input_lb.shape)
+        entry_frame = Frame(entry_frame.x_L, entry_frame.x_U, entry_ball)
+
+    _run_forward_layers(
+        net, topo_order, by_id, post_activation, alphas, device, dtype,
+        entry_box, entry_lin, entry_frame, _active_lids,
+        bounds_dict, box_state, lin_state, frame_dict, DualTF,
     )
 
+    if _box_state_out is not None:
+        _box_state_out.update(box_state)
+    lp_spec = any(frame.ball is not None for frame in frame_dict.values())
+    ball_frames = sum(frame.ball is not None for frame in frame_dict.values())
+    box_frames = sum(frame.ball is None for frame in frame_dict.values()) if lp_spec else 0
+    frame_resets = sum(
+        frame.ball is None
+        and any(frame_dict[parent].ball is not None for parent in net.preds.get(lid, []))
+        for lid, frame in frame_dict.items()
+    ) if lp_spec else 0
+    stats = ForwardPassStats(
+        lp_spec=lp_spec,
+        layers=len(frame_dict),
+        ball_frames=ball_frames,
+        box_frames=box_frames,
+        frame_resets=frame_resets,
+    )
+    return bounds_dict, lin_state, frame_dict, stats
+
+
+def _run_forward_layers(net: Net, topo_order: List[int], by_id: Dict[int, Layer],
+                        post_activation: bool, alphas: Optional[Dict[int, torch.Tensor]],
+                        device: torch.device, dtype: torch.dtype,
+                        entry_box: Bounds, entry_lin: Optional[LinearBound],
+                        entry_frame: Optional[Frame], _active_lids: Optional[FrozenSet[int]],
+                        bounds_dict: Dict[int, Bounds], box_state: Dict[int, Bounds],
+                        lin_state: Dict[int, LinearBound], frame_dict: Dict[int, Frame],
+                        DualTF: Any) -> None:
     for lid in topo_order:
+        if _active_lids is not None and lid not in _active_lids:
+            continue
         layer = by_id[lid]
         lid = layer.id
         kind = layer.kind.upper()
         preds = list(net.preds.get(lid, []) or [])
 
         if not preds:
+            if entry_lin is None or entry_frame is None:
+                raise ValueError(
+                    f"compute_forward_bounds: resumed layer {lid} has no cached source state"
+                )
             if kind == LayerKind.CONSTANT.value:
                 # CONSTANT is a data-independent source; materialize its value
                 # broadcast to batch B (taken from entry_box), no input frame.
@@ -577,7 +1234,7 @@ def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Ten
                 lin, frame = _reset_forward_box(lb, ub, device, dtype)
             else:
                 lin = new_lin
-                lin_lb, lin_ub = _concretize(lin, x_L, x_U)
+                lin_lb, lin_ub = _concretize(lin, parent_frame)
                 lb, ub = _intersect_boxes(lin_lb, lin_ub, int_lb, int_ub)
                 out = Bounds(lb, ub)
                 stored = out if post_activation else Bounds(pre_lb, pre_ub)
@@ -603,8 +1260,6 @@ def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Ten
         )
         _store_forward_state(bounds_dict, box_state, lin_state, frame_dict,
                              lid, stored, out, lin, frame)
-
-    return bounds_dict
 
 
 def _fwd_dense(layer: Layer, lin: LinearBound) -> Optional[LinearBound]:

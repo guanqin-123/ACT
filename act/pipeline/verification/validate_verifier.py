@@ -135,6 +135,7 @@ from act.pipeline.verification.per_neuron_bounds import (
     check_hookable_alignment,
     run_per_neuron_bounds_check,
     sample_inputs_from_spec,
+    project_into_input_spec,
 )
 from act.util.stats import VerifyStatus
 from act.util.options import PerformanceOptions
@@ -406,6 +407,7 @@ class VerificationValidator:
                         break
 
             spec_lb = spec_ub = None
+            specs: List[Layer] = []
             if act_net is not None:
                 from act.back_end.verifier import gather_input_spec_layers, seed_from_input_specs
 
@@ -433,6 +435,8 @@ class VerificationValidator:
                     if (input_shape and shape_prod == x_flat.numel())
                     else x_flat.reshape(1, -1)
                 ).to(self.device, self.dtype)
+                for spec_layer in specs:
+                    x = project_into_input_spec(x, spec_layer)
                 with torch.no_grad():
                     res = model(x)
                 if (

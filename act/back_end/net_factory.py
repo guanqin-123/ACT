@@ -37,7 +37,7 @@ import torch  # pyright: ignore[reportMissingImports]
 from act.back_end.core import Layer, Net
 from act.back_end.layer_schema import LayerKind, REGISTRY
 from act.back_end.serialization.serialization import NetSerializer
-from act.front_end.specs import InKind, OutKind, OutputSpec
+from act.front_end.specs import InKind, InputSpec, OutKind, OutputSpec
 from act.util.device_manager import get_default_device, get_default_dtype
 from act.util.format_utils import rule
 
@@ -1286,6 +1286,16 @@ class NetFactory:
             )
             eps = float(params.get("eps", 0.0))
             return {"center": center, "lb": center - eps, "ub": center + eps}
+        if params["kind"] == InKind.LP_EMBEDDING:
+            center = torch.full(input_shape, float(params.pop("center_val", 0.0)), dtype=dtype)
+            eps = torch.full([1] * center.dim(), float(params["eps"]), dtype=dtype)
+            spec = InputSpec(
+                kind=InKind.LP_EMBEDDING, center=center, eps=eps,
+                p_norm=float(params["p_norm"]),
+                perturbed_positions=params["perturbed_positions"],
+            )
+            lb, ub = spec.materialize_box_seed()
+            return {"center": center, "lb": lb, "ub": ub, "eps": eps}
         if params["kind"] == InKind.LIN_POLY:
             A = params.get("A")
             b = params.get("b")
@@ -1650,11 +1660,13 @@ class NetFactory:
             names.append(name)
             self.total_generated += 1
             self._record(net)
-        for architecture, cfg in self.config.get("layer_testing", {}).items():
-            if architecture != "attention":
+        for entry, cfg in self.config.get("layer_testing", {}).items():
+            architecture = cfg.get("architecture", entry)
+            build_spec = LAYER_TESTING_BUILDERS.get(architecture)
+            if build_spec is None:
                 raise ValueError(f"Unsupported layer-testing architecture: {architecture}")
-            name = f"{LAYER_TESTING_NAME_PREFIX}{architecture}"
-            net = self.create_network(name, _lt_spec_attention(cfg))
+            name = f"{LAYER_TESTING_NAME_PREFIX}{entry}"
+            net = self.create_network(name, build_spec(cfg))
             self.save_network(net, name)
             names.append(name)
             self.total_generated += 1
@@ -1686,6 +1698,36 @@ def _lt_input(shape: List[int], lb: float, ub: float) -> List[Dict[str, Any]]:
             "params": {"kind": InKind.BOX, "lb_val": float(lb), "ub_val": float(ub)},
         },
     ]
+
+
+def _lt_input_lp(shape: List[int], cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build a token input with a per-position Lp perturbation spec."""
+    return [
+        {"kind": LayerKind.INPUT.value, "params": {"shape": shape}},
+        {"kind": LayerKind.INPUT_SPEC.value, "params": dict(cfg)},
+    ]
+
+
+def _lt_spec_lp_dense(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Mix a flattened finite-p input with explicit dense weights."""
+    shape = [1, int(cfg["sequence_length"]), int(cfg["embedding_dim"])]
+    width = math.prod(shape[1:])
+    weight = torch.tensor(cfg["weight"], dtype=get_default_dtype())
+    outputs = int(weight.shape[0])
+    layers = _lt_input_lp(shape, cfg["input_spec"])
+    layers.extend([
+        {"kind": LayerKind.FLATTEN.value, "params": {
+            "start_dim": 1, "end_dim": -1, "input_shape": shape,
+            "output_shape": [1, width],
+        }},
+        {"kind": LayerKind.DENSE.value, "params": {
+            "weight": weight, "bias": torch.tensor(cfg["bias"], dtype=get_default_dtype()),
+            "in_features": width, "out_features": outputs,
+            "input_shape": [1, width], "output_shape": [1, outputs],
+        }},
+        _lt_assert_le([1.0] * outputs, float(cfg["assert_threshold"])),
+    ])
+    return {"layers": layers}
 
 
 def _lt_input_with_lin_poly(
@@ -2666,6 +2708,12 @@ LAYER_TESTING_SPECS: Dict[str, Any] = {
     f"{LAYER_TESTING_NAME_PREFIX}top1_robust":   _lt_spec_top1_robust,
     f"{LAYER_TESTING_NAME_PREFIX}range":         _lt_spec_range,
     f"{LAYER_TESTING_NAME_PREFIX}unsafe_linear": _lt_spec_unsafe_linear,
+}
+
+
+LAYER_TESTING_BUILDERS = {
+    "attention": _lt_spec_attention,
+    "lp_dense": _lt_spec_lp_dense,
 }
 
 

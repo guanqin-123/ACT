@@ -85,6 +85,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 from act.back_end.core import Bounds, Layer
+from act.front_end.specs import InKind, normalize_position_mask
 from act.back_end.layer_schema import (
     TRANSFORMER_KINDS,
     LayerKind,
@@ -260,6 +261,24 @@ def _validate_bounds_by_layer(
     return bounds_by_layer, errors
 
 
+def project_into_input_spec(x: torch.Tensor, spec_layer: Layer) -> torch.Tensor:
+    """Project hull samples into the selected per-token Lp balls."""
+    params = spec_layer.params
+    if params.get("kind") != InKind.LP_EMBEDDING:
+        return x
+    center = torch.as_tensor(params["center"], device=x.device, dtype=x.dtype)
+    eps = torch.as_tensor(params["eps"], device=x.device, dtype=x.dtype)
+    p = float(params.get("p_norm", float("inf")))
+    delta = x - center
+    norms = torch.linalg.vector_norm(delta, ord=p, dim=-1, keepdim=True)
+    scale = (eps / norms.clamp_min(torch.finfo(x.dtype).tiny)).clamp(max=1)
+    mask = normalize_position_mask(
+        params.get("perturbed_positions"), x.shape[-2],
+        batch_shape=tuple(x.shape[:-2]), device=x.device,
+    )
+    return center + torch.where(mask.unsqueeze(-1), delta * scale, 0.0)
+
+
 def sample_inputs_from_spec(
     act_net,
     num_samples: int,
@@ -290,6 +309,8 @@ def sample_inputs_from_spec(
     for _ in range(1, num_samples):
         rand = torch.rand(lb.shape, device=lb.device, dtype=lb.dtype, generator=generator)
         samples.append(lb + rand * (ub - lb))
+    for spec_layer in spec_layers:
+        samples = [project_into_input_spec(x, spec_layer) for x in samples]
     return samples
 
 
