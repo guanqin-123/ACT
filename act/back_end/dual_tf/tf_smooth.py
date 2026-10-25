@@ -64,35 +64,113 @@ def _dual_constant_box_backward(nu: torch.Tensor, lower: torch.Tensor, upper: to
     return v_out.view(BM, n), contrib
 
 
+# Bisection steps for the tangency point of the crossing-interval planes. Each
+# step halves the bracket, so 40 steps reach ~1e-12 of the interval width, far
+# below float32 resolution; the slope is then read at the bracket end that
+# over-approximates the exact tangent slope, so the plane stays sound.
+_SMOOTH_TANGENT_BISECTIONS: int = 40
+
+
+def _crossing_tangent_slopes(
+    l: torch.Tensor, u: torch.Tensor,
+    f_l: torch.Tensor, f_u: torch.Tensor,
+    func: Callable[[torch.Tensor], torch.Tensor],
+    dfunc: Callable[[torch.Tensor], torch.Tensor],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Sound slopes of the two endpoint-anchored planes on a crossing interval.
+
+    For an S-shaped ``f`` (convex on ``x <= 0``, concave on ``x >= 0``) with
+    ``l < 0 < u``:
+
+    * the UPPER plane passes through ``(l, f(l))`` and is tangent to ``f`` at a
+      point ``d_u`` in ``[0, u]``; the chord slope ``g(x) = (f(x) - f(l)) / (x - l)``
+      increases up to ``d_u`` and decreases after it, so ``f'(d_u) = max g`` and
+      any slope ``>= f'(d_u)`` keeps the plane above ``f`` on ``(l, u]``. When
+      ``h(u) = f'(u) (u - l) - (f(u) - f(l)) >= 0`` the maximum sits at ``u`` and
+      the chord itself is the plane;
+    * the LOWER plane passes through ``(u, f(u))`` and is tangent at ``d_l`` in
+      ``[l, 0]``, mirror image of the above (``h2(d) = f(u) - f(d) - f'(d) (u - d)``,
+      chord when ``h2(l) <= 0``).
+
+    ``h`` decreases on ``[0, u]`` and ``h2`` decreases on ``[l, 0]``, so a plain
+    bisection brackets the root; the slope is read at the bracket end where
+    ``f'`` is the LARGER of the two (``f'`` decreases on the concave side and
+    increases on the convex side), which over-approximates the exact tangent
+    slope and therefore stays sound. Returns ``(k_lower, k_upper)``.
+    """
+    # Upper plane anchored at (l, f(l)): root of h on [0, u].
+    lo = torch.zeros_like(u)
+    hi = u.clone()
+    for _ in range(_SMOOTH_TANGENT_BISECTIONS):
+        mid = (lo + hi) * 0.5
+        h_mid = dfunc(mid) * (mid - l) - (func(mid) - f_l)
+        lo = torch.where(h_mid >= 0, mid, lo)
+        hi = torch.where(h_mid >= 0, hi, mid)
+    k_upper = dfunc(lo)
+    chord = (f_u - f_l) / (u - l).clamp(min=1e-12)
+    h_u = dfunc(u) * (u - l) - (f_u - f_l)
+    k_upper = torch.where(h_u >= 0, chord, k_upper)
+
+    # Lower plane anchored at (u, f(u)): root of h2 on [l, 0].
+    lo = l.clone()
+    hi = torch.zeros_like(l)
+    for _ in range(_SMOOTH_TANGENT_BISECTIONS):
+        mid = (lo + hi) * 0.5
+        h2_mid = f_u - func(mid) - dfunc(mid) * (u - mid)
+        lo = torch.where(h2_mid >= 0, mid, lo)
+        hi = torch.where(h2_mid >= 0, hi, mid)
+    k_lower = dfunc(hi)
+    h2_l = f_u - f_l - dfunc(l) * (u - l)
+    k_lower = torch.where(h2_l <= 0, chord, k_lower)
+    return k_lower, k_upper
+
+
 def compute_smooth_relaxation(
     l: torch.Tensor, u: torch.Tensor,
     func: Callable[[torch.Tensor], torch.Tensor],
     dfunc: Callable[[torch.Tensor], torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Linear relaxation (k_lo, b_lo, k_hi, b_hi) for S-shaped f on [l, u].
+    """Sound linear relaxation ``(k_lo, b_lo, k_hi, b_hi)`` of an S-shaped f on [l, u].
+
+    ``f`` must be increasing, convex on ``x <= 0`` and concave on ``x >= 0``
+    (sigmoid, tanh, erf). Per element:
+
+    * ``u <= 0`` (convex): lower plane = tangent at the midpoint, upper = chord;
+    * ``l >= 0`` (concave): lower plane = chord, upper = tangent at the midpoint;
+    * ``l < 0 < u`` (crossing): upper plane through ``(l, f(l))`` tangent to the
+      concave side, lower plane through ``(u, f(u))`` tangent to the convex side
+      (:func:`_crossing_tangent_slopes`); each degrades to the chord when the
+      chord is already the tight envelope on that side.
 
     Works element-wise on any broadcastable shape (including batched [B, n]).
     """
     from .tf_mlp import _repair_degenerate_interval
     u = _repair_degenerate_interval(l, u, "smooth_relaxation")
     f_l, f_u = func(l), func(u)
-    denom = (u - l).clamp(min=1e-12)
-    k_chord = (f_u - f_l) / denom
-    k_lower, k_upper = k_chord.clone(), k_chord.clone()
-    b_lower = f_l - k_lower * l
-    b_upper = f_l - k_upper * l
+    k_chord = (f_u - f_l) / (u - l).clamp(min=1e-12)
+    b_chord = f_l - k_chord * l
+    m = (l + u) * 0.5
+    k_tan = dfunc(m)
+    b_tan = func(m) - k_tan * m
 
-    mask_pos = l >= 0
-    if mask_pos.any():
-        k_tan = dfunc(l)
-        k_lower = torch.where(mask_pos, k_tan, k_lower)
-        b_lower = torch.where(mask_pos, f_l - k_tan * l, b_lower)
+    convex = u <= 0
+    concave = l >= 0
+    crossing = ~(convex | concave)
+    k_lower = torch.where(convex, k_tan, k_chord)
+    b_lower = torch.where(convex, b_tan, b_chord)
+    k_upper = torch.where(concave, k_tan, k_chord)
+    b_upper = torch.where(concave, b_tan, b_chord)
 
-    mask_neg = u <= 0
-    if mask_neg.any():
-        k_tan = dfunc(u)
-        k_upper = torch.where(mask_neg, k_tan, k_upper)
-        b_upper = torch.where(mask_neg, f_u - k_tan * u, b_upper)
+    if bool(crossing.any()):
+        # Bisection on the crossing entries only; the others are masked out.
+        l_c = torch.where(crossing, l, torch.full_like(l, -1.0))
+        u_c = torch.where(crossing, u, torch.full_like(u, 1.0))
+        k_lo_c, k_hi_c = _crossing_tangent_slopes(
+            l_c, u_c, func(l_c), func(u_c), func, dfunc)
+        k_lower = torch.where(crossing, k_lo_c, k_lower)
+        b_lower = torch.where(crossing, f_u - k_lo_c * u, b_lower)
+        k_upper = torch.where(crossing, k_hi_c, k_upper)
+        b_upper = torch.where(crossing, f_l - k_hi_c * l, b_upper)
 
     return k_lower, b_lower, k_upper, b_upper
 
