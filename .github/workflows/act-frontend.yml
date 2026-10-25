@@ -102,6 +102,45 @@ jobs:
           cd ${{ github.workspace }}
           coverage run -p -m act.pipeline --fuzz --category acasxu_2023 --max-instances 2 --timeout 10 --iterations 50
 
+      - name: Input routes and text options
+        run: |
+          cd ${{ github.workspace }}
+          coverage run -p -m act.back_end.examples.fixtures.generate_text_query_fixtures
+          coverage run -p -m act.back_end.examples.fixtures.generate_coverage_ops
+          mkdir -p data
+          cp -R act/back_end/examples/fixtures/text_query/. data/
+          cp -R data/buffet/models/model_sst_1 data/buffet/models/model_yelp_1
+          for row in 0 1 2 3; do
+            coverage run -p -m act.back_end --verify \
+              --query-index act/back_end/examples/fixtures/bert_query_sst.csv \
+              --query-id "$row" --save-net query-export.json \
+              --solver dual --device cpu --dtype float64
+          done
+          coverage run -p -m act.back_end --verify --network query-export.json \
+            --solver dual --device cpu --dtype float64
+          rc=0
+          out=$(coverage run -p -m act.back_end --verify \
+            --query-index act/back_end/examples/fixtures/bert_query_sst.csv \
+            --query-id -1 --solver dual --device cpu --dtype float64 2>&1) || rc=$?
+          test "$rc" = 1
+          grep -qF "query id -1 must be >= 0" <<<"$out"
+          rc=0
+          out=$(coverage run -p -m act.back_end --verify \
+            --query-index act/back_end/examples/fixtures/bert_query_sst.csv \
+            --device cpu 2>&1) || rc=$?
+          test "$rc" = 2
+          grep -qF -- "--query-index and --query-id must be given together" <<<"$out"
+          coverage run -p -m act.back_end --verify \
+            --onnx act/back_end/examples/fixtures/coverage_ops/onnx/operations.onnx \
+            --vnnlib act/back_end/examples/fixtures/coverage_ops/vnnlib/disjunction.vnnlib \
+            --save-net onnx-export.json --solver dual --device cpu --dtype float64
+          for route in a b; do
+            coverage run -p -m act.front_end --synthesis --creator bert \
+              --checkpoint-dir buffet/models/model_sst_1 \
+              --position-mode sweep --conversion-route "$route" \
+              --p 1 --eps 0.001 --device cpu --dtype float64
+          done
+
       - name: Combine coverage data
         if: always()
         run: |

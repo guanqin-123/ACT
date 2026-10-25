@@ -172,7 +172,13 @@ class _LayerGraphBuilder:
         n_inputs = _prod(self.input_shape)
         self.prev_out = self._alloc_ids(n_inputs)
 
-        if self._try_build_vit_graph() or self._try_build_bert_transformer_graph():
+        conversion_route = getattr(self.model, "_act_conversion_route", None)
+        if conversion_route not in {None, "a", "b"}:
+            raise ValueError("_act_conversion_route must be 'a' or 'b'")
+        use_manual_transformer = conversion_route != "b"
+        if use_manual_transformer and (
+            self._try_build_vit_graph() or self._try_build_bert_transformer_graph()
+        ):
             if self._manual_preds is None or self._manual_succs is None:
                 raise RuntimeError("Manual transformer graph did not produce graph edges.")
             return self.layers, self._manual_preds, self._manual_succs
@@ -413,6 +419,17 @@ class _LayerGraphBuilder:
         current_vars = anchor_vars
         current_layer_ids: List[int] = [anchor_id]
 
+        embeddings = getattr(self.model, "embeddings", None)
+        embedding_norm = getattr(embeddings, "LayerNorm", None)
+        if isinstance(embedding_norm, nn.Module):
+            current_vars, norm_id = self._add_manual_layernorm(
+                embedding_norm,
+                current_vars,
+                current_shape,
+                current_layer_ids,
+            )
+            current_layer_ids = [norm_id]
+
         for block in blocks:
             current_vars, current_shape, current_layer_ids = self._build_bert_block(
                 block, current_vars, current_shape, current_layer_ids
@@ -455,6 +472,27 @@ class _LayerGraphBuilder:
             current_vars = pooled_vars
             current_shape = (1, int(classifier.in_features))
             current_layer_ids = [pool_id]
+
+            pooler = getattr(self.model, "pooler", None)
+            pooler_dense = getattr(pooler, "dense", None)
+            if isinstance(pooler_dense, nn.Linear):
+                current_vars, current_shape, pooler_id = self._add_manual_dense(
+                    pooler_dense,
+                    current_vars,
+                    current_shape,
+                    current_layer_ids,
+                )
+                tanh_vars = self._alloc_ids(len(current_vars))
+                tanh_id = self._add_manual_layer(
+                    LayerKind.TANH.value,
+                    {"input_shape": current_shape, "output_shape": current_shape},
+                    current_vars,
+                    tanh_vars,
+                    [pooler_id],
+                )
+                current_vars = tanh_vars
+                current_layer_ids = [tanh_id]
+
             current_vars, current_shape, dense_id = self._add_manual_dense(
                 classifier, current_vars, current_shape, current_layer_ids
             )
@@ -523,81 +561,99 @@ class _LayerGraphBuilder:
         seq_len = int(input_shape[1]) if len(input_shape) >= 3 else 1
         hidden_size = int(input_shape[len(input_shape) - 1])
         head_dim = int(getattr(self_attn, "attention_head_size", hidden_size))
-
-        score_rows: List[int] = []
-        for pos in range(seq_len):
-            q_vars = self._alloc_ids(head_dim)
-            q_id = self._add_manual_layer(
-                LayerKind.MHA_SPLIT.value,
-                self._mha_split_params("query", self_attn.query, pos, None, input_shape, (1, head_dim)),
-                input_vars,
-                q_vars,
-                input_layer_ids,
+        num_heads = int(getattr(self_attn, "num_attention_heads", 1))
+        if num_heads * head_dim != hidden_size:
+            raise ValueError(
+                f"Transformer attention shape mismatch: {num_heads} heads * {head_dim} "
+                f"dimensions != hidden size {hidden_size}."
             )
-            row_score_ids: List[int] = []
-            row_score_vars: List[int] = []
-            for key_pos in range(seq_len):
-                k_vars = self._alloc_ids(head_dim)
-                k_id = self._add_manual_layer(
+
+        score_rows: Dict[Tuple[int, int], int] = {}
+        for head in range(num_heads):
+            rows = None if num_heads == 1 else slice(head * head_dim, (head + 1) * head_dim)
+            for pos in range(seq_len):
+                q_vars = self._alloc_ids(head_dim)
+                q_id = self._add_manual_layer(
                     LayerKind.MHA_SPLIT.value,
-                    self._mha_split_params("key", self_attn.key, key_pos, None, input_shape, (1, head_dim)),
+                    self._mha_split_params(
+                        "query", self_attn.query, pos, None, input_shape,
+                        (1, head_dim), rows, num_heads, head_dim,
+                    ),
                     input_vars,
-                    k_vars,
+                    q_vars,
                     input_layer_ids,
                 )
-                score_vars = self._alloc_ids(1)
-                score_id = self._add_manual_layer(
-                    LayerKind.ATT_SCORES.value,
-                    {
-                        "dk": float(head_dim) ** 0.5,
-                        "q_vars": q_vars,
-                        "k_vars": k_vars,
-                        "q_src": q_id,
-                        "k_src": k_id,
-                        "query_position": pos,
-                        "key_position": key_pos,
-                        "input_shape": (1, head_dim),
-                        "output_shape": (1, 1),
-                    },
-                    q_vars + k_vars,
-                    score_vars,
-                    [q_id, k_id],
+                row_score_ids: List[int] = []
+                row_score_vars: List[int] = []
+                for key_pos in range(seq_len):
+                    k_vars = self._alloc_ids(head_dim)
+                    k_id = self._add_manual_layer(
+                        LayerKind.MHA_SPLIT.value,
+                        self._mha_split_params(
+                            "key", self_attn.key, key_pos, None, input_shape,
+                            (1, head_dim), rows, num_heads, head_dim,
+                        ),
+                        input_vars,
+                        k_vars,
+                        input_layer_ids,
+                    )
+                    score_vars = self._alloc_ids(1)
+                    score_id = self._add_manual_layer(
+                        LayerKind.ATT_SCORES.value,
+                        {
+                            "dk": float(head_dim) ** 0.5,
+                            "q_vars": q_vars,
+                            "k_vars": k_vars,
+                            "q_src": q_id,
+                            "k_src": k_id,
+                            "query_position": pos,
+                            "key_position": key_pos,
+                            "input_shape": (1, head_dim),
+                            "output_shape": (1, 1),
+                        },
+                        q_vars + k_vars,
+                        score_vars,
+                        [q_id, k_id],
+                    )
+                    row_score_ids.append(score_id)
+                    row_score_vars.extend(score_vars)
+                if len(row_score_ids) == 1:
+                    softmax_in_vars = row_score_vars
+                    softmax_preds = row_score_ids
+                else:
+                    softmax_in_vars = row_score_vars
+                    concat_vars = self._alloc_ids(seq_len)
+                    concat_id = self._add_manual_layer(
+                        LayerKind.CONCAT.value,
+                        {"concat_dim": -1},
+                        row_score_vars,
+                        concat_vars,
+                        row_score_ids,
+                    )
+                    softmax_in_vars = concat_vars
+                    softmax_preds = [concat_id]
+                prob_vars = self._alloc_ids(seq_len)
+                prob_id = self._add_manual_layer(
+                    LayerKind.SOFTMAX.value,
+                    {"axis": -1},
+                    softmax_in_vars,
+                    prob_vars,
+                    softmax_preds,
                 )
-                row_score_ids.append(score_id)
-                row_score_vars.extend(score_vars)
-            if len(row_score_ids) == 1:
-                softmax_in_vars = row_score_vars
-                softmax_preds = row_score_ids
-            else:
-                softmax_in_vars = row_score_vars
-                concat_vars = self._alloc_ids(seq_len)
-                concat_id = self._add_manual_layer(
-                    LayerKind.CONCAT.value,
-                    {"concat_dim": -1},
-                    row_score_vars,
-                    concat_vars,
-                    row_score_ids,
-                )
-                softmax_in_vars = concat_vars
-                softmax_preds = [concat_id]
-            prob_vars = self._alloc_ids(seq_len)
-            prob_id = self._add_manual_layer(
-                LayerKind.SOFTMAX.value,
-                {"axis": -1},
-                softmax_in_vars,
-                prob_vars,
-                softmax_preds,
-            )
-            score_rows.append(prob_id)
+                score_rows[(head, pos)] = prob_id
 
         context_ids: List[int] = []
         context_vars: List[int] = []
-        for pos, prob_id in enumerate(score_rows):
+        for pos in range(seq_len):
             for feature in range(hidden_size):
+                prob_id = score_rows[(feature // head_dim, pos)]
                 v_vars = self._alloc_ids(seq_len)
                 v_id = self._add_manual_layer(
                     LayerKind.MHA_SPLIT.value,
-                    self._mha_split_params("value", self_attn.value, None, feature, input_shape, (1, seq_len)),
+                    self._mha_split_params(
+                        "value", self_attn.value, None, feature, input_shape,
+                        (1, seq_len), None, num_heads, head_dim,
+                    ),
                     input_vars,
                     v_vars,
                     input_layer_ids,
@@ -688,16 +744,28 @@ class _LayerGraphBuilder:
         feature: Optional[int],
         input_shape: Tuple[int, ...],
         output_shape: Tuple[int, ...],
+        rows: Optional[slice] = None,
+        num_heads: int = 1,
+        head_dim: Optional[int] = None,
     ) -> Dict[str, Any]:
+        weight = projection.weight.detach()
+        bias = projection.bias.detach() if projection.bias is not None else None
+        if rows is not None:
+            weight = weight[rows]
+            if bias is not None:
+                bias = bias[rows]
         params: Dict[str, Any] = {
             "role": role,
-            "weight": projection.weight.detach(),
+            "weight": weight,
             "hidden_size": int(projection.in_features),
             "input_shape": input_shape,
             "output_shape": output_shape,
         }
-        if projection.bias is not None:
-            params["bias"] = projection.bias.detach()
+        if bias is not None:
+            params["bias"] = bias
+        if num_heads != 1:
+            params["num_heads"] = num_heads
+            params["head_dim"] = int(head_dim) if head_dim is not None else int(weight.shape[0])
         if position is not None:
             params["position"] = int(position)
         if feature is not None:
@@ -752,10 +820,22 @@ class _LayerGraphBuilder:
         gamma = getattr(mod, "weight").detach()
         beta = getattr(mod, "bias").detach()
         eps = float(getattr(mod, "variance_epsilon", getattr(mod, "eps", 1e-5)))
+        params: Dict[str, Any] = {
+            "gamma": gamma,
+            "beta": beta,
+            "eps": eps,
+            "input_shape": in_shape,
+            "output_shape": in_shape,
+        }
+        variant = getattr(mod, "variant", None)
+        if variant == "no_var":
+            params["variant"] = variant
+        elif variant is not None:
+            raise ValueError(f"Unsupported LayerNorm variant: {variant!r}.")
         out_vars = self._alloc_ids(len(in_vars))
         layer_id = self._add_manual_layer(
             LayerKind.LAYERNORM.value,
-            {"gamma": gamma, "beta": beta, "eps": eps, "input_shape": in_shape, "output_shape": in_shape},
+            params,
             in_vars,
             out_vars,
             pred_ids,
@@ -975,6 +1055,10 @@ class _LayerGraphBuilder:
             first_layer_id = len(self.layers)
             if node.op == 'placeholder':
                 pass  # Already pre-registered in _pre_register_nodes
+            elif node.name in self.node_outputs:
+                # A fused pattern may pre-register all of its downstream FX
+                # nodes to the single ACT layer that implements the pattern.
+                continue
             elif node.op == 'call_module':
                 self._handle_call_module(node)
             elif node.op == 'call_function':
@@ -2067,7 +2151,62 @@ class _LayerGraphBuilder:
         self._fx_pred_override[layer_id] = [src_layer]
         return out_vars, layer_id
 
+    @staticmethod
+    def _single_user(node: fx.Node) -> Optional[fx.Node]:
+        """Return the sole FX user of ``node``, if the pattern is unambiguous."""
+        users = list(node.users)
+        return users[0] if len(users) == 1 else None
 
+    def _try_process_no_var_layernorm(self, node: fx.Node) -> bool:
+        """Fuse ``gamma * (x - mean(x, -1, True)) + beta`` to LAYERNORM."""
+        source = node.args[0] if node.args and isinstance(node.args[0], fx.Node) else None
+        if source is None or source.name not in self.node_outputs:
+            return False
+        dims, keepdim, _ = self._mean_spec(node, self.node_shapes[source.name])
+        if dims != (len(self.node_shapes[source.name]) - 1,) or not keepdim:
+            return False
+        sub = self._single_user(node)
+        if sub is None or sub.op != 'call_function' or sub.target != operator.sub:
+            return False
+        if len(sub.args) < 2 or sub.args[0] is not source or sub.args[1] is not node:
+            return False
+        mul = self._single_user(sub)
+        if mul is None or mul.op != 'call_function' or mul.target != operator.mul:
+            return False
+        mul_other = mul.args[1] if mul.args[0] is sub else mul.args[0] if mul.args[1] is sub else None
+        add = self._single_user(mul)
+        if add is None or add.op != 'call_function' or add.target != operator.add:
+            return False
+        add_other = add.args[1] if add.args[0] is mul else add.args[0] if add.args[1] is mul else None
+        try:
+            gamma = self._resolve_const_tensor(mul_other).detach().to(dtype=self.dtype).reshape(-1)
+            beta = self._resolve_const_tensor(add_other).detach().to(dtype=self.dtype).reshape(-1)
+        except NotImplementedError:
+            return False
+        width = int(self.node_shapes[source.name][-1])
+        if gamma.numel() != width or beta.numel() != width:
+            return False
+        in_vars = self.node_outputs[source.name]
+        shape = self.node_shapes[source.name]
+        out_vars = self._alloc_ids(len(in_vars))
+        layer_id = self._add_layer(
+            LayerKind.LAYERNORM.value,
+            {
+                "gamma": gamma,
+                "beta": beta,
+                "eps": 0.0,
+                "variant": "no_var",
+                "input_shape": shape,
+                "output_shape": shape,
+            },
+            in_vars,
+            out_vars,
+        )
+        self.prev_out = out_vars
+        self.shape = shape
+        for fused in (node, sub, mul, add):
+            self._register_node(fused.name, layer_id)
+        return True
 
     def _mean_spec(
         self, node: fx.Node, input_shape: Tuple[int, ...]
@@ -2099,6 +2238,8 @@ class _LayerGraphBuilder:
     
     def _process_mean_operation(self, node: fx.Node) -> None:
         """Process torch.mean() while preserving axes and keepdim."""
+        if self._try_process_no_var_layernorm(node):
+            return
         if not self._get_predecessor_state(node):
             return
 
@@ -2412,6 +2553,19 @@ class TorchToACT:
             self._model_succs = {}
             self._wrapper_offset = len(self.layers)
             return
+        if getattr(inner, "_act_conversion_route", None) == "b":
+            from act.front_end.bert_loader.compact_bert import (
+                CompactBertFromEmbeddings,
+                build_compact_bert_route_b_model,
+            )
+
+            if not isinstance(inner, CompactBertFromEmbeddings):
+                raise TypeError("route b is only supported for CompactBertFromEmbeddings")
+            if len(self.shape) != 3:
+                raise ValueError(
+                    f"route-b compact BERT input must have shape [B, L, H], got {self.shape}"
+                )
+            inner = build_compact_bert_route_b_model(inner, int(self.shape[-2]))
         
         dtype = getattr(self.input_layer, 'dtype', torch.float64)
         model_layers, model_preds, model_succs = build_act(

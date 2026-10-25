@@ -23,6 +23,7 @@ dependencies:
   # ML frameworks (pipeline/llm_probe.py)
   - transformers
   - scikit-learn
+  - nltk==3.10.3  # BUFFET-compatible SST/Yelp tokenization
   # Required for Mac OS X systems - `libopenblas` uses `llvm-openmp` by default,
   # which causes errors when using `pip`-installed PyTorch.
   - "libopenblas=*=*pthreads*"

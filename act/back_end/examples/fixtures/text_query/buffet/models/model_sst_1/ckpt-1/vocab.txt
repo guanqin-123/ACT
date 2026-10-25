@@ -1,0 +1,9 @@
+[PAD]
+[UNK]
+[CLS]
+[SEP]
+[MASK]
+a
+good
+film
+.

@@ -73,6 +73,8 @@ VALID_BERT_METHODS: Final[tuple[str, ...]] = (
     "ibp",
     "discrete",
 )
+VALID_BERT_CONVERSION_ROUTES: Final[tuple[str, ...]] = ("a", "b")
+VALID_POSITION_MODES: Final[tuple[str, ...]] = ("prefix", "sweep")
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -1012,9 +1014,34 @@ def read_fuzzing_section(config_path: Optional[str | Path] = None) -> dict[str, 
 
 
 @dataclass
+class TextVerificationConfig:
+    """BERT/text robustness specification and checkpoint settings."""
+
+    method: str | None = None
+    p: float = 2.0
+    perturbed_words: int = 1
+    eps: float = 1.0e-5
+    max_eps: float = 0.01
+    num_verify_iters: int = 5
+    k: int = 1
+    alpha_opt_steps: int = 1000
+    checkpoint_dir: str | None = None
+    position_mode: str = "prefix"
+    conversion_route: str = "b"
+
+    def __post_init__(self) -> None:
+        if self.position_mode not in VALID_POSITION_MODES:
+            raise ConfigError("position_mode must be 'prefix' or 'sweep'")
+        if self.conversion_route not in VALID_BERT_CONVERSION_ROUTES:
+            raise ConfigError("conversion_route must be 'a' or 'b'")
+
+
+@dataclass
 class FrontEndConfig:
     specs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    text_verification: dict[str, Any] = field(default_factory=dict)
+    text_verification: TextVerificationConfig = field(
+        default_factory=TextVerificationConfig
+    )
 
     @classmethod
     def from_yaml(
@@ -1030,9 +1057,17 @@ class FrontEndConfig:
             raw = yaml.safe_load(f) or {}
 
         specs = deepcopy(raw.get("specs", {}))
-        text_verification = deepcopy(raw.get("text_verification", {}))
-        text_verification.update(
-            {k: v for k, v in overrides.items() if k in text_verification and v is not None}
+        text_values = deepcopy(raw.get("text_verification", {}))
+        valid_text_keys = {item.name for item in fields(TextVerificationConfig)}
+        text_values.update(
+            {
+                key: value
+                for key, value in overrides.items()
+                if key in valid_text_keys and value is not None
+            }
+        )
+        text_verification = TextVerificationConfig(
+            **{key: value for key, value in text_values.items() if key in valid_text_keys}
         )
         return cls(specs=specs, text_verification=text_verification)
 
