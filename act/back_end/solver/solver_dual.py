@@ -202,6 +202,11 @@ def _dual_norm_exponent(p: float) -> float:
     return p / (p - 1.0)
 
 
+def unproven_spec_rows(slack: torch.Tensor) -> torch.Tensor:
+    """Return ALL-rows specification rows that do not prove safety."""
+    return (slack < 0) | ~torch.isfinite(slack)
+
+
 class DualSolver(Solver):
     """Dual (linear-relaxation) certified bounds solver. Strict [B, *shape] API."""
 
@@ -346,7 +351,7 @@ class DualSolver(Solver):
                 k_actual, dtype=torch.long, device=device
             )
         else:
-            violations = (slack < 0) & active_mask
+            violations = unproven_spec_rows(slack) & active_mask
             certified = ~violations.any(dim=-1)
             candidate_rows = torch.where(
                 violations.any(dim=1),
@@ -1743,7 +1748,7 @@ class DualSolver(Solver):
             # every active row has slack >= 0. A positive tolerance band flags
             # safe near-boundary rows (false UNKNOWN); slack < -cert_tol would be
             # unsound. Hard zero boundary, matching bab.py.
-            violations = (slack < 0) & active_mask
+            violations = unproven_spec_rows(slack) & active_mask
             certified = ~violations.any(dim=-1)
 
         return SpecBatchResult(

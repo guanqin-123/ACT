@@ -75,6 +75,7 @@ from act.back_end.solver.solver_base import BatchBoundResult, Solver, SolveStatu
 from act.back_end.solver.solver_dual import (
     DualSolver,
     expand_bounds_dict,
+    unproven_spec_rows,
 )
 from act.back_end.verifier import (
     gather_input_spec_layers,
@@ -589,7 +590,7 @@ def verify_bab_batched(
         )
         presolve_slack = presolve.spec_row_slack()
         if presolve_slack is not None:
-            unproven = (presolve_slack < 0).any(dim=0)
+            unproven = unproven_spec_rows(presolve_slack).any(dim=0)
             total_rows = int(unproven.numel())
             if not bool(unproven.any().item()):
                 return VerifyResult(
