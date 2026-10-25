@@ -360,6 +360,14 @@ jobs:
             --solver dual --bab --bab-preset climb --bab-max-batch-size 16 \
             --bab-max-depth 14 --bab-max-subproblems 250 --timeout 600 --verbose
 
+      - name: BaB CLIMB-refined — tiny route-B BERT fixtures
+        run: |
+          cd ${{ github.workspace }}
+          for fixture in "$ACT_NETS_DIR"/standalone/layer_testing_routeb_bert_i{0,1}.json; do
+            coverage run -p -m act.back_end --verify --network "$fixture" --solver dual --bab \
+              --bab-preset climb_refined --device cpu
+          done
+
       # These pool nets exercise symbolic MaxPool forward and cached one-hot dual
       # backward. Exit status 0 means every lane received a verdict (CERTIFIED /
       # FALSIFIED / UNKNOWN / TIMEOUT); source assertions catch invariant violations.
@@ -392,6 +400,24 @@ jobs:
           coverage run -p -m act.back_end --verify \
             --network "$ACT_NETS_DIR/standalone/layer_testing_mha_roles.json" \
             --solver dual --device cpu --dtype float64
+
+      - name: CLIMB replay gates and coarsening controls
+        run: |
+          cd ${{ github.workspace }}
+          coverage run -p -m act.back_end --verify \
+            --network "$ACT_NETS_DIR/mlp_plain_3x8_64x64_3962224133.json" \
+            --solver dual --bab --bab-preset climb_refined \
+            --bab-branching gain \
+            --no-bab-climb-coarsening-enabled --no-bab-climb-propagation-enabled \
+            --bab-presolve-time-fraction 0.25 --bab-child-n-iters 1 \
+            --bab-max-batch-size 16 --bab-max-depth 14 --bab-max-subproblems 250 \
+            --timeout 150 --device cpu --dtype float64
+          coverage run -p -m act.back_end --verify \
+            --network "$ACT_NETS_DIR/mlp_plain_3x8_64x64_3962224133.json" \
+            --solver dual --bab --bab-preset climb \
+            --no-bab-climb-coarsening-enabled \
+            --bab-max-batch-size 16 --bab-max-depth 14 --bab-max-subproblems 250 \
+            --timeout 150 --device cpu --dtype float64
 
       # ── Coverage ───────────────────────────────────────────────────────
       - name: Combine coverage data

@@ -246,7 +246,6 @@ def forward_dense(
     parent_box = parent_boxes[0]
     parent_lin = parent_lins[0]
     parent_frame = parent_frames[0]
-    x_L, x_U = parent_frame
     prev_lb, prev_ub = parent_box.lb, parent_box.ub
     if not L.params.get("token_wise"):
         new_lin = _fwd_dense(L, parent_lin)
@@ -399,7 +398,6 @@ def forward_relu(
     parent_box = parent_boxes[0]
     parent_lin = parent_lins[0]
     parent_frame = parent_frames[0]
-    x_L, x_U = parent_frame
     pre_lb, pre_ub = parent_box.lb, parent_box.ub
     new_lin = _fwd_relu(parent_lin, pre_lb, pre_ub)
     int_lb, int_ub = _box_relu(pre_lb, pre_ub)
@@ -441,7 +439,6 @@ def forward_lrelu(
     parent_box = parent_boxes[0]
     parent_lin = parent_lins[0]
     parent_frame = parent_frames[0]
-    x_L, x_U = parent_frame
     pre_lb, pre_ub = parent_box.lb, parent_box.ub
     alpha = float(L.params["negative_slope"])
     lin = _fwd_lrelu(parent_lin, pre_lb, pre_ub, alpha)
@@ -616,7 +613,6 @@ def forward_bias(
     parent_box = parent_boxes[0]
     parent_lin = parent_lins[0]
     parent_frame = parent_frames[0]
-    x_L, x_U = parent_frame
     prev_lb, prev_ub = parent_box.lb, parent_box.ub
     lin = _fwd_bias(L, parent_lin)
     lin_lb, lin_ub = _concretize(lin, parent_frame)
@@ -663,7 +659,6 @@ def forward_scale(
     parent_box = parent_boxes[0]
     parent_lin = parent_lins[0]
     parent_frame = parent_frames[0]
-    x_L, x_U = parent_frame
     prev_lb, prev_ub = parent_box.lb, parent_box.ub
     lin = _fwd_scale(L, parent_lin)
     int_lb, int_ub = _box_scale(L, prev_lb, prev_ub)
@@ -716,7 +711,6 @@ def forward_bn(
     parent_box = parent_boxes[0]
     parent_lin = parent_lins[0]
     parent_frame = parent_frames[0]
-    x_L, x_U = parent_frame
     prev_lb, prev_ub = parent_box.lb, parent_box.ub
     lin = _fwd_bn(L, parent_lin)
     int_lb, int_ub = _box_bn(L, prev_lb, prev_ub)

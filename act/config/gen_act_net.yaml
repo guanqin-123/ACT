@@ -390,6 +390,32 @@ net_factory:
   # manifest-driven netfactory sweep exercises them without workflow changes.
 
   layer_testing:
+    routeb_bert_i0:
+      architecture: routeb_bert
+      sweep: false  # Residual ranks require the dual transformer path.
+      sequence_length: 4
+      hidden_size: 8
+      num_heads: 2
+      intermediate_size: 16
+      num_classes: 2
+      weight_seed: 20261025
+      weight_scale: 0.5
+      center_seed: 20261026
+      input_spec: {kind: LP_EMBEDDING, eps: 0.05, p_norm: .inf, perturbed_positions: [0]}
+      assert: {kind: MARGIN_ROBUST, y_true: 0, margin: 5.7}
+    routeb_bert_i1:
+      architecture: routeb_bert
+      sweep: false
+      sequence_length: 4
+      hidden_size: 8
+      num_heads: 2
+      intermediate_size: 16
+      num_classes: 2
+      weight_seed: 20261025
+      weight_scale: 0.5
+      center_seed: 20261026
+      input_spec: {kind: LP_EMBEDDING, eps: 0.025, p_norm: .inf, perturbed_positions: [0]}
+      assert: {kind: MARGIN_ROBUST, y_true: 0, margin: 6.0}
     tokenwise_dense_2:
       architecture: tokenwise_dense
       tokens: 2

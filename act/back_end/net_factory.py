@@ -1290,6 +1290,10 @@ class NetFactory:
             return {"center": center, "lb": center - eps, "ub": center + eps}
         if params["kind"] == InKind.LP_EMBEDDING:
             center = torch.full(input_shape, float(params.pop("center_val", 0.0)), dtype=dtype)
+            center_seed = params.pop("center_seed", None)
+            if center_seed is not None:
+                generator = torch.Generator().manual_seed(int(center_seed))
+                center = torch.randn(input_shape, generator=generator, dtype=dtype)
             eps = torch.full([1] * center.dim(), float(params["eps"]), dtype=dtype)
             spec = InputSpec(
                 kind=InKind.LP_EMBEDDING, center=center, eps=eps,
@@ -1794,6 +1798,113 @@ def _lt_spec_tokenwise_dense(cfg: Dict[str, Any]) -> Dict[str, Any]:
         {"kind": LayerKind.DENSE.value, "params": params},
         _lt_assert_le([1.0] * (tokens * outputs), float(cfg["assert_threshold"])),
     ]}
+
+
+def _lt_spec_routeb_bert(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a seeded compact BERT graph with explicit attention and residuals."""
+    length, hidden = int(cfg["sequence_length"]), int(cfg["hidden_size"])
+    heads, intermediate = int(cfg["num_heads"]), int(cfg["intermediate_size"])
+    if hidden % heads:
+        raise ValueError("routeb_bert hidden_size must be divisible by num_heads")
+    head_dim = hidden // heads
+    shape = [1, length, hidden]
+    split_shape = [1, length, heads, head_dim]
+    head_shape = [1, heads, length, head_dim]
+    score_shape = [1, heads, length, length]
+    dtype = get_default_dtype()
+    generator = torch.Generator().manual_seed(int(cfg["weight_seed"]))
+    scale = float(cfg["weight_scale"])
+    spec = dict(cfg["input_spec"], center_seed=int(cfg["center_seed"]))
+    layers = _lt_input_lp(shape, spec)
+
+    def draw(*dims: int) -> torch.Tensor:
+        return torch.randn(dims, generator=generator, dtype=dtype) * scale
+
+    def append(kind: str, params: Dict[str, Any], *preds: int) -> int:
+        index = len(layers)
+        layer: Dict[str, Any] = {"kind": kind, "params": params, "preds": list(preds)}
+        if len(preds) == 1:
+            layer["input_from"] = preds[0]
+        else:
+            layer["inputs"] = {"x": preds[0], "y": preds[1]}
+        layers.append(layer)
+        return index
+
+    def dense(source: int, inputs: int, outputs: int, token_wise: bool = True) -> int:
+        prefix = [1, length] if token_wise else [1]
+        return append(LayerKind.DENSE.value, {
+            "weight": draw(outputs, inputs), "bias": draw(outputs),
+            "in_features": inputs, "out_features": outputs,
+            "token_wise": token_wise, "input_shape": [*prefix, inputs],
+            "output_shape": [*prefix, outputs],
+        }, source)
+
+    def norm(source: int) -> int:
+        return append(LayerKind.LAYERNORM.value, {
+            "gamma": 1 + draw(hidden), "beta": draw(hidden), "eps": 0.0,
+            "variant": "no_var", "input_shape": shape, "output_shape": shape,
+        }, source)
+
+    norm1 = norm(1)
+    projections = []
+    for _ in range(3):
+        projection = dense(norm1, hidden, hidden)
+        split = append(LayerKind.RESHAPE.value, {
+            "target_shape": split_shape, "input_shape": shape, "output_shape": split_shape,
+        }, projection)
+        projections.append(append(LayerKind.TRANSPOSE.value, {
+            "perm": [0, 2, 1, 3], "input_shape": split_shape,
+        }, split))
+    query, key, value = projections
+    key_t = append(LayerKind.TRANSPOSE.value, {
+        "perm": [0, 1, 3, 2], "input_shape": head_shape,
+    }, key)
+    scores = append(LayerKind.MATMUL.value, {
+        "x_shape": head_shape, "y_shape": [1, heads, head_dim, length],
+        "input_shape": head_shape, "output_shape": score_shape,
+    }, query, key_t)
+    scaled = append(LayerKind.SCALE.value, {
+        "a": torch.full((heads * length * length,), head_dim ** -0.5, dtype=dtype),
+        "input_shape": score_shape, "output_shape": score_shape,
+    }, scores)
+    attention = append(LayerKind.SOFTMAX.value, {
+        "axis": -1, "rowsize": length, "input_shape": score_shape, "output_shape": score_shape,
+    }, scaled)
+    mixed = append(LayerKind.MATMUL.value, {
+        "x_shape": score_shape, "y_shape": head_shape,
+        "input_shape": score_shape, "output_shape": head_shape,
+    }, attention, value)
+    transposed = append(LayerKind.TRANSPOSE.value, {
+        "perm": [0, 2, 1, 3], "input_shape": head_shape,
+    }, mixed)
+    joined = append(LayerKind.RESHAPE.value, {
+        "target_shape": shape, "input_shape": split_shape, "output_shape": shape,
+    }, transposed)
+    projection = dense(joined, hidden, hidden)
+    residual = append(LayerKind.ADD.value, {
+        "input_shape": shape, "output_shape": shape,
+    }, projection, norm1)
+    norm2 = norm(residual)
+    feedforward = dense(norm2, hidden, intermediate)
+    activation = append(LayerKind.RELU.value, {
+        "input_shape": [1, length, intermediate], "output_shape": [1, length, intermediate],
+    }, feedforward)
+    output = dense(activation, intermediate, hidden)
+    residual = append(LayerKind.ADD.value, {
+        "input_shape": shape, "output_shape": shape,
+    }, output, norm2)
+    norm3 = norm(residual)
+    selected = append(LayerKind.GATHER.value, {
+        "indices": torch.tensor([0], dtype=torch.long), "axis": 1,
+        "input_shape": shape, "output_shape": [1, 1, hidden],
+    }, norm3)
+    flat = append(LayerKind.RESHAPE.value, {
+        "target_shape": [1, hidden], "input_shape": [1, 1, hidden],
+        "output_shape": [1, hidden],
+    }, selected)
+    dense(flat, hidden, int(cfg["num_classes"]), token_wise=False)
+    layers.append(_lt_assert_margin(int(cfg["assert"]["y_true"]), float(cfg["assert"]["margin"])))
+    return {"layers": layers}
 
 
 def _lt_input_with_lin_poly(
@@ -2782,6 +2893,7 @@ LAYER_TESTING_BUILDERS = {
     "lp_dense": _lt_spec_lp_dense,
     "mha_roles": _lt_spec_mha_roles,
     "tokenwise_dense": _lt_spec_tokenwise_dense,
+    "routeb_bert": _lt_spec_routeb_bert,
 }
 
 

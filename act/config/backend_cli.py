@@ -18,7 +18,7 @@ License: AGPLv3+
 """
 
 import argparse
-from dataclasses import fields, replace
+from dataclasses import asdict, fields, replace
 import datetime
 from functools import partial
 import glob
@@ -474,7 +474,9 @@ def _verify_one_net(
               constraints. Skipped under DualTF (see soundness note below).
     Tier 3 — BaB (verify_bab_batched): runs on remaining UNKNOWN lanes when
               backend_cfg.bab_enabled is True AND active TF propagates LP
-              constraints. bab_max_batch_size=1 disables K-batching.
+              constraints. bab_max_batch_size=1 disables K-batching. Its
+              budget is ``timeout`` minus the time this call already spent
+              (net build, tiers 1-2), the same for every lane.
     """
     from act.back_end.bab.violation import clear_violation_check_module_cache
     from act.back_end.transfer_functions import (
@@ -487,6 +489,7 @@ def _verify_one_net(
 
     clear_violation_check_module_cache()
 
+    verify_started = time.monotonic()
     net = _acquire_net(net_source, backend_cfg)
     n_layers = len(net.layers)
 
@@ -571,6 +574,16 @@ def _verify_one_net(
             pinned,
             is_dual=is_dual,
         )
+        # The net build and the earlier tiers already consumed part of
+        # --timeout; every per-lane BaB run gets the same remainder.
+        bab_budget_s = max(
+            0.0, backend_cfg.timeout - (time.monotonic() - verify_started)
+        )
+        logger.info(
+            "BaB budget %.2f s of --timeout %.2f s (%.2f s spent before BaB)",
+            bab_budget_s, backend_cfg.timeout, backend_cfg.timeout - bab_budget_s,
+        )
+
         try:
             results = [
                 _vbb(
@@ -580,7 +593,7 @@ def _verify_one_net(
                     ),
                     config=bab_cfg,
                     max_batch_size=backend_cfg.bab_max_batch_size,
-                    time_budget_s=backend_cfg.timeout,
+                    time_budget_s=bab_budget_s,
                     dual_config=backend_cfg.dual,
                 )
                 if results[i].status == VerifyStatus.UNKNOWN
@@ -612,6 +625,13 @@ def run_verification(args, backend_cfg):
     unsupported network, and 2 on invalid configuration.
     """
     pinned_bab_fields = explicit_bab_fields(args)
+    if backend_cfg.verbose:
+        resolved_bab = _resolve_bab_config(
+            backend_cfg,
+            pinned_bab_fields,
+            is_dual=backend_cfg.solver == "dual",
+        )
+        print(f"Resolved BaBConfig: {json.dumps(asdict(resolved_bab), sort_keys=True)}")
     if getattr(args, "onnx", None) is not None:
         return _run_vnncomp_verification(args, backend_cfg)
     net_source, label = _net_source_from_args(args, backend_cfg)
@@ -1327,7 +1347,9 @@ Exit status (--verify):
         "-t",
         type=float,
         default=None,
-        help="Verification timeout in seconds (default: from config.yaml)",
+        help="Verification timeout in seconds per net; BaB gets the remainder "
+        "after the net build and the earlier tiers and may overshoot by at "
+        "most one bounding unit (default: from config.yaml)",
     )
     verify_group.add_argument(
         "--tf-mode",

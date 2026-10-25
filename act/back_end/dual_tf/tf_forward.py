@@ -42,17 +42,15 @@ class LinearBound:
     b_ub: torch.Tensor
 
 @dataclass(frozen=True)
-class Frame:
+class Frame(Bounds):
     """Symbolic box over which a linear bound is defined."""
 
-    x_L: torch.Tensor
-    x_U: torch.Tensor
     ball: Optional["InputBall"] = None
 
-    def __iter__(self):
-        """Unpack the box coordinates while retaining the ball on the frame."""
-        yield self.x_L
-        yield self.x_U
+    def copy(self) -> "Frame":
+        """Clone bounds and attached finite-p geometry."""
+        ball = None if self.ball is None else self.ball.copy()
+        return Frame(self.lb.clone(), self.ub.clone(), ball)
 
 
 # Above this layer input dim, ``_fwd_X`` returns ``None`` to skip the
@@ -271,6 +269,11 @@ class InputBall:
     blocks: Tuple[Tuple[int, int], ...]
     block_eps: Optional[torch.Tensor] = None
 
+    def copy(self) -> "InputBall":
+        """Clone mutable per-lane radii while retaining immutable geometry."""
+        block_eps = None if self.block_eps is None else self.block_eps.clone()
+        return InputBall(self.q, self.blocks, block_eps)
+
     def _support(
         self,
         a: torch.Tensor,
@@ -318,10 +321,9 @@ def input_ball_for_frame(net: Net, lb_in: torch.Tensor, ub_in: torch.Tensor,
     p_norm = _resolve_perturbation_norm(params.get("p_norm"))
     if p_norm == float("inf"):
         return None
-    x_L, x_U = frame
     n = lb_in.shape[1]
     input_blocks = input_block_slices(params, lb_in.shape if orig_shape is None else orig_shape, n)
-    if x_L.shape[1] == n:
+    if frame.lb.shape[1] == n:
         frame_cols = torch.arange(n, device=lb_in.device)
     else:
         frame_cols = (ub_in > lb_in).any(dim=0).nonzero(as_tuple=True)[0]
@@ -356,13 +358,12 @@ def _concretize(lin: LinearBound, frame: Frame
     the box result, so the output is never looser than the box. Box / L_inf
     specs register no ball and take exactly the box path.
     """
-    x_L, x_U = frame
-    lb, ub = _concretize_box(lin, x_L, x_U)
+    lb, ub = _concretize_box(lin, frame.lb, frame.ub)
     if frame.ball is None or lin.A_lb is None or lin.A_ub is None:
         return lb, ub
     return _intersect_boxes(
-        frame.ball.lower(lin.A_lb, x_L, x_U) + lin.b_lb,
-        frame.ball.upper(lin.A_ub, x_L, x_U) + lin.b_ub,
+        frame.ball.lower(lin.A_lb, frame.lb, frame.ub) + lin.b_lb,
+        frame.ball.upper(lin.A_ub, frame.lb, frame.ub) + lin.b_ub,
         lb,
         ub,
     )
@@ -614,8 +615,8 @@ def _store_forward_state(bounds_dict: Dict[int, Bounds],
 def _reset_forward_box(lb: torch.Tensor, ub: torch.Tensor, device, dtype
                        ) -> Tuple[LinearBound, Frame]:
     """Reset dual-track state on a concrete box."""
-    lin, x_L, x_U = _reset_lin(lb, ub, device, dtype)
-    return lin, Frame(x_L, x_U)
+    lin, frame_lb, frame_ub = _reset_lin(lb, ub, device, dtype)
+    return lin, Frame(frame_lb, frame_ub)
 
 
 def _sum_interval_bounds(boxes: List[Bounds]) -> Bounds:
@@ -672,20 +673,59 @@ class ForwardFrame:
     """Explicit forward linear frame of one layer's output.
 
     ``lin`` bounds the layer output ``y`` by ``A_lb x + b_lb <= y <= A_ub x + b_ub``
-    for every symbolic input ``x`` in the box ``[x_L, x_U]`` (the perturbed
+    for every symbolic input ``x`` in the box ``[lb, ub]`` (the perturbed
     input dims, see :func:`_entry_lin_frame`). The relation is valid for every
     input of the box it was computed on, so concretizing it over any sub-box is
     sound. Only explicit frames (``A_lb is not None``) are wrapped; a lazy
-    identity frame carries no information beyond the stored box. ``ball`` is
-    the finite-p :class:`InputBall` when the frame is the entry frame of an
+    identity frame carries no information beyond the stored box. ``frame`` is
+    the finite-p :class:`Frame` when the frame is the entry frame of an
     LP_EMBEDDING spec (``None`` for box / L_inf specs and for reset frames).
     """
 
     lid: int
     lin: LinearBound
-    x_L: torch.Tensor
-    x_U: torch.Tensor
-    ball: Optional[InputBall] = None
+    frame: Frame
+
+    def row_lower_bounds(self, c: torch.Tensor, M: int) -> torch.Tensor:
+        """Concretize lower bounds for sample-major linear output rows."""
+        A_lb = cast(torch.Tensor, self.lin.A_lb)
+        A_ub = cast(torch.Tensor, self.lin.A_ub)
+        BM = c.shape[0]
+        if BM % M != 0:
+            raise ValueError(f"ForwardFrame.row_lower_bounds: c rows {BM} not divisible by M={M}")
+        B = BM // M
+        frame_B = A_lb.shape[0]
+        if frame_B not in (1, B):
+            raise ValueError(
+                f"ForwardFrame.row_lower_bounds: frame batch {frame_B} incompatible with B={B}"
+            )
+        c_view = c.view(B, M, -1).to(device=A_lb.device, dtype=A_lb.dtype)
+        if c_view.shape[-1] != A_lb.shape[1]:
+            raise ValueError(
+                f"ForwardFrame.row_lower_bounds: c has {c_view.shape[-1]} outputs, "
+                f"frame has {A_lb.shape[1]}"
+            )
+        c_pos = c_view.clamp(min=0)
+        c_neg = c_view.clamp(max=0)
+        a = (
+            torch.einsum("bmo,bos->bms", c_pos, A_lb)
+            + torch.einsum("bmo,bos->bms", c_neg, A_ub)
+        )
+        const = (
+            torch.einsum("bmo,bo->bm", c_pos, self.lin.b_lb)
+            + torch.einsum("bmo,bo->bm", c_neg, self.lin.b_ub)
+        )
+        lower = (
+            (a.clamp(min=0) * self.frame.lb.unsqueeze(1)).sum(dim=-1)
+            + (a.clamp(max=0) * self.frame.ub.unsqueeze(1)).sum(dim=-1)
+            + const
+        )
+        if self.frame.ball is not None:
+            lower = torch.maximum(
+                lower,
+                self.frame.ball.lower(a, self.frame.lb, self.frame.ub) + const,
+            )
+        return lower.reshape(BM)
 
 
 @dataclass(frozen=True)
@@ -754,6 +794,33 @@ def _clone_linear_bound(
     )
 
 
+def _clone_frame(
+    frame: Frame,
+    tensor_memo: Optional[Dict[int, torch.Tensor]] = None,
+    ball_memo: Optional[Dict[int, InputBall]] = None,
+) -> Frame:
+    """Clone symbolic bounds and finite-p radii for isolated cache ownership."""
+    tensors = {} if tensor_memo is None else tensor_memo
+    balls = {} if ball_memo is None else ball_memo
+    ball = frame.ball
+    if ball is not None:
+        copied_ball = balls.get(id(ball))
+        if copied_ball is None:
+            block_eps = (
+                None
+                if ball.block_eps is None
+                else _clone_cache_tensor(ball.block_eps, tensors)
+            )
+            copied_ball = InputBall(ball.q, ball.blocks, block_eps)
+            balls[id(ball)] = copied_ball
+        ball = copied_ball
+    return Frame(
+        _clone_cache_tensor(frame.lb, tensors),
+        _clone_cache_tensor(frame.ub, tensors),
+        ball,
+    )
+
+
 _MAXPOOL_CACHE_KEYS = (
     "maxpool_argmax_flat", "maxpool_dominant", "maxpool_lb", "maxpool_ub",
 )
@@ -785,7 +852,7 @@ class ForwardPrefixCache:
             forward_lin_max_perturbed=dual_config.forward_lin_max_perturbed,
         )
         for forward_alphas in alpha_steps:
-            bounds = compute_forward_bounds(
+            bounds, _, _ = compute_forward_bounds(
                 net, input_lb, input_ub, alphas=forward_alphas,
                 forward_lin_max_perturbed=dual_config.forward_lin_max_perturbed,
                 prefix_cache=cache,
@@ -843,15 +910,12 @@ class ForwardPrefixCache:
 
         tensor_copies: Dict[int, torch.Tensor] = {}
         frame_copies: Dict[int, Frame] = {}
+        ball_copies: Dict[int, InputBall] = {}
         self._frame_dict: Dict[int, Frame] = {}
         for lid, frame in frame_dict.items():
             copied = frame_copies.get(id(frame))
             if copied is None:
-                copied = Frame(
-                    _clone_cache_tensor(frame.x_L, tensor_copies),
-                    _clone_cache_tensor(frame.x_U, tensor_copies),
-                    frame.ball,
-                )
+                copied = _clone_frame(frame, tensor_copies, ball_copies)
                 frame_copies[id(frame)] = copied
             self._frame_dict[lid] = copied
         self._bounds_dict: Dict[int, Bounds] = {
@@ -975,41 +1039,14 @@ def compute_forward_bounds(net: Net, input_lb: torch.Tensor, input_ub: torch.Ten
                            alphas: Optional[Dict[int, torch.Tensor]] = None,
                            forward_lin_max_perturbed: Optional[int] = None,
                            prefix_cache: Optional[ForwardPrefixCache] = None,
-                           ) -> Dict[int, Bounds]:
-    """Forward bounds, natively batched with singleton auto-promotion.
+                           frame_lid: Optional[int] = None,
+                           ) -> Tuple[Dict[int, Bounds], Optional[ForwardFrame], ForwardPassStats]:
+    """Return forward bounds, an optional explicit frame, and pass statistics.
 
     ``forward_lin_max_perturbed`` caps the number of perturbed input dims for
     which the linear track stays symbolic (see :func:`_entry_lin_frame`);
     ``None`` resolves to the DualConfig default at call time rather than being
     frozen at import time.
-    """
-    if prefix_cache is None:
-        bounds_dict, _lin_state, _frame_dict, _stats = _forward_pass(
-            net, input_lb, input_ub, post_activation, alphas, forward_lin_max_perturbed,
-        )
-    else:
-        bounds_dict, _lin_state, _frame_dict, _stats = prefix_cache._resume(
-            net, input_lb, input_ub, post_activation, alphas, forward_lin_max_perturbed,
-        )
-    return bounds_dict
-
-
-@torch.no_grad()
-def compute_forward_bounds_with_frame(
-    net: Net, input_lb: torch.Tensor, input_ub: torch.Tensor,
-    *,
-    frame_lid: int,
-    post_activation: bool = False,
-    alphas: Optional[Dict[int, torch.Tensor]] = None,
-    forward_lin_max_perturbed: Optional[int] = None,
-    prefix_cache: Optional[ForwardPrefixCache] = None,
-) -> Tuple[Dict[int, Bounds], Optional[ForwardFrame], ForwardPassStats]:
-    """Forward bounds plus the explicit linear frame of layer ``frame_lid``.
-
-    Same arithmetic as :func:`compute_forward_bounds`; additionally returns the
-    :class:`ForwardFrame` of ``frame_lid`` when its forward state carries an
-    explicit frame, else ``None`` (the stored box is then the best forward
-    information for that layer).
     """
     if prefix_cache is None:
         bounds_dict, lin_state, frame_dict, stats = _forward_pass(
@@ -1020,60 +1057,14 @@ def compute_forward_bounds_with_frame(
             net, input_lb, input_ub, post_activation, alphas, forward_lin_max_perturbed,
         )
     frame: Optional[ForwardFrame] = None
-    lin = lin_state.get(frame_lid)
-    if lin is not None and lin.A_lb is not None and lin.A_ub is not None:
+    lin = None if frame_lid is None else lin_state.get(frame_lid)
+    if frame_lid is not None and lin is not None and lin.A_lb is not None and lin.A_ub is not None:
         source_frame = frame_dict[frame_lid]
-        x_L, x_U = source_frame
-        ball = source_frame.ball
         if prefix_cache is not None:
             lin = _clone_linear_bound(lin)
-            x_L, x_U = x_L.clone(), x_U.clone()
-        frame = ForwardFrame(lid=frame_lid, lin=lin, x_L=x_L, x_U=x_U, ball=ball)
+            source_frame = _clone_frame(source_frame)
+        frame = ForwardFrame(lid=frame_lid, lin=lin, frame=source_frame)
     return bounds_dict, frame, stats
-
-
-def forward_frame_row_lower_bounds(frame: ForwardFrame, c: torch.Tensor, M: int
-                                   ) -> torch.Tensor:
-    """Lower bound of every spec row ``c_i . y`` from an explicit output frame.
-
-    ``c`` is ``[B*M, n_out]`` sample-major (row ``b*M+j`` belongs to sample
-    ``b``) while the frame is ``[B, ...]`` or ``[1, ...]`` (broadcast over the
-    samples). Each row is composed with the signed tracks,
-    ``a = c+ A_lb + c- A_ub`` and ``k = c+ . b_lb + c- . b_ub``, so that
-    ``c . y >= a . x + k`` on the frame box; concretizing ``a`` over
-    ``[x_L, x_U]`` keeps the correlation between the output coordinates that a
-    box difference of the logits loses.
-    """
-    A_lb = cast(torch.Tensor, frame.lin.A_lb)
-    A_ub = cast(torch.Tensor, frame.lin.A_ub)
-    BM = c.shape[0]
-    if BM % M != 0:
-        raise ValueError(f"forward_frame_row_lower_bounds: c rows {BM} not divisible by M={M}")
-    B = BM // M
-    frame_B = A_lb.shape[0]
-    if frame_B not in (1, B):
-        raise ValueError(
-            f"forward_frame_row_lower_bounds: frame batch {frame_B} incompatible with B={B}"
-        )
-    c_view = c.view(B, M, -1).to(device=A_lb.device, dtype=A_lb.dtype)
-    if c_view.shape[-1] != A_lb.shape[1]:
-        raise ValueError(
-            f"forward_frame_row_lower_bounds: c has {c_view.shape[-1]} outputs, "
-            f"frame has {A_lb.shape[1]}"
-        )
-    c_pos = c_view.clamp(min=0)
-    c_neg = c_view.clamp(max=0)
-    a = torch.einsum("bmo,bos->bms", c_pos, A_lb) + torch.einsum("bmo,bos->bms", c_neg, A_ub)
-    const = (
-        torch.einsum("bmo,bo->bm", c_pos, frame.lin.b_lb)
-        + torch.einsum("bmo,bo->bm", c_neg, frame.lin.b_ub)
-    )
-    x_L = frame.x_L.unsqueeze(1)
-    x_U = frame.x_U.unsqueeze(1)
-    lower = (a.clamp(min=0) * x_L).sum(dim=-1) + (a.clamp(max=0) * x_U).sum(dim=-1) + const
-    if frame.ball is not None:
-        lower = torch.maximum(lower, frame.ball.lower(a, frame.x_L, frame.x_U) + const)
-    return lower.reshape(BM)
 
 
 def _forward_pass(net: Net, input_lb: torch.Tensor, input_ub: torch.Tensor,
@@ -1119,7 +1110,7 @@ def _forward_pass(net: Net, input_lb: torch.Tensor, input_ub: torch.Tensor,
             lb_in, ub_in, forward_lin_max_perturbed, device, dtype,
         )
         entry_ball = input_ball_for_frame(net, lb_in, ub_in, entry_frame, input_lb.shape)
-        entry_frame = Frame(entry_frame.x_L, entry_frame.x_U, entry_ball)
+        entry_frame = Frame(entry_frame.lb, entry_frame.ub, entry_ball)
 
     _run_forward_layers(
         net, topo_order, by_id, post_activation, alphas, device, dtype,
@@ -1222,7 +1213,6 @@ def _run_forward_layers(net: Net, topo_order: List[int], by_id: Dict[int, Layer]
             parent_box = box_state[preds[0]]
             parent_lin = lin_state[preds[0]]
             parent_frame = frame_dict[preds[0]]
-            x_L, x_U = parent_frame
             pre_lb, pre_ub = parent_box.lb, parent_box.ub
             alpha = alphas.get(lid)
             new_lin = _fwd_relu(parent_lin, pre_lb, pre_ub, alpha=alpha)
@@ -1886,8 +1876,6 @@ def _fwd_maxpool2d_lin(
     channel_base = (torch.arange(c, device=lb.device) * (h * w)).view(1, c, 1)
     idx_flat = (idx_plane.view(B, c, spatial_out) + channel_base).view(B, n_out)
 
-    x_L, x_U = frame
-
     def gather_lanes(start: int, end: int) -> LinearBound:
         idx = idx_flat[start:end]
         gather_idx = idx.unsqueeze(-1).expand(end - start, n_out, n_sym)
@@ -1897,8 +1885,8 @@ def _fwd_maxpool2d_lin(
         A_ub_out = cast(torch.Tensor, lin.A_ub)[start:end].gather(1, gather_idx).masked_fill(
             ~dom.unsqueeze(-1), 0.0)
         lower_row_max = (
-            torch.einsum("boi,bi->bo", A_lb_out.clamp(min=0), x_U[start:end])
-            + torch.einsum("boi,bi->bo", A_lb_out.clamp(max=0), x_L[start:end])
+            torch.einsum("boi,bi->bo", A_lb_out.clamp(min=0), frame.ub[start:end])
+            + torch.einsum("boi,bi->bo", A_lb_out.clamp(max=0), frame.lb[start:end])
             + b_lb_out
         )
         b_ub_out = torch.where(

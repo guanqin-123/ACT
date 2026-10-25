@@ -25,7 +25,6 @@ from act.back_end.dual_tf.tf_forward import (
     _dual_norm_exponent,
     _intersect_boxes,
     _resolve_perturbation_norm,
-    forward_frame_row_lower_bounds,
     input_block_slices,
     lp_ball_support,
 )
@@ -417,6 +416,7 @@ class DualSolver(Solver):
         self.last_forward_stats: Optional[ForwardPassStats] = None
         self.last_alpha_iterations: int = 0
         self.last_alpha_stop_reason: Optional[str] = None
+        self.last_branching_state_skipped: bool = False
 
     def capabilities(self) -> SolverCaps:
         return SolverCaps(supports_gpu=True, supports_csp=False, supports_dual=True)
@@ -442,6 +442,7 @@ class DualSolver(Solver):
         forward_frame: Optional[ForwardFrame] = None,
         n_iters: Optional[int] = None,
         time_cap: Optional[float] = None,
+        nu_time_cap: Optional[float] = None,
     ) -> DualBatchResult:
         """Solve and decode one prepared K-lane output-spec batch.
 
@@ -459,7 +460,15 @@ class DualSolver(Solver):
         honours ``dual_config.stagnation_patience`` and, when
         ``dual_config.stop_when_verified`` is set, stops once every lane's
         keep-best bound certifies under this method's own lane rule.
+        ``nu_time_cap`` (seconds from this call's start, None = never) skips
+        the extra branching-state pass (a full forward pass plus a backward
+        pass, heuristic-only) once it has elapsed: the lanes then return
+        ``bounds_dict=None`` / ``nu_per_layer=None`` and the caller must not
+        branch them. The bound itself is unaffected;
+        ``last_branching_state_skipped`` records the skip.
         """
+        call_started = _monotonic() if nu_time_cap is not None else 0.0
+        self.last_branching_state_skipped = False
         sample_bounds = next(iter(bounds_dict.values()))
         device = sample_bounds.lb.device
         dtype = sample_bounds.lb.dtype
@@ -637,10 +646,16 @@ class DualSolver(Solver):
 
         branch_bounds: Optional[Dict[int, Bounds]] = None
         branch_nu: Optional[Dict[int, torch.Tensor]] = None
+        skip_nu_pass = (
+            nu_time_cap is not None and _monotonic() - call_started >= nu_time_cap
+        )
         if return_nu and reuse_bounds_for_branching:
             branch_bounds = bounds_dict
             branch_nu = dual_result.nu_per_layer
-            if branch_nu is None:
+            if branch_nu is None and skip_nu_pass:
+                branch_bounds = None
+                self.last_branching_state_skipped = True
+            elif branch_nu is None:
                 nu_pass = self.compute_certified_bound(
                     net,
                     bounds_dict,
@@ -652,6 +667,8 @@ class DualSolver(Solver):
                     return_nu_per_layer=True,
                 )
                 branch_nu = nu_pass.nu_per_layer
+        elif return_nu and skip_nu_pass:
+            self.last_branching_state_skipped = True
         elif return_nu:
             branch_bounds, branch_nu = self.recompute_bounds_and_nu(
                 net,
@@ -1108,7 +1125,7 @@ class DualSolver(Solver):
                     + (c_view.clamp(max=0) * ub_bc).sum(dim=-1)
                 ).reshape(BM)
         if forward_frame is not None and forward_frame.lid == output_lid:
-            frame_bound = forward_frame_row_lower_bounds(forward_frame, c, M).to(
+            frame_bound = forward_frame.row_lower_bounds(c, M).to(
                 device=c.device, dtype=c.dtype
             )
             bound = frame_bound if bound is None else torch.maximum(bound, frame_bound)
@@ -1533,7 +1550,7 @@ class DualSolver(Solver):
                 eta_tensors = cast(Dict[int, torch.Tensor], etas)
                 if refresh_forward:
                     forward_alphas = _alpha_relu_forward_view(alpha_trees)
-                    fresh_bounds = compute_forward_bounds(
+                    fresh_bounds, _forward_frame, _forward_stats = compute_forward_bounds(
                         net,
                         input_lb,
                         input_ub,
@@ -1818,6 +1835,10 @@ class DualSolver(Solver):
         blowup_ratio: float = 10.0,
         max_rows_per_call: int = 4096,
         optimize_iters: int = 20,
+        stagnation_patience: int = 0,
+        stagnation_tol: Optional[float] = None,
+        max_time: float = 0.0,
+        time_cap: Optional[float] = None,
     ) -> Dict[int, Bounds]:
         """Metric-driven backward refinement of selected pre-activation bounds.
 
@@ -1830,6 +1851,11 @@ class DualSolver(Solver):
         intersected with the forward bounds (both are valid over-approximations,
         so the intersection is sound). Layers are processed in topological
         order so later refinements consume earlier ones.
+
+        ``stagnation_patience`` / ``stagnation_tol`` / ``max_time`` apply to
+        every row chunk's alpha loop; ``time_cap`` caps the whole call: each
+        chunk receives the remaining time and, once it is used up, the
+        remaining layers keep their forward bounds (sound).
         """
         if mode == "none":
             return bounds_dict
@@ -1837,6 +1863,12 @@ class DualSolver(Solver):
             raise ValueError(
                 f"intermediate_refine mode must be none|auto|all|tail, got {mode!r}"
             )
+        call_started = _monotonic() if time_cap is not None else 0.0
+
+        def _remaining_cap() -> Optional[float]:
+            if time_cap is None:
+                return None
+            return max(0.0, time_cap - (_monotonic() - call_started))
 
         stats = []
         for layer in net.layers:
@@ -1864,7 +1896,9 @@ class DualSolver(Solver):
             return bounds_dict
 
         out = dict(bounds_dict)
-        for lid in selected:
+        for layer_index, lid in enumerate(selected):
+            if layer_index > 0 and _remaining_cap() == 0.0:
+                break
             preds = net.preds.get(lid, [])
             if len(preds) != 1:
                 continue
@@ -1899,6 +1933,10 @@ class DualSolver(Solver):
                     lr_decay=0.98,
                     per_class_alpha=True,
                     refresh_forward=False,
+                    stagnation_patience=stagnation_patience,
+                    stagnation_tol=stagnation_tol,
+                    max_time=max_time,
+                    time_cap=_remaining_cap(),
                 )
                 lb_new[s:e] = res.margins[: e - s]
                 ub_new[s:e] = -res.margins[e - s:]
@@ -1924,6 +1962,10 @@ class DualSolver(Solver):
         rows_cap: int = 64,
         optimize_iters: int = 0,
         lane_chunk: int = 32,
+        stagnation_patience: int = 0,
+        stagnation_tol: Optional[float] = None,
+        max_time: float = 0.0,
+        time_cap: Optional[float] = None,
     ) -> Dict[int, Bounds]:
         """K-lane per-subproblem sparse refinement of pre-activation bounds.
 
@@ -1942,6 +1984,10 @@ class DualSolver(Solver):
         width. Each refined bound is intersected per lane with the existing
         bound (both are valid over-approximations: sound). Layers are visited
         in topological order so later refinements consume earlier ones.
+
+        The early-stop / time-cap arguments follow
+        ``refine_intermediate_bounds``: ``time_cap`` caps the whole call and
+        layers left when it is used up keep their current bounds.
         """
         if mode == "none":
             return bounds_dict
@@ -1949,6 +1995,12 @@ class DualSolver(Solver):
             raise ValueError(
                 f"per_subproblem_refine mode must be none|tail|all, got {mode!r}"
             )
+        call_started = _monotonic() if time_cap is not None else 0.0
+
+        def _remaining_cap() -> Optional[float]:
+            if time_cap is None:
+                return None
+            return max(0.0, time_cap - (_monotonic() - call_started))
 
         out = self._harden_split_bounds(bounds_dict, split_signs)
 
@@ -1966,7 +2018,9 @@ class DualSolver(Solver):
             return out
         selected = unstable_lids[-2:] if mode == "tail" else unstable_lids
 
-        for lid in selected:
+        for layer_index, lid in enumerate(selected):
+            if layer_index > 0 and _remaining_cap() == 0.0:
+                break
             preds = net.preds.get(lid, [])
             if len(preds) != 1:
                 continue
@@ -2006,6 +2060,10 @@ class DualSolver(Solver):
                     lr_decay=0.98,
                     per_class_alpha=True,
                     refresh_forward=False,
+                    stagnation_patience=stagnation_patience,
+                    stagnation_tol=stagnation_tol,
+                    max_time=max_time,
+                    time_cap=_remaining_cap(),
                 )
                 margins[k0:k1] = res.margins.view(k1 - k0, m_rows)
             lb_new = margins[:, :n_amb]
@@ -2056,7 +2114,7 @@ class DualSolver(Solver):
 
         with torch.no_grad():
             forward_alphas = _alpha_relu_forward_view(alpha_state) or None
-            fresh_bounds = compute_forward_bounds(
+            fresh_bounds, _forward_frame, _forward_stats = compute_forward_bounds(
                 net, input_lb, input_ub, post_activation=False, alphas=forward_alphas,
             )
             result = self.compute_certified_bound(
@@ -2117,14 +2175,14 @@ class DualSolver(Solver):
         """
         forward_frame: Optional[ForwardFrame] = None
         if bounds_dict is None:
-            from act.back_end.dual_tf.tf_forward import compute_forward_bounds_with_frame
+            from act.back_end.dual_tf.tf_forward import compute_forward_bounds
             from act.back_end.verifier import (
                 gather_input_spec_layers,
                 seed_from_input_specs,
             )
             spec_layers = gather_input_spec_layers(net)
             seed_bounds = seed_from_input_specs(spec_layers)
-            bounds_dict, forward_frame, forward_stats = compute_forward_bounds_with_frame(
+            bounds_dict, forward_frame, forward_stats = compute_forward_bounds(
                 net, seed_bounds.lb, seed_bounds.ub,
                 frame_lid=self._spec_layer_id(net),
                 post_activation=False,
