@@ -23,12 +23,14 @@ from .tf_mlp import (
     forward_reduce_sum, forward_sign,
 )
 from .tf_cnn import (
-    backward_conv2d, backward_maxpool2d, backward_avgpool2d, backward_upsample,
-    forward_conv2d, forward_maxpool2d, forward_avgpool2d, forward_upsample,
+    backward_conv1d, backward_conv2d, backward_maxpool2d, backward_avgpool2d,
+    backward_upsample, forward_conv1d, forward_conv2d, forward_maxpool2d,
+    forward_avgpool2d, forward_upsample,
 )
 from .tf_smooth import (
     backward_sigmoid, backward_tanh, backward_erf, backward_sqrt, backward_sin, backward_cos, backward_quantize,
-    forward_sigmoid, forward_tanh, forward_erf, forward_sqrt, forward_sin, forward_cos, forward_quantize,
+    backward_square, forward_sigmoid, forward_tanh, forward_erf, forward_sqrt,
+    forward_square, forward_sin, forward_cos, forward_quantize,
 )
 from .tf_rnn import forward_lstm, backward_lstm, forward_gru, backward_gru
 from .tf_transformer import (
@@ -36,6 +38,8 @@ from .tf_transformer import (
     forward_matmul, backward_matmul,
     forward_mul, backward_mul,
     forward_mha, backward_mha,
+    forward_mha_split, backward_mha_split,
+    forward_mha_join, backward_mha_join,
     forward_layernorm, backward_layernorm,
     forward_softmax, backward_softmax,
     forward_gelu, backward_gelu,
@@ -389,6 +393,94 @@ def backward_sub(L: Layer, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
     return [nu, -nu], contrib
 
 
+# ---- DIV ----
+def forward_div(
+    L: Layer, parent_boxes: List[Bounds], parent_lins: List[LinearBound],
+    parent_frames: List[Frame], preds: List[int], post_activation: bool,
+    device: torch.device, dtype: torch.dtype,
+) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
+    """Bound element-wise ``x / y`` and reset the dual frame on that box.
+
+    Division is non-affine in both operands.  The four endpoint combinations
+    give its exact interval range when the denominator has a fixed sign.  A
+    denominator interval containing zero is conservatively unbounded.
+    """
+    if len(parent_boxes) != 2:
+        raise ValueError(
+            f"forward_div: layer {L.id} expects 2 predecessors, "
+            f"got {len(parent_boxes)}"
+        )
+    x_lb = parent_boxes[0].lb.flatten(start_dim=1)
+    x_ub = parent_boxes[0].ub.flatten(start_dim=1)
+    y_lb = parent_boxes[1].lb.flatten(start_dim=1)
+    y_ub = parent_boxes[1].ub.flatten(start_dim=1)
+    try:
+        x_lb, x_ub, y_lb, y_ub = torch.broadcast_tensors(
+            x_lb, x_ub, y_lb, y_ub
+        )
+    except RuntimeError as exc:
+        raise ValueError(
+            f"forward_div: layer {L.id} operands are not broadcast-compatible: "
+            f"{tuple(x_lb.shape)} and {tuple(y_lb.shape)}"
+        ) from exc
+    candidates = torch.stack((
+        x_lb / y_lb,
+        x_lb / y_ub,
+        x_ub / y_lb,
+        x_ub / y_ub,
+    ))
+    lb = candidates.amin(dim=0)
+    ub = candidates.amax(dim=0)
+    crosses_zero = (y_lb <= 0) & (y_ub >= 0)
+    lb = torch.where(crosses_zero, torch.full_like(lb, -torch.inf), lb)
+    ub = torch.where(crosses_zero, torch.full_like(ub, torch.inf), ub)
+    out = Bounds(lb, ub)
+    lin, frame = _reset_forward_box(lb, ub, device, dtype)
+    return out, out, lin, frame
+
+
+def backward_div(L: Layer, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
+                 preds: List[int], M: int = 1, alpha=None
+                 ) -> Tuple[List[torch.Tensor], torch.Tensor]:
+    """Sound interval-box backward relaxation for element-wise division.
+
+    The DIV output was reset to an independent interval box in ``forward_div``.
+    Absorb its support value according to the sign of each dual coefficient and
+    route zero to both operands.  This deliberately sacrifices correlation but
+    never assumes an unsound local derivative of ``x / y``.
+    """
+    if len(preds) != 2:
+        raise ValueError(
+            f"backward_div: layer {L.id} expects 2 predecessors, got {len(preds)}"
+        )
+    output = bounds_dict[L.id]
+    batch_size = output.lb.shape[0]
+    if nu.shape[0] % batch_size != 0:
+        raise ValueError(
+            f"backward_div: dual batch {nu.shape[0]} is not divisible by "
+            f"bound batch {batch_size}"
+        )
+    copies = nu.shape[0] // batch_size
+    lower = output.lb.flatten(start_dim=1).repeat_interleave(copies, dim=0)
+    upper = output.ub.flatten(start_dim=1).repeat_interleave(copies, dim=0)
+    dual = nu.flatten(start_dim=1)
+    if dual.shape != lower.shape:
+        raise ValueError(
+            f"backward_div: layer {L.id} dual/output shapes differ: "
+            f"{tuple(dual.shape)} vs {tuple(lower.shape)}"
+        )
+    endpoint = torch.where(dual >= 0, lower, upper)
+    contrib = (dual * endpoint).sum(dim=1)
+    pred_nus = [
+        torch.zeros(
+            nu.shape[0], bounds_dict[pred].lb.flatten(start_dim=1).shape[1],
+            device=nu.device, dtype=nu.dtype,
+        )
+        for pred in preds
+    ]
+    return pred_nus, contrib
+
+
 # ---- CONCAT ----
 def forward_concat(
     L: Layer, parent_boxes: List[Bounds], parent_lins: List[LinearBound],
@@ -494,6 +586,7 @@ class DualTF:
         LayerKind.TANH.value:       forward_tanh,
         LayerKind.ERF.value:        forward_erf,
         LayerKind.SQRT.value:       forward_sqrt,
+        LayerKind.SQUARE.value:     forward_square,
         LayerKind.SIN.value:        forward_sin,
         LayerKind.COS.value:        forward_cos,
         LayerKind.QUANTIZE.value:   forward_quantize,
@@ -513,6 +606,7 @@ class DualTF:
         LayerKind.REDUCE_SUM.value: forward_reduce_sum,
         LayerKind.ADD.value:        forward_add,
         LayerKind.SUB.value:        forward_sub,
+        LayerKind.DIV.value:        forward_div,
         LayerKind.CONCAT.value:     forward_concat,
         LayerKind.LSTM.value:       forward_lstm,
         LayerKind.GRU.value:        forward_gru,
@@ -521,8 +615,8 @@ class DualTF:
         LayerKind.MATMUL.value:     forward_matmul,
         LayerKind.MUL.value:        forward_mul,
         LayerKind.SIGN.value:       forward_sign,
-        LayerKind.MHA_SPLIT.value:  forward_mha,
-        LayerKind.MHA_JOIN.value:   forward_mha,
+        LayerKind.MHA_SPLIT.value:  forward_mha_split,
+        LayerKind.MHA_JOIN.value:   forward_mha_join,
         LayerKind.MASK_ADD.value:   forward_mha,
         LayerKind.LAYERNORM.value:  forward_layernorm,
         LayerKind.SOFTMAX.value:    forward_softmax,
@@ -562,6 +656,7 @@ class DualTF:
         LayerKind.TANH.value:       backward_tanh,
         LayerKind.ERF.value:        backward_erf,
         LayerKind.SQRT.value:       backward_sqrt,
+        LayerKind.SQUARE.value:     backward_square,
         LayerKind.SIN.value:        backward_sin,
         LayerKind.COS.value:        backward_cos,
         LayerKind.QUANTIZE.value:   backward_quantize,
@@ -581,6 +676,7 @@ class DualTF:
         LayerKind.REDUCE_SUM.value: backward_reduce_sum,
         LayerKind.ADD.value:        backward_add,
         LayerKind.SUB.value:        backward_sub,
+        LayerKind.DIV.value:        backward_div,
         LayerKind.CONCAT.value:     backward_concat,
         LayerKind.LSTM.value:       backward_lstm,
         LayerKind.GRU.value:        backward_gru,
@@ -589,8 +685,8 @@ class DualTF:
         LayerKind.MATMUL.value:     backward_matmul,
         LayerKind.MUL.value:        backward_mul,
         LayerKind.SIGN.value:       backward_sign,
-        LayerKind.MHA_SPLIT.value:  backward_mha,
-        LayerKind.MHA_JOIN.value:   backward_mha,
+        LayerKind.MHA_SPLIT.value:  backward_mha_split,
+        LayerKind.MHA_JOIN.value:   backward_mha_join,
         LayerKind.MASK_ADD.value:   backward_mha,
         LayerKind.LAYERNORM.value:  backward_layernorm,
         LayerKind.SOFTMAX.value:    backward_softmax,
@@ -600,14 +696,13 @@ class DualTF:
     _UNIMPLEMENTED_KINDS = frozenset({
         LayerKind.LSTM.value,
         LayerKind.GRU.value,
-        LayerKind.MHA_SPLIT.value,
-        LayerKind.MHA_JOIN.value,
         LayerKind.MASK_ADD.value,
         # Backward kernels for these are stubs that raise NotImplementedError
         # at runtime. Listing them here makes supports_layer return False so
         # upstream callers (validate_verifier) cleanly SKIP affected nets
-        # instead of surfacing runtime ERROR. ATT_SCORES / ATT_MIX / CONCAT now
-        # have real backward kernels and are intentionally absent.
+        # instead of surfacing runtime ERROR. ATT_SCORES / ATT_MIX / CONCAT /
+        # MHA_SPLIT / MHA_JOIN now have real backward kernels and are
+        # intentionally absent.
     })
 
     def supports_layer(self, layer_kind: str) -> bool:
@@ -619,6 +714,10 @@ class DualTF:
 # goes here. Membership is the ground truth for stub detection; net_factory filters
 # by identity against these sets.
 # To implement a stub: fill its body AND remove it from this set in the same commit.
+# CONV1D handlers live in tf_cnn and are registered here, after the class body.
+DualTF._FORWARD_REGISTRY[LayerKind.CONV1D.value] = forward_conv1d
+DualTF._BACKWARD_REGISTRY[LayerKind.CONV1D.value] = backward_conv1d
+
 _FORWARD_STUBS = frozenset({
     forward_lstm, forward_gru, forward_mha,
 })

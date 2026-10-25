@@ -390,6 +390,14 @@ net_factory:
   # manifest-driven netfactory sweep exercises them without workflow changes.
 
   layer_testing:
+    mha_roles:
+      sweep: false  # MHA_JOIN hybrid-zonotope bounds do not support batched mixed widths.
+      sequence_length: 2
+      hidden_size: 2
+      input_spec: {kind: LP_EMBEDDING, center_val: 0.0, eps: 1.0, p_norm: 1.0, perturbed_positions: [0]}
+      projection: {weight: [[1.0, 0.5], [-0.5, 1.0]], bias: [0.1, -0.2]}
+      roles: [{role: query, position: 0}, {role: value, feature: 1}, {role: all}]
+      assert_threshold: 100.0
     lp_dense:
       sequence_length: 2
       embedding_dim: 2

@@ -9,9 +9,10 @@
 
 # Note: Gradient enablement for dual backward helpers is governed by the
 # caller's torch.set_grad_enabled() context (see DualSolver.evaluate_spec).
-# @torch.no_grad() decorators on these helpers were removed to allow
-# gradient flow during robust training; verify_once / verify_bab paths
-# remain under no_grad via their own outer guards.
+# Backward helpers allow gradient flow during robust training. Element-wise
+# forward handlers here retain @torch.no_grad(); GELU forward in tf_transformer
+# follows the caller's context. verify_once / verify_bab paths remain under
+# no_grad via their own outer guards.
 
 import math
 
@@ -19,7 +20,10 @@ import torch
 from typing import Tuple, Callable, Dict, Any, List
 from act.back_end.core import Bounds
 from act.back_end.interval_tf.tf_mlp import _sin_interval, _cos_interval, _quantize_params_flat, _quantize_qdq_value
-from .tf_forward import LinearBound, Frame, _reset_forward_box
+from .tf_forward import (
+    LinearBound, Frame, _concretize, _fwd_elementwise_planes, _intersect_boxes,
+    _reset_forward_box,
+)
 
 
 # ---- Shared primitives ----
@@ -175,6 +179,44 @@ def compute_smooth_relaxation(
     return k_lower, b_lower, k_upper, b_upper
 
 
+def forward_smooth_planes(
+    parent_boxes: List[Bounds], parent_lins: List[LinearBound],
+    parent_frames: List[Frame], post_activation: bool,
+    device: torch.device, dtype: torch.dtype,
+    int_lb: torch.Tensor, int_ub: torch.Tensor,
+    planes: Callable[[torch.Tensor, torch.Tensor],
+                     Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
+    """Forward state of an element-wise activation with interval box ``[int_lb, int_ub]``.
+
+    When the predecessor carries an explicit linear frame, the sound planes
+    ``planes(pre_lb, pre_ub) -> (k_lo, b_lo, k_hi, b_hi)`` are composed through
+    it (:func:`_fwd_elementwise_planes`), concretized over the frame and
+    intersected with the interval box, and the frame is kept -- the same
+    pattern as :func:`tf_mlp.forward_relu`. A lazy-identity frame keeps the
+    interval-reset behaviour unchanged.
+    """
+    parent_box, parent_lin, parent_frame = parent_boxes[0], parent_lins[0], parent_frames[0]
+    pre_lb, pre_ub = parent_box.lb, parent_box.ub
+    new_lin = None
+    if parent_lin.A_lb is not None and parent_lin.A_ub is not None:
+        k_lo, b_lo, k_hi, b_hi = planes(pre_lb, pre_ub)
+        new_lin = _fwd_elementwise_planes(parent_lin, k_lo, b_lo, k_hi, b_hi)
+    if new_lin is None:
+        out = Bounds(int_lb, int_ub)
+        stored = out if post_activation else Bounds(pre_lb, pre_ub)
+        lin, frame = _reset_forward_box(int_lb, int_ub, device, dtype)
+        return stored, out, lin, frame
+    lin_lb, lin_ub = _concretize(new_lin, parent_frame)
+    lb, ub = _intersect_boxes(lin_lb, lin_ub, int_lb, int_ub)
+    out = Bounds(lb, ub)
+    stored = out if post_activation else Bounds(pre_lb, pre_ub)
+    if post_activation:
+        lin, frame = _reset_forward_box(lb, ub, device, dtype)
+        return stored, out, lin, frame
+    return stored, out, new_lin, parent_frame
+
+
 def dual_smooth_backward(
     nu: torch.Tensor, bounds: Bounds,
     func: Callable[[torch.Tensor], torch.Tensor],
@@ -231,17 +273,13 @@ def forward_sigmoid(
     parent_frames: List[Frame], preds: List[int], post_activation: bool,
     device: torch.device, dtype: torch.dtype,
 ) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
-    """Forward pass for SIGMOID activation.
-
-    Body copied from tf_forward.py lines 426-430 (SIGMOID branch).
-    Returns (stored, out, lin, frame).
-    """
+    """Forward pass for SIGMOID: monotone interval box, frame kept when explicit."""
     parent_box = parent_boxes[0]
-    pre_lb, pre_ub = parent_box.lb, parent_box.ub
-    out = Bounds(torch.sigmoid(pre_lb), torch.sigmoid(pre_ub))
-    stored = out if post_activation else Bounds(pre_lb, pre_ub)
-    lin, frame = _reset_forward_box(out.lb, out.ub, device, dtype)
-    return stored, out, lin, frame
+    return forward_smooth_planes(
+        parent_boxes, parent_lins, parent_frames, post_activation, device, dtype,
+        torch.sigmoid(parent_box.lb), torch.sigmoid(parent_box.ub),
+        lambda l, u: compute_smooth_relaxation(l, u, sigmoid, dsigmoid),
+    )
 
 
 def backward_sigmoid(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
@@ -267,17 +305,13 @@ def forward_tanh(
     parent_frames: List[Frame], preds: List[int], post_activation: bool,
     device: torch.device, dtype: torch.dtype,
 ) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
-    """Forward pass for TANH activation.
-
-    Body copied from tf_forward.py lines 432-436 (TANH branch).
-    Returns (stored, out, lin, frame).
-    """
+    """Forward pass for TANH: monotone interval box, frame kept when explicit."""
     parent_box = parent_boxes[0]
-    pre_lb, pre_ub = parent_box.lb, parent_box.ub
-    out = Bounds(torch.tanh(pre_lb), torch.tanh(pre_ub))
-    stored = out if post_activation else Bounds(pre_lb, pre_ub)
-    lin, frame = _reset_forward_box(out.lb, out.ub, device, dtype)
-    return stored, out, lin, frame
+    return forward_smooth_planes(
+        parent_boxes, parent_lins, parent_frames, post_activation, device, dtype,
+        torch.tanh(parent_box.lb), torch.tanh(parent_box.ub),
+        lambda l, u: compute_smooth_relaxation(l, u, tanh, dtanh),
+    )
 
 
 def backward_tanh(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
@@ -305,11 +339,11 @@ def forward_erf(
 ) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
     """Forward pass for ERF activation, mirroring TANH."""
     parent_box = parent_boxes[0]
-    pre_lb, pre_ub = parent_box.lb, parent_box.ub
-    out = Bounds(torch.erf(pre_lb), torch.erf(pre_ub))
-    stored = out if post_activation else Bounds(pre_lb, pre_ub)
-    lin, frame = _reset_forward_box(out.lb, out.ub, device, dtype)
-    return stored, out, lin, frame
+    return forward_smooth_planes(
+        parent_boxes, parent_lins, parent_frames, post_activation, device, dtype,
+        torch.erf(parent_box.lb), torch.erf(parent_box.ub),
+        lambda l, u: compute_smooth_relaxation(l, u, erf, derf),
+    )
 
 
 def backward_erf(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
@@ -360,6 +394,41 @@ def dual_sqrt_backward(nu: torch.Tensor, bounds: Bounds, M: int = 1):
     lo_e = torch.clamp(bounds.lb, min=0.0)
     hi_e = torch.clamp(bounds.ub, min=0.0)
     return _dual_constant_box_backward(nu, torch.sqrt(lo_e), torch.sqrt(hi_e), M)
+
+
+# ---- SQUARE ----
+
+@torch.no_grad()
+def forward_square(
+    L: Any, parent_boxes: List[Bounds], parent_lins: List[LinearBound],
+    parent_frames: List[Frame], preds: List[int], post_activation: bool,
+    device: torch.device, dtype: torch.dtype,
+) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
+    """Exact interval range for element-wise ``x ** 2``."""
+    lower = parent_boxes[0].lb
+    upper = parent_boxes[0].ub
+    out_lower = torch.where(
+        (lower <= 0) & (upper >= 0),
+        torch.zeros_like(lower),
+        torch.minimum(lower.square(), upper.square()),
+    )
+    out_upper = torch.maximum(lower.square(), upper.square())
+    out = Bounds(out_lower, out_upper)
+    lin, frame = _reset_forward_box(out_lower, out_upper, device, dtype)
+    return out, out, lin, frame
+
+
+def backward_square(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
+                    preds: List[int], M: int = 1, alpha=None
+                    ) -> Tuple[List[torch.Tensor], torch.Tensor]:
+    """Absorb SQUARE's interval-box support and route zero upstream."""
+    if len(preds) != 1:
+        raise ValueError(f"SQUARE expects 1 predecessor, got {len(preds)}")
+    bounds = bounds_dict.get(L.id)
+    if bounds is None:
+        raise ValueError(f"backward_square: layer {L.id} missing bounds in bounds_dict")
+    nu_out, contrib = _dual_constant_box_backward(nu, bounds.lb, bounds.ub, M)
+    return [nu_out], contrib
 
 
 # ---- SIN ----

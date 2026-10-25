@@ -62,15 +62,8 @@ InputLayer → InputSpecLayer → Model → OutputSpecLayer
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
 from typing import Dict, Any, override
 import enum
-
-# Import Layer from core to avoid circular import issues
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .core import Layer
 
 import torch
 import torch.nn as nn
@@ -286,6 +279,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
             "weight_pos",
             "weight_neg",
             "activation",
+            "token_wise",
             "input_shape",
             "output_shape",
         ],
@@ -787,7 +781,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     LayerKind.SOFTMAX.value: {
         "params_required": ["axis"],
-        "params_optional": ["input_shape", "output_shape"],
+        "params_optional": ["input_shape", "output_shape", "rowsize"],
     },
     LayerKind.MHA.value: {
         "params_required": ["num_heads"],
@@ -900,7 +894,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     LayerKind.GATHER.value: {
         "params_required": ["indices", "axis"],
-        "params_optional": ["input_shape", "output_shape"],
+        "params_optional": ["input_shape", "output_shape", "scalar_indices"],
     },
     LayerKind.PAD.value: {
         "params_required": ["pad"],

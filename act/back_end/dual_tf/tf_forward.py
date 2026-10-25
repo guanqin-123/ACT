@@ -1386,6 +1386,77 @@ def _fwd_relu(lin: LinearBound, lb: torch.Tensor, ub: torch.Tensor,
     )
 
 
+def _fwd_elementwise_planes(
+    lin: LinearBound,
+    k_lo: torch.Tensor, b_lo: torch.Tensor,
+    k_hi: torch.Tensor, b_hi: torch.Tensor,
+) -> Optional[LinearBound]:
+    """Compose explicit dual-track bounds through element-wise planes.
+
+    Given ``k_lo x + b_lo <= f(x) <= k_hi x + b_hi`` on the layer's input box
+    (``[B, n]`` coefficients, either sign), each plane picks the input track of
+    matching sign, exactly as :func:`_fwd_scale` does for a signed scale.
+    Returns ``None`` on the lazy-identity frame or a feature-width mismatch,
+    which callers treat as "keep the interval-reset behaviour".
+    """
+    if lin.A_lb is None or lin.A_ub is None:
+        return None
+    if lin.A_lb.shape[1] != k_lo.shape[1] or lin.b_lb.shape[1] != k_lo.shape[1]:
+        return None
+    k_lo_p, k_lo_n = k_lo.clamp(min=0), k_lo.clamp(max=0)
+    k_hi_p, k_hi_n = k_hi.clamp(min=0), k_hi.clamp(max=0)
+    return LinearBound(
+        A_lb=k_lo_p.unsqueeze(-1) * lin.A_lb + k_lo_n.unsqueeze(-1) * lin.A_ub,
+        b_lb=k_lo_p * lin.b_lb + k_lo_n * lin.b_ub + b_lo,
+        A_ub=k_hi_p.unsqueeze(-1) * lin.A_ub + k_hi_n.unsqueeze(-1) * lin.A_lb,
+        b_ub=k_hi_p * lin.b_ub + k_hi_n * lin.b_lb + b_hi,
+    )
+
+
+def _fwd_rowwise_planes(
+    lin: LinearBound, row: int,
+    a_lo: torch.Tensor, c_lo: torch.Tensor,
+    a_hi: torch.Tensor, c_hi: torch.Tensor,
+) -> Optional[LinearBound]:
+    """Compose explicit dual-track bounds through per-row matrix planes.
+
+    The op acts independently on contiguous ``row``-sized feature blocks with
+    planes ``a_lo x + c_lo <= f(x) <= a_hi x + c_hi`` per block (``a`` shaped
+    ``[B*n_rows, row, row]``, ``c`` shaped ``[B*n_rows, row]``, as returned by
+    the local vector relaxation). Signed entries pick the matching input track
+    per coefficient. Returns ``None`` on the lazy-identity frame or a width
+    mismatch.
+    """
+    if lin.A_lb is None or lin.A_ub is None:
+        return None
+    B, n, n_sym = lin.A_lb.shape
+    if n % row != 0 or lin.b_lb.shape[1] != n or a_lo.shape[0] != B * (n // row):
+        return None
+    n_rows = n // row
+    A_lb = lin.A_lb.reshape(B, n_rows, row, n_sym)
+    A_ub = lin.A_ub.reshape(B, n_rows, row, n_sym)
+    b_lb = lin.b_lb.reshape(B, n_rows, row)
+    b_ub = lin.b_ub.reshape(B, n_rows, row)
+    a_lo = a_lo.reshape(B, n_rows, row, row)
+    a_hi = a_hi.reshape(B, n_rows, row, row)
+    a_lo_p, a_lo_n = a_lo.clamp(min=0), a_lo.clamp(max=0)
+    a_hi_p, a_hi_n = a_hi.clamp(min=0), a_hi.clamp(max=0)
+    A_lb_new = (torch.einsum("brij,brjs->bris", a_lo_p, A_lb)
+                + torch.einsum("brij,brjs->bris", a_lo_n, A_ub))
+    b_lb_new = (torch.einsum("brij,brj->bri", a_lo_p, b_lb)
+                + torch.einsum("brij,brj->bri", a_lo_n, b_ub)
+                + c_lo.reshape(B, n_rows, row))
+    A_ub_new = (torch.einsum("brij,brjs->bris", a_hi_p, A_ub)
+                + torch.einsum("brij,brjs->bris", a_hi_n, A_lb))
+    b_ub_new = (torch.einsum("brij,brj->bri", a_hi_p, b_ub)
+                + torch.einsum("brij,brj->bri", a_hi_n, b_lb)
+                + c_hi.reshape(B, n_rows, row))
+    return LinearBound(
+        A_lb=A_lb_new.reshape(B, n, n_sym), b_lb=b_lb_new.reshape(B, n),
+        A_ub=A_ub_new.reshape(B, n, n_sym), b_ub=b_ub_new.reshape(B, n),
+    )
+
+
 def _fwd_bias(layer: Layer, lin: LinearBound) -> LinearBound:
     """Compose dual-track affine bounds through a bias layer.
 

@@ -63,12 +63,18 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from collections import Counter
-from typing import Callable, Dict, List, Literal, Optional, Protocol, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Protocol, Sequence, Set, Tuple, cast
 
 import torch
 
 from act.back_end.bab.node import SubproblemBatch
 from act.back_end.solver.solver_base import SolveStatus
+from act.back_end.solver.solver_dual import (
+    AlphaState,
+    _alpha_tree_concat_lanes,
+    _alpha_tree_gather_lanes,
+    _alpha_tree_map,
+)
 from act.util.device_manager import get_default_dtype
 
 
@@ -217,51 +223,34 @@ class RandomBounding(BoundingStrategy):
 
 
 def _clone_optional_dict(
-    d: Optional[Dict[int, torch.Tensor]],
-) -> Optional[Dict[int, torch.Tensor]]:
-    return {key: tensor.clone() for key, tensor in d.items()} if d is not None else None
+    d: Optional[Dict[int, Any]],
+) -> Optional[Dict[int, Any]]:
+    return cast(
+        Optional[Dict[int, Any]],
+        _alpha_tree_map(d, lambda leaf: leaf.clone()),
+    )
 
 
 def _index_optional_dict(
-    d: Optional[Dict[int, torch.Tensor]], idx: torch.Tensor
-) -> Optional[Dict[int, torch.Tensor]]:
-    if d is None:
-        return None
-    return {key: tensor.index_select(0, idx.to(tensor.device)) for key, tensor in d.items()}
+    d: Optional[Dict[int, Any]], idx: torch.Tensor
+) -> Optional[Dict[int, Any]]:
+    return cast(Optional[Dict[int, Any]], _alpha_tree_gather_lanes(d, idx))
 
 
 def _merge_optional_dict(
-    existing: Optional[Dict[int, torch.Tensor]],
+    existing: Optional[Dict[int, Any]],
     n_existing: int,
-    incoming: Optional[Dict[int, torch.Tensor]],
+    incoming: Optional[Dict[int, Any]],
     n_incoming: int,
-) -> Optional[Dict[int, torch.Tensor]]:
+) -> Optional[Dict[int, Any]]:
     # Per-key concat with key-union; a subproblem missing a key is padded with
     # zeros (e.g. split_signs keys differ per branch — a missing layer means "not
     # split", i.e. all-zero signs). Keeps the pool lossless across heterogeneous
     # incremental-state/split structures.
-    if existing is None and incoming is None:
-        return None
-    existing = existing or {}
-    incoming = incoming or {}
-    merged: Dict[int, torch.Tensor] = {}
-    for key in sorted(set(existing) | set(incoming)):
-        te = existing.get(key)
-        ti = incoming.get(key)
-        ref = te if te is not None else ti
-        assert ref is not None
-        if te is not None and ti is not None:
-            assert te.shape[1:] == ti.shape[1:], (
-                f"optional dict key {key} trailing shape mismatch: "
-                f"existing {tuple(te.shape[1:])} vs incoming {tuple(ti.shape[1:])}"
-            )
-        trailing = ref.shape[1:]
-        if te is None:
-            te = torch.zeros((n_existing, *trailing), dtype=ref.dtype, device=ref.device)
-        if ti is None:
-            ti = torch.zeros((n_incoming, *trailing), dtype=ref.dtype, device=ref.device)
-        merged[key] = torch.cat([te, ti], dim=0)
-    return merged
+    return cast(
+        Optional[Dict[int, Any]],
+        _alpha_tree_concat_lanes(existing, incoming, n_existing, n_incoming),
+    )
 
 
 class OrderFunction(Protocol):
@@ -380,7 +369,7 @@ class TopKBounding(BoundingStrategy):
         self._parent_margins: Optional[torch.Tensor] = None
         self._node_id: Optional[torch.Tensor] = None
         self._parent_id: Optional[torch.Tensor] = None
-        self._incremental_alpha: Optional[Dict[int, torch.Tensor]] = None
+        self._incremental_alpha: Optional[AlphaState] = None
         self._incremental_eta: Optional[Dict[int, torch.Tensor]] = None
         self._split_signs: Optional[Dict[int, torch.Tensor]] = None
 
@@ -832,7 +821,7 @@ class MCTSBounding(BoundingStrategy):
         self._parent_margins: Optional[torch.Tensor] = None
         self._node_id: Optional[torch.Tensor] = None
         self._parent_id: Optional[torch.Tensor] = None
-        self._incremental_alpha: Optional[Dict[int, torch.Tensor]] = None
+        self._incremental_alpha: Optional[AlphaState] = None
         self._incremental_eta: Optional[Dict[int, torch.Tensor]] = None
         self._split_signs: Optional[Dict[int, torch.Tensor]] = None
 

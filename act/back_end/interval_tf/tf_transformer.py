@@ -47,19 +47,41 @@ def tf_posenc(L: Layer, Bin: Bounds) -> Fact:
     C.replace(Con("EQ", tuple(L.out_vars+L.in_vars), {"tag":f"posenc:{L.id}"})); C.add_box(L.id,L.out_vars,B); return Fact(B,C)
 
 def tf_layernorm(L: Layer, Bin: Bounds) -> Fact:
+    """Interval LayerNorm over contiguous groups of ``gamma.numel()`` features.
+
+    Each group (one token of a flattened ``[B, L*W]`` sequence) gets its own
+    mean and, for the standard variant, its own variance bound, like torch
+    ``LayerNorm`` over the trailing gamma axis. A gamma spanning the whole
+    non-batch width is one group per sample, reduced over all non-batch dims.
+    """
     if Bin.lb.dim() < 2:
         raise ValueError(f"LAYERNORM expects batched bounds [B, *], got shape {tuple(Bin.lb.shape)}")
     variant = L.params.get("variant", L.params.get("layer_norm", "standard"))
-    norm_dims = tuple(range(1, Bin.lb.dim()))
-    mu_lb = torch.mean(Bin.lb, dim=norm_dims, keepdim=True)
-    mu_ub = torch.mean(Bin.ub, dim=norm_dims, keepdim=True)
-    cx_lb, cx_ub = Bin.lb - mu_ub, Bin.ub - mu_lb
+    gamma = cast(torch.Tensor, L.params["gamma"])
+    beta = cast(torch.Tensor, L.params["beta"])
+    width = int(gamma.numel())
+    features = int(Bin.lb.shape[1:].numel())
+    if width == 0 or features % width:
+        raise ValueError(
+            f"LAYERNORM {L.id}: gamma width {width} does not divide the flattened input width {features}"
+        )
+    if width == features:
+        grp_lb, grp_ub = Bin.lb, Bin.ub
+        norm_dims: Tuple[int, ...] = tuple(range(1, Bin.lb.dim()))
+    else:
+        grp_lb = Bin.lb.reshape(Bin.lb.shape[0], features // width, width)
+        grp_ub = Bin.ub.reshape(Bin.ub.shape[0], features // width, width)
+        norm_dims = (-1,)
+        gamma, beta = gamma.reshape(width), beta.reshape(width)
+    mu_lb = torch.mean(grp_lb, dim=norm_dims, keepdim=True)
+    mu_ub = torch.mean(grp_ub, dim=norm_dims, keepdim=True)
+    cx_lb, cx_ub = grp_lb - mu_ub, grp_ub - mu_lb
     if variant == "no_var":
         # The no-variance form omits the std division, so the centered
         # interval already is the normalized output (tighter, no relaxation).
         sh_lb, sh_ub = cx_lb, cx_ub
     else:
-        radius = 0.5 * (Bin.ub - Bin.lb)
+        radius = 0.5 * (grp_ub - grp_lb)
         v_lo = torch.zeros_like(mu_lb)
         v_hi = torch.mean((2 * radius) ** 2, dim=norm_dims, keepdim=True)
         eps=float(cast(float, L.params.get("eps",1e-5)))
@@ -67,15 +89,9 @@ def tf_layernorm(L: Layer, Bin: Bounds) -> Fact:
         inv_lb = torch.rsqrt(v_hi + eps_t)
         inv_ub = torch.rsqrt(torch.clamp_min(v_lo, 0.0) + eps_t)
         sh_lb, sh_ub = scale_interval(cx_lb, cx_ub, inv_lb, inv_ub)
-    gamma = cast(torch.Tensor, L.params["gamma"])
-    beta = cast(torch.Tensor, L.params["beta"])
-    if gamma.numel() != sh_lb.shape[-1] and sh_lb.shape[-1] % gamma.numel() == 0:
-        repeat = sh_lb.shape[-1] // gamma.numel()
-        gamma = gamma.repeat(repeat)
-        beta = beta.repeat(repeat)
     lb=torch.where(gamma>=0, gamma*sh_lb+beta, gamma*sh_ub+beta)
     ub=torch.where(gamma>=0, gamma*sh_ub+beta, gamma*sh_lb+beta)
-    lb, ub = _round_nan_outward(lb, ub)
+    lb, ub = _round_nan_outward(lb.reshape(Bin.lb.shape), ub.reshape(Bin.ub.shape))
     B=Bounds(lb,ub); C=ConSet(); C.replace(Con("INEQ", tuple(L.out_vars+L.in_vars), {"tag":f"layernorm:{L.id}"}))
     C.add_box(L.id,L.out_vars,B); return Fact(B,C)
 

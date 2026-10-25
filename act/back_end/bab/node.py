@@ -23,12 +23,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Dict, Optional
+from typing import Dict, Optional, cast
 
 import torch
 
 from act.back_end.core import Bounds, Layer, Net, ParamValue
 from act.back_end.layer_schema import LayerKind
+from act.back_end.solver.solver_dual import (
+    AlphaState,
+    _alpha_spec_row_count,
+    _alpha_tree_concat_lanes,
+    _alpha_tree_gather_lanes,
+)
 from act.front_end.specs import InKind
 
 
@@ -56,7 +62,7 @@ class SubproblemBatch:
     depths: torch.Tensor  # (N,)    tree depth
 
     # -- incremental-start fields ---------------------------------------------------
-    incremental_alpha: Optional[Dict[int, torch.Tensor]] = None  # layer_id → [N, M, n]
+    incremental_alpha: Optional[AlphaState] = None
     incremental_eta: Optional[Dict[int, torch.Tensor]] = None  # layer_id → [N, M, n]
     split_signs: Optional[Dict[int, torch.Tensor]] = None  # layer_id → [N, M, n] in {-1, 0, +1}
     parent_margins: Optional[torch.Tensor] = None  # [N]
@@ -108,7 +114,10 @@ class SubproblemBatch:
             lb=self.lb.index_select(0, indices.to(self.lb.device)),
             ub=self.ub.index_select(0, indices.to(self.ub.device)),
             depths=self.depths.index_select(0, indices.to(self.depths.device)),
-            incremental_alpha=_gather_optional_dict(self.incremental_alpha, indices),
+            incremental_alpha=cast(
+                Optional[AlphaState],
+                _alpha_tree_gather_lanes(self.incremental_alpha, indices),
+            ),
             incremental_eta=_gather_optional_dict(self.incremental_eta, indices),
             split_signs=_gather_optional_dict(self.split_signs, indices),
             parent_margins=_gather_optional_tensor(self.parent_margins, indices),
@@ -134,8 +143,14 @@ class SubproblemBatch:
             lb=torch.cat([self.lb, other.lb.to(self.lb.device)], dim=0),
             ub=torch.cat([self.ub, other.ub.to(self.ub.device)], dim=0),
             depths=torch.cat([self.depths, other.depths.to(self.depths.device)], dim=0),
-            incremental_alpha=_concat_padded_dict(
-                self.incremental_alpha, other.incremental_alpha, n_self, n_other
+            incremental_alpha=cast(
+                Optional[AlphaState],
+                _alpha_tree_concat_lanes(
+                    self.incremental_alpha,
+                    other.incremental_alpha,
+                    n_self,
+                    n_other,
+                ),
             ),
             incremental_eta=_concat_padded_dict(
                 self.incremental_eta, other.incremental_eta, n_self, n_other
@@ -294,8 +309,9 @@ def _child_lanes(
             batch.depths.index_select(0, parent_index.to(batch.depths.device))
             + depth_inc
         ),
-        incremental_alpha=_gather_optional_dict(
-            batch.incremental_alpha, parent_index
+        incremental_alpha=cast(
+            Optional[AlphaState],
+            _alpha_tree_gather_lanes(batch.incremental_alpha, parent_index),
         ),
         incremental_eta=_gather_optional_dict(batch.incremental_eta, parent_index),
         split_signs=_gather_optional_dict(batch.split_signs, parent_index),
@@ -384,7 +400,7 @@ def split_neurons(
 
     m_specs = 1
     if batch.incremental_alpha:
-        m_specs = int(next(iter(batch.incremental_alpha.values())).shape[1])
+        m_specs = _alpha_spec_row_count(batch.incremental_alpha)
     elif batch.split_signs:
         m_specs = int(next(iter(batch.split_signs.values())).shape[1])
 

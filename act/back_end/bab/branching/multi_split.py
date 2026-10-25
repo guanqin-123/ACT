@@ -27,7 +27,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import torch
 
@@ -41,10 +41,11 @@ from act.back_end.bab.node import (
 )
 from act.back_end.core import Bounds, Layer, Net
 from act.back_end.solver.solver_base import BatchBoundResult
-
-if TYPE_CHECKING:
-    pass
-
+from act.back_end.solver.solver_dual import (
+    AlphaState,
+    _alpha_spec_row_count,
+    _alpha_tree_repeat_lanes,
+)
 
 # ---------------------------------------------------------------------------
 # Joint multi-neuron splitting (verdict-boundary)
@@ -255,9 +256,7 @@ def gain_tested_decision(
     )
     m_specs = 1
     if branch_batch.incremental_alpha:
-        m_specs = int(
-            next(iter(branch_batch.incremental_alpha.values())).shape[1]
-        )
+        m_specs = _alpha_spec_row_count(branch_batch.incremental_alpha)
     signs = _gather_optional_dict(
         branch_batch.split_signs, repeated_indices
     ) or {}
@@ -287,8 +286,11 @@ def gain_tested_decision(
         lb=branch_batch.lb.index_select(0, repeated_indices),
         ub=branch_batch.ub.index_select(0, repeated_indices),
         depths=branch_batch.depths.index_select(0, repeated_indices),
-        incremental_alpha=_gather_optional_dict(
-            branch_batch.incremental_alpha, repeated_indices
+        incremental_alpha=cast(
+            Optional[AlphaState],
+            _alpha_tree_repeat_lanes(
+                branch_batch.incremental_alpha, 2 * n_selected
+            ),
         ),
         incremental_eta=_gather_optional_dict(
             branch_batch.incremental_eta, repeated_indices

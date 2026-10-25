@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from typing import Tuple, Optional, Dict, Any, List, cast
 from act.back_end.core import Bounds, Layer
 from act.back_end.utils import avgpool2d_denominators, avgpool2d_output_hw, pair_2d
+from act.back_end.interval_tf.tf_cnn import _conv1d_to_linear_matrix
 
 from .tf_forward import (
     LinearBound, Frame,
@@ -29,6 +30,53 @@ from .tf_forward import (
 
 
 # ---- CONV2D ----
+def _conv1d_scalar_param(value: Any, name: str) -> int:
+    """Return a Conv1d scalar parameter from its int or singleton sequence form."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, (list, tuple)) and len(value) == 1:
+        return int(value[0])
+    raise TypeError(f"Conv1d {name} must be an int or singleton sequence, got {value!r}")
+
+
+def forward_conv1d(
+    L: Layer,
+    parent_boxes: List[Bounds],
+    parent_lins: List[LinearBound],
+    parent_frames: List[Frame],
+    preds: List[int],
+    post_activation: bool,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
+    """Sound Conv1d interval bounds with a fresh dual frame."""
+    assert len(parent_boxes) == 1, f"CONV1D expects 1 predecessor, got {len(parent_boxes)}"
+    weight = cast(torch.Tensor, L.params["weight"])
+    input_shape = tuple(int(d) for d in cast(Tuple[int, ...], L.params["input_shape"]))
+    output_shape = tuple(int(d) for d in cast(Tuple[int, ...], L.params["output_shape"]))
+    stride = _conv1d_scalar_param(L.params.get("stride", 1), "stride")
+    padding = _conv1d_scalar_param(L.params.get("padding", 0), "padding")
+    dilation = _conv1d_scalar_param(L.params.get("dilation", 1), "dilation")
+    groups = _conv1d_scalar_param(L.params.get("groups", 1), "groups")
+    matrix = _conv1d_to_linear_matrix(
+        weight, input_shape, output_shape, stride, padding, dilation, groups,
+    )
+    lower = parent_boxes[0].lb.flatten(start_dim=1)
+    upper = parent_boxes[0].ub.flatten(start_dim=1)
+    positive = matrix.clamp(min=0)
+    negative = matrix.clamp(max=0)
+    out_lower = lower @ positive.T + upper @ negative.T
+    out_upper = upper @ positive.T + lower @ negative.T
+    bias = L.params.get("bias")
+    if isinstance(bias, torch.Tensor):
+        bias_flat = bias.repeat_interleave(output_shape[-1]).reshape(1, -1)
+        out_lower = out_lower + bias_flat
+        out_upper = out_upper + bias_flat
+    out = Bounds(out_lower, out_upper)
+    lin, frame = _reset_forward_box(out_lower, out_upper, device, dtype)
+    return out, out, lin, frame
+
+
 def forward_conv2d(
     L: Layer,
     parent_boxes: List[Bounds],
@@ -79,6 +127,32 @@ def forward_conv2d(
 
 
 _CONV_CHANNEL_CHUNK_SIZE = 32
+
+
+def backward_conv1d(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
+                    preds: List[int], M: int = 1, alpha=None
+                    ) -> Tuple[List[torch.Tensor], torch.Tensor]:
+    """Exact affine adjoint and bias contribution for Conv1d."""
+    input_shape = tuple(int(d) for d in cast(Tuple[int, ...], L.params["input_shape"]))
+    output_shape = tuple(int(d) for d in cast(Tuple[int, ...], L.params["output_shape"]))
+    stride = _conv1d_scalar_param(L.params.get("stride", 1), "stride")
+    padding = _conv1d_scalar_param(L.params.get("padding", 0), "padding")
+    dilation = _conv1d_scalar_param(L.params.get("dilation", 1), "dilation")
+    groups = _conv1d_scalar_param(L.params.get("groups", 1), "groups")
+    matrix = _conv1d_to_linear_matrix(
+        cast(torch.Tensor, L.params["weight"]), input_shape, output_shape,
+        stride, padding, dilation, groups,
+    )
+    nu_flat = nu.flatten(start_dim=1)
+    nu_out = nu_flat @ matrix
+    bias = L.params.get("bias")
+    if isinstance(bias, torch.Tensor):
+        bias_flat = bias.repeat_interleave(output_shape[-1])
+        contrib = -(nu_flat @ bias_flat)
+    else:
+        contrib = torch.zeros(nu_flat.shape[0], dtype=nu.dtype, device=nu.device)
+    assert len(preds) == 1, f"CONV1D expects 1 predecessor, got {len(preds)}"
+    return [nu_out], contrib
 
 
 def backward_conv2d(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
@@ -418,7 +492,7 @@ def backward_avgpool2d(L, nu, bounds_dict, preds, M: int = 1, alpha=None):
     c = int(c); iH = int(iH); iW = int(iW)
 
     oH, oW = avgpool2d_output_hw(
-        (iH, iW), kernel_size, stride, padding, ceil_mode
+        (iH, iW), kernel_size, stride, cast(Any, padding), ceil_mode
     )
 
     BM = nu.shape[0]
@@ -439,7 +513,7 @@ def backward_avgpool2d(L, nu, bounds_dict, preds, M: int = 1, alpha=None):
         (oH, oW),
         kernel_size,
         stride,
-        padding,
+        cast(Any, padding),
         ceil_mode=ceil_mode,
         count_include_pad=count_include_pad,
         divisor_override=divisor_override,

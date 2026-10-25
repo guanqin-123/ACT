@@ -1483,7 +1483,10 @@ class NetFactory:
             input_from = ls.get("input_from")
             if input_from is not None:
                 in_vars = list(layers[int(input_from)].out_vars)
-                n_out = int(params.get("out_features", len(in_vars)))
+                n_out = int(params.get(
+                    "out_features", math.prod(params["output_shape"][1:])
+                    if "output_shape" in params else len(in_vars),
+                ))
                 out_vars = list(range(vc, vc + n_out))
                 vc += n_out
             else:
@@ -1557,8 +1560,10 @@ class NetFactory:
         validate_factory_schema_alignment(net)
         return net
 
-    def save_network(self, net: Net, name: str) -> None:
-        path = self.output_dir / f"{name}.json"
+    def save_network(self, net: Net, name: str, subdir: Optional[str] = None) -> None:
+        directory = self.output_dir / subdir if subdir else self.output_dir
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{name}.json"
         d = NetSerializer.serialize_net(net)
         with open(path, "w") as f:
             json.dump(d, f, indent=2)
@@ -1611,6 +1616,8 @@ class NetFactory:
         self._record(net)
 
     def generate(self) -> List[str]:
+        for old in (self.output_dir / "standalone").glob("*.json"):
+            old.unlink()
         for old in self.output_dir.glob("*.json"):
             old.unlink()
         if self.manifest_path.exists():
@@ -1667,8 +1674,10 @@ class NetFactory:
                 raise ValueError(f"Unsupported layer-testing architecture: {architecture}")
             name = f"{LAYER_TESTING_NAME_PREFIX}{entry}"
             net = self.create_network(name, build_spec(cfg))
-            self.save_network(net, name)
-            names.append(name)
+            sweep = cfg.get("sweep", True)
+            self.save_network(net, name, subdir=None if sweep else "standalone")
+            if sweep:
+                names.append(name)
             self.total_generated += 1
             self._record(net)
         return names
@@ -1726,6 +1735,41 @@ def _lt_spec_lp_dense(cfg: Dict[str, Any]) -> Dict[str, Any]:
             "input_shape": [1, width], "output_shape": [1, outputs],
         }},
         _lt_assert_le([1.0] * outputs, float(cfg["assert_threshold"])),
+    ])
+    return {"layers": layers}
+
+
+def _lt_spec_mha_roles(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Exercise each projection role and a join with mixed forward frames."""
+    length, hidden = int(cfg["sequence_length"]), int(cfg["hidden_size"])
+    shape = [1, length, hidden]
+    layers = _lt_input_lp(shape, cfg["input_spec"])
+    weight = torch.tensor(cfg["projection"]["weight"], dtype=get_default_dtype())
+    bias = torch.tensor(cfg["projection"]["bias"], dtype=get_default_dtype())
+    widths = {"query": hidden, "value": length, "all": length * hidden}
+    outputs = []
+    all_index = None
+    for role in cfg["roles"]:
+        outputs.append(len(layers))
+        if role["role"] == "all":
+            all_index = len(layers)
+        layers.append({"kind": LayerKind.MHA_SPLIT.value, "input_from": 1, "preds": [1],
+                       "params": {"weight": weight, "bias": bias, "hidden_size": hidden,
+                                  "input_shape": shape, **role,
+                                  "output_shape": [1, widths[role["role"]]]}})
+    if all_index is None:
+        raise ValueError("mha_roles requires an all projection for the flattened branch")
+    outputs[outputs.index(all_index)] = len(layers)
+    layers.append({"kind": LayerKind.FLATTEN.value, "input_from": all_index,
+                   "preds": [all_index], "params": {
+                       "start_dim": 1, "end_dim": -1, "input_shape": shape,
+                       "output_shape": [1, length * hidden],
+                   }})
+    joined = sum(widths[role["role"]] for role in cfg["roles"])
+    layers.extend([
+        {"kind": LayerKind.MHA_JOIN.value, "preds": outputs,
+         "params": {"seq_len": 1, "hidden_size": joined, "output_shape": [1, joined]}},
+        _lt_assert_le([1.0] * joined, float(cfg["assert_threshold"])),
     ])
     return {"layers": layers}
 
@@ -2714,6 +2758,7 @@ LAYER_TESTING_SPECS: Dict[str, Any] = {
 LAYER_TESTING_BUILDERS = {
     "attention": _lt_spec_attention,
     "lp_dense": _lt_spec_lp_dense,
+    "mha_roles": _lt_spec_mha_roles,
 }
 
 

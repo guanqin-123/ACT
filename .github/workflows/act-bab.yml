@@ -386,6 +386,13 @@ jobs:
             --bab-max-depth 4 --bab-max-subproblems 40 --timeout 30 \
             --device cpu --dtype float64
 
+      - name: MHA projection roles and frames
+        run: |
+          cd ${{ github.workspace }}
+          coverage run -p -m act.back_end --verify \
+            --network "$ACT_NETS_DIR/standalone/layer_testing_mha_roles.json" \
+            --solver dual --device cpu --dtype float64
+
       # ── Coverage ───────────────────────────────────────────────────────
       - name: Combine coverage data
         if: always()

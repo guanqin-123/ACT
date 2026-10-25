@@ -74,6 +74,7 @@ from act.back_end.bab.violation import _check_input_specs_batched, check_violati
 from act.back_end.solver.solver_base import BatchBoundResult, Solver, SolveStatus
 from act.back_end.solver.solver_dual import (
     DualSolver,
+    _alpha_tree_select_spec_rows,
     expand_bounds_dict,
     unproven_spec_rows,
 )
@@ -159,18 +160,11 @@ def _net_bound_elements(net: Net) -> int:
 
 
 def _select_spec_rows(
-    state: Optional[Dict[int, torch.Tensor]],
+    state: Optional[Dict[int, Any]],
     keep_rows: torch.Tensor,
-) -> Optional[Dict[int, torch.Tensor]]:
-    """Slice the spec axis of per-layer incremental dual state."""
-    if state is None:
-        return None
-    return {
-        lid: tensor.index_select(1, keep_rows.to(tensor.device))
-        if tensor.dim() >= 3
-        else tensor
-        for lid, tensor in state.items()
-    }
+) -> Optional[Dict[int, Any]]:
+    """Slice spec-bearing leaves of per-layer incremental dual state."""
+    return cast(Optional[Dict[int, Any]], _alpha_tree_select_spec_rows(state, keep_rows))
 
 
 def _neuron_branching_supported(config: BaBConfig) -> bool:

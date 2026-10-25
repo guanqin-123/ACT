@@ -205,6 +205,24 @@ def _alpha_tree_map(
     raise TypeError(f"unsupported alpha pytree node: {type(tree)!r}")
 
 
+def _alpha_tree_gather_lanes(tree: AlphaTree, indices: torch.Tensor) -> AlphaTree:
+    """Gather leading-axis lanes from every alpha leaf."""
+    return _alpha_tree_map(
+        tree,
+        lambda leaf: leaf.index_select(0, indices.to(leaf.device)),
+    )
+
+
+def _alpha_tree_repeat_lanes(tree: AlphaTree, repeats: int) -> AlphaTree:
+    """Repeat each leading-axis lane consecutively in every alpha leaf."""
+    if repeats < 1:
+        raise ValueError(f"alpha lane repeats must be positive, got {repeats}")
+    return _alpha_tree_map(
+        tree,
+        lambda leaf: leaf.repeat_interleave(repeats, dim=0),
+    )
+
+
 def _alpha_tree_zero_lanes(tree: AlphaTree, lanes: int) -> AlphaTree:
     """Build an all-zero tree with ``lanes`` and matching trailing shapes."""
     return _alpha_tree_map(
@@ -260,6 +278,39 @@ def _alpha_tree_concat_lanes(
     raise TypeError(
         "alpha pytree structure mismatch: "
         f"left {type(left)!r} vs right {type(right)!r}"
+    )
+
+
+def _alpha_spec_row_count(state: Optional[AlphaState]) -> int:
+    """Return ``M`` from top-level ReLU tensors, ignoring attention pytrees."""
+    if not state:
+        return 1
+    counts = {
+        int(tree.shape[1])
+        for tree in state.values()
+        if isinstance(tree, torch.Tensor) and tree.dim() >= 3
+    }
+    if len(counts) > 1:
+        raise ValueError(f"inconsistent alpha spec-row counts: {sorted(counts)}")
+    return next(iter(counts), 1)
+
+
+def _alpha_tree_select_spec_rows(
+    state: Optional[AlphaState], keep_rows: torch.Tensor
+) -> Optional[AlphaState]:
+    """Select ReLU specification rows; lane-only omega leaves stay unchanged."""
+    if state is None:
+        return None
+    return cast(
+        AlphaState,
+        _alpha_tree_map(
+            state,
+            lambda leaf: (
+                leaf.index_select(1, keep_rows.to(leaf.device))
+                if leaf.dim() >= 3
+                else leaf
+            ),
+        ),
     )
 
 
@@ -333,6 +384,17 @@ _DUAL_NORM_EPS = 1e-12
 
 class DualSolver(Solver):
     """Dual (linear-relaxation) certified bounds solver. Strict [B, *shape] API."""
+
+    # Kinds whose forward state in ``bounds_dict`` is the PRE-activation box
+    # (``post_activation=False``); bilinear kernels reading an operand from
+    # such a layer need the post-activation box instead.
+    _PRE_ACTIVATION_KINDS = {
+        LayerKind.RELU.value, LayerKind.LRELU.value, LayerKind.SIGMOID.value,
+        LayerKind.TANH.value, LayerKind.ERF.value, LayerKind.SQRT.value,
+        LayerKind.SIN.value, LayerKind.COS.value, LayerKind.QUANTIZE.value,
+        LayerKind.GELU.value, LayerKind.SOFTMAX.value, LayerKind.LAYERNORM.value,
+    }
+    _BILINEAR_KINDS = {LayerKind.MATMUL.value, LayerKind.MUL.value}
 
     _AFFINE_CONTRIB_KINDS = {
         LayerKind.DENSE.value,
@@ -894,6 +956,8 @@ class DualSolver(Solver):
                     handler_bounds = self._local_phase_bounds(
                         bounds_dict, lid, split_signs[lid]
                     )
+                if k in self._BILINEAR_KINDS:
+                    handler_bounds = self._bilinear_operand_bounds(net, handler_bounds, preds)
                 if alpha is None:
                     pred_nus, contrib = handler(layer, nu_here, handler_bounds, preds, M)
                 else:
@@ -979,6 +1043,39 @@ class DualSolver(Solver):
                 forward_margins=forward_margins,
             )
 
+    def _bilinear_operand_bounds(
+        self, net: Net, bounds_dict: Dict[int, Bounds], preds: List[int],
+    ) -> Dict[int, Bounds]:
+        """View of ``bounds_dict`` with post-activation boxes for bilinear operands.
+
+        ``bounds_dict`` stores activation layers pre-activation, but a MATMUL /
+        MUL operand read from e.g. a SOFTMAX layer is the activation OUTPUT
+        (the probabilities, not the scores). Each such operand is mapped through
+        its registered dual forward handler on its own stored box, exactly as
+        the forward pass computed it; other entries are shared unchanged.
+        """
+        from act.back_end.dual_tf.tf_forward import _reset_forward_box
+
+        device, dtype = get_default_device(), get_default_dtype()
+        view: Optional[Dict[int, Bounds]] = None
+        for pid in preds:
+            pred = net.by_id[int(pid)]
+            kind = pred.kind.upper() if isinstance(pred.kind, str) else pred.kind
+            pre = bounds_dict.get(int(pid))
+            if kind not in self._PRE_ACTIVATION_KINDS or pre is None:
+                continue
+            pre_box = Bounds(pre.lb.flatten(start_dim=1), pre.ub.flatten(start_dim=1))
+            lin, frame = _reset_forward_box(pre_box.lb, pre_box.ub, device, dtype)
+            forward = self.tf._FORWARD_REGISTRY[kind]
+            _, out, _, _ = forward(
+                pred, [pre_box], [lin], [frame], list(net.preds.get(int(pid), [])),
+                True, device, dtype,
+            )
+            if view is None:
+                view = dict(bounds_dict)
+            view[int(pid)] = out
+        return bounds_dict if view is None else view
+
     def _forward_margin_bound(
         self,
         bounds_dict: Dict[int, Bounds],
@@ -1051,6 +1148,7 @@ class DualSolver(Solver):
         per_class_alpha: bool,
         optimize_alpha: bool,
         incremental_alphas: Optional[AlphaState],
+        preds: Optional[List[int]] = None,
     ) -> Any:
         """Per-kind dual-alpha allocation returning a pytree of leaves, or None.
 
@@ -1067,6 +1165,12 @@ class DualSolver(Solver):
         if k in (LayerKind.ATT_SCORES.value, LayerKind.ATT_MIX.value):
             return self._init_attention_alpha(
                 layer, bounds_dict, device, dtype,
+                optimize_alpha=optimize_alpha,
+                incremental_alphas=incremental_alphas,
+            )
+        if k == LayerKind.MATMUL.value:
+            return self._init_matmul_alpha(
+                layer, bounds_dict, device, dtype, list(preds or []),
                 optimize_alpha=optimize_alpha,
                 incremental_alphas=incremental_alphas,
             )
@@ -1139,6 +1243,46 @@ class DualSolver(Solver):
             }
         else:
             tree = attention_rule_alpha(x_l, x_u, y_l, y_u)
+        if optimize_alpha:
+            return {key: torch.nn.Parameter(val.detach().clone()) for key, val in tree.items()}
+        return {key: val.detach() for key, val in tree.items()}
+
+    def _init_matmul_alpha(
+        self,
+        layer: Layer,
+        bounds_dict: Dict[int, Bounds],
+        device: torch.device,
+        dtype: torch.dtype,
+        preds: List[int],
+        *,
+        optimize_alpha: bool,
+        incremental_alphas: Optional[AlphaState],
+    ) -> Any:
+        """Allocate the per-element fusion-slope pytree of a batched MATMUL.
+
+        Same contract as :meth:`_init_attention_alpha` with ``[B, G*I*J]``
+        leaves (one slope pair per output element) warm-started at the rule
+        init of the operand boxes; ``None`` when either operand box is missing.
+        """
+        from act.back_end.dual_tf.tf_transformer import _matmul_shapes, matmul_rule_alpha
+
+        if len(preds) != 2 or any(pid not in bounds_dict for pid in preds):
+            return None
+        G, I, K, J = _matmul_shapes(layer.params["x_shape"], layer.params["y_shape"])
+        x_box, y_box = bounds_dict[preds[0]], bounds_dict[preds[1]]
+        x_l = x_box.lb.to(device=device, dtype=dtype).flatten(start_dim=1)
+        x_u = x_box.ub.to(device=device, dtype=dtype).flatten(start_dim=1)
+        y_l = y_box.lb.to(device=device, dtype=dtype).flatten(start_dim=1)
+        y_u = y_box.ub.to(device=device, dtype=dtype).flatten(start_dim=1)
+        if incremental_alphas is not None and layer.id in incremental_alphas:
+            prior = cast(Dict[str, torch.Tensor], cast(object, incremental_alphas[layer.id]))
+            tree = {
+                key: prior[key].detach().clone().to(device=device, dtype=dtype).clamp(0.0, 1.0)
+                for key in ("omega_l", "omega_u")
+            }
+        else:
+            k_thresh = float(cast(float, layer.params.get("k_thresh", 1.0)))
+            tree = matmul_rule_alpha(x_l, x_u, y_l, y_u, G, I, K, J, k_thresh)
         if optimize_alpha:
             return {key: torch.nn.Parameter(val.detach().clone()) for key, val in tree.items()}
         return {key: val.detach() for key, val in tree.items()}
@@ -1267,11 +1411,18 @@ class DualSolver(Solver):
         for layer in net.layers:
             if ancestor_lids is not None and layer.id not in ancestor_lids:
                 continue
+            layer_preds = list(net.preds.get(layer.id, []))
+            layer_kind = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
+            alpha_bounds = (
+                self._bilinear_operand_bounds(net, bounds_dict, layer_preds)
+                if layer_kind in self._BILINEAR_KINDS else bounds_dict
+            )
             tree = self._init_alpha(
-                layer, bounds_dict, B, M, device, dtype,
+                layer, alpha_bounds, B, M, device, dtype,
                 per_class_alpha=per_class_alpha,
                 optimize_alpha=optimize_alpha,
                 incremental_alphas=incremental_alphas,
+                preds=layer_preds,
             )
             if tree is not None:
                 alphas[layer.id] = tree
