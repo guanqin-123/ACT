@@ -71,9 +71,8 @@ from act.back_end.core import Bounds, Layer, Net
 from act.back_end.dual_tf.tf_forward import compute_forward_bounds
 from act.back_end.layer_schema import LayerKind
 from act.back_end.bab.violation import _check_input_specs_batched, check_violations_batched
-from act.back_end.solver.solver_base import Solver, SolveStatus
+from act.back_end.solver.solver_base import BatchBoundResult, Solver, SolveStatus
 from act.back_end.solver.solver_dual import (
-    DualBatchResult,
     DualSolver,
     expand_bounds_dict,
 )
@@ -217,7 +216,7 @@ def _solve_dual_batch(
     keep_rows: Optional[torch.Tensor] = None,
     root_bounds_dict: Optional[Dict[int, Bounds]] = None,
     round_policy: Optional[Any] = None,
-) -> DualBatchResult:
+) -> BatchBoundResult:
     """Prepare BaB-specific bounds/state policy, then call ``DualSolver``."""
     solver = DualSolver()
     block_eps_updates = _install_embedding_child_block_eps(
@@ -588,8 +587,9 @@ def verify_bab_batched(
             optimize=presolve_tier in ("dual_alpha", "dual_alpha_eta"),
             root_bounds_dict=root_fwd,
         )
-        if presolve.row_slack is not None:
-            unproven = (presolve.row_slack < 0).any(dim=0)
+        presolve_slack = presolve.spec_row_slack()
+        if presolve_slack is not None:
+            unproven = (presolve_slack < 0).any(dim=0)
             total_rows = int(unproven.numel())
             if not bool(unproven.any().item()):
                 return VerifyResult(
@@ -620,14 +620,18 @@ def verify_bab_batched(
         if (
             presplit_k > 0
             and root_batch.batch_size == 1
-            and presolve.bounds_dict is not None
-            and presolve.nu_per_layer is not None
+            and presolve.intermediate_bounds() is not None
+            and presolve.neuron_sensitivities() is not None
         ):
+            presolve_bounds = presolve.intermediate_bounds()
+            presolve_sensitivities = presolve.neuron_sensitivities()
+            assert presolve_bounds is not None
+            assert presolve_sensitivities is not None
             presplit = presplit_root(
                 root_batch,
                 net,
-                presolve.bounds_dict,
-                presolve.nu_per_layer,
+                presolve_bounds,
+                presolve_sensitivities,
                 presplit_k,
             )
             if presplit is not None:
@@ -722,7 +726,7 @@ def verify_bab_batched(
         bounds_dict_for_branching: Optional[Dict[int, Bounds]] = None
         nu_per_layer_for_branching: Optional[Dict[int, torch.Tensor]] = None
         witness_input_for_branching: Optional[torch.Tensor] = None
-        dual_solve_result: Optional[DualBatchResult] = None
+        dual_solve_result: Optional[BatchBoundResult] = None
         if solver_tier == "lp":
             solver = solver_factory()
             solution = setup_and_solve_batch(
@@ -742,7 +746,7 @@ def verify_bab_batched(
                 root_bounds_dict=node_root_fwd,
                 round_policy=_wave_policy,
             )
-            solution = dual_solve_result.solution
+            solution = dual_solve_result.lane_solution()
         elif solver_tier in ("dual_alpha", "dual_alpha_eta"):
             dual_solve_result = _solve_dual_batch(
                 net=net,
@@ -757,10 +761,10 @@ def verify_bab_batched(
                 root_bounds_dict=node_root_fwd,
                 round_policy=_wave_policy,
             )
-            solution = dual_solve_result.solution
-            bounds_dict_for_branching = dual_solve_result.bounds_dict
-            nu_per_layer_for_branching = dual_solve_result.nu_per_layer
-            witness_input_for_branching = dual_solve_result.witness_input
+            solution = dual_solve_result.lane_solution()
+            bounds_dict_for_branching = dual_solve_result.intermediate_bounds()
+            nu_per_layer_for_branching = dual_solve_result.neuron_sensitivities()
+            witness_input_for_branching = dual_solve_result.lane_witness_inputs()
         else:
             raise ValueError(
                 f"Unknown solver_tier={solver_tier!r}. Valid: {VALID_SOLVER_TIERS}."

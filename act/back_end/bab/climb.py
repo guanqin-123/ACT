@@ -28,7 +28,7 @@ from act.back_end.bab.node import (
     slice_bounds_dict,
 )
 from act.back_end.core import Bounds, Net
-from act.back_end.solver.solver_base import SolveStatus
+from act.back_end.solver.solver_base import BoundResult, SolveStatus
 from act.back_end.solver.solver_dual import DualBatchResult
 from act.config.config import (
     BaBConfig,
@@ -592,7 +592,8 @@ def certificate_replay(
         local_phase_clamp=True,
     )
     n_lanes = batch.batch_size
-    slack = result.margins.reshape(n_lanes, m_specs)
+    bound_result: BoundResult = result
+    slack = bound_result.row_lower_bounds().reshape(n_lanes, m_specs)
     slack = slack - thresholds.reshape(n_lanes, m_specs).to(slack)
     pinned_rows: Optional[torch.Tensor] = None
     if out_kind == OutKind.UNSAFE_LINEAR:

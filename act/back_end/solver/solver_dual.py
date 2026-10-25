@@ -20,7 +20,9 @@ from act.back_end.layer_schema import LayerKind
 from act.back_end.dual_tf.tf_forward import _intersect_boxes
 from act.config.config import DualConfig
 from act.back_end.solver.solver_base import (
+    BatchBoundResult,
     BatchLPSolution,
+    BoundResult,
     SolveStatus,
     Solver,
     SolverCaps,
@@ -31,7 +33,7 @@ from act.util.stats import SpecBatchResult
 
 
 @dataclass(frozen=True)
-class DualResult:
+class DualResult(BoundResult):
     """Result of ``compute_certified_bound``. Fields depend on caller flags."""
 
     margins: torch.Tensor
@@ -40,9 +42,17 @@ class DualResult:
     eta_state: Optional[Dict[int, torch.Tensor]] = None
     nu_per_layer: Optional[Dict[int, torch.Tensor]] = None
 
+    def row_lower_bounds(self) -> torch.Tensor:
+        """Return the certified lower bounds."""
+        return self.margins
+
+    def row_witness_inputs(self) -> Optional[torch.Tensor]:
+        """Return the optional dual witness inputs."""
+        return cast(Optional[torch.Tensor], self.sce)
+
 
 @dataclass(frozen=True)
-class DualBatchResult:
+class DualBatchResult(BatchBoundResult):
     """Decoded result of :meth:`DualSolver.solve_spec_batch` for one K-lane batch."""
 
     solution: BatchLPSolution
@@ -58,6 +68,30 @@ class DualBatchResult:
     thresholds: Optional[torch.Tensor] = None
     m_specs: int = 0
     reference_bounds: Optional[Dict[int, Bounds]] = None
+
+    def lane_solution(self) -> BatchLPSolution:
+        """Return the decoded lane solution."""
+        return self.solution
+
+    def lane_lower_bounds(self) -> torch.Tensor:
+        """Return the decoded lower bounds."""
+        return self.lower_bounds
+
+    def spec_row_slack(self) -> Optional[torch.Tensor]:
+        """Return per-row slack when output rows were decoded."""
+        return self.row_slack
+
+    def lane_witness_inputs(self) -> Optional[torch.Tensor]:
+        """Return lane witness inputs when the relaxation produced them."""
+        return self.witness_input
+
+    def intermediate_bounds(self) -> Optional[Dict[int, Bounds]]:
+        """Return intermediate bounds requested for branching."""
+        return self.bounds_dict
+
+    def neuron_sensitivities(self) -> Optional[Dict[int, torch.Tensor]]:
+        """Return dual sensitivities requested for neuron branching."""
+        return self.nu_per_layer
 
 
 def expand_bounds_dict(bounds_dict: Dict[int, Bounds], M: int) -> Dict[int, Bounds]:
