@@ -588,8 +588,9 @@ def verify_bab_batched(
             optimize=presolve_tier in ("dual_alpha", "dual_alpha_eta"),
             root_bounds_dict=root_fwd,
         )
-        if presolve.row_slack is not None:
-            unproven = (presolve.row_slack < 0).any(dim=0)
+        presolve_slack = presolve.spec_row_slack()
+        if presolve_slack is not None:
+            unproven = (presolve_slack < 0).any(dim=0)
             total_rows = int(unproven.numel())
             if not bool(unproven.any().item()):
                 return VerifyResult(
@@ -617,17 +618,19 @@ def verify_bab_batched(
                     root_batch.split_signs, keep,
                 )
         presplit_k = int(config.presplit_levels)
+        presolve_bounds = presolve.intermediate_bounds()
+        presolve_sensitivities = presolve.neuron_sensitivities()
         if (
             presplit_k > 0
             and root_batch.batch_size == 1
-            and presolve.bounds_dict is not None
-            and presolve.nu_per_layer is not None
+            and presolve_bounds is not None
+            and presolve_sensitivities is not None
         ):
             presplit = presplit_root(
                 root_batch,
                 net,
-                presolve.bounds_dict,
-                presolve.nu_per_layer,
+                presolve_bounds,
+                presolve_sensitivities,
                 presplit_k,
             )
             if presplit is not None:
@@ -742,7 +745,7 @@ def verify_bab_batched(
                 root_bounds_dict=node_root_fwd,
                 round_policy=_wave_policy,
             )
-            solution = dual_solve_result.solution
+            solution = dual_solve_result.lane_solution()
         elif solver_tier in ("dual_alpha", "dual_alpha_eta"):
             dual_solve_result = _solve_dual_batch(
                 net=net,
@@ -757,10 +760,10 @@ def verify_bab_batched(
                 root_bounds_dict=node_root_fwd,
                 round_policy=_wave_policy,
             )
-            solution = dual_solve_result.solution
-            bounds_dict_for_branching = dual_solve_result.bounds_dict
-            nu_per_layer_for_branching = dual_solve_result.nu_per_layer
-            witness_input_for_branching = dual_solve_result.witness_input
+            solution = dual_solve_result.lane_solution()
+            bounds_dict_for_branching = dual_solve_result.intermediate_bounds()
+            nu_per_layer_for_branching = dual_solve_result.neuron_sensitivities()
+            witness_input_for_branching = dual_solve_result.lane_witness_inputs()
         else:
             raise ValueError(
                 f"Unknown solver_tier={solver_tier!r}. Valid: {VALID_SOLVER_TIERS}."

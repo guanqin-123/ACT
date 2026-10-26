@@ -592,7 +592,7 @@ def certificate_replay(
         local_phase_clamp=True,
     )
     n_lanes = batch.batch_size
-    slack = result.margins.reshape(n_lanes, m_specs)
+    slack = result.row_lower_bounds().reshape(n_lanes, m_specs)
     slack = slack - thresholds.reshape(n_lanes, m_specs).to(slack)
     pinned_rows: Optional[torch.Tensor] = None
     if out_kind == OutKind.UNSAFE_LINEAR:

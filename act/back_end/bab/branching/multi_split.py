@@ -27,7 +27,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 
@@ -40,10 +40,7 @@ from act.back_end.bab.node import (
     split_neurons,
 )
 from act.back_end.core import Bounds, Layer, Net
-
-if TYPE_CHECKING:
-    from act.back_end.solver.solver_dual import DualBatchResult
-
+from act.back_end.solver.solver_base import BatchBoundResult
 
 # ---------------------------------------------------------------------------
 # Joint multi-neuron splitting (verdict-boundary)
@@ -227,7 +224,7 @@ def gain_tested_decision(
     bounds_dict: Optional[Dict[int, Bounds]],
     nu_per_layer: Optional[Dict[int, torch.Tensor]],
     input_shape: tuple[int, ...],
-    solve_dual: Callable[..., DualBatchResult],
+    solve_dual: Callable[..., BatchBoundResult],
     n_candidates: int = 3,
 ) -> Optional[SplitDecision]:
     """Pick each lane's split by measured child bounds, not by score proxy."""
@@ -311,7 +308,7 @@ def gain_tested_decision(
         keep_rows=keep_rows,
         root_bounds_dict=root_bounds_dict,
     )
-    child_lbs = (-result.solution.max_viol).view(
+    child_lbs = result.lane_lower_bounds().view(
         batch_size, n_selected, 2
     )
     pair_gain = child_lbs.min(dim=2).values

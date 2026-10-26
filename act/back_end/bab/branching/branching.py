@@ -58,6 +58,7 @@ from act.back_end.bab.node import (
     split_neurons,
 )
 from act.back_end.core import Bounds, Layer, Net
+from act.back_end.solver.solver_base import BoundResult
 from act.back_end.dual_tf.tf_forward import compute_forward_bounds
 from act.back_end.layer_schema import LayerKind
 from act.front_end.specs import InKind
@@ -905,7 +906,10 @@ class FSBBranching(BaBSRBranching):
         N = batch.batch_size
         baseline = batch.parent_margins
         result = self._evaluate_hypotheses(net, bounds_dict, hypothesis_list)
-        stacked_margins = result.margins.to(device=batch.lb.device, dtype=batch.lb.dtype)
+        stacked_margins = result.row_lower_bounds().to(
+            device=batch.lb.device,
+            dtype=batch.lb.dtype,
+        )
         if stacked_margins.dim() == 1:
             stacked_margins = stacked_margins.reshape(1, -1)
         if stacked_margins.dim() > 2:
@@ -950,7 +954,7 @@ class FSBBranching(BaBSRBranching):
         net: Net,
         bounds_dict: Optional[Dict[int, Bounds]],
         split_signs: List[Dict[int, torch.Tensor]],
-    ) -> Any:
+    ) -> BoundResult:
         if bounds_dict is None:
             raise ValueError("FSB hypothesis evaluation requires bounds_dict")
         c = self._zero_objective(net, bounds_dict)
