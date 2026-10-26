@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
+import math
 from typing import Any, ClassVar, Dict, List, Optional
 import torch
 
@@ -59,6 +60,8 @@ def normalize_position_mask(
         raise ValueError(
             f"boolean perturbed_positions shape {tuple(pos.shape)} incompatible with mask shape {shape}"
         )
+    if pos.numel() and (pos.is_floating_point() or pos.is_complex()):
+        raise ValueError("perturbed_positions must contain integer indices or booleans")
     idx = pos.to(dtype=torch.long).flatten()
     mask = torch.zeros(shape, dtype=torch.bool, device=pos.device)
     if idx.numel() == 0:
@@ -128,6 +131,9 @@ class InputSpec:
       embedding space at each SELECTED token position t in P; all OTHER
       positions are PINNED to ``center``.
 
+      ``p_norm`` is shared across the batch. ``eps`` is a scalar or one
+      radius per sample, not a separate radius for each token or coordinate.
+
       Contrast: image = ONE ball over all input coordinates (perturbs pixels);
       LP_EMBEDDING = localized per-token balls at chosen sequence positions in
       EMBEDDING space (rest fixed) — perturbs token embeddings, not pixels.
@@ -144,8 +150,8 @@ class InputSpec:
     budget: torch.Tensor | int | None = None
     synonym_table: Optional[Any] = None
     
-    def __post_init__(self):
-        """Ensure all numeric fields are tensors for architecture."""
+    def __post_init__(self) -> None:
+        """Tensorize fields and normalize finite-p input parameters."""
         # Convert eps (scalar → 1-D tensor)
         if self.eps is not None and not isinstance(self.eps, torch.Tensor):
             self.eps = torch.tensor([float(self.eps)])
@@ -177,6 +183,21 @@ class InputSpec:
             if val is not None and not isinstance(val, torch.Tensor):
                 if isinstance(val, (list, tuple)):
                     setattr(self, field, torch.tensor(val))
+
+        if self.kind == InKind.LP_EMBEDDING:
+            if not isinstance(self.p_norm, torch.Tensor):
+                raise ValueError("LP_EMBEDDING requires p_norm")
+            values = self.p_norm.reshape(-1)
+            if values.numel() == 0:
+                raise ValueError("LP_EMBEDDING p_norm must not be empty")
+            p = float(values[0])
+            if math.isnan(p) or p < 1:
+                raise ValueError(f"LP_EMBEDDING p_norm must be at least 1, got {p}")
+            if not bool((values == p).all()):
+                raise ValueError("LP_EMBEDDING p_norm must be shared across batch lanes")
+            self.p_norm = values[:1].clone()
+            if self.center is not None and self.eps is not None:
+                self.eps = self._eps_like(self.center)
 
     def materialize_box_seed(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Materialize the box seed used by interval and LP back ends.
@@ -212,7 +233,7 @@ class InputSpec:
                 raise ValueError("LP_EMBEDDING requires both center and eps")
             lb = self.center.clone()
             ub = self.center.clone()
-            mask = self._embedding_position_mask(self.center)
+            mask = self._embedding_position_mask()
             expanded_mask = mask.unsqueeze(-1).expand_as(self.center)
             eps = self._eps_like(self.center)
             full_lb = self.center - eps
@@ -235,27 +256,37 @@ class InputSpec:
             Epsilon tensor on the same device and dtype as ``center``.
 
         Raises:
-            ValueError: If epsilon is missing.
+            ValueError: If epsilon is missing, or an LP radius is invalid.
         """
         if self.eps is None:
             raise ValueError(f"{self.kind} requires eps")
+        if self.kind == InKind.LP_EMBEDDING and not center.is_floating_point():
+            raise ValueError("LP_EMBEDDING center must have a floating-point dtype")
         if isinstance(self.eps, torch.Tensor):
-            return self.eps.to(device=center.device, dtype=center.dtype)
-        return torch.tensor([float(self.eps)], device=center.device, dtype=center.dtype)
+            eps = self.eps.to(device=center.device, dtype=center.dtype)
+        else:
+            eps = center.new_tensor([float(self.eps)])
+        if self.kind != InKind.LP_EMBEDDING:
+            return eps
+        if not bool(torch.isfinite(eps).all()) or bool((eps < 0).any()):
+            raise ValueError("LP_EMBEDDING eps must be finite and non-negative")
+        if eps.numel() == 1:
+            return eps.reshape((1,) * center.dim())
+        batch_shape = tuple(center.shape[:-2])
+        if tuple(eps.shape) not in (
+            batch_shape, (*batch_shape, 1), (*batch_shape, 1, 1),
+        ):
+            raise ValueError(
+                "LP_EMBEDDING eps must be scalar or one radius per sample; "
+                f"got shape {tuple(eps.shape)} for center {tuple(center.shape)}"
+            )
+        return eps.reshape(*batch_shape, 1, 1)
 
-    def _embedding_position_mask(self, center: torch.Tensor) -> torch.Tensor:
-        """Build a boolean token-position mask for embedding-space specs.
-
-        Args:
-            center: Clean embedding tensor with embedding dimension last.
-
-        Returns:
-            Boolean tensor with shape ``center.shape[:-1]``.
-
-        Raises:
-            ValueError: If ``center`` is not an embedding tensor or the provided
-                positions cannot be applied to its token dimension.
-        """
+    def _embedding_position_mask(self) -> torch.Tensor:
+        """Build the token mask on the clean embedding tensor's device."""
+        center = self.center
+        if center is None:
+            raise ValueError("LP_EMBEDDING requires center")
         if center.dim() < 2:
             raise ValueError("LP_EMBEDDING center must have at least [L, D] shape")
         return normalize_position_mask(
