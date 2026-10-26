@@ -29,7 +29,9 @@ from act.back_end.bab.node import (
 )
 from act.back_end.core import Bounds, Net
 from act.back_end.solver.solver_base import SolveStatus
-from act.back_end.solver.solver_dual import DualBatchResult
+from act.back_end.solver.solver_dual import (
+    DualBatchResult, certification_tolerance, unproven_spec_rows,
+)
 from act.config.config import (
     BaBConfig,
     CLIMB_SOLVER_TIER,
@@ -533,13 +535,12 @@ def propagate(
 def is_certified(slack: torch.Tensor, out_kind: str) -> torch.Tensor:
     """Per-lane certification mask over ``[N, M]`` slack rows.
 
-    Byte-consistent with the ``DualSolver.solve_spec_batch`` lane statuses: an
-    ``UNSAFE_LINEAR`` lane certifies when any finite row is strictly positive;
-    every other kind certifies only when all rows are finite and non-negative.
+    Replay subtracts the shared strict-certification band before returning an
+    UNSAFE_LINEAR slack. ALL-row properties retain their closed zero boundary.
     """
     if out_kind == OutKind.UNSAFE_LINEAR:
         return (torch.isfinite(slack) & (slack > 0)).any(dim=1)
-    return torch.isfinite(slack).all(dim=1) & (slack >= 0).all(dim=1)
+    return ~unproven_spec_rows(slack).any(dim=1)
 
 
 @torch.no_grad()
@@ -592,10 +593,17 @@ def certificate_replay(
         local_phase_clamp=True,
     )
     n_lanes = batch.batch_size
-    slack = result.row_lower_bounds().reshape(n_lanes, m_specs)
-    slack = slack - thresholds.reshape(n_lanes, m_specs).to(slack)
+    assert result.dual_margins is not None
+    margins = result.dual_margins.reshape(n_lanes, m_specs)
+    threshold_rows = thresholds.reshape(n_lanes, m_specs).to(margins)
+    slack = margins - threshold_rows
     pinned_rows: Optional[torch.Tensor] = None
     if out_kind == OutKind.UNSAFE_LINEAR:
+        # The budget must remain a backward certificate, including its strict
+        # rounding band. Combined forward margins cannot fund literal deletion.
+        slack = slack - certification_tolerance(
+            torch.maximum(margins.abs(), threshold_rows.abs())
+        )
         passing = torch.isfinite(slack) & (slack > 0)
         pinned_rows = passing.to(torch.int64).argmax(dim=1)
     assert result.nu_per_layer is not None, (
@@ -856,6 +864,9 @@ class ClimbSession:
             device=batch.lb.device,
             dtype=torch.long,
         )
+        if dual_solve_result.forward_only_certified is not None:
+            forward_only = dual_solve_result.forward_only_certified.to(unsat_idx.device)
+            unsat_idx = unsat_idx[~forward_only.index_select(0, unsat_idx)]
         if (
             int(unsat_idx.numel()) == 0
             or dual_solve_result.c_rows is None

@@ -22,6 +22,15 @@ import torch
 
 ScalarTensor = torch.Tensor | float | int
 
+
+def lp_norm(value: torch.Tensor, p: float, *, keepdim: bool = False) -> torch.Tensor:
+    """Scale before exponentiation so extreme valid norms do not underflow."""
+    scale = value.abs().amax(dim=-1, keepdim=True)
+    unit = value / torch.where(scale == 0, 1.0, scale)
+    norm = torch.linalg.vector_norm(unit, ord=p, dim=-1, keepdim=True) * scale
+    return norm if keepdim else norm.squeeze(-1)
+
+
 def normalize_position_mask(
     positions: "torch.Tensor | Sequence[int] | Sequence[bool] | None",
     token_count: int,
@@ -103,6 +112,74 @@ class InKind(str, Enum):
     # Analysis seeds the enclosing box; finite-p tightness is recovered by dual per-position input terms.
     LP_EMBEDDING = "LP_EMBEDDING"
     SYNONYM_SUB = "SYNONYM_SUB"
+
+
+@dataclass(frozen=True)
+class InputGeometry:
+    """Canonical token balls; a child box never changes this root domain."""
+
+    center: torch.Tensor
+    eps: torch.Tensor
+    mask: torch.Tensor
+    p: float
+
+    @property
+    def q(self) -> float:
+        """Holder dual exponent used by backend linear support."""
+        return 1.0 if self.p == math.inf else math.inf if self.p == 1 else self.p / (self.p - 1)
+
+    @property
+    def embed_dim(self) -> int:
+        """Width of one independent token ball."""
+        return self.center.shape[-1]
+
+    @property
+    def radii(self) -> torch.Tensor:
+        """Per-token radii, with zero radius at pinned positions."""
+        return self.eps * self.mask.unsqueeze(-1)
+
+    def box(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Enclose the root balls without changing their centers or radii."""
+        radii = self.radii
+        return self.center - radii, self.center + radii
+
+    def snapshot(self) -> "InputGeometry":
+        """Own detached tensors for a verifier cache, including nonleaf inputs."""
+        return InputGeometry(
+            self.center.detach().clone(), self.eps.detach().clone(),
+            self.mask.clone(), self.p,
+        )
+
+    def to(self, reference: torch.Tensor) -> "InputGeometry":
+        """Move one domain at the solve boundary, not at every layer."""
+        if self.center.device == reference.device and self.center.dtype == reference.dtype:
+            return self
+        return InputGeometry(
+            self.center.to(reference), self.eps.to(reference),
+            self.mask.to(device=reference.device), self.p,
+        )
+
+    def contains(self, x: torch.Tensor, tol: float = 0.0) -> torch.Tensor:
+        """Check every token without flattening selected tokens across lanes."""
+        shaped = x.reshape(x.shape[0], *self.center.shape[1:])
+        norms = lp_norm(shaped - self.center.to(x), self.p)
+        return (norms <= self.radii.to(x).squeeze(-1) + tol).flatten(1).all(1)
+
+    def project(self, x: torch.Tensor) -> torch.Tensor:
+        """Radially restrict generated samples; not a counterexample validator."""
+        shaped = x.reshape(x.shape[0], *self.center.shape[1:])
+        center = self.center.to(x)
+        delta = shaped - center
+        norm = lp_norm(delta, self.p, keepdim=True)
+        radii = self.radii.to(x)
+        scale = (radii / torch.where(norm == 0, 1.0, norm)).clamp(max=1)
+        # Move rounded boundary samples inward; at unrepresentable tiny radii,
+        # the center is the guaranteed feasible representable sample.
+        scale = torch.where(norm > radii, scale * (1 - 4 * torch.finfo(x.dtype).eps), scale)
+        candidate = center + delta * scale
+        inside = lp_norm(candidate - center, self.p, keepdim=True) <= radii
+        return torch.where(inside, candidate, center).reshape_as(x)
+
 
 @dataclass
 class InputSpec:
@@ -229,18 +306,10 @@ class InputSpec:
             return self.center - eps, self.center + eps
 
         if self.kind == InKind.LP_EMBEDDING:
-            if self.center is None or self.eps is None:
-                raise ValueError("LP_EMBEDDING requires both center and eps")
-            lb = self.center.clone()
-            ub = self.center.clone()
-            mask = self._embedding_position_mask()
-            expanded_mask = mask.unsqueeze(-1).expand_as(self.center)
-            eps = self._eps_like(self.center)
-            full_lb = self.center - eps
-            full_ub = self.center + eps
-            lb = torch.where(expanded_mask, full_lb, lb)
-            ub = torch.where(expanded_mask, full_ub, ub)
-            return lb, ub
+            geometry = self.input_geometry()
+            lb, ub = geometry.box()
+            assert self.center is not None
+            return lb.reshape_as(self.center), ub.reshape_as(self.center)
 
         raise NotImplementedError(
             f"Input kind {self.kind!r} does not define a box seed"
@@ -295,6 +364,45 @@ class InputSpec:
             batch_shape=tuple(center.shape[:-2]),
             device=center.device,
         )
+
+    def input_geometry(self) -> InputGeometry:
+        """Normalize geometry once at a model or ACT-layer construction boundary."""
+        center = self.center
+        if center is None or self.kind != InKind.LP_EMBEDDING:
+            raise ValueError("Input geometry requires an LP_EMBEDDING center")
+        mask = self._embedding_position_mask()
+        if center.numel() == 0 or not bool(torch.isfinite(center).all()):
+            raise ValueError("LP_EMBEDDING center must have nonempty, finite token coordinates")
+        eps = self._eps_like(center)
+        assert isinstance(self.p_norm, torch.Tensor)
+        if center.dim() == 2:
+            center, eps, mask = center.unsqueeze(0), eps.unsqueeze(0), mask.unsqueeze(0)
+        return InputGeometry(center, eps, mask, float(self.p_norm.item()))
+
+
+def normalize_input_geometry(
+    params: Mapping[str, ScalarTensor | str | Sequence[int] | None],
+) -> InputGeometry | None:
+    """Interpret raw INPUT_SPEC fields in the frontend, never in solver kernels."""
+    if params.get("kind") != InKind.LP_EMBEDDING:
+        return None
+    center, eps, p = params.get("center"), params.get("eps"), params.get("p_norm")
+    positions = params.get("perturbed_positions")
+    if not isinstance(center, torch.Tensor) or not isinstance(eps, (torch.Tensor, int, float)):
+        raise ValueError("LP_EMBEDDING requires center and eps")
+    if not isinstance(p, (torch.Tensor, int, float)):
+        raise ValueError("LP_EMBEDDING requires numeric p_norm")
+    if positions is not None and not isinstance(positions, (torch.Tensor, list, tuple)):
+        raise ValueError("LP_EMBEDDING positions must be indices or a boolean mask")
+    spec = InputSpec(
+        kind=InKind.LP_EMBEDDING, center=center, eps=eps,
+        p_norm=p, perturbed_positions=positions,
+    )
+    geometry = spec.input_geometry()
+    width = params.get("embed_dim")
+    if width is not None and (not isinstance(width, int) or width != geometry.embed_dim):
+        raise ValueError("LP_EMBEDDING embed_dim must match center's last dimension")
+    return geometry
 
 
 class OutKind(str, Enum):

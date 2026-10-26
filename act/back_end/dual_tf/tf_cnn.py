@@ -60,7 +60,6 @@ def forward_conv2d(
     parent_box = parent_boxes[0]
     parent_lin = parent_lins[0]
     frame = parent_frames[0]
-    x_L, x_U = frame
 
     new_lin = _fwd_conv2d(L, parent_lin)
     if new_lin is None:
@@ -70,7 +69,7 @@ def forward_conv2d(
         lin, frame = _reset_forward_box(lb, ub, device, dtype)
     else:
         lin = new_lin
-        lin_lb, lin_ub = _concretize(lin, x_L, x_U)
+        lin_lb, lin_ub = _concretize(lin, frame)
         int_lb, int_ub = _fwd_conv2d_interval(L, parent_box.lb, parent_box.ub)
         lb, ub = _intersect_boxes(lin_lb, lin_ub, int_lb, int_ub)
         out = Bounds(lb, ub)
@@ -231,8 +230,7 @@ def forward_maxpool2d(
         rtol=0.0, atol=0.0, equal_nan=True,
     ).all(), f"MAXPOOL2D layer {L.id}: a dominant window's max upper bound is not at its argmax"
 
-    x_L, x_U = parent_frame
-    lin_lb, lin_ub = _concretize(lin, x_L, x_U)
+    lin_lb, lin_ub = _concretize(lin, parent_frame)
     lb, ub = _intersect_boxes(lin_lb, lin_ub, box_lb, box_ub)
     L.cache["maxpool_argmax_flat"] = idx_flat
     L.cache["maxpool_dominant"] = dominant

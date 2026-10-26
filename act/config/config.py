@@ -494,6 +494,18 @@ class DualConfig:
     lr_decay: float = 0.98
     """Multiplicative learning-rate decay applied each Adam iteration."""
 
+    stagnation_patience: int = 0
+    """Stop after this many non-improving iterations; zero disables stopping."""
+
+    stagnation_tol: float = 1e-5
+    """Minimum bound improvement that resets the stagnation counter."""
+
+    stop_when_verified: bool = False
+    """Stop once every lane is certified; disabled by default."""
+
+    max_time: float = 0.0
+    """Optimization time limit in seconds; zero disables the limit."""
+
     per_class_alpha: bool = True
     """Allocate separate α tensors per output class rather than sharing one α."""
 
@@ -505,6 +517,10 @@ class DualConfig:
     keeps an explicit linear bound; above it, interval-only."""
 
     def __post_init__(self) -> None:
+        for name in ("stagnation_patience", "stagnation_tol", "max_time"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ConfigError(f"{name} must be finite and non-negative, got {value}")
         if self.forward_lin_max_perturbed < 0:
             raise ConfigError(
                 "forward_lin_max_perturbed must be non-negative, got "

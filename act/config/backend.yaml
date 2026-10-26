@@ -189,6 +189,10 @@ backend:
     lr_alpha: 0.1                   # Adam learning rate for alpha (relaxation slopes)
     lr_beta: 0.1                    # Adam learning rate for eta (split-constraint multipliers)
     lr_decay: 0.98                  # multiplicative learning-rate decay per Adam iteration
+    stagnation_patience: 0          # non-improving iterations before stopping; 0 disables
+    stagnation_tol: 0.00001         # minimum bound improvement to reset stagnation
+    stop_when_verified: false       # stop when every lane is certified
+    max_time: 0.0                   # optimization time limit in seconds; 0 disables
     per_class_alpha: true           # separate alpha tensors per output class
     incremental_start_enabled: true # children start from the parent's alpha/eta
     # Linear forward bounds are kept up to this many perturbed input dims;

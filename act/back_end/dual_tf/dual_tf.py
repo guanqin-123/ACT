@@ -288,12 +288,11 @@ def forward_add(
 ) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
     """ADD multi-pred forward handler.
 
-    Source: tf_forward.py lines 287-322 (ADD branch of compute_forward_bounds).
-    Semantics preserved verbatim — when all predecessor frames share the same
-    object identity and A_lb shapes match, sum the dual-track linear bounds and
-    concretize over the common frame; otherwise fall back to summing interval
-    boxes and reset the dual-track state. Bias (if present) is added on both
-    paths via _align. Returns (stored, out, lin, frame) where stored == out.
+    Shared frames and matching output widths permit affine summation. When
+    every relation is lazy identity, sum interval boxes and reset instead:
+    one lazy identity cannot represent k identities, and materializing k*I
+    would defeat the wide-frame memory cap. Bias is added on both paths.
+    Returns (stored, out, lin, frame) where stored == out.
     """
     assert len(parent_boxes) >= 2, "forward_add: requires >=2 predecessors"
     # Compare b_lb widths (always present), not A_lb: A_lb is None for the lazy
@@ -305,6 +304,8 @@ def forward_add(
     ) and all(
         parent_lins[i].b_lb.shape == parent_lins[0].b_lb.shape
         for i in range(1, len(parent_lins))
+    ) and any(
+        lin.A_lb is not None or lin.A_ub is not None for lin in parent_lins
     )
     if can_dual:
         lin = _sum_linear_bounds(parent_lins)
@@ -318,7 +319,7 @@ def forward_add(
                 b_ub=lin.b_ub + bias_vec,
             )
         frame = parent_frames[0]
-        lb, ub = _concretize(lin, *frame)
+        lb, ub = _concretize(lin, frame)
     else:
         summed = _sum_interval_bounds(parent_boxes)
         lb, ub = summed.lb, summed.ub
@@ -421,7 +422,7 @@ def forward_concat(
             b_ub=torch.cat([lin.b_ub for lin in parent_lins], dim=1),
         )
         frame = parent_frames[0]
-        lb, ub = _concretize(lin, *frame)
+        lb, ub = _concretize(lin, frame)
     else:
         lb = torch.cat([box.lb for box in parent_boxes], dim=concat_dim)
         ub = torch.cat([box.ub for box in parent_boxes], dim=concat_dim)

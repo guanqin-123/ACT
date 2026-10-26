@@ -43,7 +43,10 @@ from .tf_mlp import (
 )
 
 # Forward bounds
-from .tf_forward import compute_forward_bounds, Frame
+from .tf_forward import (
+    compute_forward_bounds, Frame, ForwardFrame, ForwardPassStats,
+    ForwardPrefixCache, input_support, forward_frame_row_lower_bounds,
+)
 
 from .tf_cnn import (
     dual_conv2d_backward,
@@ -76,7 +79,8 @@ __all__ = [
     'forward_dense', 'forward_relu', 'forward_bias', 'forward_scale',
     'forward_bn', 'forward_lrelu', 'forward_identity', 'forward_reshape',
     'compute_forward_bounds',
-    'Frame',
+    'Frame', 'ForwardFrame', 'ForwardPassStats', 'ForwardPrefixCache',
+    'input_support', 'forward_frame_row_lower_bounds',
     'dual_conv2d_backward',
     'backward_conv2d', 'backward_maxpool2d', 'backward_avgpool2d',
     'forward_conv2d', 'forward_maxpool2d', 'forward_avgpool2d',

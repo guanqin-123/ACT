@@ -35,8 +35,6 @@ from act.config.config import (
 )
 from act.back_end.bab.node import (
     SubproblemBatch,
-    _install_embedding_child_block_eps,
-    _restore_embedding_child_block_eps,
     slice_branching_state,
     split_neurons,
 )
@@ -76,6 +74,7 @@ from act.back_end.solver.solver_dual import (
     DualBatchResult,
     DualSolver,
     expand_bounds_dict,
+    unproven_spec_rows,
 )
 from act.back_end.verifier import (
     gather_input_spec_layers,
@@ -220,126 +219,124 @@ def _solve_dual_batch(
 ) -> DualBatchResult:
     """Prepare BaB-specific bounds/state policy, then call ``DualSolver``."""
     solver = DualSolver()
-    block_eps_updates = _install_embedding_child_block_eps(
-        net, batched_bounds, batch
+    # Reused root boxes have no lane-matched symbolic frame.
+    forward_frame = None
+    input_split_child = (
+        batch.depths.numel() > 0
+        and bool((batch.depths.max() > 0).item())
+        and not batch.split_signs
     )
-    try:
-        input_split_child = (
-            batch.depths.numel() > 0
-            and bool((batch.depths.max() > 0).item())
-            and not batch.split_signs
-        )
-        use_root_dict = root_bounds_dict is not None and not input_split_child
-        if use_root_dict:
-            assert root_bounds_dict is not None
-            bounds_dict = expand_bounds_dict(root_bounds_dict, k_actual)
-            lane_box = Bounds(batched_bounds.lb, batched_bounds.ub)
-            for layer in net.layers:
-                kind = (
-                    layer.kind.upper()
-                    if isinstance(layer.kind, str)
-                    else layer.kind
-                )
-                if (
-                    kind in (LayerKind.INPUT.value, LayerKind.INPUT_SPEC.value)
-                    and layer.id in bounds_dict
-                ):
-                    bounds_dict[layer.id] = lane_box
-            if config.root_bounds_reuse == "split_refresh" and batch.split_signs:
-                refreshed = solver._interval_refresh_bounds(
-                    net, bounds_dict, batch.split_signs
-                )
-                if refreshed is not None:
-                    bounds_dict = refreshed
-                refine_mode = config.per_subproblem_refine
-                refine_rows_cap = config.per_subproblem_refine_rows_cap
-                refine_iters = config.per_subproblem_refine_iters
-                if round_policy is not None:
-                    if round_policy.refine_mode is not None:
-                        refine_mode = round_policy.refine_mode
-                    if round_policy.refine_rows_cap is not None:
-                        refine_rows_cap = round_policy.refine_rows_cap
-                    if round_policy.refine_iters is not None:
-                        refine_iters = round_policy.refine_iters
-                if refine_mode != "none":
-                    bounds_dict = solver.refine_intermediate_bounds_batched(
-                        net,
-                        bounds_dict,
-                        split_signs=batch.split_signs,
-                        mode=refine_mode,
-                        rows_cap=refine_rows_cap,
-                        optimize_iters=refine_iters,
-                    )
-        else:
-            bounds_dict = compute_forward_bounds(
-                net,
-                batched_bounds.lb,
-                batched_bounds.ub,
-                forward_lin_max_perturbed=dual_config.forward_lin_max_perturbed,
+    use_root_dict = root_bounds_dict is not None and not input_split_child
+    if use_root_dict:
+        assert root_bounds_dict is not None
+        bounds_dict = expand_bounds_dict(root_bounds_dict, k_actual)
+        lane_box = Bounds(batched_bounds.lb, batched_bounds.ub)
+        for layer in net.layers:
+            kind = (
+                layer.kind.upper()
+                if isinstance(layer.kind, str)
+                else layer.kind
             )
-
-        out_kind = assert_layer.params["kind"]
-        if not isinstance(out_kind, str):
-            raise TypeError(
-                f"ASSERT kind must be str, got {type(out_kind).__name__}"
+            if (
+                kind in (LayerKind.INPUT.value, LayerKind.INPUT_SPEC.value)
+                and layer.id in bounds_dict
+            ):
+                bounds_dict[layer.id] = lane_box
+        if config.root_bounds_reuse == "split_refresh" and batch.split_signs:
+            refreshed = solver._interval_refresh_bounds(
+                net, bounds_dict, batch.split_signs
             )
-        fields = OutputSpec(kind=out_kind)._gather_rows(
-            rows=None,
-            batch_size=1,
-            device=batched_bounds.lb.device,
-            dtype=batched_bounds.lb.dtype,
-            shared_ndim={},
-            source=assert_layer.params,
-            source_batch_size=1,
-            drop_singleton_batch=True,
-        )
-        out_spec = OutputSpec(
-            kind=out_kind,
-            y_true=fields.get("y_true"),
-            margin=fields.get("margin"),
-            c=fields.get("c"),
-            d=fields.get("d"),
-            lb=fields.get("lb"),
-            ub=fields.get("ub"),
-        )
-        eta_enabled = config.solver_tier == "dual_alpha_eta"
-        is_child_batch = (
-            bool(batch.depths.min().item() > 0) if batch.depths.numel() else False
-        )
-        result = solver.solve_spec_batch(
+            if refreshed is not None:
+                bounds_dict = refreshed
+            refine_mode = config.per_subproblem_refine
+            refine_rows_cap = config.per_subproblem_refine_rows_cap
+            refine_iters = config.per_subproblem_refine_iters
+            if round_policy is not None:
+                if round_policy.refine_mode is not None:
+                    refine_mode = round_policy.refine_mode
+                if round_policy.refine_rows_cap is not None:
+                    refine_rows_cap = round_policy.refine_rows_cap
+                if round_policy.refine_iters is not None:
+                    refine_iters = round_policy.refine_iters
+            if refine_mode != "none":
+                bounds_dict = solver.refine_intermediate_bounds_batched(
+                    net,
+                    bounds_dict,
+                    split_signs=batch.split_signs,
+                    mode=refine_mode,
+                    rows_cap=refine_rows_cap,
+                    optimize_iters=refine_iters,
+                )
+    else:
+        bounds_dict, forward_frame, _ = compute_forward_bounds(
             net,
-            bounds_dict,
-            out_spec,
-            optimize=optimize,
-            dual_config=dual_config,
-            input_shape=tuple(batched_bounds.lb.shape[1:]),
-            keep_rows=keep_rows,
-            split_signs=batch.split_signs if eta_enabled else None,
-            eta=batch.incremental_eta if eta_enabled else None,
-            incremental_alphas=(
-                batch.incremental_alpha
-                if dual_config.incremental_start_enabled
-                else None
-            ),
-            incremental_etas=(
-                batch.incremental_eta
-                if eta_enabled and dual_config.incremental_start_enabled
-                else None
-            ),
-            optimize_alpha=not (
-                config.eta_only_children and is_child_batch
-            ),
-            refresh_forward=not use_root_dict,
-            return_nu=_neuron_branching_supported(config),
-            reuse_bounds_for_branching=use_root_dict,
+            batched_bounds.lb,
+            batched_bounds.ub,
+            forward_lin_max_perturbed=dual_config.forward_lin_max_perturbed,
         )
-        if optimize:
-            batch.incremental_alpha = result.alpha_state
-            if eta_enabled:
-                batch.incremental_eta = result.eta_state
-        return result
-    finally:
-        _restore_embedding_child_block_eps(block_eps_updates)
+
+    out_kind = assert_layer.params["kind"]
+    if not isinstance(out_kind, str):
+        raise TypeError(
+            f"ASSERT kind must be str, got {type(out_kind).__name__}"
+        )
+    out_kind = OutKind(out_kind)
+    fields = OutputSpec(kind=out_kind)._gather_rows(
+        rows=None,
+        batch_size=1,
+        device=batched_bounds.lb.device,
+        dtype=batched_bounds.lb.dtype,
+        shared_ndim={},
+        source=assert_layer.params,
+        source_batch_size=1,
+        drop_singleton_batch=True,
+    )
+    out_spec = OutputSpec(
+        kind=out_kind,
+        y_true=fields.get("y_true"),
+        margin=fields.get("margin"),
+        c=fields.get("c"),
+        d=fields.get("d"),
+        lb=fields.get("lb"),
+        ub=fields.get("ub"),
+    )
+    eta_enabled = config.solver_tier == "dual_alpha_eta"
+    is_child_batch = (
+        bool(batch.depths.min().item() > 0) if batch.depths.numel() else False
+    )
+    result = solver.solve_spec_batch(
+        net,
+        bounds_dict,
+        out_spec,
+        optimize=optimize,
+        dual_config=dual_config,
+        input_shape=tuple(batched_bounds.lb.shape[1:]),
+        keep_rows=keep_rows,
+        split_signs=batch.split_signs if eta_enabled else None,
+        eta=batch.incremental_eta if eta_enabled else None,
+        incremental_alphas=(
+            batch.incremental_alpha
+            if dual_config.incremental_start_enabled
+            else None
+        ),
+        incremental_etas=(
+            batch.incremental_eta
+            if eta_enabled and dual_config.incremental_start_enabled
+            else None
+        ),
+        optimize_alpha=not (
+            config.eta_only_children and is_child_batch
+        ),
+        refresh_forward=not use_root_dict,
+        return_nu=_neuron_branching_supported(config),
+        reuse_bounds_for_branching=use_root_dict,
+        forward_frame=forward_frame,
+    )
+    if optimize:
+        batch.incremental_alpha = result.alpha_state
+        if eta_enabled:
+            batch.incremental_eta = result.eta_state
+    return result
 
 
 def _auto_batch_budget_bytes(safety: float) -> float:
@@ -515,6 +512,8 @@ def verify_bab_batched(
 
     spec_layers = gather_input_spec_layers(net)
     root_bounds = seed_from_input_specs(spec_layers)
+    if root_bounds.lb.shape[0] != 1:
+        raise ValueError("verify_bab_batched requires one root sample; slice the net before BaB")
     input_shape: tuple[int, ...] = tuple(root_bounds.lb.shape[1:])
 
     per_lane_dim = int(root_bounds.lb[0].numel())
@@ -552,7 +551,7 @@ def verify_bab_batched(
     if presolve_tier in ("dual", "dual_alpha", "dual_alpha_eta") and (
         reuse_mode != "none" or refine_mode != "none"
     ):
-        root_fwd = compute_forward_bounds(
+        root_fwd, _, _ = compute_forward_bounds(
             net,
             root_bounds.lb,
             root_bounds.ub,
@@ -590,7 +589,7 @@ def verify_bab_batched(
         )
         presolve_slack = presolve.spec_row_slack()
         if presolve_slack is not None:
-            unproven = (presolve_slack < 0).any(dim=0)
+            unproven = unproven_spec_rows(presolve_slack).any(dim=0)
             total_rows = int(unproven.numel())
             if not bool(unproven.any().item()):
                 return VerifyResult(

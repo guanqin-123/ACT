@@ -93,9 +93,9 @@ class LinearBounds:
         # is solved exactly by the dual norm, so concretization is tight.
         self.q = 1.0 / (1.0 - 1.0 / p) if p != 1 else float("inf")
         # eps is stored verbatim: a python float keeps the original scalar-eps
-        # path bit-identical, while a [B, perturbed_words] tensor lets each BaB
-        # child lane carry its own per-word ball radius (consumed block-wise in
-        # concretize). It is never coerced, so a scalar never becomes a tensor.
+        # path bit-identical, while a [B, perturbed_words] tensor carries the
+        # original per-sample token radii, consumed block-wise in concretize.
+        # Child boxes do not redefine them; a scalar never becomes a tensor.
         self.eps = eps
         self.perturbed_words = perturbed_words
         self.device = lw.device
@@ -152,18 +152,10 @@ class LinearBounds:
 
         ``eps`` may be a scalar (one Lp ball shared by the whole batch) or a
         ``[B, perturbed_words]`` tensor carrying one radius per (lane, word)
-        block. Each block's radius scales only that block's dual-norm tail, so
-        a BaB child lane is concretized against its own asymmetric box without
-        coupling to its siblings.
-
-        Soundness (split L2 child): the per-block ``eps`` must be the ball
-        re-enclosure radius (``rederive_embedding_block_eps``) -- the radius of
-        the smallest L2 ball that still contains the child box. Feeding the raw
-        per-coordinate half-width ``(ub - lb) / 2`` at ``q == 2`` over-claims
-        the region (``||half (x) nu||_2 > ||half (x) nu||_1``, the box min) and
-        yields an unsound bound. The ``p == inf`` path is exact per-coordinate
-        and needs no re-enclosure. Sourcing that radius is the seeding oracle's
-        job (Wave 3); this method only consumes the radius it is handed.
+        block. Each block's radius scales only that block's dual-norm tail.
+        Radii describe the original token balls, not child-box half-widths.
+        BaB intersects their support with child-box support in the forward
+        frame; this method only consumes the radius it is handed.
 
         Returns:
             ``(lower, upper)`` boxes of shape ``[B, length, dim_out]``.

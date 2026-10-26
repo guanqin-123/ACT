@@ -37,7 +37,7 @@ import torch  # pyright: ignore[reportMissingImports]
 from act.back_end.core import Layer, Net
 from act.back_end.layer_schema import LayerKind, REGISTRY
 from act.back_end.serialization.serialization import NetSerializer
-from act.front_end.specs import InKind, OutKind, OutputSpec
+from act.front_end.specs import InKind, InputSpec, OutKind, OutputSpec
 from act.util.device_manager import get_default_device, get_default_dtype
 from act.util.format_utils import rule
 
@@ -1286,6 +1286,21 @@ class NetFactory:
             )
             eps = float(params.get("eps", 0.0))
             return {"center": center, "lb": center - eps, "ub": center + eps}
+        if params["kind"] == InKind.LP_EMBEDDING:
+            spec = InputSpec(
+                kind=InKind.LP_EMBEDDING,
+                center=torch.full(input_shape, float(params.pop("center_val", 0.0)), dtype=dtype),
+                eps=params["eps"],
+                p_norm=params["p_norm"],
+                perturbed_positions=params.get("perturbed_positions"),
+            )
+            geometry = spec.input_geometry()
+            lb, ub = geometry.box()
+            return {
+                "center": geometry.center, "eps": geometry.eps,
+                "p_norm": spec.p_norm, "perturbed_positions": geometry.mask,
+                "embed_dim": geometry.embed_dim, "lb": lb, "ub": ub,
+            }
         if params["kind"] == InKind.LIN_POLY:
             A = params.get("A")
             b = params.get("b")
@@ -1686,6 +1701,34 @@ def _lt_input(shape: List[int], lb: float, ub: float) -> List[Dict[str, Any]]:
             "params": {"kind": InKind.BOX, "lb_val": float(lb), "ub_val": float(ub)},
         },
     ]
+
+
+def _lt_spec_lp_dense() -> Dict[str, Any]:
+    """Two independent unit L2 balls: max 3*x0+4*x1+3*x2+4*x3 = 10.
+
+    A global L2 ball gives sqrt(50), while the enclosing box gives 14.
+    The threshold 10.25 therefore requires finite-p support, and the concrete
+    input [[0.6, 0.8], [0.6, 0.8]] attains 10 (ruling out a global ball).
+    """
+    shape = [1, 2, 2]
+    return {"layers": [
+        {"kind": LayerKind.INPUT.value, "params": {"shape": shape}},
+        {"kind": LayerKind.INPUT_SPEC.value, "params": {
+            "kind": InKind.LP_EMBEDDING, "center_val": 0.0,
+            "eps": 1.0, "p_norm": 2.0, "perturbed_positions": None,
+        }},
+        {"kind": LayerKind.FLATTEN.value, "params": {
+            "start_dim": 1, "end_dim": -1,
+            "input_shape": shape, "output_shape": [1, 4],
+        }},
+        {"kind": LayerKind.DENSE.value, "params": {
+            "weight": torch.tensor([[3.0, 4.0, 3.0, 4.0]], dtype=get_default_dtype()),
+            "bias": torch.zeros(1, dtype=get_default_dtype()),
+            "in_features": 4, "out_features": 1,
+            "input_shape": [1, 4], "output_shape": [1, 1],
+        }},
+        _lt_assert_le([1.0], 10.25),
+    ]}
 
 
 def _lt_input_with_lin_poly(
@@ -2662,6 +2705,7 @@ LAYER_TESTING_SPECS: Dict[str, Any] = {
     # CI's --generate + --validate-soundness + --verify --bab exercise every
     # branch in the verifier's seed / ASSERT-encoding / MILP-negation paths.
     f"{LAYER_TESTING_NAME_PREFIX}lin_poly":      _lt_spec_lin_poly,
+    f"{LAYER_TESTING_NAME_PREFIX}lp_dense":      _lt_spec_lp_dense,
     f"{LAYER_TESTING_NAME_PREFIX}margin_robust": _lt_spec_margin_robust,
     f"{LAYER_TESTING_NAME_PREFIX}top1_robust":   _lt_spec_top1_robust,
     f"{LAYER_TESTING_NAME_PREFIX}range":         _lt_spec_range,

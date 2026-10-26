@@ -27,9 +27,7 @@ from typing import Dict, Optional
 
 import torch
 
-from act.back_end.core import Bounds, Layer, Net, ParamValue
-from act.back_end.layer_schema import LayerKind
-from act.front_end.specs import InKind
+from act.back_end.core import Bounds, Layer, Net
 
 
 # ---------------------------------------------------------------------------
@@ -87,10 +85,9 @@ class SubproblemBatch:
     def from_bounds(bounds: Bounds, depth: int = 0) -> SubproblemBatch:
         """Wrap ``Bounds[B, *shape]`` into ``SubproblemBatch[B, D]``.
 
-        Multi-sample inputs (``B > 1`` — e.g., wrapped models carrying several
-        specs at once) become ``B`` independent subproblems so each gets its
-        own BaB exploration tree. Single-sample (``B == 1``) is the legacy
-        path. Unbatched ``Bounds`` (``lb.dim() < 2``) is treated as ``B = 1``.
+        Each leading row becomes a subproblem lane. The BaB entry point starts
+        from one root sample; descendant boxes may be batched here.
+        Unbatched ``Bounds`` (``lb.dim() < 2``) is treated as ``B = 1``.
         """
         lb_raw = bounds.lb.detach()
         ub_raw = bounds.ub.detach()
@@ -425,120 +422,6 @@ def split_neurons(
         f"split_neurons: parent_index has {parent_index.numel()} entries for {children.batch_size} children"
     )
     return children, parent_index
-
-
-def rederive_embedding_block_eps(
-    lb: torch.Tensor,
-    ub: torch.Tensor,
-    input_shape: tuple[int, ...],
-    perturbed_positions: Optional[torch.Tensor],
-    p_norm: float,
-) -> torch.Tensor:
-    """Return child per-token Lp radii for split embedding boxes.
-
-    BaB input splits partition the enclosing embedding box.  For finite-p
-    LP_EMBEDDING children, the dual A2 term must use a radius for each token
-    block that contains the split child box around its midpoint.  The radius is
-    therefore the primal-p norm of the child half-width vector in that block;
-    non-perturbed token blocks keep radius zero.
-    """
-    if len(input_shape) < 2:
-        raise ValueError(f"embedding input_shape must include token and embedding axes, got {input_shape}")
-    n = int(lb.shape[0])
-    token_count = int(input_shape[-2])
-    embed_dim = int(input_shape[-1])
-    flat_dim = token_count * embed_dim
-    if int(lb.shape[-1]) < flat_dim or int(ub.shape[-1]) < flat_dim:
-        raise ValueError(
-            f"input bounds have dim {lb.shape[-1]}/{ub.shape[-1]}, expected at least {flat_dim}"
-        )
-    half = ((ub[:, :flat_dim] - lb[:, :flat_dim]) * 0.5).reshape(n, token_count, embed_dim)
-
-    if p_norm == float("inf"):
-        radii = half.abs().amax(dim=-1)
-    elif p_norm == 1.0:
-        radii = half.abs().sum(dim=-1)
-    elif p_norm == 2.0:
-        radii = torch.linalg.vector_norm(half, ord=2, dim=-1)
-    else:
-        radii = torch.linalg.vector_norm(half, ord=p_norm, dim=-1)
-
-    if perturbed_positions is None:
-        return radii
-    from act.front_end.specs import normalize_position_mask
-
-    mask = normalize_position_mask(
-        perturbed_positions, token_count, batch_shape=(n,), device=lb.device,
-    )
-    return torch.where(mask, radii, torch.zeros_like(radii))
-
-
-def _finite_embedding_spec(net: Net) -> Optional[Layer]:
-    for layer in net.layers:
-        if (
-            layer.kind == LayerKind.INPUT_SPEC.value
-            and layer.params.get("kind") == InKind.LP_EMBEDDING
-        ):
-            p_norm = layer.params.get("p_norm", float("inf"))
-            if isinstance(p_norm, torch.Tensor):
-                p_value = float(p_norm.reshape(-1)[0].item())
-            elif isinstance(p_norm, (int, float, bool)):
-                p_value = float(p_norm)
-            else:
-                continue
-            if p_value != float("inf"):
-                return layer
-    return None
-
-
-def _install_embedding_child_block_eps(
-    net: Net,
-    batched_bounds: Bounds,
-    batch: SubproblemBatch,
-) -> list[tuple[Layer, ParamValue]]:
-    """Install finite-p embedding radii derived from a split child box."""
-    spec = _finite_embedding_spec(net)
-    if (
-        spec is None
-        or batch.depths.numel() == 0
-        or int(batch.depths.max().item()) == 0
-    ):
-        return []
-    p_raw = spec.params.get("p_norm", float("inf"))
-    if isinstance(p_raw, torch.Tensor):
-        p_norm = float(p_raw.reshape(-1)[0].item())
-    elif isinstance(p_raw, (int, float, bool)):
-        p_norm = float(p_raw)
-    else:
-        return []
-    input_shape = tuple(batched_bounds.lb.shape[1:])
-    positions_raw = spec.params.get("perturbed_positions")
-    positions = positions_raw if isinstance(positions_raw, torch.Tensor) else None
-    block_eps = rederive_embedding_block_eps(
-        batched_bounds.lb.flatten(start_dim=1),
-        batched_bounds.ub.flatten(start_dim=1),
-        input_shape,
-        positions,
-        p_norm,
-    )
-    old_values: list[tuple[Layer, ParamValue]] = []
-    for layer in net.layers:
-        kind = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
-        if kind in (LayerKind.INPUT.value, LayerKind.INPUT_SPEC.value):
-            old_values.append((layer, layer.params.get("bab_block_eps", None)))
-            layer.params["bab_block_eps"] = block_eps
-    return old_values
-
-
-def _restore_embedding_child_block_eps(
-    updates: list[tuple[Layer, ParamValue]],
-) -> None:
-    """Restore input-layer embedding radii after a child solve."""
-    for layer, old in updates:
-        if old is None:
-            layer.params.pop("bab_block_eps", None)
-        else:
-            layer.params["bab_block_eps"] = old
 
 
 def split_input_nary(

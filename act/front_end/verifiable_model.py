@@ -79,7 +79,7 @@ import torch.nn as nn
 from typing import Dict, Any, Optional, List, Tuple, Union
 
 # Import ACT components
-from act.front_end.specs import InputSpec, OutputSpec, InKind, OutKind
+from act.front_end.specs import InputGeometry, InputSpec, OutputSpec, InKind, OutKind
 from act.front_end.spec_creator_base import LabeledInputTensor
 from act.back_end.layer_schema import LayerKind, REGISTRY
 from act.back_end.layer_util import create_layer
@@ -472,8 +472,7 @@ class InputSpecLayer(nn.Module):
 
         if self.kind == InKind.LP_EMBEDDING:
             self.spec.lb, self.spec.ub = self.spec.materialize_box_seed()
-            # Legacy dual consumers use the mask's presence to distinguish
-            # token balls from one global input ball.
+            # Export the same explicit token selection checked by this wrapper.
             positions = self.spec._embedding_position_mask()
         elif self.kind == InKind.LINF_BALL and self.spec.center is not None and self.spec.eps is not None:
             eps = self.spec.eps
@@ -656,28 +655,22 @@ class InputSpecLayer(nn.Module):
             return (x, satisfied, explanation)
         
         elif self.kind == InKind.LP_EMBEDDING:
-            lb_buffer, ub_buffer = self.lb, self.ub
             center_buffer, eps_buffer, norm_buffer = self.center, self.eps, self.p_norm
-            if not isinstance(lb_buffer, torch.Tensor) or not isinstance(
-                ub_buffer, torch.Tensor
-            ) or not isinstance(center_buffer, torch.Tensor) or not isinstance(
+            mask_buffer = self.perturbed_positions
+            if not isinstance(center_buffer, torch.Tensor) or not isinstance(
                 eps_buffer, torch.Tensor
-            ) or not isinstance(norm_buffer, torch.Tensor
+            ) or not isinstance(norm_buffer, torch.Tensor) or not isinstance(
+                mask_buffer, torch.Tensor
             ):
                 raise ValueError("LP_EMBEDDING requires normalized input parameters")
 
-            lb = self._gather_rows(lb_buffer, rows, batch_size, "lb")
-            ub = self._gather_rows(ub_buffer, rows, batch_size, "ub")
-            lb_ok = (x >= lb).reshape(batch_size, -1).all(dim=1)
-            ub_ok = (x <= ub).reshape(batch_size, -1).all(dim=1)
-            satisfied = lb_ok & ub_ok
-            p = float(norm_buffer.item())
-            if p != math.inf:
-                center = self._gather_rows(center_buffer, rows, batch_size, "center")
-                eps = self._gather_rows(eps_buffer, rows, batch_size, "eps")
-                norms = torch.linalg.vector_norm(x - center, ord=p, dim=-1)
-                # The seed-box check already pins every unselected token.
-                satisfied &= (norms <= eps.squeeze(-1)).flatten(start_dim=1).all(dim=1)
+            geometry = InputGeometry(
+                self._gather_rows(center_buffer, rows, batch_size, "center"),
+                self._gather_rows(eps_buffer, rows, batch_size, "eps"),
+                self._gather_rows(mask_buffer, rows, batch_size, "perturbed_positions"),
+                float(norm_buffer.item()),
+            )
+            satisfied = geometry.contains(x)
             n_ok = satisfied.sum().item()
             explanation = f"✅ INPUT LP_EMBEDDING: {n_ok}/{batch_size} satisfied"
             return (x, satisfied, explanation)

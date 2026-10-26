@@ -197,7 +197,9 @@ class VerificationValidator:
         for L in new_net.layers:
             if L.kind in ("INPUT", "INPUT_SPEC"):
                 params = L.params or {}
-                for key in ("lb", "ub", "center", "eps"):
+                if L.input_geometry is not None:
+                    params["perturbed_positions"] = L.input_geometry.mask
+                for key in ("lb", "ub", "center", "eps", "perturbed_positions"):
                     t = params.get(key)
                     if torch.is_tensor(t) and t.dim() > 0 and t.shape[0] != target_B:
                         params[key] = (
@@ -240,6 +242,8 @@ class VerificationValidator:
                         device=self.device,
                         dtype=self.dtype if v.is_floating_point() else v.dtype,
                     )
+            if L.input_geometry is not None:
+                L.refresh_input_geometry()
         return net
 
     def _batchify_assert_layer(self, L: Layer, target_B: int) -> None:
@@ -426,6 +430,7 @@ class VerificationValidator:
 
             delta = spec_ub - spec_lb
             dim = int(spec_lb.numel())
+            geometry = act_net.input_geometry if act_net is not None else None
 
             def _probe(x_flat: torch.Tensor, label: str) -> Optional[Tuple[torch.Tensor, Dict[str, Any]]]:
                 x = (
@@ -433,6 +438,9 @@ class VerificationValidator:
                     if (input_shape and shape_prod == x_flat.numel())
                     else x_flat.reshape(1, -1)
                 ).to(self.device, self.dtype)
+                # These are generated hull samples, not alleged solver witnesses.
+                if geometry is not None:
+                    x = geometry.project(x)
                 with torch.no_grad():
                     res = model(x)
                 if (

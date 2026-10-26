@@ -110,7 +110,7 @@ jobs:
 
       # ===================================================================
       # LP_EMBEDDING input-domain splits on safenlp: perturbed-embedding
-      # branching mask + per-token radius rederivation on BaB children.
+      # branching mask + immutable root balls intersected with child boxes.
       # ===================================================================
       - name: BaB on VNNLIB — safenlp LP_EMBEDDING input splitting
         run: |
@@ -118,6 +118,9 @@ jobs:
           coverage run -p -m act.pipeline --verify vnnlib --category safenlp_2024 --max-instances 1 \
             --solvers dual --bab --bab-branching-method width --bab-input-split-fanout 2 \
             --bab-max-depth 6 --bab-max-nodes 100 --device cpu --dtype float64
+          coverage run -p -m act.pipeline --verify netfactory --validate-soundness \
+            --networks layer_testing_lp_dense --solvers dual --batch-sizes 1 \
+            --device cpu --dtype float64
 
       # ===================================================================
       # LLM-probe BaB controller with the offline deterministic mock backend:
@@ -141,6 +144,13 @@ jobs:
           coverage run -p -m act.back_end --verify --network act/back_end/examples/nets/layer_testing_bab_deep.json \
             --solver dual --bab --bab-branching gain --bab-multi-split-levels 3 \
             --bab-max-depth 4 --bab-max-subproblems 40 --device cpu --dtype float64
+          coverage run -p -m act.back_end --verify \
+            --network "$ACT_NETS_DIR/layer_testing_bab_deep.json" \
+            --solver dual --bab --bab-solver-tier dual_alpha_eta \
+            --dual-stagnation-patience 1 --dual-stagnation-tol 1 \
+            --dual-stop-when-verified --dual-max-time 5 \
+            --bab-max-depth 4 --bab-max-subproblems 40 --timeout 30 \
+            --device cpu --dtype float64
 
       # Joint-split depth, counters, and child cubes are asserted in bab.py and node.py.
       # Exit status 0 means every lane received a verdict; stdout is not validation.

@@ -61,7 +61,6 @@ from act.back_end.core import Bounds, Layer, Net
 from act.back_end.solver.solver_base import BoundResult
 from act.back_end.dual_tf.tf_forward import compute_forward_bounds
 from act.back_end.layer_schema import LayerKind
-from act.front_end.specs import InKind
 from act.util.device_manager import get_default_device, get_default_dtype
 
 
@@ -531,7 +530,7 @@ def witness_relu_preactivations(
         x = x.reshape(x.shape[0], *input_shape)
     bounds_dict = None
     try:
-        bounds_dict = compute_forward_bounds(
+        bounds_dict, _, _ = compute_forward_bounds(
             net,
             x,
             x,
@@ -789,50 +788,18 @@ def _preact_bias_of(net: Net, lid: int) -> torch.Tensor:
 
 
 def _perturbed_embedding_input_mask(net: Optional[Net], batch: SubproblemBatch) -> Optional[torch.Tensor]:
-    """Flat input mask for LP_EMBEDDING perturbed token coordinates.
-
-    The mask is stored on the batch after first discovery so fallback input
-    branching can still reuse it when a strategy helper lacks the net handle.
-    """
-    cached = getattr(batch, "_perturbed_embedding_mask", None)
-    if isinstance(cached, torch.Tensor):
-        return cached.to(device=batch.lb.device, dtype=torch.bool)
-    if net is None:
+    """Expand one root sample's canonical token mask over its coordinates."""
+    if net is None or net.input_geometry is None:
         return None
-    for layer in net.layers:
-        if (
-            layer.kind != LayerKind.INPUT_SPEC.value
-            or layer.params.get("kind") != InKind.LP_EMBEDDING
-        ):
-            continue
-        center = layer.params.get("center")
-        if not isinstance(center, torch.Tensor) or center.dim() < 2:
-            continue
-        token_count = int(center.shape[-2])
-        embed_dim = int(center.shape[-1])
-        from act.front_end.specs import normalize_position_mask
-
-        positions_raw = layer.params.get("perturbed_positions")
-        positions = positions_raw if isinstance(positions_raw, (torch.Tensor, list, tuple)) else None
-        if (
-            isinstance(positions, torch.Tensor)
-            and positions.dtype == torch.bool
-            and positions.numel() != token_count
-            and positions.numel() % token_count == 0
-        ):
-            positions = positions.reshape(-1, token_count)[0]
-        token_mask = normalize_position_mask(
-            positions, token_count, device=batch.lb.device,
+    geometry = net.input_geometry
+    if geometry.mask.shape[0] != 1:
+        raise ValueError("BaB branching requires one root sample; slice the net before branching")
+    flat = geometry.mask.unsqueeze(-1).expand_as(geometry.center).reshape(-1)
+    if flat.numel() != batch.input_dim:
+        raise ValueError(
+            f"BaB input dimension {batch.input_dim} differs from geometry width {flat.numel()}"
         )
-        flat = token_mask.unsqueeze(-1).expand(token_count, embed_dim).reshape(-1)
-        if flat.numel() < batch.input_dim:
-            pad = torch.zeros(batch.input_dim - flat.numel(), device=batch.lb.device, dtype=torch.bool)
-            flat = torch.cat([flat, pad], dim=0)
-        elif flat.numel() > batch.input_dim:
-            flat = flat[:batch.input_dim]
-        setattr(batch, "_perturbed_embedding_mask", flat)
-        return flat
-    return None
+    return flat.to(device=batch.lb.device)
 
 
 class FSBBranching(BaBSRBranching):
