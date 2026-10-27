@@ -78,6 +78,8 @@ class BranchingScores:
     """Width-masked input-axis scores kept alongside neuron scores, so a lane
     with no splittable neuron falls back to a *wide* input dimension instead of
     a hard-coded dim 0 (zero width on any sparse-perturbation benchmark)."""
+    babsr_per_layer: Optional[Dict[int, torch.Tensor]] = None
+    """Original candidates retained when FSB replaces scores with measured gains."""
 
 
 @dataclass
@@ -87,6 +89,8 @@ class SplitDecision:
     fanout: int = 2
     layer_id: Optional[torch.Tensor] = None
     neuron_idx: Optional[torch.Tensor] = None
+    lane_mask: Optional[torch.Tensor] = None
+    """Scored lanes covered by a neuron-only decision; tensors contain kept rows."""
 
     def input_axes(self, batch: SubproblemBatch) -> torch.Tensor:
         if self.input_axis is None:
@@ -339,10 +343,12 @@ class BaBSRBranching(BranchingStrategy):
         decision_threshold: float = 1e-3,
         intercept_fallback_max: int = 2,
         sparsest_layer: Optional[int] = None,
+        neuron_only: bool = False,
     ) -> None:
         self.decision_threshold = decision_threshold
         self.intercept_fallback_max = intercept_fallback_max
         self.sparsest_layer = sparsest_layer
+        self.neuron_only = neuron_only
         self.icp_score_counter = 0
 
     def compute_scores(
@@ -360,6 +366,8 @@ class BaBSRBranching(BranchingStrategy):
         per_layer: Dict[int, torch.Tensor] = {}
         intercept_per_layer: Dict[int, torch.Tensor] = {}
         for lid, bounds in bounds_dict.items():
+            if self.neuron_only and _layer_kind_upper(net.by_id[lid]) != LayerKind.RELU.value:
+                continue
             if self.sparsest_layer is not None and lid != self.sparsest_layer:
                 continue
             if lid not in nu_per_layer:
@@ -460,6 +468,10 @@ class BaBSRBranching(BranchingStrategy):
         )
 
     def select(self, scores: torch.Tensor | BranchingScores) -> torch.Tensor | SplitDecision:
+        if self.neuron_only:
+            return self.select_neuron_only(
+                BranchingScores(flat=scores) if isinstance(scores, torch.Tensor) else scores
+            )
         if isinstance(scores, torch.Tensor):
             return _argmax_splittable(scores)
         if scores.flat is not None:
@@ -511,6 +523,74 @@ class BaBSRBranching(BranchingStrategy):
             return self._input_axis_fallback(scores)
 
         return SplitDecision(kind="neuron", layer_id=decisions_layer, neuron_idx=decisions_neuron)
+
+
+    def select_neuron_only(self, scores: BranchingScores) -> SplitDecision:
+        """Select finite ReLU candidates and flag candidate-less lanes for retirement."""
+        per_layer = scores.per_layer or {}
+        intercept = scores.intercept_per_layer or {}
+        fallback = scores.babsr_per_layer or per_layer
+        sample = next(iter(per_layer.values()), None)
+        if sample is None:
+            sample = next(iter(fallback.values()), None)
+        if sample is None:
+            sample = next(iter(intercept.values()), None)
+        if sample is None:
+            sample = scores.flat if scores.flat is not None else scores.input_fallback
+        if sample is None:
+            raise ValueError("neuron-only scores must identify the scored batch")
+
+        n_lanes = sample.shape[0]
+        keep = torch.zeros(n_lanes, dtype=torch.bool, device=sample.device)
+        layers = torch.zeros(n_lanes, dtype=torch.long, device=sample.device)
+        neurons = torch.zeros_like(layers)
+        for lane in range(n_lanes):
+            lid, neuron, value = _lane_argmax(per_layer, lane)
+            if lid is not None and value > self.decision_threshold:
+                self.icp_score_counter = 0
+            else:
+                lid = None
+                if intercept and self.icp_score_counter < self.intercept_fallback_max:
+                    lid, neuron, _ = _lane_argmax(intercept, lane)
+                    if lid is not None:
+                        self.icp_score_counter += 1
+                if lid is None:
+                    self.icp_score_counter = 0
+                    for table in (fallback, intercept):
+                        lid, neuron, _ = _lane_argmax(table, lane)
+                        if lid is not None:
+                            break
+            if lid is not None:
+                layers[lane] = lid
+                neurons[lane] = neuron
+                keep[lane] = True
+
+        rows = torch.where(keep)[0]
+        return SplitDecision(
+            kind="neuron",
+            layer_id=layers.index_select(0, rows),
+            neuron_idx=neurons.index_select(0, rows),
+            lane_mask=keep,
+        )
+
+
+def _lane_argmax(
+    per_layer: Dict[int, torch.Tensor], lane: int
+) -> Tuple[Optional[int], int, float]:
+    """Return the best finite candidate, including zero and negative scores."""
+    best_lid: Optional[int] = None
+    best_idx = 0
+    best_value = float("-inf")
+    for lid, score in per_layer.items():
+        row = score[lane]
+        if row.numel() == 0:
+            continue
+        value, index = row.masked_fill(~torch.isfinite(row), float("-inf")).max(dim=0)
+        if float(value.item()) > best_value:
+            best_lid = lid
+            best_idx = int(index.item())
+            best_value = float(value.item())
+    return best_lid, best_idx, best_value
 
 
 _WITNESS_GAP_TOL = 1e-6
@@ -566,8 +646,10 @@ class WitnessResidualBranching(BaBSRBranching):
     paths whose solver does not expose an SCE.
     """
 
-    def __init__(self, decision_threshold: float = 1e-12) -> None:
-        super().__init__(decision_threshold=decision_threshold)
+    def __init__(
+        self, decision_threshold: float = 1e-12, neuron_only: bool = False
+    ) -> None:
+        super().__init__(decision_threshold=decision_threshold, neuron_only=neuron_only)
         self.fallback_count = 0
         self.different_from_babsr_count = 0
 
@@ -810,11 +892,13 @@ class FSBBranching(BaBSRBranching):
         decision_threshold: float = 1e-3,
         intercept_fallback_max: int = 2,
         sparsest_layer: Optional[int] = None,
+        neuron_only: bool = False,
     ) -> None:
         super().__init__(
             decision_threshold=decision_threshold,
             intercept_fallback_max=intercept_fallback_max,
             sparsest_layer=sparsest_layer,
+            neuron_only=neuron_only,
         )
         self.dual_solver = dual_solver
         self.branching_candidates = branching_candidates
@@ -840,8 +924,11 @@ class FSBBranching(BaBSRBranching):
 
         hypothesis_list: List[Dict[int, torch.Tensor]] = []
         candidate_metadata: List[Tuple[int, torch.Tensor]] = []
+        candidate_validity: List[torch.Tensor] = []
         topk = self.branching_candidates
         for lid, score in bsr.per_layer.items():
+            if self.neuron_only:
+                score = score.masked_fill(~torch.isfinite(score), float("-inf"))
             k = min(topk, score.shape[-1])
             if k > 0:
                 top_values, top_idx = score.topk(k, dim=-1)
@@ -849,12 +936,20 @@ class FSBBranching(BaBSRBranching):
                     if not bool(torch.isfinite(top_values[:, idx]).any().item()):
                         continue
                     neuron_per_lane = top_idx[:, idx]
+                    valid = torch.isfinite(top_values[:, idx])
+                    candidate_validity.append(valid)
                     hypothesis_list.append(
-                        self._clone_split_signs_with_hypothesis(batch, lid, neuron_per_lane, net)
+                        self._clone_split_signs_with_hypothesis(
+                            batch, lid,
+                            neuron_per_lane.masked_fill(~valid, -1) if self.neuron_only else neuron_per_lane,
+                            net,
+                        )
                     )
                     candidate_metadata.append((lid, neuron_per_lane))
         if bsr.intercept_per_layer is not None:
             for lid, score in bsr.intercept_per_layer.items():
+                if self.neuron_only:
+                    score = score.masked_fill(~torch.isfinite(score), float("-inf"))
                 k = min(topk, score.shape[-1])
                 if k > 0:
                     top_values, top_idx = score.topk(k, dim=-1)
@@ -862,8 +957,14 @@ class FSBBranching(BaBSRBranching):
                         if not bool(torch.isfinite(top_values[:, idx]).any().item()):
                             continue
                         neuron_per_lane = top_idx[:, idx]
+                        valid = torch.isfinite(top_values[:, idx])
+                        candidate_validity.append(valid)
                         hypothesis_list.append(
-                            self._clone_split_signs_with_hypothesis(batch, lid, neuron_per_lane, net)
+                            self._clone_split_signs_with_hypothesis(
+                                batch, lid,
+                                neuron_per_lane.masked_fill(~valid, -1) if self.neuron_only else neuron_per_lane,
+                                net,
+                            )
                         )
                         candidate_metadata.append((lid, neuron_per_lane))
 
@@ -890,6 +991,11 @@ class FSBBranching(BaBSRBranching):
             if baseline is not None
             else stacked_margins
         )
+        if self.neuron_only:
+            improvements = improvements.masked_fill(
+                ~torch.stack(candidate_validity) | ~torch.isfinite(improvements),
+                float("-inf"),
+            )
 
         if bool(torch.isneginf(improvements).all().item()):
             return bsr
@@ -914,6 +1020,7 @@ class FSBBranching(BaBSRBranching):
             per_layer=final_per_layer,
             intercept_per_layer=bsr.intercept_per_layer,
             input_fallback=bsr.input_fallback,
+            babsr_per_layer=bsr.per_layer,
         )
 
     def _evaluate_hypotheses(
@@ -981,6 +1088,8 @@ class FSBBranching(BaBSRBranching):
             )
         for lane in range(batch.batch_size):
             idx = int(neuron_idx_per_lane[lane].item())
+            if idx < 0:
+                continue
             hypo[lid][lane, :, idx] = +1.0
         return hypo
 
@@ -995,17 +1104,22 @@ def _build_branching_strategy(
     *,
     dual_solver: Any = None,
     branching_candidates: int = 3,
+    neuron_only: bool = False,
 ) -> BranchingStrategy:
     if method == "random":
         return RandomBranching()
     if method == "width":
         return InputBranching()
     if method == "babsr":
-        return BaBSRBranching()
+        return BaBSRBranching(neuron_only=neuron_only)
     if method == "witness_residual":
-        return WitnessResidualBranching()
+        return WitnessResidualBranching(neuron_only=neuron_only)
     if method == "fsb":
         if dual_solver is None:
             raise ValueError("FSB branching requires a dual_solver instance (inject via factory).")
-        return FSBBranching(dual_solver=dual_solver, branching_candidates=branching_candidates)
+        return FSBBranching(
+            dual_solver=dual_solver,
+            branching_candidates=branching_candidates,
+            neuron_only=neuron_only,
+        )
     raise ValueError(f"Unknown branching method: {method!r}")

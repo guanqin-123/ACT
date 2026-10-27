@@ -36,16 +36,16 @@ bab_presets:
   # CLIMB: query-local certificate replay, core learning and phase propagation.
   # When the dual bound certifies a subproblem, its alpha/eta certificate is
   # replayed to measure what each split decision (ReLU phase literal) it relied
-  # on contributes, and literals are dropped while the budget
-  # theta * slack - delta covers them (the first recheck_k lanes get one extra
-  # replay). The surviving literals form a core, kept in a per-query library of
+  # on contributes. The budget proposes deletions, with up to recheck_k extra
+  # deletion attempts. Every changed row must pass final replay before it
+  # forms a core, kept in a per-query library of
   # at most max_cores cores (subsumption, resolution, eviction). Pending
   # subproblems whose split signs contain a core are discharged before
   # bounding, and unresolved ones before splitting.
   # validate_climb_config raises ConfigError unless solver_tier is
   # dual_alpha_eta, bounding is a TopKBounding pool, branching splits neurons,
-  # and root_bounds_reuse, intermediate_refine and per_subproblem_refine are
-  # "none".
+  # root reuse is "none" or "plain", and per_subproblem_refine is "none".
+  # Root-only refinement is safe; split-dependent references are not.
   climb:
     # Replay needs the alpha/eta dual certificate.
     solver_tier: "dual_alpha_eta"
@@ -54,9 +54,9 @@ bab_presets:
     branching_method: "babsr"
     # CLIMB prunes the pending pool, which must be a TopKBounding pool.
     bounding: "depth_bound_blend"
-    # Prerequisite: children re-run the forward pass (no root-bound reuse).
+    # Baseline: children re-run the forward pass on the unchanged root box.
     root_bounds_reuse: "none"
-    # Prerequisite: no intermediate-bound refinement at the root.
+    # Baseline: no root intermediate-bound refinement.
     intermediate_refine: "none"
     # Prerequisite: no per-subproblem intermediate-bound refinement.
     per_subproblem_refine: "none"
@@ -67,6 +67,23 @@ bab_presets:
     # The first 2 lanes get one extra replay to try dropping one more literal.
     climb_recheck_k: 2
     # One split per step, so small nets still learn cores.
+    multi_split_levels: 1
+
+  climb_refined:
+    # Replay uses the evaluated alpha/eta backward certificate.
+    solver_tier: "dual_alpha_eta"
+    # Keep neuron-only splitting and the existing CLIMB-compatible pool.
+    branching_method: "babsr"
+    bounding: "depth_bound_blend"
+    # Reuse bounds tightened once on the full root domain.
+    root_bounds_reuse: "plain"
+    intermediate_refine: "all"
+    # Split-dependent tightening cannot be reused after literal deletion.
+    per_subproblem_refine: "none"
+    # Preserve the baseline coarsening policy and binary split width.
+    climb_enabled: true
+    climb_theta: 0.5
+    climb_recheck_k: 2
     multi_split_levels: 1
 
 backend:

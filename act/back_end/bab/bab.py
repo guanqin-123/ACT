@@ -51,6 +51,7 @@ from act.back_end.bab.branching.multi_split import (
     enumerate_unstable_candidates,
     gain_tested_decision,
     groups_to_tensors,
+    lanes_with_relu_candidates,
     presplit_root,
 )
 from act.back_end.bab.branching.bounding import (
@@ -94,8 +95,12 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _build_branching_strategy(method: str, *, dual_solver: Any = None) -> BranchingStrategy:
-    return _build_branching_strategy_impl(method, dual_solver=dual_solver)
+def _build_branching_strategy(
+    method: str, *, dual_solver: Any = None, neuron_only: bool = False
+) -> BranchingStrategy:
+    return _build_branching_strategy_impl(
+        method, dual_solver=dual_solver, neuron_only=neuron_only
+    )
 
 
 def _build_bounding(
@@ -181,6 +186,34 @@ def _neuron_branching_supported(config: BaBConfig) -> bool:
 
 def _witness_residual_branching_active(config: BaBConfig) -> bool:
     return config.branching_method == "witness_residual"
+
+
+def _keep_branch_lanes(
+    branch_batch: SubproblemBatch,
+    bounds_dict: Optional[Dict[int, Bounds]],
+    nu_per_layer: Optional[Dict[int, torch.Tensor]],
+    witness_preact: Optional[Dict[int, torch.Tensor]],
+    keep: torch.Tensor,
+) -> tuple[
+    SubproblemBatch,
+    Optional[Dict[int, Bounds]],
+    Optional[Dict[int, torch.Tensor]],
+    Optional[Dict[int, torch.Tensor]],
+]:
+    """Apply one lane selector to branch state, including spec-packed sensitivities."""
+    kept_idx = torch.where(keep.to(branch_batch.lb.device))[0]
+    bounds_out, nu_out = slice_branching_state(
+        bounds_dict, nu_per_layer, kept_idx, branch_batch.batch_size
+    )
+    witness_out = (
+        None
+        if witness_preact is None
+        else {
+            lid: tensor.index_select(0, kept_idx.to(tensor.device))
+            for lid, tensor in witness_preact.items()
+        }
+    )
+    return branch_batch.select(kept_idx), bounds_out, nu_out, witness_out
 
 
 def _assert_multi_split_invariants(
@@ -453,7 +486,9 @@ def verify_bab_batched(
     brancher_method = (
         "babsr" if config.branching_method == "gain" else config.branching_method
     )
-    brancher = _build_branching_strategy(brancher_method, dual_solver=fsb_dual_solver)
+    brancher = _build_branching_strategy(
+        brancher_method, dual_solver=fsb_dual_solver, neuron_only=climb is not None
+    )
 
     multi_split_stats: Dict[str, int] = {
         "multi_split_k_requested": int(config.multi_split_levels),
@@ -670,7 +705,34 @@ def verify_bab_batched(
         }
 
     any_dropped_max_depth = False
+    any_retired_no_relu_candidate = False
     _last_input_widths: Optional[list[float]] = None
+
+    def _retire_lanes(
+        keep: torch.Tensor,
+        branch_batch: SubproblemBatch,
+        bounds_dict: Optional[Dict[int, Bounds]],
+        nu_per_layer: Optional[Dict[int, torch.Tensor]],
+        witness_preact: Optional[Dict[int, torch.Tensor]],
+    ) -> tuple[
+        Optional[SubproblemBatch],
+        Optional[Dict[int, Bounds]],
+        Optional[Dict[int, torch.Tensor]],
+        Optional[Dict[int, torch.Tensor]],
+    ]:
+        """Retire unresolved CLIMB lanes without interpreting them as proofs."""
+        nonlocal any_retired_no_relu_candidate
+        assert climb is not None
+        retired = int((~keep).sum().item())
+        if retired == 0:
+            return branch_batch, bounds_dict, nu_per_layer, witness_preact
+        climb.retire_lanes_without_relu_candidate(retired)
+        any_retired_no_relu_candidate = True
+        if not bool(keep.any().item()):
+            return None, None, None, None
+        return _keep_branch_lanes(
+            branch_batch, bounds_dict, nu_per_layer, witness_preact, keep
+        )
 
     while not pool.empty:
         elapsed = time.time() - start
@@ -859,14 +921,16 @@ def verify_bab_batched(
                 0, unresolved_idx.to(node_lower_bound.device)
             )
             if climb is not None:
-                unresolved = climb.before_split(cast(TopKBounding, pool), unresolved)
+                unresolved, kept_rows = climb.before_split(cast(TopKBounding, pool), unresolved)
+                unresolved_idx = unresolved_idx.index_select(0, kept_rows)
             branch_mask = unresolved.depths < int(config.max_depth)
             if bool((~branch_mask).any().item()):
                 any_dropped_max_depth = True
             branch_idx = torch.where(branch_mask)[0]
-            branched_lanes = int(branch_idx.numel())
             if int(branch_idx.numel()) > 0:
                 branch_batch = unresolved.select(branch_idx)
+                children: Optional[SubproblemBatch] = None
+                parent_index = torch.empty(0, dtype=torch.long, device=branch_batch.lb.device)
                 if neuron_branching_supported:
                     full_branch_idx = unresolved_idx.index_select(
                         0, branch_idx.to(unresolved_idx.device)
@@ -978,7 +1042,12 @@ def verify_bab_batched(
                         children, parent_index = multi
                     else:
                         decision = None
-                        if config.branching_method == "gain":
+                        if climb is not None and config.branching_method == "gain":
+                            branch_batch, bd_branch, nu_branch, witness_preact_branch = _retire_lanes(
+                                lanes_with_relu_candidates(branch_batch, bd_branch, nu_branch),
+                                branch_batch, bd_branch, nu_branch, witness_preact_branch,
+                            )
+                        if branch_batch is not None and config.branching_method == "gain":
                             decision = gain_tested_decision(
                                 branch_batch,
                                 net,
@@ -992,7 +1061,7 @@ def verify_bab_batched(
                                 input_shape,
                                 solve_dual=_solve_dual_batch,
                             )
-                        if decision is None:
+                        if branch_batch is not None and decision is None:
                             extra_branch_kwargs = (
                                 {"witness_preact_per_layer": witness_preact_branch}
                                 if _witness_residual_branching_active(config)
@@ -1006,15 +1075,21 @@ def verify_bab_batched(
                                 **extra_branch_kwargs,
                             )
                             decision = cast(SplitDecision, cast(Any, brancher).select(scores))
-                            if _witness_residual_branching_active(config):
+                            if climb is not None and decision.lane_mask is not None:
+                                branch_batch, bd_branch, nu_branch, witness_preact_branch = _retire_lanes(
+                                    decision.lane_mask,
+                                    branch_batch, bd_branch, nu_branch, witness_preact_branch,
+                                )
+                            if branch_batch is not None and _witness_residual_branching_active(config):
                                 _assert_witness_residual_decision_unstable(
                                     decision, bd_branch
                                 )
-                        if decision.kind == "input_axis":
-                            if climb is not None:
-                                climb.reject_input_axis_split()
-                            decision.fanout = fanout
-                        children, parent_index = decision.apply(branch_batch, net)
+                        if branch_batch is not None and decision is not None:
+                            if decision.kind == "input_axis":
+                                if climb is not None:
+                                    climb.reject_input_axis_split()
+                                decision.fanout = fanout
+                            children, parent_index = decision.apply(branch_batch, net)
                 else:
                     scores = brancher.compute_scores(branch_batch, net)
                     legacy_decision = cast(Any, brancher).select(scores)
@@ -1048,24 +1123,27 @@ def verify_bab_batched(
                         decision.fanout = int(_wave_policy.input_split_fanout)
                     children, parent_index = decision.apply(branch_batch, net)
 
-                if provenance:
-                    pid = branch_batch.node_id
-                    assert pid is not None
-                    children.parent_id = pid.index_select(0, parent_index.to(pid.device))
-                    nc = children.batch_size
-                    children.node_id = torch.arange(
-                        node_counter,
-                        node_counter + nc,
-                        device=children.lb.device,
-                        dtype=torch.long,
-                    )
-                    node_counter += nc
-                pool.push(children)
-                if climb is not None:
-                    climb.after_children(children.batch_size, len(pool))
-                if frontier_cap > 0 and len(pool) > frontier_cap:
-                    if pool.evict_to(frontier_cap) > 0:
-                        any_dropped_frontier_cap = True
+                if children is not None:
+                    assert branch_batch is not None
+                    branched_lanes = branch_batch.batch_size
+                    if provenance:
+                        pid = branch_batch.node_id
+                        assert pid is not None
+                        children.parent_id = pid.index_select(0, parent_index.to(pid.device))
+                        nc = children.batch_size
+                        children.node_id = torch.arange(
+                            node_counter,
+                            node_counter + nc,
+                            device=children.lb.device,
+                            dtype=torch.long,
+                        )
+                        node_counter += nc
+                    pool.push(children)
+                    if climb is not None:
+                        climb.after_children(children.batch_size, len(pool))
+                    if frontier_cap > 0 and len(pool) > frontier_cap:
+                        if pool.evict_to(frontier_cap) > 0:
+                            any_dropped_frontier_cap = True
 
         processed += k_actual
 
@@ -1115,7 +1193,12 @@ def verify_bab_batched(
         int(spec_keep_rows.numel()) if spec_keep_rows is not None else None
     )
 
-    if not any_dropped_max_depth and not any_dropped_frontier_cap and pool_remaining == 0:
+    if (
+        not any_dropped_max_depth
+        and not any_dropped_frontier_cap
+        and not any_retired_no_relu_candidate
+        and pool_remaining == 0
+    ):
         return VerifyResult(
             VerifyStatus.CERTIFIED,
             metadata={
@@ -1142,7 +1225,11 @@ def verify_bab_batched(
             "exhausted_budget_nodes": exhausted_nodes,
             "nodes_minted": node_counter,
             "any_dropped_frontier_cap": any_dropped_frontier_cap,
-            "reason": "budget_exhausted_with_unproven_subboxes",
+            "reason": (
+                "climb_retired_without_relu_candidate"
+                if any_retired_no_relu_candidate
+                else "budget_exhausted_with_unproven_subboxes"
+            ),
             **_branching_metadata(),
         },
     )

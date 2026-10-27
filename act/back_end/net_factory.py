@@ -2326,6 +2326,35 @@ def _lt_spec_softmax() -> Dict[str, Any]:
     ]}
 
 
+def _lt_spec_climb_admission() -> Dict[str, Any]:
+    """One ReLU whose inactive certificate needs replay after coarsening."""
+    return {"layers": [
+        *_lt_input([1, 1], -1.0, 1.0),
+        {"kind": LayerKind.RELU.value, "params": {}},
+        _lt_assert_le([-1.0], 0.25),
+    ]}
+
+
+def _lt_spec_climb_reuse() -> Dict[str, Any]:
+    """Duplicate ReLUs cancel exactly, but the root relaxation needs splits."""
+    device, dtype = get_default_device(), get_default_dtype()
+    return {"layers": [
+        *_lt_input([1, 2], -1.0, 1.0),
+        {"kind": LayerKind.DENSE.value, "params": {
+            "in_features": 2, "out_features": 2,
+            "weight": torch.tensor([[1.0, 0.0], [1.0, 0.0]], device=device, dtype=dtype),
+            "bias": torch.zeros(2, device=device, dtype=dtype),
+        }},
+        {"kind": LayerKind.RELU.value, "params": {}},
+        {"kind": LayerKind.DENSE.value, "params": {
+            "in_features": 2, "out_features": 1,
+            "weight": torch.tensor([[1.0, -1.0]], device=device, dtype=dtype),
+            "bias": torch.zeros(1, device=device, dtype=dtype),
+        }},
+        _lt_assert_le([1.0], 0.1),
+    ]}
+
+
 def _lt_spec_bab_deep() -> Dict[str, Any]:
     # MLP with RELU activations + tight LINEAR_LE constraint engineered so
     # interval certification at the seed box cannot prove the property
@@ -2701,6 +2730,8 @@ LAYER_TESTING_SPECS: Dict[str, Any] = {
     # branching / bounding / CE-validation paths that trivial nets never
     # reach.
     f"{LAYER_TESTING_NAME_PREFIX}bab_deep":       _lt_spec_bab_deep,
+    f"{LAYER_TESTING_NAME_PREFIX}climb_admission": _lt_spec_climb_admission,
+    f"{LAYER_TESTING_NAME_PREFIX}climb_reuse":    _lt_spec_climb_reuse,
     # InKind / OutKind coverage examples: deterministic 1-net-per-kind so
     # CI's --generate + --validate-soundness + --verify --bab exercise every
     # branch in the verifier's seed / ASSERT-encoding / MILP-negation paths.

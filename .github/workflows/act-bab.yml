@@ -121,6 +121,12 @@ jobs:
           coverage run -p -m act.pipeline --verify netfactory --validate-soundness \
             --networks layer_testing_lp_dense --solvers dual --batch-sizes 1 \
             --device cpu --dtype float64
+          coverage run -p -m act.back_end.dual_tf.tf_smooth
+          for net in layer_testing_sigmoid layer_testing_tanh layer_testing_erf; do
+            coverage run -p -m act.pipeline --verify netfactory --validate-soundness \
+              --networks "$net" --solvers dual --batch-sizes 1 \
+              --device cpu --dtype float64
+          done
 
       # ===================================================================
       # LLM-probe BaB controller with the offline deterministic mock backend:
@@ -365,10 +371,18 @@ jobs:
       - name: BaB CLIMB — certificate replay and propagation
         run: |
           cd ${{ github.workspace }}
+          coverage run -p -m act.back_end.bab.climb
           coverage run -p -m act.back_end --verify \
             --network "$ACT_NETS_DIR/mlp_plain_3x8_64x64_3962224133.json" \
             --solver dual --bab --bab-preset climb --bab-max-batch-size 16 \
             --bab-max-depth 14 --bab-max-subproblems 250 --timeout 600 --verbose
+          for preset in climb climb_refined; do
+            coverage run -p -m act.back_end --verify \
+              --network "$ACT_NETS_DIR/layer_testing_climb_reuse.json" \
+              --solver dual --bab --bab-preset "$preset" --dual-n-iters 20 \
+              --bab-max-batch-size 4 --bab-max-depth 6 --bab-max-subproblems 64 \
+              --timeout 30 --device cpu --dtype float64
+          done
 
       # These pool nets exercise symbolic MaxPool forward and cached one-hot dual
       # backward. Exit status 0 means every lane received a verdict (CERTIFIED /

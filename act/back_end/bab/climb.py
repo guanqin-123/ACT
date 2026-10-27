@@ -178,6 +178,8 @@ class ClimbMetrics:
     recheck_calls: int = 0
     recheck_time_s: float = 0.0
     coarsen_time_s: float = 0.0
+    coarsen_replay_fallbacks: int = 0
+    retired_unknown_lanes: int = 0
     propagate_time_s: float = 0.0
     cores_inserted: int = 0
     core_literals_original: int = 0
@@ -201,6 +203,8 @@ class ClimbMetrics:
             "climb_recheck_calls": self.recheck_calls,
             "climb_recheck_time_s": self.recheck_time_s,
             "climb_coarsen_time_s": self.coarsen_time_s,
+            "climb_coarsen_replay_fallbacks": self.coarsen_replay_fallbacks,
+            "climb_retired_unknown_lanes": self.retired_unknown_lanes,
             "climb_propagate_time_s": self.propagate_time_s,
             "climb_cores_inserted": self.cores_inserted,
             "climb_cores_subsumed": self.library.subsumed if self.library is not None else 0,
@@ -399,16 +403,17 @@ def propagate(
     codec: LiteralCodec,
     *,
     core_chunk: int,
-) -> Tuple[SubproblemBatch, ...]:
+) -> Tuple[Tuple[SubproblemBatch, ...], Tuple[torch.Tensor, ...]]:
     """Apply certified cores jointly to pending and active groups to fixpoint.
 
     ``core_chunk`` caps the cores per matmul chunk; it bounds memory only, the
-    fixpoint is independent of it.
+    fixpoint is independent of it. Return the propagated groups and their
+    original-row selectors so external bound/witness arrays stay aligned.
     """
     if core_chunk < 1:
         raise ValueError("core_chunk must be positive")
     if not batches:
-        return ()
+        return (), ()
     group_sizes = [batch.batch_size for batch in batches]
     packed_batches = [
         pack_split_matrix(
@@ -420,7 +425,9 @@ def propagate(
         for batch in batches
     ]
     if library.core_count == 0:
-        return tuple(batches)
+        return tuple(batches), tuple(
+            torch.arange(batch.batch_size, device=batch.lb.device) for batch in batches
+        )
     device = batches[0].lb.device
     packed_cores = library.pack(device)
     batch_values = torch.cat(
@@ -514,10 +521,12 @@ def propagate(
         f"(rows={assignments.shape[0]}, variables={assignments.shape[1]})"
     )
     result_batches: List[SubproblemBatch] = []
+    kept_rows: List[torch.Tensor] = []
     offset = 0
     for batch, size in zip(batches, group_sizes):
         group_active = active[offset : offset + size]
         keep = torch.where(group_active)[0]
+        kept_rows.append(keep)
         restricted = batch.select(keep)
         restricted_assignments = assignments[offset : offset + size].index_select(0, keep)
         propagated = apply_literal_assignments(
@@ -529,7 +538,7 @@ def propagate(
         )
         result_batches.append(propagated)
         offset += size
-    return tuple(result_batches)
+    return tuple(result_batches), tuple(kept_rows)
 
 
 def is_certified(slack: torch.Tensor, out_kind: str) -> torch.Tensor:
@@ -639,7 +648,11 @@ def _literal_costs(
     bounds: Dict[int, Bounds],
     pinned_rows: Optional[torch.Tensor],
 ) -> torch.Tensor:
-    """Full ReLU Eq. 12 costs ``(eta + relu(-nu)) * m`` in ``slack.dtype``, ``[N, M, W]``."""
+    """Estimate Eq. 12 costs ``(eta + relu(-nu)) * m``, shaped ``[N, M, W]``.
+
+    Retained alpha can change the relaxation after literal deletion. These
+    costs select candidates; only replay certifies a changed learned core.
+    """
     n_lanes, width = literals.shape
     m_specs = slack.shape[1]
     costs = torch.zeros(
@@ -689,7 +702,10 @@ def coarsen(
     recheck_k: int,
     recheck: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
 ) -> torch.Tensor:
-    """Alg. 2 vector-budget deletion plus at most ``recheck_k`` one-step rechecks.
+    """Choose budget deletions plus at most ``recheck_k`` one-step rechecks.
+
+    The caller must replay every changed result before core admission,
+    including rows changed only by the cost-budget heuristic.
 
     Per row ``m`` the budget is ``theta * slack_m - delta_m`` with
     ``delta_m = delta_abs + delta_rel * |slack_m|``; rows with
@@ -780,10 +796,8 @@ def validate_climb_config(config: BaBConfig) -> None:
         failures.append(f"bounding must be one of {TOP_K_BOUNDINGS}")
     if config.branching_method not in NEURON_BRANCHING_METHODS:
         failures.append(f"branching_method must be one of {NEURON_BRANCHING_METHODS}")
-    if config.root_bounds_reuse != "none":
-        failures.append("root_bounds_reuse must be 'none'")
-    if config.intermediate_refine != NO_REFINEMENT_MODE:
-        failures.append(f"intermediate_refine must be {NO_REFINEMENT_MODE!r}")
+    if config.root_bounds_reuse not in ("none", "plain"):
+        failures.append("root_bounds_reuse must be 'none' or 'plain'")
     if config.per_subproblem_refine != NO_REFINEMENT_MODE:
         failures.append(f"per_subproblem_refine must be {NO_REFINEMENT_MODE!r}")
     if failures:
@@ -827,7 +841,7 @@ class ClimbSession:
             # bounded. view_all/replace_all never score, cool, or probe.
             pending_before = pool.view_all()
             propagate_started = time.perf_counter()
-            (pending_after,) = propagate(
+            (pending_after,), _ = propagate(
                 [pending_before],
                 self.library,
                 self.codec,
@@ -849,6 +863,10 @@ class ClimbSession:
         self.metrics.main_bound_calls += 1
         self.metrics.main_bound_row_passes += k_actual
 
+    def retire_lanes_without_relu_candidate(self, retired: int) -> None:
+        """Record unresolved lanes that cannot use CLIMB's neuron-only splits."""
+        self.metrics.retired_unknown_lanes += retired
+
     def learn(
         self,
         batch: SubproblemBatch,
@@ -856,9 +874,9 @@ class ClimbSession:
         dual_solve_result: DualBatchResult,
         k_actual: int,
     ) -> None:
-        # H2: replay -> coarsen -> insert. Certified lanes only; replay reads
-        # the immutable forward snapshot, the theta budget coarsens the
-        # validated vector, and the survivor is inserted as a core.
+        # Replay uses the immutable root-domain reference, optionally refined
+        # once at the root. Budget coarsening proposes a smaller row; a final
+        # replay must certify it before admission, or restore the original.
         unsat_idx = torch.tensor(
             [i for i, status in enumerate(statuses) if status == SolveStatus.UNSAT],
             device=batch.lb.device,
@@ -933,6 +951,14 @@ class ClimbSession:
                 context, candidate, rows
             ),
         )
+        changed = torch.where(valid & (retained != packed).any(dim=1))[0]
+        if changed.numel():
+            certified = self._instrumented_recheck(
+                context, retained.index_select(0, changed), changed
+            )
+            failed = changed[~certified]
+            retained[failed] = packed[failed]
+            self.metrics.coarsen_replay_fallbacks += int(failed.numel())
         self.metrics.coarsen_time_s += time.perf_counter() - coarsen_started
         original_literals = int((packed != 0).sum())
         retained_literals = int((retained != 0).sum())
@@ -1028,9 +1054,9 @@ class ClimbSession:
 
     def before_split(
         self, pool: TopKBounding, unresolved: SubproblemBatch
-    ) -> SubproblemBatch:
+    ) -> Tuple[SubproblemBatch, torch.Tensor]:
         if self.library.core_count == 0:
-            return unresolved
+            return unresolved, torch.arange(unresolved.batch_size, device=unresolved.lb.device)
         # H3: one joint fixpoint over (pending, active); pending removals were
         # never bounded (pre-bound), active removals are parents spared a split
         # (pre-split).
@@ -1042,7 +1068,7 @@ class ClimbSession:
         propagation_groups.append(unresolved)
         presplit_before = unresolved.batch_size
         propagate_started = time.perf_counter()
-        propagation = propagate(
+        propagation, kept_rows = propagate(
             propagation_groups,
             self.library,
             self.codec,
@@ -1057,7 +1083,7 @@ class ClimbSession:
         unresolved = propagation[-1]
         self.metrics.presplit_discharged += presplit_before - unresolved.batch_size
         self.metrics.observe_frontier(len(pool) + unresolved.batch_size)
-        return unresolved
+        return unresolved, kept_rows[-1]
 
     def reject_input_axis_split(self) -> None:
         raise ValueError(
@@ -1072,3 +1098,43 @@ class ClimbSession:
 
     def metadata(self) -> Dict[str, int | float]:
         return self.metrics.metadata()
+
+
+if __name__ == "__main__":
+    from tempfile import TemporaryDirectory
+
+    from act.back_end.dual_tf.tf_forward import compute_forward_bounds
+    from act.back_end.net_factory import LAYER_TESTING_SPECS, NetFactory
+    from act.back_end.solver.solver_dual import DualSolver
+    from act.config.config import BackendConfig, DualConfig
+    from act.front_end.specs import OutputSpec
+    from act.util.device_manager import initialize_device
+
+    initialize_device("cpu", "float64")
+    with TemporaryDirectory(prefix="act-climb-admission-") as directory:
+        factory = NetFactory(BackendConfig.from_yaml().generation.net_factory,
+                             output_dir=directory, write_manifest=False)
+        net = factory.create_network("admission", LAYER_TESTING_SPECS["layer_testing_climb_admission"]())
+        upper = torch.ones(1, 1, device=get_default_device(), dtype=get_default_dtype())
+        lower = -upper
+        bounds, frame, _ = compute_forward_bounds(net, lower, upper)
+        for alpha in (1., 0.):
+            batch = SubproblemBatch.from_bounds(Bounds(lower, upper), depth=1)
+            batch.split_signs = {2: -torch.ones(1, 1, 1, device=upper.device, dtype=upper.dtype)}
+            result = DualSolver().solve_spec_batch(
+                net, bounds, OutputSpec(OutKind.LINEAR_LE, c=-upper[0], d=upper.new_tensor(.25)),
+                optimize=True, dual_config=DualConfig(n_iters=0), input_shape=(1,),
+                split_signs=batch.split_signs, incremental_alphas={2: torch.full_like(batch.split_signs[2], alpha)},
+                refresh_forward=False, forward_frame=frame,
+            )
+            assert result.solution.statuses == (SolveStatus.UNSAT,)
+            batch.incremental_alpha, batch.incremental_eta = result.alpha_state, result.eta_state
+            session = ClimbSession(
+                BaBConfig(climb_enabled=True, solver_tier="dual_alpha_eta", branching_method="babsr",
+                          bounding="depth_bound_blend", climb_theta=.5, climb_recheck_k=0),
+                net, OutKind.LINEAR_LE,
+            )
+            session.learn(batch, result.solution.statuses, result, 1)
+            expected = (frozenset({-1}),) if alpha == 1 else (frozenset(),)
+            assert session.library.cores == expected
+            assert session.metadata()["climb_coarsen_replay_fallbacks"] == int(alpha)
