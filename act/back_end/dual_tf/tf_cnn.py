@@ -15,8 +15,11 @@
 import torch
 import torch.nn.functional as F
 from typing import Tuple, Optional, Dict, Any, List, cast
-from act.back_end.core import Bounds, Layer
+from act.back_end.core import Bounds, Layer, ParamValue
+from act.back_end.layer_schema import LayerKind
+from act.back_end.interval_tf.tf_cnn import _conv1d_to_linear_matrix
 from act.back_end.utils import avgpool2d_denominators, avgpool2d_output_hw, pair_2d
+from .tf_mlp import forward_dense, backward_dense
 
 from .tf_forward import (
     LinearBound, Frame,
@@ -26,6 +29,51 @@ from .tf_forward import (
 
 
 # Forward registry handlers. Each returns (stored, out, lin, frame).
+
+
+def _conv1d_as_dense(layer: Layer, reference: torch.Tensor) -> Layer:
+    """Use the existing Conv1d affine-map owner and dense frame machinery."""
+    weight = layer.params["weight"]
+    assert isinstance(weight, torch.Tensor)
+    options: dict[str, int] = {}
+    for name, default in (("stride", 1), ("padding", 0), ("dilation", 1), ("groups", 1)):
+        value = layer.params.get(name, default)
+        if isinstance(value, (tuple, list)):
+            value, = value
+        assert isinstance(value, int), f"CONV1D {name} must be an integer"
+        options[name] = value
+    output_shape = layer.get_tuple("output_shape")
+    matrix = _conv1d_to_linear_matrix(
+        weight.to(reference), layer.get_tuple("input_shape"), output_shape, **options,
+    )
+    params: dict[str, ParamValue] = {
+        "weight": matrix, "in_features": matrix.shape[1], "out_features": matrix.shape[0],
+    }
+    bias = layer.params.get("bias")
+    assert bias is None or isinstance(bias, torch.Tensor)
+    if bias is not None:
+        params["bias"] = bias.to(reference).repeat_interleave(output_shape[-1])
+    return Layer(layer.id, LayerKind.DENSE.value, params, layer.in_vars, layer.out_vars)
+
+
+def forward_conv1d(
+    L: Layer, parent_boxes: List[Bounds], parent_lins: List[LinearBound],
+    parent_frames: List[Frame], preds: List[int], post_activation: bool,
+    device: torch.device, dtype: torch.dtype,
+) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
+    """Propagate Conv1d through its exact affine map, retaining valid frames."""
+    return forward_dense(
+        _conv1d_as_dense(L, parent_boxes[0].lb), parent_boxes, parent_lins,
+        parent_frames, preds, post_activation, device, dtype,
+    )
+
+
+def backward_conv1d(
+    L: Layer, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
+    preds: List[int], M: int = 1, alpha=None,
+) -> Tuple[List[torch.Tensor], torch.Tensor]:
+    """Exact Conv1d adjoint, with the solver's negative affine-bias convention."""
+    return backward_dense(_conv1d_as_dense(L, nu), nu, bounds_dict, preds, M, alpha)
 
 
 # ---- CONV2D ----

@@ -23,10 +23,12 @@ from .tf_mlp import (
     forward_reduce_sum, forward_sign,
 )
 from .tf_cnn import (
+    backward_conv1d, forward_conv1d,
     backward_conv2d, backward_maxpool2d, backward_avgpool2d, backward_upsample,
     forward_conv2d, forward_maxpool2d, forward_avgpool2d, forward_upsample,
 )
 from .tf_smooth import (
+    _dual_constant_box_backward, forward_square, backward_square,
     backward_sigmoid, backward_tanh, backward_erf, backward_sqrt, backward_sin, backward_cos, backward_quantize,
     forward_sigmoid, forward_tanh, forward_erf, forward_sqrt, forward_sin, forward_cos, forward_quantize,
 )
@@ -36,6 +38,7 @@ from .tf_transformer import (
     forward_matmul, backward_matmul,
     forward_mul, backward_mul,
     forward_mha, backward_mha,
+    forward_mha_split, backward_mha_split,
     forward_layernorm, backward_layernorm,
     forward_softmax, backward_softmax,
     forward_gelu, backward_gelu,
@@ -44,6 +47,7 @@ from .tf_forward import (
     compute_forward_bounds, LinearBound, Frame,
     _sum_linear_bounds, _sum_interval_bounds, _concretize,
     _reset_forward_box, _align, _int_param,
+    _shared_explicit_frame, _intersect_boxes,
 )
 
 
@@ -390,6 +394,41 @@ def backward_sub(L: Layer, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
     return [nu, -nu], contrib
 
 
+def forward_div(
+    L: Layer, parent_boxes: List[Bounds], parent_lins: List[LinearBound],
+    parent_frames: List[Frame], preds: List[int], post_activation: bool,
+    device: torch.device, dtype: torch.dtype,
+) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
+    """Bound fixed-sign elementwise division; zero denominators stay unproven."""
+    assert len(parent_boxes) == 2, f"DIV expects 2 predecessors, got {len(parent_boxes)}"
+    xl, xu, yl, yu = torch.broadcast_tensors(
+        parent_boxes[0].lb.flatten(1), parent_boxes[0].ub.flatten(1),
+        parent_boxes[1].lb.flatten(1), parent_boxes[1].ub.flatten(1),
+    )
+    corners = torch.stack((xl / yl, xl / yu, xu / yl, xu / yu))
+    crosses_zero = (yl <= 0) & (yu >= 0)
+    lb = torch.where(crosses_zero, torch.full_like(xl, -torch.inf), corners.amin(0))
+    ub = torch.where(crosses_zero, torch.full_like(xu, torch.inf), corners.amax(0))
+    out = Bounds(lb, ub)
+    lin, frame = _reset_forward_box(lb, ub, device, dtype)
+    return out, out, lin, frame
+
+
+def backward_div(
+    L: Layer, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
+    preds: List[int], M: int = 1, alpha=None,
+) -> Tuple[List[torch.Tensor], torch.Tensor]:
+    """Absorb DIV output-box support and route zero to each operand."""
+    assert len(preds) == 2, f"DIV expects 2 predecessors, got {len(preds)}"
+    out = bounds_dict[L.id]
+    _, contribution = _dual_constant_box_backward(nu, out.lb, out.ub, M)
+    routes = [
+        nu.new_zeros(nu.shape[0], bounds_dict[pid].lb.flatten(1).shape[1])
+        for pid in preds
+    ]
+    return routes, contribution
+
+
 # ---- CONCAT ----
 def forward_concat(
     L: Layer, parent_boxes: List[Bounds], parent_lins: List[LinearBound],
@@ -405,15 +444,13 @@ def forward_concat(
     on interval boxes along concat_dim (default 1) and reset dual-track state.
     Returns (stored, out, lin, frame) where stored == out.
     """
-    assert len(parent_boxes) >= 2, "forward_concat: requires >=2 predecessors"
+    assert parent_boxes, "forward_concat: requires at least one predecessor"
     concat_dim = _int_param(L.params.get("concat_dim", 1), 1)
-    can_dual = all(
-        parent_frames[i] is parent_frames[0] for i in range(1, len(parent_frames))
-    ) and all(
-        parent_lins[i].A_lb.shape[0] == parent_lins[0].A_lb.shape[0]
-        and parent_lins[i].A_lb.shape[2] == parent_lins[0].A_lb.shape[2]
-        for i in range(1, len(parent_lins))
+    can_dual = _shared_explicit_frame(
+        parent_lins, parent_frames, [box.lb.shape[1] for box in parent_boxes],
     )
+    int_lb = torch.cat([box.lb for box in parent_boxes], dim=concat_dim)
+    int_ub = torch.cat([box.ub for box in parent_boxes], dim=concat_dim)
     if can_dual:
         lin = LinearBound(
             A_lb=torch.cat([lin.A_lb for lin in parent_lins], dim=1),
@@ -423,9 +460,9 @@ def forward_concat(
         )
         frame = parent_frames[0]
         lb, ub = _concretize(lin, frame)
+        lb, ub = _intersect_boxes(lb, ub, int_lb, int_ub)
     else:
-        lb = torch.cat([box.lb for box in parent_boxes], dim=concat_dim)
-        ub = torch.cat([box.ub for box in parent_boxes], dim=concat_dim)
+        lb, ub = int_lb, int_ub
         lin, frame = _reset_forward_box(lb, ub, device, dtype)
     out = Bounds(lb, ub)
     return out, out, lin, frame
@@ -495,9 +532,11 @@ class DualTF:
         LayerKind.TANH.value:       forward_tanh,
         LayerKind.ERF.value:        forward_erf,
         LayerKind.SQRT.value:       forward_sqrt,
+        LayerKind.SQUARE.value:     forward_square,
         LayerKind.SIN.value:        forward_sin,
         LayerKind.COS.value:        forward_cos,
         LayerKind.QUANTIZE.value:   forward_quantize,
+        LayerKind.CONV1D.value:     forward_conv1d,
         LayerKind.CONV2D.value:     forward_conv2d,
         LayerKind.MAXPOOL2D.value:  forward_maxpool2d,
         LayerKind.AVGPOOL2D.value:  forward_avgpool2d,
@@ -514,6 +553,7 @@ class DualTF:
         LayerKind.REDUCE_SUM.value: forward_reduce_sum,
         LayerKind.ADD.value:        forward_add,
         LayerKind.SUB.value:        forward_sub,
+        LayerKind.DIV.value:        forward_div,
         LayerKind.CONCAT.value:     forward_concat,
         LayerKind.LSTM.value:       forward_lstm,
         LayerKind.GRU.value:        forward_gru,
@@ -522,8 +562,8 @@ class DualTF:
         LayerKind.MATMUL.value:     forward_matmul,
         LayerKind.MUL.value:        forward_mul,
         LayerKind.SIGN.value:       forward_sign,
-        LayerKind.MHA_SPLIT.value:  forward_mha,
-        LayerKind.MHA_JOIN.value:   forward_mha,
+        LayerKind.MHA_SPLIT.value:  forward_mha_split,
+        LayerKind.MHA_JOIN.value:   forward_concat,
         LayerKind.MASK_ADD.value:   forward_mha,
         LayerKind.LAYERNORM.value:  forward_layernorm,
         LayerKind.SOFTMAX.value:    forward_softmax,
@@ -563,9 +603,11 @@ class DualTF:
         LayerKind.TANH.value:       backward_tanh,
         LayerKind.ERF.value:        backward_erf,
         LayerKind.SQRT.value:       backward_sqrt,
+        LayerKind.SQUARE.value:     backward_square,
         LayerKind.SIN.value:        backward_sin,
         LayerKind.COS.value:        backward_cos,
         LayerKind.QUANTIZE.value:   backward_quantize,
+        LayerKind.CONV1D.value:     backward_conv1d,
         LayerKind.CONV2D.value:     backward_conv2d,
         LayerKind.MAXPOOL2D.value:  backward_maxpool2d,
         LayerKind.AVGPOOL2D.value:  backward_avgpool2d,
@@ -582,6 +624,7 @@ class DualTF:
         LayerKind.REDUCE_SUM.value: backward_reduce_sum,
         LayerKind.ADD.value:        backward_add,
         LayerKind.SUB.value:        backward_sub,
+        LayerKind.DIV.value:        backward_div,
         LayerKind.CONCAT.value:     backward_concat,
         LayerKind.LSTM.value:       backward_lstm,
         LayerKind.GRU.value:        backward_gru,
@@ -590,8 +633,8 @@ class DualTF:
         LayerKind.MATMUL.value:     backward_matmul,
         LayerKind.MUL.value:        backward_mul,
         LayerKind.SIGN.value:       backward_sign,
-        LayerKind.MHA_SPLIT.value:  backward_mha,
-        LayerKind.MHA_JOIN.value:   backward_mha,
+        LayerKind.MHA_SPLIT.value:  backward_mha_split,
+        LayerKind.MHA_JOIN.value:   backward_concat,
         LayerKind.MASK_ADD.value:   backward_mha,
         LayerKind.LAYERNORM.value:  backward_layernorm,
         LayerKind.SOFTMAX.value:    backward_softmax,
@@ -601,8 +644,6 @@ class DualTF:
     _UNIMPLEMENTED_KINDS = frozenset({
         LayerKind.LSTM.value,
         LayerKind.GRU.value,
-        LayerKind.MHA_SPLIT.value,
-        LayerKind.MHA_JOIN.value,
         LayerKind.MASK_ADD.value,
         # Backward kernels for these are stubs that raise NotImplementedError
         # at runtime. Listing them here makes supports_layer return False so

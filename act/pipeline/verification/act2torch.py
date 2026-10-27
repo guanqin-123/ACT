@@ -28,7 +28,8 @@ import torch  # pyright: ignore[reportMissingImports]
 import torch.nn as nn  # pyright: ignore[reportMissingImports]
 import logging
 
-from act.back_end.core import Net, Layer
+from act.back_end.core import Net, Layer, Bounds
+from act.back_end.interval_tf.tf_transformer import softmax_rowsize
 from act.back_end.layer_schema import ACT_TO_TORCH, LayerKind, REGISTRY
 from act.util.device_manager import get_default_dtype, get_default_device
 
@@ -122,6 +123,19 @@ class ACTMaskAdd(nn.Module):
         return x + mask
 
 
+class ACTSoftmax(nn.Module):
+    """Execute explicit contiguous rows using the analysis interpretation."""
+
+    def __init__(self, layer: Layer) -> None:
+        super().__init__()
+        self.layer = layer
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        row = softmax_rowsize(self.layer, Bounds(x, x))
+        assert row is not None
+        return x.reshape(x.shape[0], -1, row).softmax(-1).reshape_as(x)
+
+
 class ACTLayerNorm(nn.Module):
     def __init__(
         self,
@@ -137,11 +151,18 @@ class ACTLayerNorm(nn.Module):
         self.variant = variant
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.variant == "no":
+            return x
         gamma = self.get_buffer("gamma").to(device=x.device, dtype=x.dtype)
         beta = self.get_buffer("beta").to(device=x.device, dtype=x.dtype)
         if self.variant == "no_var":
-            dims = tuple(range(1, x.dim()))
-            return (x - x.mean(dim=dims, keepdim=True)) * gamma + beta
+            width = gamma.numel()
+            features = x.shape[1:].numel()
+            if width == 0 or features % width:
+                raise ValueError("LayerNorm gamma width must divide the input width")
+            rows = x.reshape(x.shape[0], -1, width)
+            centered = rows - rows.mean(dim=-1, keepdim=True)
+            return (centered * gamma.flatten() + beta.flatten()).reshape_as(x)
         import torch.nn.functional as F
 
         return F.layer_norm(x, gamma.shape, weight=gamma, bias=beta, eps=self.eps)
@@ -179,10 +200,10 @@ class ACTMHASplit(nn.Module):
         bias = self.get_buffer("bias")
         if bias is not None:
             bias = bias.to(device=x.device, dtype=x.dtype)
-        projected = F.linear(x.reshape(x.shape[0], -1, weight.shape[1]), weight, bias)
-        hidden = self.hidden_size or int(projected.shape[-1])
-        sequence_length = projected.shape[1]
-        projected = projected.reshape(x.shape[0], sequence_length, hidden)
+        hidden = self.hidden_size or int(weight.shape[1])
+        if hidden != weight.shape[1]:
+            raise ValueError("MHA_SPLIT hidden_size must match the projection input width")
+        projected = F.linear(x.reshape(x.shape[0], -1, hidden), weight, bias)
         if self.role in {"query", "key"}:
             return projected[:, self.position, :]
         if self.role == "value":
@@ -218,8 +239,8 @@ class ACTMHAJoin(nn.Module):
         self.hidden_size = hidden_size
 
     def forward(self, *inputs: torch.Tensor) -> torch.Tensor:
-        output = torch.cat(inputs, dim=-1)
-        hidden_size = self.hidden_size or int(output.shape[-1])
+        output = torch.cat([value.flatten(1) for value in inputs], dim=1)
+        hidden_size = self.hidden_size or int(output.shape[1] // self.sequence_length)
         return output.reshape(output.shape[0], self.sequence_length, hidden_size)
 
 
@@ -307,7 +328,9 @@ class ActGraphModule(nn.Module):
             if mod is None:
                 out = self._apply_functional(layer, inp_tensors)
             else:
-                if layer.kind == LayerKind.DENSE.value and inp_tensors[0].dim() >= 3:
+                if layer.kind == LayerKind.DENSE.value and layer.params.get("token_wise"):
+                    out = mod(inp_tensors[0])
+                elif layer.kind == LayerKind.DENSE.value and inp_tensors[0].dim() >= 3:
                     import torch.nn.functional as F
                     output_shape = layer.params.get("output_shape")
                     if output_shape is not None and len(output_shape) >= 3:
@@ -1214,6 +1237,8 @@ class ACTToTorch:
             return ACTMatMul()
         if kind == LayerKind.MASK_ADD.value:
             return ACTMaskAdd(cast(torch.Tensor, params["M"]))
+        if kind == LayerKind.SOFTMAX.value and "rowsize" in params:
+            return ACTSoftmax(act_layer)
         if kind == LayerKind.LAYERNORM.value:
             variant = str(params.get("variant", params.get("layer_norm", "standard")))
             return ACTLayerNorm(
@@ -1300,6 +1325,8 @@ class ACTToTorch:
             for key in ("ceil_mode", "count_include_pad", "divisor_override"):
                 if key in params:
                     kwargs[key] = params[key]
+        if kind == LayerKind.GELU.value and "approximate" in params:
+            kwargs["approximate"] = params["approximate"]
 
         # Create module instance
         m = cls(*args, **kwargs)

@@ -19,7 +19,10 @@ import torch
 from typing import Tuple, Callable, Dict, Any, List, Final
 from act.back_end.core import Bounds
 from act.back_end.interval_tf.tf_mlp import _sin_interval, _cos_interval, _quantize_params_flat, _quantize_qdq_value
-from .tf_forward import LinearBound, Frame, _reset_forward_box
+from .tf_forward import (
+    LinearBound, Frame, _reset_forward_box, _concretize,
+    _fwd_elementwise_planes, _intersect_boxes,
+)
 
 
 # ---- Shared primitives ----
@@ -177,6 +180,30 @@ def dual_smooth_backward(
     return v_out.view(BM, n), contrib
 
 
+def _forward_smooth_planes(
+    parent_boxes: List[Bounds], parent_lins: List[LinearBound],
+    parent_frames: List[Frame], post_activation: bool,
+    int_lb: torch.Tensor, int_ub: torch.Tensor,
+    planes: Callable[[torch.Tensor, torch.Tensor],
+                     Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
+    """Compose valid scalar envelopes while retaining the caller's grad context."""
+    parent, relation = parent_boxes[0], parent_lins[0]
+    lin = None
+    if relation.A_lb is not None and relation.A_ub is not None:
+        lin = _fwd_elementwise_planes(relation, planes(parent.lb, parent.ub))
+    lb, ub = int_lb, int_ub
+    if lin is not None:
+        linear_lb, linear_ub = _concretize(lin, parent_frames[0])
+        lb, ub = _intersect_boxes(linear_lb, linear_ub, int_lb, int_ub)
+    out = Bounds(lb, ub)
+    stored = out if post_activation else Bounds(parent.lb, parent.ub)
+    if lin is not None and not post_activation:
+        return stored, out, lin, parent_frames[0]
+    lin, frame = _reset_forward_box(lb, ub, lb.device, lb.dtype)
+    return stored, out, lin, frame
+
+
 # ---- SIGMOID ----
 
 @torch.no_grad()
@@ -185,17 +212,13 @@ def forward_sigmoid(
     parent_frames: List[Frame], preds: List[int], post_activation: bool,
     device: torch.device, dtype: torch.dtype,
 ) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
-    """Forward pass for SIGMOID activation.
-
-    Body copied from tf_forward.py lines 426-430 (SIGMOID branch).
-    Returns (stored, out, lin, frame).
-    """
+    """Propagate sigmoid bounds and compose its planes on an explicit frame."""
     parent_box = parent_boxes[0]
-    pre_lb, pre_ub = parent_box.lb, parent_box.ub
-    out = Bounds(torch.sigmoid(pre_lb), torch.sigmoid(pre_ub))
-    stored = out if post_activation else Bounds(pre_lb, pre_ub)
-    lin, frame = _reset_forward_box(out.lb, out.ub, device, dtype)
-    return stored, out, lin, frame
+    return _forward_smooth_planes(
+        parent_boxes, parent_lins, parent_frames, post_activation,
+        torch.sigmoid(parent_box.lb), torch.sigmoid(parent_box.ub),
+        lambda l, u: compute_smooth_relaxation(l, u, sigmoid, dsigmoid),
+    )
 
 
 def backward_sigmoid(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
@@ -221,17 +244,13 @@ def forward_tanh(
     parent_frames: List[Frame], preds: List[int], post_activation: bool,
     device: torch.device, dtype: torch.dtype,
 ) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
-    """Forward pass for TANH activation.
-
-    Body copied from tf_forward.py lines 432-436 (TANH branch).
-    Returns (stored, out, lin, frame).
-    """
+    """Propagate tanh bounds and compose its planes on an explicit frame."""
     parent_box = parent_boxes[0]
-    pre_lb, pre_ub = parent_box.lb, parent_box.ub
-    out = Bounds(torch.tanh(pre_lb), torch.tanh(pre_ub))
-    stored = out if post_activation else Bounds(pre_lb, pre_ub)
-    lin, frame = _reset_forward_box(out.lb, out.ub, device, dtype)
-    return stored, out, lin, frame
+    return _forward_smooth_planes(
+        parent_boxes, parent_lins, parent_frames, post_activation,
+        torch.tanh(parent_box.lb), torch.tanh(parent_box.ub),
+        lambda l, u: compute_smooth_relaxation(l, u, tanh, dtanh),
+    )
 
 
 def backward_tanh(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
@@ -259,11 +278,11 @@ def forward_erf(
 ) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
     """Forward pass for ERF activation, mirroring TANH."""
     parent_box = parent_boxes[0]
-    pre_lb, pre_ub = parent_box.lb, parent_box.ub
-    out = Bounds(torch.erf(pre_lb), torch.erf(pre_ub))
-    stored = out if post_activation else Bounds(pre_lb, pre_ub)
-    lin, frame = _reset_forward_box(out.lb, out.ub, device, dtype)
-    return stored, out, lin, frame
+    return _forward_smooth_planes(
+        parent_boxes, parent_lins, parent_frames, post_activation,
+        torch.erf(parent_box.lb), torch.erf(parent_box.ub),
+        lambda l, u: compute_smooth_relaxation(l, u, erf, derf),
+    )
 
 
 def backward_erf(L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
@@ -314,6 +333,35 @@ def dual_sqrt_backward(nu: torch.Tensor, bounds: Bounds, M: int = 1):
     lo_e = torch.clamp(bounds.lb, min=0.0)
     hi_e = torch.clamp(bounds.ub, min=0.0)
     return _dual_constant_box_backward(nu, torch.sqrt(lo_e), torch.sqrt(hi_e), M)
+
+
+@torch.no_grad()
+def forward_square(
+    L: Any, parent_boxes: List[Bounds], parent_lins: List[LinearBound],
+    parent_frames: List[Frame], preds: List[int], post_activation: bool,
+    device: torch.device, dtype: torch.dtype,
+) -> Tuple[Bounds, Bounds, LinearBound, Frame]:
+    """Exact interval image of x squared, stored as an output box."""
+    lower, upper = parent_boxes[0].lb, parent_boxes[0].ub
+    lb = torch.where(
+        (lower <= 0) & (upper >= 0), torch.zeros_like(lower),
+        torch.minimum(lower.square(), upper.square()),
+    )
+    ub = torch.maximum(lower.square(), upper.square())
+    out = Bounds(lb, ub)
+    lin, frame = _reset_forward_box(lb, ub, device, dtype)
+    return out, out, lin, frame
+
+
+def backward_square(
+    L: Any, nu: torch.Tensor, bounds_dict: Dict[int, Bounds],
+    preds: List[int], M: int = 1, alpha=None,
+) -> Tuple[List[torch.Tensor], torch.Tensor]:
+    """Absorb square's exact output-box support without an unsound derivative."""
+    assert len(preds) == 1, f"SQUARE expects 1 predecessor, got {len(preds)}"
+    out = bounds_dict[L.id]
+    nu_in, contribution = _dual_constant_box_backward(nu, out.lb, out.ub, M)
+    return [nu_in], contribution
 
 
 # ---- SIN ----

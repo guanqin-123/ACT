@@ -920,6 +920,66 @@ def _fwd_relu(lin: LinearBound, lb: torch.Tensor, ub: torch.Tensor,
     )
 
 
+def _shared_explicit_frame(
+    lins: List[LinearBound], frames: List[Frame], widths: List[int],
+) -> bool:
+    """Whether operand relations use the same explicit symbolic coordinates."""
+    return all(frame is frames[0] for frame in frames[1:]) and all(
+        lin.A_lb is not None and lin.A_ub is not None
+        and lin.A_lb.shape[1] == width and lin.b_lb.shape[1] == width
+        for lin, width in zip(lins, widths, strict=True)
+    )
+
+
+def _fwd_elementwise_planes(
+    lin: LinearBound,
+    planes: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+) -> Optional[LinearBound]:
+    """Compose signed elementwise envelopes over an existing explicit frame."""
+    if lin.A_lb is None or lin.A_ub is None:
+        return None
+    k_lo, b_lo, k_hi, b_hi = planes
+    if lin.A_lb.shape[1] != k_lo.shape[1] or lin.b_lb.shape[1] != k_lo.shape[1]:
+        return None
+    lp, ln = k_lo.clamp(min=0), k_lo.clamp(max=0)
+    up, un = k_hi.clamp(min=0), k_hi.clamp(max=0)
+    return LinearBound(
+        A_lb=lp.unsqueeze(-1) * lin.A_lb + ln.unsqueeze(-1) * lin.A_ub,
+        b_lb=lp * lin.b_lb + ln * lin.b_ub + b_lo,
+        A_ub=up.unsqueeze(-1) * lin.A_ub + un.unsqueeze(-1) * lin.A_lb,
+        b_ub=up * lin.b_ub + un * lin.b_lb + b_hi,
+    )
+
+
+def _fwd_rowwise_planes(
+    lin: LinearBound, row: int,
+    planes: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+) -> Optional[LinearBound]:
+    """Compose independent row maps, preserving the original symbolic axis."""
+    if lin.A_lb is None or lin.A_ub is None:
+        return None
+    B, n, symbols = lin.A_lb.shape
+    a_lo, c_lo, a_hi, c_hi = planes
+    if n % row or a_lo.shape[0] != B * (n // row):
+        return None
+    rows, outputs = n // row, a_lo.shape[-2]
+    A_lb, A_ub = (a.reshape(B, rows, row, symbols) for a in (lin.A_lb, lin.A_ub))
+    b_lb, b_ub = (b.reshape(B, rows, row) for b in (lin.b_lb, lin.b_ub))
+    lo, hi = (a.reshape(B, rows, outputs, row) for a in (a_lo, a_hi))
+    lp, ln = lo.clamp(min=0), lo.clamp(max=0)
+    up, un = hi.clamp(min=0), hi.clamp(max=0)
+    lower_a = torch.einsum("brij,brjs->bris", lp, A_lb) + torch.einsum("brij,brjs->bris", ln, A_ub)
+    upper_a = torch.einsum("brij,brjs->bris", up, A_ub) + torch.einsum("brij,brjs->bris", un, A_lb)
+    lower_b = torch.einsum("brij,brj->bri", lp, b_lb) + torch.einsum("brij,brj->bri", ln, b_ub)
+    upper_b = torch.einsum("brij,brj->bri", up, b_ub) + torch.einsum("brij,brj->bri", un, b_lb)
+    return LinearBound(
+        A_lb=lower_a.reshape(B, rows * outputs, symbols),
+        b_lb=(lower_b + c_lo.reshape(B, rows, outputs)).reshape(B, rows * outputs),
+        A_ub=upper_a.reshape(B, rows * outputs, symbols),
+        b_ub=(upper_b + c_hi.reshape(B, rows, outputs)).reshape(B, rows * outputs),
+    )
+
+
 def _fwd_bias(layer: Layer, lin: LinearBound) -> LinearBound:
     """Compose dual-track affine bounds through a bias layer.
 

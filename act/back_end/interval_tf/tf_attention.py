@@ -509,26 +509,20 @@ class LinearBounds:
     def exp(self) -> "LinearBounds":
         """Bound ``exp(x)`` with a tangent lower and secant upper envelope.
 
-        The tangent anchor is clamped below ``l + 1`` to keep the lower bound
-        strictly positive; a linear extrapolation past a threshold avoids
-        overflow while remaining an upper bound.
+        The tangent anchor stays below ``l + 1`` to keep its lower bound
+        positive. Nonfinite exponentials remain visible to callers: a linear
+        extrapolation of a convex exponential is not an upper envelope.
         """
         l, u = self.concretize()
         # Anchor < l + 1 keeps exp(anchor)*(l-anchor)+exp(anchor) > 0.
         m = torch.min((l + u) / 2, l + 0.99)
-        thres = torch.tensor(12.0, device=self.device, dtype=l.dtype)
-
-        def exp_with_trick(x: torch.Tensor) -> torch.Tensor:
-            mask = torch.lt(x, thres).to(x.dtype)
-            return mask * torch.exp(torch.min(x, thres)) + \
-                (1 - mask) * (torch.exp(thres) * (x - thres + 1))
-
-        kl = torch.exp(torch.min(m, thres))
+        kl = torch.exp(m)
         lw = self.lw * kl.unsqueeze(2)
         lb = kl * (self.lb - m + 1)
-        ku = (exp_with_trick(u) - exp_with_trick(l)) / (u - l + _EPS)
+        width = u - l
+        ku = (torch.exp(u) - torch.exp(l)) / torch.where(width > 0, width, torch.ones_like(width))
         uw = self.uw * ku.unsqueeze(2)
-        ub = self.ub * ku - ku * l + exp_with_trick(l)
+        ub = self.ub * ku - ku * l + torch.exp(l)
         return self._like(lw, uw, lb, ub)
 
     def _softmax_sum(self) -> tuple["LinearBounds", "LinearBounds"]:
@@ -648,6 +642,7 @@ class LinearBounds:
         gamma: torch.Tensor,
         beta: torch.Tensor,
         variant: str = "standard",
+        eps: float = _EPS,
     ) -> "LinearBounds":
         """Layer normalization relaxation with an optional no-variance mode.
 
@@ -667,7 +662,7 @@ class LinearBounds:
 
         if variant == "standard":
             variance = minus_mu.sqr().matmul(w_avg)
-            normalized = minus_mu.divide(variance.add(_EPS).sqrt())
+            normalized = minus_mu.divide(variance.add(eps).sqrt())
         elif variant == "no_var":
             normalized = minus_mu
         else:

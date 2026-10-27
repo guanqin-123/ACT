@@ -286,6 +286,7 @@ class DualSolver(Solver):
     }
     _AFFINE_CONTRIB_KINDS = {
         LayerKind.DENSE.value,
+        LayerKind.CONV1D.value,
         LayerKind.CONV2D.value,
         LayerKind.BIAS.value,
         LayerKind.BN.value,
@@ -972,14 +973,14 @@ class DualSolver(Solver):
         RELU allocates an optimizable lower-envelope slope ``[B, M, n]`` (or
         ``[B, n]`` when ``per_class_alpha`` is off), warm-started from
         ``incremental_alphas`` when present. SOFTMAX and LAYERNORM are
-        fixed-slope and allocate no alpha; attention cores allocate fusion
-        slopes. Each kind owns the shape of its own pytree, which its
+        fixed-slope and allocate no alpha; attention cores and MATMUL allocate
+        fusion slopes. Each kind owns the shape of its own pytree, which its
         backward kernel reads back via
         ``alpha.get(lid)``.
         """
         k = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
-        if k in (LayerKind.ATT_SCORES.value, LayerKind.ATT_MIX.value):
-            return self._init_attention_alpha(
+        if k in (LayerKind.ATT_SCORES.value, LayerKind.ATT_MIX.value, LayerKind.MATMUL.value):
+            return self._init_bilinear_alpha(
                 net, layer, bounds_dict, device, dtype,
                 optimize_alpha=optimize_alpha,
                 incremental_alphas=incremental_alphas,
@@ -1014,7 +1015,7 @@ class DualSolver(Solver):
                 alpha_init = alpha_init_bn.contiguous()
         return torch.nn.Parameter(alpha_init) if optimize_alpha else alpha_init.detach()
 
-    def _init_attention_alpha(
+    def _init_bilinear_alpha(
         self,
         net: Net,
         layer: Layer,
@@ -1025,29 +1026,32 @@ class DualSolver(Solver):
         optimize_alpha: bool,
         incremental_alphas: Optional[AlphaState],
     ) -> AlphaTree:
-        """Allocate the bilinear-attention fusion-slope pytree for one core.
+        """Allocate lane-major fusion slopes for attention or MATMUL.
 
-        The pytree is ``{omega_l, omega_u}`` with per-output ``[B, 1]`` slopes,
+        The pytree is ``{omega_l, omega_u}`` with ``[B, outputs]`` slopes,
         warm-started at the rule init derived from the same local input boxes the
         backward kernel reads (so allocator, kernel, keep-best clone and the
         ``[0, 1]`` projection all agree on the shape). Returns ``None`` when the
         predecessor boxes are missing so the kernel falls back to its rule slope.
         """
         from act.back_end.dual_tf.tf_transformer import (
-            attention_rule_alpha, _attention_input_boxes,
+            attention_rule_alpha, _attention_input_boxes, matmul_rule_alpha, _matmul_shapes,
         )
         kind = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
-        src_keys = ("q_src", "k_src") if kind == "ATT_SCORES" else ("w_src", "v_src")
-        source_ids = [cast(int, layer.params[key]) for key in src_keys]
+        if kind == LayerKind.MATMUL.value:
+            source_ids = net.preds[layer.id]
+        else:
+            src_keys = ("q_src", "k_src") if kind == "ATT_SCORES" else ("w_src", "v_src")
+            source_ids = [cast(int, layer.params[key]) for key in src_keys]
         if any(lid not in bounds_dict for lid in source_ids):
-            # Missing predecessor bounds disable learned attention slopes.
+            # Missing predecessor bounds leave the kernel at its fixed rule.
             return None
-        boxes = _attention_input_boxes(
-            layer, self._bilinear_operand_bounds(
-                net, bounds_dict, source_ids
-            )
-        )
-        x_l, x_u, y_l, y_u, _scale, _mask = boxes
+        operands = self._bilinear_operand_bounds(net, bounds_dict, source_ids)
+        if kind == LayerKind.MATMUL.value:
+            x_box, y_box = (operands[lid] for lid in source_ids)
+            x_l, x_u, y_l, y_u = (box.flatten(1) for box in (x_box.lb, x_box.ub, y_box.lb, y_box.ub))
+        else:
+            x_l, x_u, y_l, y_u, _scale, _mask = _attention_input_boxes(layer, operands)
         x_l = x_l.to(device=device, dtype=dtype)
         x_u = x_u.to(device=device, dtype=dtype)
         y_l = y_l.to(device=device, dtype=dtype)
@@ -1059,7 +1063,12 @@ class DualSolver(Solver):
                 "omega_u": prior["omega_u"].detach().clone().to(device=device, dtype=dtype).clamp(0.0, 1.0),
             }
         else:
-            tree = attention_rule_alpha(x_l, x_u, y_l, y_u)
+            k_thresh = float(cast(float, layer.params.get("k_thresh", 1.0)))
+            if kind == LayerKind.MATMUL.value:
+                shape = _matmul_shapes(layer.params["x_shape"], layer.params["y_shape"])
+                tree = matmul_rule_alpha(x_l, x_u, y_l, y_u, *shape, k_thresh)
+            else:
+                tree = attention_rule_alpha(x_l, x_u, y_l, y_u, k_thresh)
         if optimize_alpha:
             return {key: torch.nn.Parameter(val.detach().clone()) for key, val in tree.items()}
         return {key: val.detach() for key, val in tree.items()}

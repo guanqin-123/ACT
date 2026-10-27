@@ -898,7 +898,9 @@ def _generate_layer_variables(kind, i, vc, params, layers):
     in_vars = list(layers[i - 1].out_vars)
 
     # Determine output count from params
-    if "out_features" in params:
+    if kind == LayerKind.DENSE.value and params.get("token_wise"):
+        n_out = math.prod(params["output_shape"][1:])
+    elif "out_features" in params:
         n_out = int(params["out_features"])
     elif "output_shape" in params:
         n_out = torch.Size(params["output_shape"]).numel()
@@ -1488,7 +1490,10 @@ class NetFactory:
             input_from = ls.get("input_from")
             if input_from is not None:
                 in_vars = list(layers[int(input_from)].out_vars)
-                n_out = int(params.get("out_features", len(in_vars)))
+                n_out = math.prod(params["output_shape"][1:]) if params.get("token_wise") else int(params.get(
+                    "out_features", math.prod(params["output_shape"][1:])
+                    if "output_shape" in params else len(in_vars),
+                ))
                 out_vars = list(range(vc, vc + n_out))
                 vc += n_out
             else:
@@ -1908,6 +1913,58 @@ def _lt_spec_activation_product(kind: LayerKind) -> Dict[str, Any]:
          "inputs": {"x": 2, "y": 3}, "preds": [2, 3]},
         _lt_assert_le([1.0], 0.1),
     ]}
+
+
+def _lt_spec_token_wise_dense() -> Dict[str, Any]:
+    """Compact token projections through explicit and sequential input wiring."""
+    dtype = get_default_dtype()
+    weight = torch.tensor([[0.5, -0.25, 0.75], [-0.5, 0.25, 0.125]], dtype=dtype)
+    return {"layers": _lt_input([1, 2, 3], -1.0, 1.0) + [
+        {"kind": LayerKind.DENSE.value, "params": {
+            "weight": weight,
+            "bias": torch.tensor([0.125, -0.25], dtype=dtype),
+            "in_features": 3, "out_features": 2, "token_wise": True,
+            "input_shape": [1, 2, 3], "output_shape": [1, 2, 2],
+        }, "input_from": 1, "preds": [1]},
+        {"kind": LayerKind.DENSE.value, "params": {
+            "weight": weight.T.contiguous(),
+            "bias": torch.tensor([0.25, -0.125, 0.375], dtype=dtype),
+            "in_features": 2, "out_features": 3, "token_wise": True,
+            "input_shape": [1, 2, 2], "output_shape": [1, 2, 3],
+        }},
+        _lt_assert_le([1.0, -0.5, 0.25, -0.25, 0.5, -1.0], 10.0),
+    ]}
+
+
+def _lt_spec_mha_split_join(role: str) -> Dict[str, Any]:
+    """Select both positions/features from a rectangular per-head projection."""
+    dtype = get_default_dtype()
+    weight = torch.tensor([[0.5, -0.25, 0.75], [-0.5, 0.25, 0.125]], dtype=dtype)
+    bias = torch.tensor([0.125, -0.25], dtype=dtype)
+    projection_shape = [1, 2, 2] if role == "all" else [1, 2]
+    hidden_size = 4 if role == "all" else 2
+    layers = _lt_input([1, 2, 3], -1.0, 1.0)
+    for index in range(2):
+        layers.append({
+            "kind": LayerKind.MHA_SPLIT.value,
+            "params": {
+                "role": role,
+                "feature" if role == "value" else "position": index,
+                "weight": weight * (index + 1), "bias": bias,
+                "num_heads": 1, "head_dim": 2, "seq_len": 2, "hidden_size": 3,
+                "input_shape": [1, 2, 3], "output_shape": projection_shape,
+            },
+            "input_from": 1, "preds": [1],
+        })
+    layers.extend([
+        {"kind": LayerKind.MHA_JOIN.value, "params": {
+            "seq_len": 2, "hidden_size": hidden_size, "concat_dim": -1,
+            "input_shapes": [projection_shape, projection_shape],
+            "output_shape": [1, 2, hidden_size],
+        }, "preds": [2, 3]},
+        _lt_assert_le([1.0, -0.5, 0.25, -1.0] * (hidden_size // 2), 10.0),
+    ])
+    return {"layers": layers}
 
 
 def _lt_spec_attention(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -2336,9 +2393,12 @@ def _lt_spec_min_op() -> Dict[str, Any]:
     ]}
 
 
-def _lt_spec_softmax() -> Dict[str, Any]:
+def _lt_spec_softmax(rowsize: Optional[int] = None) -> Dict[str, Any]:
+    params = {"axis": -1}
+    if rowsize is not None:
+        params["rowsize"] = rowsize
     return {"layers": _lt_input([1, 4], -1.0, 1.0) + [
-        {"kind": LayerKind.SOFTMAX.value, "params": {"axis": -1}},
+        {"kind": LayerKind.SOFTMAX.value, "params": params},
         _lt_assert_le([1.0, 1.0, 1.0, 1.0], 5.0),
     ]}
 
@@ -2682,6 +2742,11 @@ LAYER_TESTING_SPECS: Dict[str, Any] = {
     f"{LAYER_TESTING_NAME_PREFIX}matmul":        _lt_spec_matmul,
     f"{LAYER_TESTING_NAME_PREFIX}activation_matmul": lambda: _lt_spec_activation_product(LayerKind.MATMUL),
     f"{LAYER_TESTING_NAME_PREFIX}activation_mul": lambda: _lt_spec_activation_product(LayerKind.MUL),
+    f"{LAYER_TESTING_NAME_PREFIX}token_wise_dense": _lt_spec_token_wise_dense,
+    f"{LAYER_TESTING_NAME_PREFIX}mha_split_join_query": lambda: _lt_spec_mha_split_join("query"),
+    f"{LAYER_TESTING_NAME_PREFIX}mha_split_join_key": lambda: _lt_spec_mha_split_join("key"),
+    f"{LAYER_TESTING_NAME_PREFIX}mha_split_join_value": lambda: _lt_spec_mha_split_join("value"),
+    f"{LAYER_TESTING_NAME_PREFIX}mha_split_join_all": lambda: _lt_spec_mha_split_join("all"),
     f"{LAYER_TESTING_NAME_PREFIX}arg_extremum":  _lt_spec_arg_extremum,
     f"{LAYER_TESTING_NAME_PREFIX}upsample":      _lt_spec_upsample,
     f"{LAYER_TESTING_NAME_PREFIX}expand":        _lt_spec_expand,
@@ -2697,6 +2762,7 @@ LAYER_TESTING_SPECS: Dict[str, Any] = {
     f"{LAYER_TESTING_NAME_PREFIX}rnn":           _lt_spec_rnn,
     f"{LAYER_TESTING_NAME_PREFIX}gelu":          _lt_spec_gelu,
     f"{LAYER_TESTING_NAME_PREFIX}softmax":       _lt_spec_softmax,
+    f"{LAYER_TESTING_NAME_PREFIX}softmax_rows":  lambda: _lt_spec_softmax(2),
     # Transformer / normalization coverage: each example targets one TF
     # function in act/back_end/interval_tf/tf_transformer.py that is
     # otherwise unreachable through the random MLP/CNN/RNN generators.
