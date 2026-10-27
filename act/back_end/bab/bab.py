@@ -74,6 +74,7 @@ from act.back_end.solver.solver_base import Solver, SolveStatus
 from act.back_end.solver.solver_dual import (
     DualBatchResult,
     DualSolver,
+    _alpha_tree_select_spec_rows,
     expand_bounds_dict,
     unproven_spec_rows,
 )
@@ -642,7 +643,7 @@ def verify_bab_batched(
             keep = torch.where(unproven)[0]
             if int(keep.numel()) < total_rows:
                 spec_keep_rows = keep
-                root_batch.incremental_alpha = _select_spec_rows(
+                root_batch.incremental_alpha = _alpha_tree_select_spec_rows(
                     root_batch.incremental_alpha, keep,
                 )
                 root_batch.incremental_eta = _select_spec_rows(
@@ -1282,3 +1283,36 @@ def verify_bab(
         dual_config=dual_config,
         trace=trace,
     )
+
+
+if __name__ == "__main__":
+    from tempfile import TemporaryDirectory
+
+    from act.back_end.net_factory import LAYER_TESTING_SPECS, NetFactory
+    from act.config.config import BackendConfig
+    from act.util.device_manager import initialize_device
+
+    initialize_device("cpu", "float64")
+    torch.set_num_threads(1)
+    _ = torch.manual_seed(42)
+    with TemporaryDirectory(prefix="act-bab-shared-") as directory:
+        factory = NetFactory(BackendConfig.from_yaml().generation.net_factory,
+                             output_dir=directory, write_manifest=False)
+        # Shared [B,n] alpha must broadcast child eta/signs over both spec rows.
+        spec = LAYER_TESTING_SPECS["layer_testing_climb_reuse"]()
+        spec["layers"][-1]["params"].update(c=[[1.], [-1.]], d=[.1, .1])
+        net = factory.create_network("shared_multirow", spec)
+        trace: list[dict[str, int | float | None]] = []
+        verdict = verify_bab_batched(
+            net, DualSolver,
+            BaBConfig(
+                solver_tier="dual_alpha_eta", branching_method="babsr",
+                root_bounds_reuse="plain", bounding="depth_bound_blend",
+                max_depth=4, max_nodes=16,
+            ),
+            max_batch_size=4, time_budget_s=60,
+            dual_config=DualConfig(n_iters=1, per_class_alpha=False), trace=trace,
+        )
+        assert verdict.status == VerifyStatus.UNKNOWN
+        assert len(trace) > 1
+        assert any(wave["K"] > 1 for wave in trace if isinstance(wave["K"], int))

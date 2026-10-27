@@ -53,6 +53,7 @@ from act.config.config import DualConfig
 from act.back_end.bab.node import (
     SubproblemBatch,
     _layer_neuron_count,
+    _state_spec_row_count,
     split_input,
     split_input_nary,
     split_neurons,
@@ -1074,11 +1075,7 @@ class FSBBranching(BaBSRBranching):
                 hypo[key] = value.clone()
 
         n_neurons = _layer_neuron_count(net.by_id[lid])
-        n_specs = 1
-        if batch.incremental_alpha is not None and lid in batch.incremental_alpha:
-            n_specs = int(batch.incremental_alpha[lid].shape[1])
-        elif batch.incremental_eta is not None and lid in batch.incremental_eta:
-            n_specs = int(batch.incremental_eta[lid].shape[1])
+        n_specs = _state_spec_row_count(batch)
 
         if lid not in hypo:
             hypo[lid] = torch.zeros(

@@ -27,7 +27,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import torch
 
@@ -37,10 +37,12 @@ from act.back_end.bab.node import (
     SubproblemBatch,
     _gather_optional_dict,
     _layer_neuron_count,
+    _state_spec_row_count,
     split_neurons,
 )
 from act.back_end.core import Bounds, Layer, Net
 from act.back_end.solver.solver_base import BatchBoundResult
+from act.back_end.solver.solver_dual import AlphaState, _alpha_tree_repeat_lanes
 
 # ---------------------------------------------------------------------------
 # Joint multi-neuron splitting (verdict-boundary)
@@ -271,15 +273,11 @@ def gain_tested_decision(
     top_neurons = all_neurons.gather(1, top)
 
     # Keep this probe builder separate: rows are lane-major, depth is unchanged,
-    # and M comes from alpha (else 1) because solve_dual reads the probe depth.
+    # and shared alpha leaves do not constrain the active spec-row count.
     repeated_indices = torch.arange(batch_size, device=device).repeat_interleave(
         2 * n_selected
     )
-    m_specs = 1
-    if branch_batch.incremental_alpha:
-        m_specs = int(
-            next(iter(branch_batch.incremental_alpha.values())).shape[1]
-        )
+    m_specs = _state_spec_row_count(branch_batch)
     signs = _gather_optional_dict(
         branch_batch.split_signs, repeated_indices
     ) or {}
@@ -309,8 +307,9 @@ def gain_tested_decision(
         lb=branch_batch.lb.index_select(0, repeated_indices),
         ub=branch_batch.ub.index_select(0, repeated_indices),
         depths=branch_batch.depths.index_select(0, repeated_indices),
-        incremental_alpha=_gather_optional_dict(
-            branch_batch.incremental_alpha, repeated_indices
+        incremental_alpha=cast(
+            Optional[AlphaState],
+            _alpha_tree_repeat_lanes(branch_batch.incremental_alpha, 2 * n_selected),
         ),
         incremental_eta=_gather_optional_dict(
             branch_batch.incremental_eta, repeated_indices

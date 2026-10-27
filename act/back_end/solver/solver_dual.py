@@ -13,13 +13,13 @@
 from __future__ import annotations
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeAlias, Union, cast
 
 import torch
 from act.back_end.core import Bounds, Layer, Net, get_topo_order
 from act.back_end.layer_schema import LayerKind
 from act.back_end.dual_tf.tf_forward import (
-    Frame, ForwardFrame, ForwardPrefixCache, _intersect_boxes,
+    Frame, ForwardFrame, ForwardPrefixCache, _intersect_boxes, _reset_forward_box,
     forward_frame_row_lower_bounds, input_support,
 )
 from act.config.config import DualConfig
@@ -37,6 +37,12 @@ from act.util.stats import SpecBatchResult
 
 _monotonic = time.monotonic
 
+AlphaTree: TypeAlias = Union[
+    torch.Tensor, Dict[Any, "AlphaTree"], List["AlphaTree"],
+    Tuple["AlphaTree", ...], None,
+]
+AlphaState: TypeAlias = Dict[int, AlphaTree]
+
 
 @dataclass(frozen=True)
 class DualResult(BoundResult):
@@ -44,7 +50,7 @@ class DualResult(BoundResult):
 
     margins: torch.Tensor
     sce: Optional[Any] = None
-    alpha_state: Optional[Dict[int, torch.Tensor]] = None
+    alpha_state: Optional[AlphaState] = None
     eta_state: Optional[Dict[int, torch.Tensor]] = None
     nu_per_layer: Optional[Dict[int, torch.Tensor]] = None
     dual_margins: Optional[torch.Tensor] = None
@@ -68,7 +74,7 @@ class DualBatchResult(BatchBoundResult):
     lower_bounds: torch.Tensor
     bounds_dict: Optional[Dict[int, Bounds]] = None
     nu_per_layer: Optional[Dict[int, torch.Tensor]] = None
-    alpha_state: Optional[Dict[int, torch.Tensor]] = None
+    alpha_state: Optional[AlphaState] = None
     eta_state: Optional[Dict[int, torch.Tensor]] = None
     witness_input: Optional[torch.Tensor] = None
     row_slack: Optional[torch.Tensor] = None
@@ -134,7 +140,7 @@ def expand_bounds_dict(bounds_dict: Dict[int, Bounds], M: int) -> Dict[int, Boun
     return out
 
 
-def _alpha_tree_leaves(tree: Any):
+def _alpha_tree_leaves(tree: AlphaTree) -> Iterator[torch.Tensor]:
     """Yield the tensor leaves of a dual-alpha pytree.
 
     A per-layer alpha is a pytree whose shape is interpreted by the matching
@@ -157,17 +163,99 @@ def _alpha_tree_leaves(tree: Any):
         raise TypeError(f"unsupported alpha pytree node: {type(tree)!r}")
 
 
-def _clone_alpha_tree(tree: Any) -> Any:
-    """Detach-clone every leaf of an alpha pytree, preserving its structure."""
+def _alpha_tree_map(
+    tree: AlphaTree, transform: Callable[[torch.Tensor], torch.Tensor]
+) -> AlphaTree:
+    """Transform tensor leaves without changing their per-kernel structure."""
     if tree is None:
         return None
     if isinstance(tree, torch.Tensor):
-        return tree.detach().clone()
+        return transform(tree)
     if isinstance(tree, dict):
-        return {key: _clone_alpha_tree(value) for key, value in tree.items()}
+        return {key: _alpha_tree_map(value, transform) for key, value in tree.items()}
     if isinstance(tree, (list, tuple)):
-        return type(tree)(_clone_alpha_tree(value) for value in tree)
+        return type(tree)(_alpha_tree_map(value, transform) for value in tree)
     raise TypeError(f"unsupported alpha pytree node: {type(tree)!r}")
+
+
+def _clone_alpha_tree(tree: AlphaTree) -> AlphaTree:
+    """Detach-clone evaluated optimizer state without retaining its graph."""
+    return _alpha_tree_map(tree, lambda leaf: leaf.detach().clone())
+
+
+def _alpha_tree_gather_lanes(tree: AlphaTree, indices: torch.Tensor) -> AlphaTree:
+    """Gather axis-zero lanes, including repeated indices, into owned storage."""
+    return _alpha_tree_map(tree, lambda leaf: leaf.index_select(0, indices.to(leaf.device)))
+
+
+def _alpha_tree_repeat_lanes(tree: AlphaTree, repeats: int) -> AlphaTree:
+    """Repeat each lane consecutively, matching repeat_interleave bound rows."""
+    if repeats < 1:
+        raise ValueError(f"alpha lane repeats must be positive, got {repeats}")
+    return _alpha_tree_map(tree, lambda leaf: leaf.repeat_interleave(repeats, dim=0))
+
+
+def _alpha_tree_zero_lanes(tree: AlphaTree, lanes: int) -> AlphaTree:
+    """Preserve payload shapes while zero-initializing missing warm-start lanes."""
+    return _alpha_tree_map(tree, lambda leaf: leaf.new_zeros((lanes, *leaf.shape[1:])))
+
+
+def _alpha_tree_concat_lanes(
+    left: AlphaTree, right: AlphaTree, n_left: int, n_right: int
+) -> AlphaTree:
+    """Concatenate lane state, filling absent subtrees from the present layout."""
+    if left is None and right is None:
+        return None
+    if left is None:
+        left = _alpha_tree_zero_lanes(right, n_left)
+    if right is None:
+        right = _alpha_tree_zero_lanes(left, n_right)
+    if isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor):
+        if left.shape[1:] != right.shape[1:]:
+            raise ValueError("alpha leaf trailing shapes must agree when concatenating lanes")
+        return torch.cat((left, right.to(device=left.device, dtype=left.dtype)), dim=0)
+    if isinstance(left, dict) and isinstance(right, dict):
+        keys = list(left) + [key for key in right if key not in left]
+        return {
+            key: _alpha_tree_concat_lanes(left.get(key), right.get(key), n_left, n_right)
+            for key in keys
+        }
+    if isinstance(left, (list, tuple)) and isinstance(right, type(left)):
+        if len(left) != len(right):
+            raise ValueError("alpha sequence lengths must agree when concatenating lanes")
+        values = [
+            _alpha_tree_concat_lanes(a, b, n_left, n_right)
+            for a, b in zip(left, right, strict=True)
+        ]
+        return tuple(values) if isinstance(left, tuple) else values
+    raise TypeError(f"alpha pytree structure mismatch: {type(left)!r} vs {type(right)!r}")
+
+
+def _alpha_spec_row_count(state: Optional[AlphaState]) -> int:
+    """Infer spec rows from ReLU tensors; shared/attention payloads do not fix M."""
+    counts = {
+        int(tree.shape[1]) for tree in (state or {}).values()
+        if isinstance(tree, torch.Tensor) and tree.dim() >= 3 and tree.shape[1] != 1
+    }
+    if len(counts) > 1:
+        raise ValueError(f"inconsistent alpha spec-row counts: {sorted(counts)}")
+    return next(iter(counts), 1)
+
+
+def _alpha_tree_select_spec_rows(
+    state: Optional[AlphaState], keep_rows: torch.Tensor
+) -> Optional[AlphaState]:
+    """Select nonshared ReLU spec rows; keep per-kind attention payloads shared."""
+    if state is None:
+        return None
+    return {
+        lid: (
+            tree.index_select(1, keep_rows.to(tree.device))
+            if isinstance(tree, torch.Tensor) and tree.dim() >= 3 and tree.shape[1] != 1
+            else _alpha_tree_map(tree, lambda leaf: leaf.clone())
+        )
+        for lid, tree in state.items()
+    }
 
 
 def unproven_spec_rows(slack: torch.Tensor) -> torch.Tensor:
@@ -189,6 +277,13 @@ def escaping_spec_rows(slack: torch.Tensor, reference: torch.Tensor) -> torch.Te
 class DualSolver(Solver):
     """Dual (linear-relaxation) certified bounds solver. Strict [B, *shape] API."""
 
+    _PRE_ACTIVATION_BOUNDS_KINDS = {
+        LayerKind.RELU.value, LayerKind.LRELU.value, "LEAKY_RELU",
+        LayerKind.SIGMOID.value, LayerKind.TANH.value, LayerKind.ERF.value,
+        LayerKind.SQRT.value, LayerKind.SIN.value, LayerKind.COS.value,
+        LayerKind.QUANTIZE.value, LayerKind.SOFTMAX.value,
+        LayerKind.LAYERNORM.value, LayerKind.GELU.value,
+    }
     _AFFINE_CONTRIB_KINDS = {
         LayerKind.DENSE.value,
         LayerKind.CONV2D.value,
@@ -212,6 +307,29 @@ class DualSolver(Solver):
     def capabilities(self) -> SolverCaps:
         return SolverCaps(supports_gpu=True, supports_csp=False, supports_dual=True)
 
+    def _bilinear_operand_bounds(
+        self, net: Net, bounds_dict: Dict[int, Bounds], source_ids: List[int]
+    ) -> Dict[int, Bounds]:
+        """View activation outputs as boxes without changing stored pre-activation bounds."""
+        view = dict(bounds_dict)
+        for lid in set(source_ids):
+            layer = net.by_id[lid]
+            kind = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
+            if kind not in self._PRE_ACTIVATION_BOUNDS_KINDS:
+                continue
+            pre = bounds_dict[lid]
+            parent = Bounds(pre.lb.flatten(start_dim=1), pre.ub.flatten(start_dim=1))
+            lin, frame = _reset_forward_box(
+                parent.lb, parent.ub, parent.lb.device, parent.lb.dtype
+            )
+            handler = self.tf._FORWARD_REGISTRY[kind]
+            _, out, _, _ = handler(
+                layer, [parent], [lin], [frame], net.preds[lid], True,
+                parent.lb.device, parent.lb.dtype,
+            )
+            view[lid] = out
+        return view
+
     def solve_spec_batch(
         self,
         net: Net,
@@ -224,7 +342,7 @@ class DualSolver(Solver):
         keep_rows: Optional[torch.Tensor] = None,
         split_signs: Optional[Dict[int, torch.Tensor]] = None,
         eta: Optional[Dict[int, torch.Tensor]] = None,
-        incremental_alphas: Optional[Dict[int, torch.Tensor]] = None,
+        incremental_alphas: Optional[AlphaState] = None,
         incremental_etas: Optional[Dict[int, torch.Tensor]] = None,
         optimize_alpha: bool = True,
         refresh_forward: bool = True,
@@ -458,7 +576,7 @@ class DualSolver(Solver):
         c: torch.Tensor, M: int = 1,
         return_sce: bool = False,
         enable_grad: bool = False,
-        alpha: Optional[Dict[int, torch.Tensor]] = None,
+        alpha: Optional[AlphaState] = None,
         eta: Optional[Dict[int, torch.Tensor]] = None,
         split_signs: Optional[Union[Dict[int, torch.Tensor], List[Dict[int, torch.Tensor]]]] = None,
         optimize: bool = False,
@@ -466,7 +584,7 @@ class DualSolver(Solver):
         lr_alpha: float = 0.1,
         lr_beta: float = 0.1,
         lr_decay: float = 0.98,
-        incremental_alphas: Optional[Dict[int, torch.Tensor]] = None,
+        incremental_alphas: Optional[AlphaState] = None,
         incremental_etas: Optional[Dict[int, torch.Tensor]] = None,
         return_optimized: bool = False,
         per_class_alpha: bool = True,
@@ -706,6 +824,19 @@ class DualSolver(Solver):
                     handler_bounds = self._local_phase_bounds(
                         bounds_dict, lid, split_signs[lid]
                     )
+                if k in (LayerKind.MUL.value, LayerKind.MATMUL.value):
+                    handler_bounds = self._bilinear_operand_bounds(
+                        net, handler_bounds, preds
+                    )
+                elif k in (LayerKind.ATT_SCORES.value, LayerKind.ATT_MIX.value):
+                    source_keys = (
+                        ("q_src", "k_src")
+                        if k == LayerKind.ATT_SCORES.value else ("w_src", "v_src")
+                    )
+                    handler_bounds = self._bilinear_operand_bounds(
+                        net, handler_bounds,
+                        [cast(int, layer.params[key]) for key in source_keys],
+                    )
                 if alpha is None:
                     pred_nus, contrib = handler(layer, nu_here, handler_bounds, preds, M)
                 else:
@@ -727,8 +858,12 @@ class DualSolver(Solver):
                     eta_l = eta[lid].to(device=nu_here.device, dtype=nu_here.dtype)
                     signs_l = split_signs[lid].to(device=nu_here.device, dtype=nu_here.dtype)
                     if eta_l.dim() == 3:
+                        if eta_l.shape[1] == 1:
+                            eta_l = eta_l.expand(-1, M, -1)
                         eta_l = eta_l.reshape(-1, eta_l.shape[-1])
                     if signs_l.dim() == 3:
+                        if signs_l.shape[1] == 1:
+                            signs_l = signs_l.expand(-1, M, -1)
                         signs_l = signs_l.reshape(-1, signs_l.shape[-1])
                     pn = pred_nus[0]
                     n_clip = min(pn.shape[-1], eta_l.shape[-1])
@@ -820,6 +955,7 @@ class DualSolver(Solver):
 
     def _init_alpha(
         self,
+        net: Net,
         layer: Layer,
         bounds_dict: Dict[int, Bounds],
         B: int,
@@ -829,23 +965,22 @@ class DualSolver(Solver):
         *,
         per_class_alpha: bool,
         optimize_alpha: bool,
-        incremental_alphas: Optional[Dict[int, torch.Tensor]],
-    ) -> Any:
+        incremental_alphas: Optional[AlphaState],
+    ) -> AlphaTree:
         """Per-kind dual-alpha allocation returning a pytree of leaves, or None.
 
         RELU allocates an optimizable lower-envelope slope ``[B, M, n]`` (or
         ``[B, n]`` when ``per_class_alpha`` is off), warm-started from
         ``incremental_alphas`` when present. SOFTMAX and LAYERNORM are
-        fixed-slope for now and allocate no alpha (``None``), so only RELU
-        contributes optimizer leaves; their backward kernels interpret the
-        absent alpha as the fixed relaxation. Each kind owns the shape of its
-        own pytree, which the matching backward kernel reads back via
+        fixed-slope and allocate no alpha; attention cores allocate fusion
+        slopes. Each kind owns the shape of its own pytree, which its
+        backward kernel reads back via
         ``alpha.get(lid)``.
         """
         k = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
         if k in (LayerKind.ATT_SCORES.value, LayerKind.ATT_MIX.value):
             return self._init_attention_alpha(
-                layer, bounds_dict, device, dtype,
+                net, layer, bounds_dict, device, dtype,
                 optimize_alpha=optimize_alpha,
                 incremental_alphas=incremental_alphas,
             )
@@ -854,8 +989,10 @@ class DualSolver(Solver):
         b = bounds_dict.get(layer.id)
         assert b is not None, f"_init_alpha: no bounds for RELU layer {layer.id}"
         if incremental_alphas is not None and layer.id in incremental_alphas:
+            previous = incremental_alphas[layer.id]
+            assert isinstance(previous, torch.Tensor)
             alpha_init = (
-                incremental_alphas[layer.id]
+                previous
                 .detach()
                 .clone()
                 .to(device=device, dtype=dtype)
@@ -879,14 +1016,15 @@ class DualSolver(Solver):
 
     def _init_attention_alpha(
         self,
+        net: Net,
         layer: Layer,
         bounds_dict: Dict[int, Bounds],
         device: torch.device,
         dtype: torch.dtype,
         *,
         optimize_alpha: bool,
-        incremental_alphas: Optional[Dict[int, torch.Tensor]],
-    ) -> Any:
+        incremental_alphas: Optional[AlphaState],
+    ) -> AlphaTree:
         """Allocate the bilinear-attention fusion-slope pytree for one core.
 
         The pytree is ``{omega_l, omega_u}`` with per-output ``[B, 1]`` slopes,
@@ -900,10 +1038,15 @@ class DualSolver(Solver):
         )
         kind = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
         src_keys = ("q_src", "k_src") if kind == "ATT_SCORES" else ("w_src", "v_src")
-        if any(int(layer.params[key]) not in bounds_dict for key in src_keys):
+        source_ids = [cast(int, layer.params[key]) for key in src_keys]
+        if any(lid not in bounds_dict for lid in source_ids):
             # Missing predecessor bounds disable learned attention slopes.
             return None
-        boxes = _attention_input_boxes(layer, bounds_dict)
+        boxes = _attention_input_boxes(
+            layer, self._bilinear_operand_bounds(
+                net, bounds_dict, source_ids
+            )
+        )
         x_l, x_u, y_l, y_u, _scale, _mask = boxes
         x_l = x_l.to(device=device, dtype=dtype)
         x_u = x_u.to(device=device, dtype=dtype)
@@ -931,7 +1074,7 @@ class DualSolver(Solver):
         lr_alpha: float = 0.1,
         lr_beta: float = 0.1,
         lr_decay: float = 0.98,
-        incremental_alphas: Optional[Dict[int, torch.Tensor]] = None,
+        incremental_alphas: Optional[AlphaState] = None,
         incremental_etas: Optional[Dict[int, torch.Tensor]] = None,
         split_signs: Optional[Dict[int, torch.Tensor]] = None,
         return_sce: bool = False,
@@ -1005,12 +1148,12 @@ class DualSolver(Solver):
                         ancestor_lids.add(p)
                         stack.append(p)
 
-        alphas: Dict[int, Any] = {}
+        alphas: AlphaState = {}
         for layer in net.layers:
             if ancestor_lids is not None and layer.id not in ancestor_lids:
                 continue
             tree = self._init_alpha(
-                layer, bounds_dict, B, M, device, dtype,
+                net, layer, bounds_dict, B, M, device, dtype,
                 per_class_alpha=per_class_alpha,
                 optimize_alpha=optimize_alpha,
                 incremental_alphas=incremental_alphas,
@@ -1053,7 +1196,7 @@ class DualSolver(Solver):
         if not param_groups or n_iters <= 0:
             result = self.compute_certified_bound(
                 net, bounds_dict, c, M=M, return_sce=return_sce,
-                alpha=cast(Dict[int, torch.Tensor], alphas) if alphas else None,
+                alpha=alphas if alphas else None,
                 eta=cast(Dict[int, torch.Tensor], etas) if etas else None,
                 split_signs=split_signs, start_lid=start_lid,
                 forward_frame=forward_frame,
@@ -1075,7 +1218,7 @@ class DualSolver(Solver):
         best_bounds = torch.full((BM,), float("-inf"), device=device, dtype=dtype)
         best_forward: Optional[torch.Tensor] = None
         best_sce: Optional[torch.Tensor] = None
-        best_alpha_state: Dict[int, Any] = {
+        best_alpha_state: AlphaState = {
             lid: _clone_alpha_tree(tree) for lid, tree in alphas.items()
         }
         best_eta_state: Dict[int, torch.Tensor] = {
@@ -1099,7 +1242,6 @@ class DualSolver(Solver):
         with torch.enable_grad():
             for _ in range(n_iters):
                 optimizer.zero_grad()
-                alpha_tensors = cast(Dict[int, torch.Tensor], alphas)
                 eta_tensors = cast(Dict[int, torch.Tensor], etas)
                 if refresh_forward:
                     fresh_bounds, current_frame, _stats = compute_forward_bounds(
@@ -1124,7 +1266,7 @@ class DualSolver(Solver):
                     M=M,
                     return_sce=return_sce,
                     enable_grad=True,
-                    alpha=alpha_tensors,
+                    alpha=alphas,
                     eta=eta_tensors,
                     split_signs=split_signs,
                     start_lid=start_lid,
@@ -1572,7 +1714,7 @@ class DualSolver(Solver):
         bounds_dict: Dict[int, Bounds],
         c: torch.Tensor,
         M: int,
-        alpha_state: Optional[Dict[int, torch.Tensor]] = None,
+        alpha_state: Optional[AlphaState] = None,
         eta_state: Optional[Dict[int, torch.Tensor]] = None,
         split_signs: Optional[Dict[int, torch.Tensor]] = None,
         per_class_alpha: bool = True,

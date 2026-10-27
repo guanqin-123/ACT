@@ -63,12 +63,20 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from collections import Counter
-from typing import Callable, Dict, List, Literal, Optional, Protocol, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Literal, Optional, Protocol, Sequence, Set, Tuple, cast
 
 import torch
 
 from act.back_end.bab.node import SubproblemBatch
 from act.back_end.solver.solver_base import SolveStatus
+from act.back_end.solver.solver_dual import (
+    AlphaState,
+    AlphaTree,
+    _alpha_tree_concat_lanes,
+    _alpha_tree_gather_lanes,
+    _alpha_tree_map,
+    _clone_alpha_tree,
+)
 from act.util.device_manager import get_default_dtype
 
 
@@ -147,68 +155,46 @@ class RandomBounding(BoundingStrategy):
     ``pop(k)`` selects ``k`` subproblems uniformly at random from the
     pool (without replacement).
 
-    Internal storage is fully tensor-native: three tensors ``(M, D)``,
-    ``(M, D)``, ``(M,)`` for lower bounds, upper bounds, and depths
-    respectively.
+    The pool retains complete subproblem rows, including dual warm starts
+    and split phases.
     """
 
     def __init__(self) -> None:
-        self._lb: Optional[torch.Tensor] = None  # (M, D)
-        self._ub: Optional[torch.Tensor] = None  # (M, D)
-        self._depths: Optional[torch.Tensor] = None  # (M,)
+        self._batch: Optional[SubproblemBatch] = None
 
     # -- BoundingStrategy interface -----------------------------------------
 
     def push(self, batch: SubproblemBatch) -> None:
-        if self._lb is None:
-            self._lb = batch.lb.clone()
-            self._ub = batch.ub.clone()
-            self._depths = batch.depths.clone()
-        else:
-            assert self._ub is not None and self._depths is not None
-            self._lb = torch.cat([self._lb, batch.lb], dim=0)
-            self._ub = torch.cat([self._ub, batch.ub], dim=0)
-            self._depths = torch.cat([self._depths, batch.depths], dim=0)
+        self._batch = (
+            batch.select(torch.arange(batch.batch_size, device=batch.lb.device))
+            if self._batch is None else self._batch.concat(batch)
+        )
 
     def pop(self, batch_size: int = 1) -> SubproblemBatch:
         if self.empty:
             raise IndexError("pop from empty pool")
 
         n = min(batch_size, len(self))
-        assert self._lb is not None and self._ub is not None and self._depths is not None
-        perm = torch.randperm(len(self), device=self._lb.device)
+        assert self._batch is not None
+        perm = torch.randperm(len(self), device=self._batch.lb.device)
         selected = perm[:n]
         remaining = perm[n:]
-
-        result = SubproblemBatch(
-            lb=self._lb[selected],
-            ub=self._ub[selected],
-            depths=self._depths[selected],
-        )
-
-        if len(remaining) > 0:
-            self._lb = self._lb[remaining]
-            self._ub = self._ub[remaining]
-            self._depths = self._depths[remaining]
-        else:
-            self._lb = None
-            self._ub = None
-            self._depths = None
-
+        result = self._batch.select(selected)
+        self._batch = self._batch.select(remaining) if remaining.numel() else None
         return result
 
     def evict_to(self, cap: int) -> int:
         total = len(self)
         if total <= cap or cap <= 0:
             return 0
-        assert self._lb is not None and self._ub is not None and self._depths is not None
-        self._lb = self._lb[:cap]
-        self._ub = self._ub[:cap]
-        self._depths = self._depths[:cap]
+        assert self._batch is not None
+        self._batch = self._batch.select(
+            torch.arange(cap, device=self._batch.lb.device)
+        )
         return total - cap
 
     def __len__(self) -> int:
-        return 0 if self._lb is None else self._lb.shape[0]
+        return 0 if self._batch is None else self._batch.batch_size
 
 
 # ---------------------------------------------------------------------------
@@ -219,15 +205,19 @@ class RandomBounding(BoundingStrategy):
 def _clone_optional_dict(
     d: Optional[Dict[int, torch.Tensor]],
 ) -> Optional[Dict[int, torch.Tensor]]:
-    return {key: tensor.clone() for key, tensor in d.items()} if d is not None else None
+    return cast(
+        Optional[Dict[int, torch.Tensor]],
+        _alpha_tree_map(cast(AlphaTree, d), torch.Tensor.clone),
+    )
 
 
 def _index_optional_dict(
     d: Optional[Dict[int, torch.Tensor]], idx: torch.Tensor
 ) -> Optional[Dict[int, torch.Tensor]]:
-    if d is None:
-        return None
-    return {key: tensor.index_select(0, idx.to(tensor.device)) for key, tensor in d.items()}
+    return cast(
+        Optional[Dict[int, torch.Tensor]],
+        _alpha_tree_gather_lanes(cast(AlphaTree, d), idx),
+    )
 
 
 def _merge_optional_dict(
@@ -240,28 +230,12 @@ def _merge_optional_dict(
     # zeros (e.g. split_signs keys differ per branch — a missing layer means "not
     # split", i.e. all-zero signs). Keeps the pool lossless across heterogeneous
     # incremental-state/split structures.
-    if existing is None and incoming is None:
-        return None
-    existing = existing or {}
-    incoming = incoming or {}
-    merged: Dict[int, torch.Tensor] = {}
-    for key in sorted(set(existing) | set(incoming)):
-        te = existing.get(key)
-        ti = incoming.get(key)
-        ref = te if te is not None else ti
-        assert ref is not None
-        if te is not None and ti is not None:
-            assert te.shape[1:] == ti.shape[1:], (
-                f"optional dict key {key} trailing shape mismatch: "
-                f"existing {tuple(te.shape[1:])} vs incoming {tuple(ti.shape[1:])}"
-            )
-        trailing = ref.shape[1:]
-        if te is None:
-            te = torch.zeros((n_existing, *trailing), dtype=ref.dtype, device=ref.device)
-        if ti is None:
-            ti = torch.zeros((n_incoming, *trailing), dtype=ref.dtype, device=ref.device)
-        merged[key] = torch.cat([te, ti], dim=0)
-    return merged
+    return cast(
+        Optional[Dict[int, torch.Tensor]],
+        _alpha_tree_concat_lanes(
+            cast(AlphaTree, existing), cast(AlphaTree, incoming), n_existing, n_incoming
+        ),
+    )
 
 
 class OrderFunction(Protocol):
@@ -380,7 +354,7 @@ class TopKBounding(BoundingStrategy):
         self._parent_margins: Optional[torch.Tensor] = None
         self._node_id: Optional[torch.Tensor] = None
         self._parent_id: Optional[torch.Tensor] = None
-        self._incremental_alpha: Optional[Dict[int, torch.Tensor]] = None
+        self._incremental_alpha: Optional[AlphaState] = None
         self._incremental_eta: Optional[Dict[int, torch.Tensor]] = None
         self._split_signs: Optional[Dict[int, torch.Tensor]] = None
 
@@ -408,7 +382,9 @@ class TopKBounding(BoundingStrategy):
             self._parent_margins = parent.clone()
             self._node_id = batch.node_id.clone() if batch.node_id is not None else None
             self._parent_id = batch.parent_id.clone() if batch.parent_id is not None else None
-            self._incremental_alpha = _clone_optional_dict(batch.incremental_alpha)
+            self._incremental_alpha = cast(
+                Optional[AlphaState], _clone_alpha_tree(batch.incremental_alpha)
+            )
             self._incremental_eta = _clone_optional_dict(batch.incremental_eta)
             self._split_signs = _clone_optional_dict(batch.split_signs)
             self._assert_push_transition(size_before, n_new)
@@ -419,7 +395,12 @@ class TopKBounding(BoundingStrategy):
         assert (self._node_id is None) == (batch.node_id is None)
         assert (self._parent_id is None) == (batch.parent_id is None)
         n_old = prev_lb.shape[0]
-        self._incremental_alpha = _merge_optional_dict(self._incremental_alpha, n_old, batch.incremental_alpha, n_new)
+        self._incremental_alpha = cast(
+            Optional[AlphaState],
+            _alpha_tree_concat_lanes(
+                self._incremental_alpha, batch.incremental_alpha, n_old, n_new
+            ),
+        )
         self._incremental_eta = _merge_optional_dict(self._incremental_eta, n_old, batch.incremental_eta, n_new)
         self._split_signs = _merge_optional_dict(self._split_signs, n_old, batch.split_signs, n_new)
         self._lb = torch.cat([prev_lb, batch.lb], dim=0)
@@ -508,7 +489,10 @@ class TopKBounding(BoundingStrategy):
             lb=lb.index_select(0, idx),
             ub=ub.index_select(0, idx),
             depths=depths.index_select(0, idx),
-            incremental_alpha=_index_optional_dict(self._incremental_alpha, idx),
+            incremental_alpha=cast(
+                Optional[AlphaState],
+                _alpha_tree_gather_lanes(self._incremental_alpha, idx),
+            ),
             incremental_eta=_index_optional_dict(self._incremental_eta, idx),
             split_signs=_index_optional_dict(self._split_signs, idx),
             parent_margins=parent.index_select(0, idx),
@@ -832,7 +816,7 @@ class MCTSBounding(BoundingStrategy):
         self._parent_margins: Optional[torch.Tensor] = None
         self._node_id: Optional[torch.Tensor] = None
         self._parent_id: Optional[torch.Tensor] = None
-        self._incremental_alpha: Optional[Dict[int, torch.Tensor]] = None
+        self._incremental_alpha: Optional[AlphaState] = None
         self._incremental_eta: Optional[Dict[int, torch.Tensor]] = None
         self._split_signs: Optional[Dict[int, torch.Tensor]] = None
 
@@ -863,7 +847,9 @@ class MCTSBounding(BoundingStrategy):
             self._parent_margins = parent.clone()
             self._node_id = batch.node_id.clone()
             self._parent_id = batch.parent_id.clone()
-            self._incremental_alpha = _clone_optional_dict(batch.incremental_alpha)
+            self._incremental_alpha = cast(
+                Optional[AlphaState], _clone_alpha_tree(batch.incremental_alpha)
+            )
             self._incremental_eta = _clone_optional_dict(batch.incremental_eta)
             self._split_signs = _clone_optional_dict(batch.split_signs)
         else:
@@ -874,7 +860,12 @@ class MCTSBounding(BoundingStrategy):
             assert prev_lower is not None and prev_parent is not None
             assert prev_node is not None and prev_parent_id is not None
             n_old = prev_lb.shape[0]
-            self._incremental_alpha = _merge_optional_dict(self._incremental_alpha, n_old, batch.incremental_alpha, n_new)
+            self._incremental_alpha = cast(
+                Optional[AlphaState],
+                _alpha_tree_concat_lanes(
+                    self._incremental_alpha, batch.incremental_alpha, n_old, n_new
+                ),
+            )
             self._incremental_eta = _merge_optional_dict(self._incremental_eta, n_old, batch.incremental_eta, n_new)
             self._split_signs = _merge_optional_dict(self._split_signs, n_old, batch.split_signs, n_new)
             self._lb = torch.cat([prev_lb, batch.lb], dim=0)
@@ -940,7 +931,10 @@ class MCTSBounding(BoundingStrategy):
             lb=lb.index_select(0, idx),
             ub=ub.index_select(0, idx),
             depths=depths.index_select(0, idx),
-            incremental_alpha=_index_optional_dict(self._incremental_alpha, idx),
+            incremental_alpha=cast(
+                Optional[AlphaState],
+                _alpha_tree_gather_lanes(self._incremental_alpha, idx),
+            ),
             incremental_eta=_index_optional_dict(self._incremental_eta, idx),
             split_signs=_index_optional_dict(self._split_signs, idx),
             parent_margins=parent.index_select(0, idx),

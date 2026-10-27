@@ -25,6 +25,7 @@ from act.back_end.bab.branching.bounding import TopKBounding
 from act.back_end.bab.node import (
     SubproblemBatch,
     _layer_neuron_count,
+    _state_spec_row_count,
     slice_bounds_dict,
 )
 from act.back_end.core import Bounds, Net
@@ -361,13 +362,7 @@ def apply_literal_assignments(
 ) -> SubproblemBatch:
     """Decode compact inferred phases back to a lossless subproblem batch."""
     signs = {key: value.clone() for key, value in (batch.split_signs or {}).items()}
-    specs = 1
-    if signs:
-        specs = next(iter(signs.values())).shape[1]
-    elif batch.incremental_alpha:
-        specs = next(iter(batch.incremental_alpha.values())).shape[1]
-    elif batch.incremental_eta:
-        specs = next(iter(batch.incremental_eta.values())).shape[1]
+    specs = _state_spec_row_count(batch)
     if active_variables.numel() == 0:
         batch.split_signs = signs or None
         return batch

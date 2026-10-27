@@ -1893,6 +1893,23 @@ def _lt_spec_matmul() -> Dict[str, Any]:
     ]}
 
 
+def _lt_spec_activation_product(kind: LayerKind) -> Dict[str, Any]:
+    """Two sigmoid operands expose pre-/post-activation bilinear bound drift."""
+    params = (
+        {"x_shape": [1, 1], "y_shape": [1, 1],
+         "input_shape": [1, 1], "output_shape": [1, 1]}
+        if kind == LayerKind.MATMUL else {}
+    )
+    input_shape = [1, 1, 1] if kind == LayerKind.MATMUL else [1, 1]
+    return {"layers": _lt_input(input_shape, -0.1, 0.1) + [
+        {"kind": LayerKind.SIGMOID.value, "params": {}, "preds": [1]},
+        {"kind": LayerKind.SIGMOID.value, "params": {}, "preds": [1]},
+        {"kind": kind.value, "params": params,
+         "inputs": {"x": 2, "y": 3}, "preds": [2, 3]},
+        _lt_assert_le([1.0], 0.1),
+    ]}
+
+
 def _lt_spec_attention(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Small explicit attention block for the dual bilinear core kernels."""
     B = int(cfg["batch_size"])
@@ -2663,6 +2680,8 @@ LAYER_TESTING_SPECS: Dict[str, Any] = {
     f"{LAYER_TESTING_NAME_PREFIX}compare":       _lt_spec_compare,
     f"{LAYER_TESTING_NAME_PREFIX}where":         _lt_spec_where,
     f"{LAYER_TESTING_NAME_PREFIX}matmul":        _lt_spec_matmul,
+    f"{LAYER_TESTING_NAME_PREFIX}activation_matmul": lambda: _lt_spec_activation_product(LayerKind.MATMUL),
+    f"{LAYER_TESTING_NAME_PREFIX}activation_mul": lambda: _lt_spec_activation_product(LayerKind.MUL),
     f"{LAYER_TESTING_NAME_PREFIX}arg_extremum":  _lt_spec_arg_extremum,
     f"{LAYER_TESTING_NAME_PREFIX}upsample":      _lt_spec_upsample,
     f"{LAYER_TESTING_NAME_PREFIX}expand":        _lt_spec_expand,

@@ -23,11 +23,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Dict, Optional
+from typing import Dict, Optional, cast
 
 import torch
 
 from act.back_end.core import Bounds, Layer, Net
+from act.back_end.solver.solver_dual import (
+    AlphaState,
+    AlphaTree,
+    _alpha_spec_row_count,
+    _alpha_tree_concat_lanes,
+    _alpha_tree_gather_lanes,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +61,7 @@ class SubproblemBatch:
     depths: torch.Tensor  # (N,)    tree depth
 
     # -- incremental-start fields ---------------------------------------------------
-    incremental_alpha: Optional[Dict[int, torch.Tensor]] = None  # layer_id → [N, M, n]
+    incremental_alpha: Optional[AlphaState] = None  # layer_id → kernel alpha tree
     incremental_eta: Optional[Dict[int, torch.Tensor]] = None  # layer_id → [N, M, n]
     split_signs: Optional[Dict[int, torch.Tensor]] = None  # layer_id → [N, M, n] in {-1, 0, +1}
     parent_margins: Optional[torch.Tensor] = None  # [N]
@@ -105,7 +112,10 @@ class SubproblemBatch:
             lb=self.lb.index_select(0, indices.to(self.lb.device)),
             ub=self.ub.index_select(0, indices.to(self.ub.device)),
             depths=self.depths.index_select(0, indices.to(self.depths.device)),
-            incremental_alpha=_gather_optional_dict(self.incremental_alpha, indices),
+            incremental_alpha=cast(
+                Optional[AlphaState],
+                _alpha_tree_gather_lanes(self.incremental_alpha, indices),
+            ),
             incremental_eta=_gather_optional_dict(self.incremental_eta, indices),
             split_signs=_gather_optional_dict(self.split_signs, indices),
             parent_margins=_gather_optional_tensor(self.parent_margins, indices),
@@ -122,17 +132,19 @@ class SubproblemBatch:
         sets: a layer touched only by one side's splits exists there and not in
         the other. Zero padding is exact for ``split_signs`` and
         ``incremental_eta`` (0 = unconstrained / no multiplier), so it
-        preserves each side's feasible region. ``incremental_alpha`` is only
-        ever concatenated between children of the same parent batch, whose key
-        sets agree.
+        preserves each side's feasible region. Missing ``incremental_alpha``
+        subtrees are zero-initialized through the shared alpha-tree helper.
         """
         n_self, n_other = self.batch_size, other.batch_size
         return SubproblemBatch(
             lb=torch.cat([self.lb, other.lb.to(self.lb.device)], dim=0),
             ub=torch.cat([self.ub, other.ub.to(self.ub.device)], dim=0),
             depths=torch.cat([self.depths, other.depths.to(self.depths.device)], dim=0),
-            incremental_alpha=_concat_padded_dict(
-                self.incremental_alpha, other.incremental_alpha, n_self, n_other
+            incremental_alpha=cast(
+                Optional[AlphaState],
+                _alpha_tree_concat_lanes(
+                    self.incremental_alpha, other.incremental_alpha, n_self, n_other
+                ),
             ),
             incremental_eta=_concat_padded_dict(
                 self.incremental_eta, other.incremental_eta, n_self, n_other
@@ -213,9 +225,10 @@ def _gather_optional_dict(
     idx: torch.Tensor,
 ) -> Optional[Dict[int, torch.Tensor]]:
     """Gather rows ``idx`` from every tensor of an optional per-layer dict."""
-    if d is None:
-        return None
-    return {k: t.index_select(0, idx.to(t.device)) for k, t in d.items()}
+    return cast(
+        Optional[Dict[int, torch.Tensor]],
+        _alpha_tree_gather_lanes(cast(AlphaTree, d), idx),
+    )
 
 
 def _gather_optional_tensor(
@@ -243,24 +256,22 @@ def _concat_padded_dict(
     n_y: int,
 ) -> Optional[Dict[int, torch.Tensor]]:
     """Stack two per-layer dicts, zero-filling a layer block missing on one side."""
-    if not x and not y:
-        return None
-    x = x or {}
-    y = y or {}
-    out: Dict[int, torch.Tensor] = {}
-    for lid in sorted(set(x) | set(y)):
-        present = x.get(lid)
-        if present is None:
-            present = y[lid]
-        trailing = present.shape[1:]
-        left = x.get(lid)
-        if left is None:
-            left = torch.zeros((n_x, *trailing), dtype=present.dtype, device=present.device)
-        right = y.get(lid)
-        if right is None:
-            right = torch.zeros((n_y, *trailing), dtype=present.dtype, device=present.device)
-        out[lid] = torch.cat([left, right.to(device=left.device)], dim=0)
-    return out
+    return cast(
+        Optional[Dict[int, torch.Tensor]],
+        _alpha_tree_concat_lanes(cast(AlphaTree, x), cast(AlphaTree, y), n_x, n_y),
+    )
+
+
+def _state_spec_row_count(batch: SubproblemBatch) -> int:
+    """Infer active spec rows without treating shared attention leaves as specs."""
+    counts = {_alpha_spec_row_count(batch.incremental_alpha) or 1}
+    for state in (batch.incremental_eta, batch.split_signs):
+        if state:
+            counts.update(int(tensor.shape[1]) for tensor in state.values())
+    nonshared = counts - {1}
+    if len(nonshared) > 1:
+        raise ValueError(f"incompatible incremental-state spec counts: {sorted(counts)}")
+    return next(iter(nonshared), 1)
 
 
 # ---------------------------------------------------------------------------
@@ -291,8 +302,9 @@ def _child_lanes(
             batch.depths.index_select(0, parent_index.to(batch.depths.device))
             + depth_inc
         ),
-        incremental_alpha=_gather_optional_dict(
-            batch.incremental_alpha, parent_index
+        incremental_alpha=cast(
+            Optional[AlphaState],
+            _alpha_tree_gather_lanes(batch.incremental_alpha, parent_index),
         ),
         incremental_eta=_gather_optional_dict(batch.incremental_eta, parent_index),
         split_signs=_gather_optional_dict(batch.split_signs, parent_index),
@@ -379,11 +391,7 @@ def split_neurons(
         f"children={children.batch_size}, parent_indices={parent_index.numel()})"
     )
 
-    m_specs = 1
-    if batch.incremental_alpha:
-        m_specs = int(next(iter(batch.incremental_alpha.values())).shape[1])
-    elif batch.split_signs:
-        m_specs = int(next(iter(batch.split_signs.values())).shape[1])
+    m_specs = _state_spec_row_count(batch)
 
     signs = children.split_signs or {}
     for layer_id_value in torch.unique(top_layers).tolist():
