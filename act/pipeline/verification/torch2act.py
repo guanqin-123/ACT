@@ -46,6 +46,7 @@
 
 from __future__ import annotations
 import logging
+import operator
 from typing import Any, ClassVar, Dict, List, Optional, Set, Tuple, Union, cast
 import torch
 import torch.nn as nn
@@ -69,7 +70,8 @@ from act.back_end.layer_schema import ACT_TO_TORCH, LayerKind
 from act.back_end.layer_util import create_layer
 from act.back_end.utils import avgpool2d_output_hw
 from act.pipeline.verification.utils import (
-    _prod, _normalize_tuple, _assert_dag, _assert_dataflow, ONNX_HANDLERS,
+    _prod, _normalize_tuple, _normalize_axes, _reduce_output_shape,
+    _assert_dag, _assert_dataflow, _broadcast_constant, ONNX_HANDLERS,
 )
 
 # Imports needed for main() test harness
@@ -861,14 +863,14 @@ class _LayerGraphBuilder:
             return [int(x) for x in evaluated.reshape(-1).tolist()]
         return None
 
-    def _evaluate_constant_subgraph(self, node_name: str) -> Optional[torch.Tensor]:
-        """Recursively evaluate an fx node whose inputs trace back to constants only.
+    def _evaluate_constant_subgraph(
+        self, node_name: str, *, allow_sample: bool = True,
+    ) -> Optional[torch.Tensor]:
+        """Evaluate constant operands, optionally allowing a sample-derived value.
 
-        Returns the concrete tensor or None if the chain involves any variable
-        (i.e. an actual model activation). Used by ``_resolve_slice_input_to_int_list``
-        to recover Slice bounds whose value is computed by a chain of constant
-        ops (e.g. YOLO's ``slice_23`` where starts/ends come from constant
-        ``Concat(initializer_X, initializer_Y)``).
+        Static Gather/Split metadata cannot depend on an input whose value
+        changes across the verified region. Other callers may allow a locally
+        valid sample-derived chain (e.g. a Slice bound near its sample).
         """
         cached = self._resolve_constant_tensor(node_name)
         if cached is not None:
@@ -883,7 +885,7 @@ class _LayerGraphBuilder:
             # was passed, substitute it so the chain can continue; the resulting
             # IR is locally valid around that sample. Without one, treat as
             # genuinely variable and abort the constant evaluation.
-            if self.sample_input is not None:
+            if allow_sample and self.sample_input is not None:
                 return self.sample_input
             return None
         if target_node.op != 'call_module':
@@ -894,7 +896,7 @@ class _LayerGraphBuilder:
         arg_vals: List[Any] = []
         for a in target_node.args:
             if isinstance(a, fx.Node):
-                v = self._evaluate_constant_subgraph(a.name)
+                v = self._evaluate_constant_subgraph(a.name, allow_sample=allow_sample)
                 if v is None:
                     return None
                 arg_vals.append(v)
@@ -1031,6 +1033,14 @@ class _LayerGraphBuilder:
         if node.target is nn.functional.adaptive_avg_pool2d:
             self._process_adaptive_avg_pool2d_function(node)
             return
+        if node.target in (operator.matmul, torch.matmul, torch.mm, torch.bmm):
+            self._process_matmul_operation(node)
+            return
+        if node.target in (operator.truediv, torch.div, torch.true_divide):
+            if node.kwargs.get("rounding_mode") is not None:
+                raise NotImplementedError(f"division rounding_mode at {node.name} is unsupported")
+            self._process_elementwise_operation(node, LayerKind.DIV)
+            return
         
         target_name = str(node.target).lower()
         
@@ -1083,6 +1093,8 @@ class _LayerGraphBuilder:
         elif method_name == 'expand':
             if self._get_predecessor_state(node):
                 self._create_expand_method_layer(node)
+        elif method_name == 'mean':
+            self._process_mean_operation(node)
         
         else:
             raise NotImplementedError(
@@ -1213,6 +1225,9 @@ class _LayerGraphBuilder:
             return
         if kind == LayerKind.DENSE.value and isinstance(mod, nn.Linear):
             self._convert_linear(mod)
+            return
+        if kind == LayerKind.CONV1D.value and isinstance(mod, nn.Conv1d):
+            self._convert_conv1d(mod)
             return
         if kind == LayerKind.RELU.value:
             self._convert_activation(mod, LayerKind.RELU)
@@ -1438,30 +1453,63 @@ class _LayerGraphBuilder:
         self._create_flatten_layer(start_dim=mod.start_dim, end_dim=mod.end_dim)
     
     def _convert_linear(self, mod: nn.Linear) -> None:
-        """Convert nn.Linear to DENSE layer."""
+        """Convert a trailing-feature Linear without expanding its weight."""
         in_features = int(mod.in_features)
         out_features = int(mod.out_features)
-        has_bias = mod.bias is not None
-        
-        W = mod.weight.detach()
-        b = mod.bias.detach() if has_bias else torch.zeros(out_features)
-        
-        out_vars = self._alloc_ids(out_features)
-        
+        if self.shape[-1] != in_features or len(self.prev_out) != _prod(self.shape):
+            raise ValueError(
+                f"Linear input shape {self.shape} and {len(self.prev_out)} variables "
+                f"do not match in_features={in_features}"
+            )
+        output_shape = (*self.shape[:-1], out_features)
+        out_vars = self._alloc_ids(_prod(output_shape))
         params = {
-            "weight": W,
-            "input_shape": self.shape, "output_shape": (1, out_features),
+            "weight": mod.weight.detach(),
+            "input_shape": self.shape, "output_shape": output_shape,
             "in_features": in_features, "out_features": out_features
         }
-        if b is not None:
-            params["bias"] = b
+        if len(self.shape) > 2 or (len(self.shape) > 1 and self.shape[0] != 1):
+            params["token_wise"] = True
+        if mod.bias is not None:
+            params["bias"] = mod.bias.detach()
         self._add_layer(
             LayerKind.DENSE.value,
             params,
             self.prev_out, out_vars
         )
-        self.shape = (1, out_features)
+        self.shape = output_shape
         self.prev_out = out_vars
+
+    def _convert_conv1d(self, mod: nn.Conv1d) -> None:
+        """Convert a channel-first Conv1d using the existing spatial schema."""
+        if len(self.shape) != 3 or self.shape[0] != 1:
+            raise ValueError(f"Conv1d requires a per-lane (1, C, W) shape, got {self.shape}")
+        if isinstance(mod.padding, str) or mod.padding_mode != "zeros":
+            raise NotImplementedError("Conv1d string or nonzero padding is unsupported")
+        _, channels, width = self.shape
+        if channels != mod.in_channels or len(self.prev_out) != channels * width:
+            raise ValueError(f"Conv1d channels/variables disagree with shape {self.shape}")
+        kernel = int(mod.kernel_size[0])
+        stride = int(mod.stride[0])
+        padding = int(mod.padding[0])
+        dilation = int(mod.dilation[0])
+        out_width = (width + 2 * padding - dilation * (kernel - 1) - 1) // stride + 1
+        if out_width <= 0:
+            raise ValueError(f"Conv1d input width {width} produces no output")
+        output_shape = (1, int(mod.out_channels), out_width)
+        params = {
+            "weight": mod.weight.detach(), "in_channels": channels,
+            "out_channels": int(mod.out_channels), "kernel_size": kernel,
+            "stride": stride, "padding": padding, "dilation": dilation,
+            "groups": int(mod.groups), "input_shape": self.shape,
+            "output_shape": output_shape,
+        }
+        if mod.bias is not None:
+            params["bias"] = mod.bias.detach()
+        out_vars = self._alloc_ids(int(mod.out_channels) * out_width)
+        self._add_layer(LayerKind.CONV1D.value, params, self.prev_out, out_vars)
+        self.prev_out = out_vars
+        self.shape = output_shape
     
     def _convert_conv2d(self, mod: nn.Conv2d) -> None:
         """Convert nn.Conv2d."""
@@ -1737,29 +1785,8 @@ class _LayerGraphBuilder:
     # -------------------------------------------------------------------------
     
     def _process_add_operation(self, node: fx.Node) -> None:
-        """Process ADD operation (skip connection merge)."""
-        inputs = [a for a in node.args if isinstance(a, fx.Node)]
-        if len(inputs) < 2:
-            return
-        
-        x_name, y_name = inputs[0].name, inputs[1].name
-        if x_name not in self.node_outputs or y_name not in self.node_outputs:
-            return
-        
-        x_vars = self.node_outputs[x_name]
-        y_vars = self.node_outputs[y_name]
-        x_shape = self.node_shapes[x_name]
-        
-        out_vars = self._alloc_ids(len(x_vars))
-        
-        params = {"x_vars": x_vars, "y_vars": y_vars, "input_shape": x_shape, "output_shape": x_shape}
-        layer_id = self._add_layer(
-            LayerKind.ADD.value, params,
-            x_vars + y_vars, out_vars
-        )
-        self.prev_out = out_vars
-        self.shape = x_shape
-        self._register_node(node.name, layer_id)
+        """Lower an ADD with real tensor broadcasting."""
+        self._process_elementwise_operation(node, LayerKind.ADD)
 
     def _resolve_const_tensor(self, val: Any) -> torch.Tensor:
         """Resolve a non-variable operand (literal / get_attr buffer) to a tensor."""
@@ -1773,86 +1800,185 @@ class _LayerGraphBuilder:
                 obj = getattr(obj, part)
             if isinstance(obj, torch.Tensor):
                 return obj
+        if isinstance(val, fx.Node):
+            resolved = self._resolve_constant_tensor(val.name)
+            if resolved is not None:
+                return resolved
         raise NotImplementedError(f"Cannot resolve constant operand: {val}")
 
-    def _emit_const_bias(self, node: fx.Node, var_node: fx.Node,
-                         const: torch.Tensor, negate: bool) -> None:
-        """Emit a BIAS layer (y = x + c). For x - c pass negate=True (c -> -c)."""
-        in_vars = self.node_outputs[var_node.name]
-        shape = self.node_shapes[var_node.name]
-        c = const.flatten().to(dtype=torch.get_default_dtype())
-        if negate:
-            c = -c
-        if c.numel() == 1:
-            c = c.expand(len(in_vars)).clone()
-        if c.numel() != len(in_vars):
-            raise NotImplementedError(
-                f"sub/bias const numel {c.numel()} != vars {len(in_vars)} at {node.name}"
+    def _broadcast_operand(
+        self, node: fx.Node, output_shape: Tuple[int, ...],
+    ) -> Tuple[List[int], Optional[int]]:
+        """Align one variable through existing RESHAPE/EXPAND layers."""
+        source_shape = self.node_shapes[node.name]
+        variables = self.node_outputs[node.name]
+        producer = self.node_to_layer_id.get(node.name)
+        if producer is not None and producer < 0:
+            producer = None
+        if source_shape == output_shape:
+            return variables, producer
+        if len(source_shape) > len(output_shape) or (
+            len(source_shape) == len(output_shape)
+            and source_shape[0] not in (1, output_shape[0])
+        ):
+            raise NotImplementedError(f"Cannot broadcast {source_shape} to {output_shape}")
+        if len(source_shape) < len(output_shape):
+            # A native runtime with B>1 would align a rank-deficient operand's
+            # B into a feature axis, coupling verifier lanes. Reject that
+            # source behavior rather than modeling a different computation.
+            if self.input_shape[0] == 1 and (
+                self.sample_input is None or self.sample_input.shape[0] != 1
+            ):
+                raise NotImplementedError(
+                    f"Rank-deficient variable broadcast {source_shape} "
+                    f"to {output_shape} couples verifier lanes"
+                )
+            padded = (*(1 for _ in range(len(output_shape) - len(source_shape))), *source_shape)
+            reshaped = self._alloc_ids(len(variables))
+            reshape_id = self._add_layer(
+                LayerKind.RESHAPE.value,
+                {"target_shape": padded, "input_shape": source_shape, "output_shape": padded},
+                variables, reshaped,
             )
-        out_vars = self._alloc_ids(len(in_vars))
-        layer_id = self._add_layer(
-            LayerKind.BIAS.value,
-            {"c": c, "input_shape": shape, "output_shape": shape},
-            in_vars, out_vars,
+            self._fx_pred_override[reshape_id] = [] if producer is None else [producer]
+            variables, producer, source_shape = reshaped, reshape_id, padded
+        if torch.broadcast_shapes(source_shape, output_shape) != output_shape:
+            raise ValueError(f"Cannot broadcast {source_shape} to {output_shape}")
+        expanded = self._alloc_ids(_prod(output_shape))
+        expand_id = self._add_layer(
+            LayerKind.EXPAND.value,
+            {"shape": output_shape, "input_shape": source_shape, "output_shape": output_shape},
+            variables, expanded,
         )
-        self.prev_out = out_vars
-        self.shape = shape
+        self._fx_pred_override[expand_id] = [] if producer is None else [producer]
+        return expanded, expand_id
+
+    def _process_elementwise_operation(self, node: fx.Node, kind: LayerKind) -> None:
+        """Lower ADD/SUB/MUL through one shape and producer owner."""
+        if len(node.args) < 2:
+            raise ValueError(f"{kind.value} at {node.name} requires two operands")
+        a, b = node.args[:2]
+        a_var = isinstance(a, fx.Node) and a.name in self.node_outputs
+        b_var = isinstance(b, fx.Node) and b.name in self.node_outputs
+        if a_var and b_var:
+            assert isinstance(a, fx.Node) and isinstance(b, fx.Node)
+            x_shape, y_shape = self.node_shapes[a.name], self.node_shapes[b.name]
+            try:
+                output_shape = tuple(torch.broadcast_shapes(x_shape, y_shape))
+            except RuntimeError as exc:
+                raise ValueError(f"{kind.value} cannot broadcast {x_shape}, {y_shape}") from exc
+            if self.input_shape[0] == 1 and output_shape[0] != 1 and (
+                (self.sample_input is not None and self.sample_input.shape[0] != 1)
+                or any(len(shape) == len(output_shape) and shape[0] == 1
+                       for shape in (x_shape, y_shape))
+            ):
+                raise NotImplementedError(f"{kind.value} cannot broadcast the verifier lane")
+            x_vars, x_src = self._broadcast_operand(a, output_shape)
+            y_vars, y_src = self._broadcast_operand(b, output_shape)
+            out_vars = self._alloc_ids(_prod(output_shape))
+            layer_id = self._add_layer(
+                kind.value,
+                {
+                    "x_vars": x_vars, "y_vars": y_vars,
+                    "input_shape": output_shape, "output_shape": output_shape,
+                },
+                x_vars + y_vars, out_vars,
+            )
+            self._fx_pred_override[layer_id] = list(
+                dict.fromkeys(p for p in (x_src, y_src) if p is not None)
+            )
+        elif a_var or b_var:
+            if kind == LayerKind.DIV and not a_var:
+                raise NotImplementedError(f"const/var division at {node.name} is unsupported")
+            var = a if a_var else b
+            assert isinstance(var, fx.Node)
+            const = self._resolve_const_tensor(b if a_var else a)
+            try:
+                output_shape = tuple(torch.broadcast_shapes(self.node_shapes[var.name], tuple(const.shape)))
+            except RuntimeError as exc:
+                raise ValueError(f"{kind.value} cannot broadcast constant {tuple(const.shape)}") from exc
+            if self.input_shape[0] == 1 and output_shape[0] != 1 and (
+                (self.sample_input is not None and self.sample_input.shape[0] != 1)
+                or (len(self.node_shapes[var.name]) == len(output_shape)
+                    and self.node_shapes[var.name][0] == 1)
+            ):
+                raise NotImplementedError(f"{kind.value} cannot broadcast the verifier lane")
+            in_vars, source = self._broadcast_operand(var, output_shape)
+            value = _broadcast_constant(const, output_shape, self.dtype)
+            if kind == LayerKind.DIV:
+                if bool((value == 0).any()):
+                    raise ZeroDivisionError(f"division by zero at {node.name}")
+                value = value.reciprocal()
+            if kind == LayerKind.SUB and not a_var:
+                negated = self._alloc_ids(len(in_vars))
+                scale_id = self._add_layer(
+                    LayerKind.SCALE.value,
+                    {"a": -torch.ones_like(value), "input_shape": output_shape,
+                     "output_shape": output_shape},
+                    in_vars, negated,
+                )
+                self._fx_pred_override[scale_id] = [] if source is None else [source]
+                in_vars, source = negated, scale_id
+            if kind == LayerKind.SUB and a_var:
+                value = -value
+            out_vars = self._alloc_ids(_prod(output_shape))
+            layer_id = self._add_layer(
+                LayerKind.SCALE.value if kind in (LayerKind.MUL, LayerKind.DIV) else LayerKind.BIAS.value,
+                {
+                    "a" if kind in (LayerKind.MUL, LayerKind.DIV) else "c": value,
+                    "input_shape": output_shape, "output_shape": output_shape,
+                },
+                in_vars, out_vars,
+            )
+            self._fx_pred_override[layer_id] = [] if source is None else [source]
+            if source is not None and source != self.node_to_layer_id.get(var.name):
+                self._record_chain_head(node.name, source)
+        else:
+            raise NotImplementedError(f"{kind.value} at {node.name} has no variable operand")
+        self.prev_out, self.shape = out_vars, output_shape
         self._register_node(node.name, layer_id)
 
     def _process_sub_operation(self, node: fx.Node) -> None:
-        """SUB: var-var -> SUB layer; var-const -> BIAS(-c); const-var -> SCALE(-1)+BIAS(c)."""
+        """Lower SUB using the shared shape and producer path."""
+        self._process_elementwise_operation(node, LayerKind.SUB)
+
+    def _process_matmul_operation(self, node: fx.Node) -> None:
+        """Lower equal-group matrix products with both operands in the graph."""
         if len(node.args) < 2:
-            raise NotImplementedError(f"sub at {node.name} expects 2 operands")
-        a, b = node.args[0], node.args[1]
-        a_node = a if isinstance(a, fx.Node) else None
-        b_node = b if isinstance(b, fx.Node) else None
-        a_var = a_node is not None and a_node.name in self.node_outputs
-        b_var = b_node is not None and b_node.name in self.node_outputs
-        if a_var and b_var and a_node is not None and b_node is not None:
-            x_vars = self.node_outputs[a_node.name]
-            y_vars = self.node_outputs[b_node.name]
-            x_shape = self.node_shapes[a_node.name]
-            if len(y_vars) != len(x_vars):
-                raise NotImplementedError(f"sub var-var size mismatch at {node.name}")
-            out_vars = self._alloc_ids(len(x_vars))
-            layer_id = self._add_layer(
-                LayerKind.SUB.value,
-                {"x_vars": x_vars, "y_vars": y_vars, "input_shape": x_shape, "output_shape": x_shape},
-                x_vars + y_vars, out_vars,
-            )
-            self.prev_out = out_vars
-            self.shape = x_shape
-            self._register_node(node.name, layer_id)
-            return
-        if a_var and not b_var and a_node is not None:
-            self._emit_const_bias(node, a_node, self._resolve_const_tensor(b), negate=True)
-            return
-        if b_var and not a_var and b_node is not None:
-            in_vars = self.node_outputs[b_node.name]
-            shape = self.node_shapes[b_node.name]
-            scale_vars = self._alloc_ids(len(in_vars))
-            neg = torch.full((len(in_vars),), -1.0, dtype=torch.get_default_dtype())
-            self._add_layer(
-                LayerKind.SCALE.value,
-                {"a": neg, "input_shape": shape, "output_shape": shape},
-                in_vars, scale_vars,
-            )
-            c = self._resolve_const_tensor(a).flatten().to(dtype=torch.get_default_dtype())
-            if c.numel() == 1:
-                c = c.expand(len(in_vars)).clone()
-            if c.numel() != len(in_vars):
-                raise NotImplementedError(f"sub const-var numel {c.numel()} != vars {len(in_vars)} at {node.name}")
-            out_vars = self._alloc_ids(len(in_vars))
-            layer_id = self._add_layer(
-                LayerKind.BIAS.value,
-                {"c": c, "input_shape": shape, "output_shape": shape},
-                scale_vars, out_vars,
-            )
-            self.prev_out = out_vars
-            self.shape = shape
-            self._register_node(node.name, layer_id)
-            return
-        raise NotImplementedError(f"sub with no variable operand at {node.name}")
+            raise ValueError(f"matmul at {node.name} requires two operands")
+        a, b = node.args[:2]
+        if not (
+            isinstance(a, fx.Node) and isinstance(b, fx.Node)
+            and a.name in self.node_outputs and b.name in self.node_outputs
+        ):
+            raise NotImplementedError(f"matmul at {node.name} requires two variable matrices")
+        x_shape = self.node_shapes[a.name]
+        y_shape = self.node_shapes[b.name]
+        native_lanes = self.input_shape[0] == 1
+        minimum_rank = 3 if native_lanes else 2
+        group_start = 1 if native_lanes else 0
+        if (
+            len(x_shape) < minimum_rank or len(x_shape) != len(y_shape)
+            or (native_lanes and (x_shape[0] != 1 or y_shape[0] != 1))
+            or x_shape[group_start:-2] != y_shape[group_start:-2]
+            or x_shape[-1] != y_shape[-2]
+        ):
+            raise NotImplementedError(f"matmul at {node.name} cannot combine {x_shape} and {y_shape}")
+        x_vars, y_vars = self.node_outputs[a.name], self.node_outputs[b.name]
+        output_shape = (*x_shape[:-1], y_shape[-1])
+        out_vars = self._alloc_ids(_prod(output_shape))
+        layer_id = self._add_layer(
+            LayerKind.MATMUL.value,
+            {
+                "x_vars": x_vars, "y_vars": y_vars,
+                "x_shape": x_shape[1:] if native_lanes else x_shape,
+                "y_shape": y_shape[1:] if native_lanes else y_shape,
+                "input_shape": x_shape, "output_shape": output_shape,
+            },
+            x_vars + y_vars, out_vars,
+        )
+        self.prev_out, self.shape = out_vars, output_shape
+        self._register_node(node.name, layer_id)
 
     def _process_concat_operation(self, node: fx.Node) -> None:
         """Process CONCAT operation."""
@@ -1894,47 +2020,8 @@ class _LayerGraphBuilder:
             self._create_flatten_layer(node.name)
     
     def _process_mul_operation(self, node: fx.Node) -> None:
-        """Process MUL operation."""
-        inputs = [a for a in node.args if isinstance(a, fx.Node)]
-        
-        if len(inputs) >= 2:
-            x_name, y_name = inputs[0].name, inputs[1].name
-            if x_name in self.node_outputs and y_name in self.node_outputs:
-                x_vars = self.node_outputs[x_name]
-                y_vars = self.node_outputs[y_name]
-                x_shape = self.node_shapes[x_name]
-                
-                out_vars = self._alloc_ids(len(x_vars))
-
-                params = {"x_vars": x_vars, "y_vars": y_vars,
-                          "input_shape": x_shape, "output_shape": x_shape}
-                layer_id = self._add_layer(
-                    LayerKind.MUL.value, params,
-                    x_vars + y_vars, out_vars
-                )
-                self.prev_out = out_vars
-                self.shape = x_shape
-                self._register_node(node.name, layer_id)
-        
-        elif len(inputs) == 1:
-            x_name = inputs[0].name
-            if x_name in self.node_outputs:
-                x_vars = self.node_outputs[x_name]
-                x_shape = self.node_shapes[x_name]
-                scalar = node.args[1] if len(node.args) > 1 else 1.0
-                if not isinstance(scalar, (int, float)):
-                    scalar = 1.0
-                
-                scale_tensor = torch.full((len(x_vars),), float(scalar), dtype=self.dtype)
-                out_vars = self._alloc_ids(len(x_vars))
-                layer_id = self._add_layer(
-                    "SCALE",
-                    {"a": scale_tensor, "input_shape": x_shape, "output_shape": x_shape},
-                    x_vars, out_vars
-                )
-                self.prev_out = out_vars
-                self.shape = x_shape
-                self._register_node(node.name, layer_id)
+        """Lower MUL using the shared shape and producer path."""
+        self._process_elementwise_operation(node, LayerKind.MUL)
     
     def _process_adaptive_avg_pool2d_function(self, node: fx.Node) -> None:
         """Process F.adaptive_avg_pool2d() via the nn.AdaptiveAvgPool2d converter."""
@@ -1945,15 +2032,28 @@ class _LayerGraphBuilder:
         self._register_node(node.name)
     
     def _process_mean_operation(self, node: fx.Node) -> None:
-        """Process torch.mean()."""
+        """Reduce explicit non-lane axes with the source's keepdim setting."""
         if not self._get_predecessor_state(node):
-            return
-        
-        out_vars = self._alloc_ids(1)
-        output_shape = (1, 1)
+            raise ValueError(f"mean at {node.name} has no tensor predecessor")
+        dim = node.kwargs.get("dim", node.args[1] if len(node.args) > 1 else None)
+        if dim is None:
+            raise NotImplementedError(f"mean at {node.name} cannot reduce the verifier lane axis")
+        rank = len(self.shape)
+        raw_axes = dim if isinstance(dim, (tuple, list)) else (dim,)
+        axes = _normalize_axes(raw_axes, rank)
+        if not axes or len(axes) != len(raw_axes) or axes[0] < 0 or axes[-1] >= rank:
+            raise ValueError(f"mean at {node.name} has invalid feature axes {axes}")
+        if axes[0] == 0 and self.input_shape[0] == 1:
+            raise ValueError(f"mean at {node.name} cannot reduce the verifier lane axis")
+        keepdim = bool(node.kwargs.get("keepdim", node.args[2] if len(node.args) > 2 else False))
+        output_shape = _reduce_output_shape(self.shape, axes, keepdim)
+        out_vars = self._alloc_ids(_prod(output_shape))
         layer_id = self._add_layer(
             LayerKind.MEAN.value,
-            {"input_shape": self.shape, "output_shape": output_shape},
+            {
+                "input_shape": self.shape, "output_shape": output_shape,
+                "dim": axes, "keepdim": keepdim,
+            },
             self.prev_out, out_vars
         )
         self.prev_out = out_vars
@@ -1961,7 +2061,7 @@ class _LayerGraphBuilder:
         self._register_node(node.name, layer_id)
     
     def _process_getitem_operation(self, node: fx.Node) -> None:
-        """Process indexing operation (passthrough).
+        """Process one static non-lane integer index.
 
         If the node is already registered (e.g. by OnnxSplit13's handler, which
         pre-registers each ``getitem(split, i)`` child to point at the i-th
@@ -1972,9 +2072,76 @@ class _LayerGraphBuilder:
             self.prev_out = self.node_outputs[node.name]
             self.shape = self.node_shapes[node.name]
             return
-        inputs = [a for a in node.args if isinstance(a, fx.Node)]
-        if inputs:
-            self._propagate_node_state(node.name, inputs[0].name)
+        if len(node.args) < 2 or not isinstance(node.args[0], fx.Node):
+            raise NotImplementedError(f"getitem at {node.name} requires a tensor input")
+        source = node.args[0]
+        if source.name not in self.node_outputs:
+            if (
+                not node.users and source.op == "call_function"
+                and source.target is operator.getitem and source.args[1] == 1
+                and isinstance(source.args[0], fx.Node)
+                and source.args[0].op == "call_module"
+                and isinstance(self.modules.get(str(source.args[0].target)), nn.RNNBase)
+            ):
+                # LSTM's unused (h, c) tuple was unpacked by FX, not by the model.
+                return
+            raise NotImplementedError(f"getitem at {node.name} requires a variable tensor")
+        if source.op == "call_module" and isinstance(
+            self.modules.get(str(source.target)), nn.RNNBase,
+        ):
+            if node.args[1] == 0:
+                self._propagate_node_state(node.name, source.name)
+                return
+            if node.args[1] == 1 and all(
+                user.op == "call_function" and user.target is operator.getitem
+                and not user.users for user in node.users
+            ):
+                return
+            raise NotImplementedError(f"RNN hidden-state use at {node.name} is unsupported")
+        shape = self.node_shapes[source.name]
+        raw = node.args[1]
+        indices = raw if isinstance(raw, tuple) else (raw,)
+        if len(indices) > len(shape):
+            raise IndexError(f"getitem at {node.name} has too many indices")
+        indexed = [i for i, value in enumerate(indices) if isinstance(value, int)]
+        if len(indexed) != 1 or indexed[0] == 0 or any(
+            not (isinstance(value, int) or (isinstance(value, slice) and value == slice(None)))
+            for value in indices
+        ):
+            raise NotImplementedError(f"getitem at {node.name} supports one non-lane integer index")
+        axis = indexed[0]
+        value = indices[axis]
+        assert isinstance(value, int)
+        index = int(value)
+        if index < 0:
+            index += shape[axis]
+        if not 0 <= index < shape[axis]:
+            raise IndexError(f"getitem index {index} outside axis {axis} at {node.name}")
+        in_vars = self.node_outputs[source.name]
+        gather_shape = (*shape[:axis], 1, *shape[axis + 1:])
+        gathered = self._alloc_ids(_prod(gather_shape))
+        gather_id = self._add_layer(
+            LayerKind.GATHER.value,
+            {
+                "indices": torch.tensor([index], dtype=torch.int64),
+                "axis": axis, "input_shape": shape, "output_shape": gather_shape,
+            },
+            in_vars, gathered,
+        )
+        output_shape = (*shape[:axis], *shape[axis + 1:]) or (1,)
+        out_vars = self._alloc_ids(len(gathered))
+        reshape_id = self._add_layer(
+            LayerKind.RESHAPE.value,
+            {
+                "target_shape": output_shape,
+                "input_shape": gather_shape, "output_shape": output_shape,
+            },
+            gathered, out_vars,
+        )
+        self._fx_pred_override[reshape_id] = [gather_id]
+        self._record_chain_head(node.name, gather_id)
+        self.prev_out, self.shape = out_vars, output_shape
+        self._register_node(node.name, reshape_id)
     
     def _process_passthrough_function(self, node: fx.Node) -> None:
         """Process no-op functions (dropout, stochastic_depth)."""
@@ -2074,6 +2241,7 @@ class TorchToACT:
         self.layers: List[Layer] = []
         self.prev_out: List[int] = []
         self.shape: Tuple[int, ...] = tuple(int(s) for s in shape)
+        self._body_shape: Tuple[int, ...] = self.shape
         self._model_preds: Dict[int, List[int]] = {}
         self._model_succs: Dict[int, List[int]] = {}
         self._wrapper_offset: int = 0
@@ -2093,17 +2261,47 @@ class TorchToACT:
         new_layers, out_vars = self.input_layer.to_act_layers(len(self.layers), [])
         self.layers.extend(new_layers)
         self.prev_out = out_vars
-        # Capture batch dim from InputLayer for downstream spec encoding.
-        B = self.input_layer.shape[0]
 
         for mod in self.m.children():
             if type(mod).__name__ == "InputSpecLayer" and hasattr(mod, 'to_act_layers'):
                 new_layers, out_vars = mod.to_act_layers(
-                    len(self.layers), self.prev_out, B
+                    len(self.layers), self.prev_out, self.input_layer.shape[0]
                 )
                 self.layers.extend(new_layers)
                 self.prev_out = out_vars
 
+        # InputSpec tensors own the independent verifier-lane axis.  The
+        # leading dimension of a fixed ONNX input can instead be model data.
+        reference = next(
+            (
+                layer.params[key]
+                for layer in self.layers if layer.kind == LayerKind.INPUT_SPEC.value
+                for key in ("lb", "center")
+                if isinstance(layer.params.get(key), torch.Tensor)
+            ),
+            None,
+        )
+        B = int(reference.shape[0]) if isinstance(reference, torch.Tensor) else self.shape[0]
+        structural = (
+            isinstance(reference, torch.Tensor)
+            and reference.ndim == len(self.shape) + 1
+            and tuple(reference.shape[1:]) == tuple(self.shape)
+        )
+        per_sample = _prod(tuple(self.shape if structural else self.shape[1:]))
+        if isinstance(reference, torch.Tensor) and reference.numel() != B * per_sample:
+            raise ValueError(
+                f"INPUT_SPEC shape {tuple(reference.shape)} does not match "
+                f"{B} lanes of {per_sample} model coordinates"
+            )
+        one_lane_vars = self.layers[0].out_vars[:per_sample]
+        self.layers[0].out_vars = one_lane_vars
+        self.layers[0].params["batch_size"] = B
+        for layer in self.layers[1:]:
+            if layer.kind == LayerKind.INPUT_SPEC.value:
+                layer.in_vars = one_lane_vars
+                layer.out_vars = one_lane_vars
+        self.prev_out = one_lane_vars
+        self._body_shape = tuple(self.shape) if structural else (1, *self.shape[1:])
         self._build_inner_model()
 
         for mod in self.m.children():
@@ -2136,7 +2334,7 @@ class TorchToACT:
         
         dtype = getattr(self.input_layer, 'dtype', torch.float64)
         model_layers, model_preds, model_succs = build_act(
-            inner, self.shape, dtype, sample_input=self.sample_input,
+            inner, self._body_shape, dtype, sample_input=self.sample_input,
         )
         
         # Offset layer IDs
@@ -2215,6 +2413,7 @@ class TorchToACT:
         multi_operand_kinds = {
             LayerKind.MUL.value, LayerKind.ADD.value,
             LayerKind.SUB.value, LayerKind.MATMUL.value,
+            LayerKind.DIV.value,
         }
         for layer in self.layers:
             if layer.kind not in multi_operand_kinds:

@@ -78,6 +78,10 @@ def _slice_first_dim(value: Any, sample_idx: int, expected_b: int) -> Any:
 def slice_net_to_sample(net: Net, sample_idx: int) -> Net:
     from act.front_end.spec_creator_base import LabeledInputTensor
 
+    seed_bounds = seed_from_input_specs(gather_input_spec_layers(net))
+    B = int(seed_bounds.lb.shape[0])
+    if not 0 <= sample_idx < B:
+        raise IndexError(f"sample index {sample_idx} outside {B} verifier lanes")
     mutable_kinds = {
         LayerKind.INPUT.value,
         LayerKind.INPUT_SPEC.value,
@@ -104,9 +108,9 @@ def slice_net_to_sample(net: Net, sample_idx: int) -> Net:
     input_layer = net2.by_id[entry_id]
     shape = input_layer.params.get("shape") or []
     shape_t = tuple(shape) if isinstance(shape, (list, tuple)) else ()
-    B = int(shape_t[0]) if shape_t else 1
     if shape_t and int(shape_t[0]) == B:
         input_layer.params["shape"] = (1,) + tuple(shape_t[1:])
+    input_layer.params["batch_size"] = 1
     li = input_layer.params.get("labeled_input")
     if isinstance(li, LabeledInputTensor):
         new_tensor = _slice_first_dim(li.tensor, sample_idx, B)
@@ -309,7 +313,10 @@ def setup_and_solve_batch(
     spec_layers = gather_input_spec_layers(net)
     assert_layer = get_assert_layer(net)
 
-    entry_fact = Fact(bounds=input_bounds_per_b, cons=ConSet())
+    entry_fact = Fact(
+        bounds=Bounds(input_bounds_per_b.lb.flatten(1), input_bounds_per_b.ub.flatten(1)),
+        cons=ConSet(),
+    )
     add_all_input_specs(entry_fact.cons, input_ids, spec_layers)
 
     _before, after, globalC = analyze(net, entry_id, entry_fact, cache=cache)
@@ -604,7 +611,10 @@ def verify_once(
         return results
 
     # 2. Build entry_fact (with all INPUT_SPEC constraints) and analyze.
-    entry_fact = Fact(bounds=seed_bounds, cons=ConSet())
+    entry_fact = Fact(
+        bounds=Bounds(seed_bounds.lb.flatten(1), seed_bounds.ub.flatten(1)),
+        cons=ConSet(),
+    )
     add_all_input_specs(entry_fact.cons, input_ids, spec_layers)
     _before, after, _globalC = analyze(net, entry_id, entry_fact)
 

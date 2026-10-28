@@ -57,6 +57,16 @@ def infer_layout_from_tensor(x: torch.Tensor) -> str:
     return "FLAT"
 
 
+def _is_fixed_model_input(labeled: LabeledInputTensor, spec: InputSpec) -> bool:
+    """Identify one fixed model tensor carried inside one spec lane."""
+    seed = spec.lb if isinstance(spec.lb, torch.Tensor) else spec.center
+    return (
+        isinstance(seed, torch.Tensor)
+        and labeled.tensor.ndim >= 2 and labeled.tensor.shape[0] != 1
+        and tuple(seed.shape[1:]) == tuple(labeled.tensor.shape)
+    )
+
+
 def _merge_specs_to_batch(
     lts: List[LabeledInputTensor],
     in_specs: List[InputSpec],
@@ -104,6 +114,13 @@ def _merge_specs_to_batch(
     Returns:
         (batched_labeled_tensor, batched_input_spec, batched_output_spec)
     """
+    if len(lts) != 1 and any(
+        _is_fixed_model_input(labeled, spec) for labeled, spec in zip(lts, in_specs)
+    ):
+        raise ValueError(
+            "Fixed-shape model input cannot be merged into independent verifier lanes"
+        )
+
     # Assert all tensors have the same shape (guaranteed by grouping in gkey)
     if len(lts) > 1:
         first_shape = lts[0].tensor.shape
@@ -335,7 +352,7 @@ def synthesize_models_and_seeds_from_specs(
     groups: Dict[Tuple, List] = defaultdict(list)
     models: Dict[int, Tuple[nn.Module, str]] = {}  # id(model) -> (model, model's representative_name)
     
-    for data_source, model_name, pytorch_model, labeled_tensors, spec_pairs in spec_results:
+    for result_index, (data_source, model_name, pytorch_model, labeled_tensors, spec_pairs) in enumerate(spec_results):
         if not labeled_tensors or not spec_pairs:
             continue
         
@@ -364,6 +381,8 @@ def synthesize_models_and_seeds_from_specs(
                     d_sig,
                 )
             gkey = (data_source, mid, in_spec.kind, out_spec.kind, cd_sig)
+            if _is_fixed_model_input(lt, in_spec):
+                gkey += (result_index, idx)
             groups[gkey].append((lt, in_spec, out_spec, f"{data_source}:{model_name}:s{idx}"))
     
     # -------------------------------------------------------------------------
@@ -375,7 +394,7 @@ def synthesize_models_and_seeds_from_specs(
     ] = {}
     disjunct_counter: Dict[Tuple[str, str, str, str], int] = defaultdict(int)
     for gkey, grouped_specs in groups.items():
-        data_src, mid, in_kind, out_kind, _cd_sig = gkey
+        data_src, mid, in_kind, out_kind, _cd_sig = gkey[:5]
         pytorch_model, rep_name = models[mid]
         # Use representative model_name for the display key; if a single
         # (data_src, model_name) expands into multiple UNSAFE_LINEAR disjuncts
@@ -394,7 +413,7 @@ def synthesize_models_and_seeds_from_specs(
     # -------------------------------------------------------------------------
     # Summary: Print statistics and return results
     # -------------------------------------------------------------------------
-    total_specs = sum(vm.input_layer.input_tensor.shape[0] for vm in synthesis_models.values())
+    total_specs = sum(int(vm.input_spec.spec.lb.shape[0]) for vm in synthesis_models.values())
     
     print(f"\n🎉 Synthesis Complete:")
     print(f"   Total specs: {total_specs}")

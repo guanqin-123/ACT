@@ -144,7 +144,8 @@ def tf_bias(L: Layer, Bin: Bounds) -> Fact:
     C.add_box(L.id, L.out_vars, B); return Fact(B,C)
 
 def tf_scale(L: Layer, Bin: Bounds) -> Fact:
-    a=L.params["a"]
+    # Bounds are [B, n], but SCALE parameters can retain spatial axes.
+    a=L.params["a"].reshape(-1)
     lb=torch.where(a>=0, a*Bin.lb, a*Bin.ub); ub=torch.where(a>=0, a*Bin.ub, a*Bin.lb)
     B=Bounds(lb,ub); C=ConSet(); C.replace(Con("EQ", tuple(L.out_vars + L.in_vars), {"tag": f"scale:{L.id}", "a": a}))
     C.add_box(L.id, L.out_vars, B); return Fact(B,C)

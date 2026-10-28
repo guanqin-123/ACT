@@ -193,6 +193,24 @@ class VerificationValidator:
         if target_B is None or target_B <= 0:
             return self._migrate_net_to_device(copy.deepcopy(net))
 
+        from act.back_end.verifier import gather_input_spec_layers, seed_from_input_specs
+        from act.front_end.spec_creator_base import LabeledInputTensor
+
+        input_layer = next(layer for layer in net.layers if layer.kind == "INPUT")
+        shape = input_layer.params.get("shape")
+        shape_t = tuple(shape) if isinstance(shape, (list, tuple)) else ()
+        seed = seed_from_input_specs(gather_input_spec_layers(net))
+        original_B = int(seed.lb.shape[0])
+        structural = (
+            len(shape_t) >= 2 and shape_t[0] != 1
+            and tuple(seed.lb.shape[1:]) == shape_t
+        )
+        if structural and target_B != 1:
+            raise ValueError(
+                f"Fixed model input {shape_t} cannot be replicated as "
+                f"{target_B} independent verifier lanes"
+            )
+
         new_net = copy.deepcopy(net)
         for L in new_net.layers:
             if L.kind in ("INPUT", "INPUT_SPEC"):
@@ -213,9 +231,21 @@ class VerificationValidator:
                     if not isinstance(shape_param, (list, tuple)):
                         continue
                     shp = list(shape_param)
-                    if shp and shp[0] != target_B:
+                    if shp and not structural and shp[0] != target_B:
                         shp[0] = target_B
                         params["shape"] = tuple(shp)
+                    params["batch_size"] = target_B
+                    labeled = params.get("labeled_input")
+                    if (
+                        not structural and isinstance(labeled, LabeledInputTensor)
+                        and labeled.tensor.shape[0] == original_B
+                        and original_B != target_B
+                    ):
+                        tensor = labeled.tensor[:1].expand(target_B, *labeled.tensor.shape[1:]).clone()
+                        label = labeled.label
+                        if label is not None and label.shape[0] == original_B:
+                            label = label[:1].expand(target_B, *label.shape[1:]).clone()
+                        params["labeled_input"] = LabeledInputTensor(tensor=tensor, label=label)
             elif L.kind in ("LSTM", "GRU", "RNN", "EMBEDDING"):
                 params = L.params or {}
                 for key in ("input_shape", "output_shape"):

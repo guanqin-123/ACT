@@ -21,14 +21,13 @@
 # ===---------------------------------------------------------------------===#
 
 from typing import Optional, Dict, Any, Tuple, cast
-from collections import deque
 from typing import Set, List
 import importlib
 import torch  # pyright: ignore[reportMissingImports]
 import torch.nn as nn  # pyright: ignore[reportMissingImports]
 import logging
 
-from act.back_end.core import Net, Layer, Bounds
+from act.back_end.core import Net, Layer, Bounds, get_topo_order
 from act.back_end.interval_tf.tf_transformer import softmax_rowsize
 from act.back_end.layer_schema import ACT_TO_TORCH, LayerKind, REGISTRY
 from act.util.device_manager import get_default_dtype, get_default_device
@@ -48,14 +47,22 @@ def _axis_shift(input_shape: Any, x: torch.Tensor) -> int:
     return 1
 
 
-def _align_elementwise_param(param: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+def _align_elementwise_param(
+    param: torch.Tensor, x: torch.Tensor, input_shape: Any = None,
+) -> torch.Tensor:
     """Align a flat SCALE/BIAS param to ``x`` for elementwise combination.
 
-    A param spanning the full per-sample tensor (e.g. a position embedding,
-    not just the feature axis) is reshaped to ``x``'s per-sample shape so it
-    broadcasts over the batch; a per-feature param is returned unchanged for
-    trailing-axis broadcast.
+    A param spanning the full per-sample tensor (e.g. a position embedding)
+    is reshaped to ``x``'s per-sample shape. For a fixed structural leading
+    dimension, a full-shape param follows the model tensor instead of a
+    verifier lane; a trailing-feature param is returned unchanged.
     """
+    if (
+        input_shape is not None and len(input_shape) == x.dim()
+        and int(input_shape[0]) != 1 and tuple(input_shape) == tuple(x.shape)
+        and param.numel() == x.numel()
+    ):
+        return param.reshape_as(x)
     if x.dim() >= 2 and param.numel() == x[0].numel() and param.numel() != x.shape[-1]:
         return param.reshape(x.shape[1:])
     return param
@@ -394,10 +401,14 @@ class ActGraphModule(nn.Module):
             return out
         if kind == LayerKind.SCALE.value:
             return inputs[0] * _align_elementwise_param(
-                getattr(self, f"_scale_a_{layer.id}"), inputs[0])
+                getattr(self, f"_scale_a_{layer.id}"), inputs[0],
+                layer.params.get("input_shape"),
+            )
         if kind == LayerKind.BIAS.value:
             return inputs[0] + _align_elementwise_param(
-                getattr(self, f"_bias_c_{layer.id}"), inputs[0])
+                getattr(self, f"_bias_c_{layer.id}"), inputs[0],
+                layer.params.get("input_shape"),
+            )
         if kind == LayerKind.TRANSPOSE.value:
             perm = layer.params.get("perm")
             if perm is None:
@@ -419,12 +430,12 @@ class ActGraphModule(nn.Module):
             target = layer.params.get("target_shape") or layer.params.get("output_shape")
             if target is None:
                 return inputs[0]
-            # target encodes a per-sample shape (leading dim is conceptual
-            # batch slot = 1 in the template). At runtime the input carries
-            # the actual batch B from VerifiableModel batchification, so
-            # substitute B for the leading dim rather than reshaping literally
-            # — otherwise B>1 fails with "shape '[1, n]' invalid for input of
-            # size B*n".
+            input_shape = layer.params.get("input_shape")
+            if input_shape is not None and (int(input_shape[0]) != 1 or int(target[0]) != 1):
+                # A fixed-shape ONNX leading dimension belongs to the model,
+                # not to the verifier's independent sample lanes.
+                return inputs[0].reshape(tuple(int(d) for d in target))
+            # Native templates carry one conceptual lane; preserve the live B.
             return inputs[0].reshape(inputs[0].shape[0], *target[1:])
         if kind == LayerKind.MAX.value:
             if len(inputs) < 2:
@@ -984,6 +995,13 @@ class ACTToTorch:
         input_spec_mod = InputSpecLayer(InputSpec(**input_spec_dict))
 
         body_ids = {layer.id for layer in body_acts}
+        for layer in body_acts:
+            missing = [pred for pred in self.act_net.preds.get(layer.id, [])
+                       if pred not in self.act_net.by_id]
+            if missing:
+                raise ValueError(
+                    f"ACTToTorch: layer {layer.id} references missing predecessors {missing}"
+                )
         body_preds = {
             lid: [p if p in body_ids else None for p in self.act_net.preds.get(lid, [])]
             for lid in body_ids
@@ -993,26 +1011,9 @@ class ACTToTorch:
             for lid in body_ids
         }
 
-        indegree = {
-            lid: sum(1 for pred in body_preds[lid] if pred is not None) for lid in body_ids
-        }
-        queue = deque(layer.id for layer in body_acts if indegree[layer.id] == 0)
-        topo_order = []
-        while queue:
-            lid = queue.popleft()
-            topo_order.append(lid)
-            for succ_id in body_succs.get(lid, []):
-                indegree[succ_id] -= 1
-                if indegree[succ_id] == 0:
-                    queue.append(succ_id)
-
-        if len(topo_order) != len(body_ids):
-            unresolved = [layer.id for layer in body_acts if layer.id not in topo_order]
-            raise ValueError(
-                f"ACTToTorch body graph contains a cycle or unresolved dependencies. "
-                f"Topological sort covered {len(topo_order)} of {len(body_ids)} body layers; "
-                f"remaining ids={unresolved}."
-            )
+        # Scheduling deduplicates dependencies; numerical inputs keep their
+        # original order and multiplicity (e.g. h + h reads h twice).
+        topo_order = [lid for lid in get_topo_order(self.act_net) if lid in body_ids]
 
         layer_modules: Dict[int, Optional[nn.Module]] = {}
         skip_ids: Set[int] = set()

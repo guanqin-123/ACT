@@ -31,10 +31,10 @@ ParamValue = Union[torch.Tensor, int, str, tuple, bool, None]
 class Layer:
     id: int                                     # Unique layer identifier
     kind: str                                   # UPPER name (e.g., "DENSE", "CONV2D", "RELU")
-    params: Dict[str, ParamValue]              # Union-typed parameters: tensors, scalars, shapes, etc.
+    params: Dict[str, Any]                     # Schema-validated, including nested metadata
     in_vars: List[int]                         # Input variable indices 
     out_vars: List[int]                        # Output variable indices
-    cache: Dict[str, torch.Tensor] = field(default_factory=dict)  # Runtime cache tensors
+    cache: Dict[str, Any] = field(default_factory=dict)  # Runtime values and metadata
     input_geometry: Optional[InputGeometry] = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
