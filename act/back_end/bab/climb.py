@@ -593,7 +593,7 @@ def certificate_replay(
         eta=eta,
         split_signs=batch.split_signs,
         optimize=False,
-        return_nu_per_layer=True,
+        return_nu_per_layer=with_costs,
         local_phase_clamp=True,
     )
     n_lanes = batch.batch_size
@@ -610,19 +610,19 @@ def certificate_replay(
         )
         passing = torch.isfinite(slack) & (slack > 0)
         pinned_rows = passing.to(torch.int64).argmax(dim=1)
-    assert result.nu_per_layer is not None, (
-        "certificate_replay: solver returned no nu_per_layer despite return_nu_per_layer=True"
-    )
-    nu: Dict[int, torch.Tensor] = {}
-    for layer_id, value in result.nu_per_layer.items():
-        if value.shape[0] == n_lanes * m_specs:
-            nu[layer_id] = value.reshape(n_lanes, m_specs, -1)
-        elif value.shape[0] == n_lanes:
-            nu[layer_id] = value.reshape(n_lanes, -1, value.shape[-1])
-        else:
-            return None
     costs: Optional[torch.Tensor] = None
     if with_costs:
+        assert result.nu_per_layer is not None, (
+            "certificate_replay: solver returned no nu_per_layer despite return_nu_per_layer=True"
+        )
+        nu: Dict[int, torch.Tensor] = {}
+        for layer_id, value in result.nu_per_layer.items():
+            if value.shape[0] == n_lanes * m_specs:
+                nu[layer_id] = value.reshape(n_lanes, m_specs, -1)
+            elif value.shape[0] == n_lanes:
+                nu[layer_id] = value.reshape(n_lanes, -1, value.shape[-1])
+            else:
+                return None
         assert literals is not None
         assert codec is not None
         costs = _literal_costs(
@@ -814,6 +814,8 @@ class ClimbSession:
     def __init__(self, config: BaBConfig, net: Net, out_kind: str) -> None:
         self._net = net
         self._out_kind = out_kind
+        self._coarsening_enabled = config.climb_coarsening_enabled
+        self._propagation_enabled = config.climb_propagation_enabled
         self._theta = config.climb_theta
         self._delta_abs = config.climb_delta_abs
         self._delta_rel = config.climb_delta_rel
@@ -831,6 +833,9 @@ class ClimbSession:
         return cls(config, net, out_kind) if config.climb_enabled else None
 
     def before_pop(self, pool: TopKBounding) -> None:
+        if not self._propagation_enabled:
+            self.metrics.observe_frontier(len(pool))
+            return
         if self.library.core_count > 0:
             # H1: eager discharge of the whole pending pool before any lane is
             # bounded. view_all/replace_all never score, cool, or probe.
@@ -919,33 +924,38 @@ class ClimbSession:
             out_kind=self._out_kind,
             literals=packed,
             codec=self.codec,
+            with_costs=self._coarsening_enabled,
         )
         if replay is not None:
             slack, costs = replay
             valid = is_certified(slack, self._out_kind)
         else:
             slack = costs = valid = None
-        if costs is None or valid is None or not bool(valid.any().item()):
+        if valid is None or not bool(valid.any().item()):
             return
         budget_slack = slack
         assert budget_slack is not None
-        costs[~valid] = torch.inf
         context = _ReplayContext(
             replay_batch, replay_bounds, replay_c_lanes, replay_thresholds, replay_m_specs
         )
         coarsen_started = time.perf_counter()
-        retained = coarsen(
-            packed,
-            costs,
-            budget_slack,
-            theta=self._theta,
-            delta_abs=self._delta_abs,
-            delta_rel=self._delta_rel,
-            recheck_k=self._recheck_k,
-            recheck=lambda candidate, rows: self._instrumented_recheck(
-                context, candidate, rows
-            ),
-        )
+        if self._coarsening_enabled:
+            assert costs is not None
+            costs[~valid] = torch.inf
+            retained = coarsen(
+                packed,
+                costs,
+                budget_slack,
+                theta=self._theta,
+                delta_abs=self._delta_abs,
+                delta_rel=self._delta_rel,
+                recheck_k=self._recheck_k,
+                recheck=lambda candidate, rows: self._instrumented_recheck(
+                    context, candidate, rows
+                ),
+            )
+        else:
+            retained = packed
         changed = torch.where(valid & (retained != packed).any(dim=1))[0]
         if changed.numel():
             certified = self._instrumented_recheck(
@@ -1050,6 +1060,11 @@ class ClimbSession:
     def before_split(
         self, pool: TopKBounding, unresolved: SubproblemBatch
     ) -> Tuple[SubproblemBatch, torch.Tensor]:
+        if not self._propagation_enabled:
+            self.metrics.observe_frontier(len(pool) + unresolved.batch_size)
+            return unresolved, torch.arange(
+                unresolved.batch_size, device=unresolved.lb.device
+            )
         if self.library.core_count == 0:
             return unresolved, torch.arange(unresolved.batch_size, device=unresolved.lb.device)
         # H3: one joint fixpoint over (pending, active); pending removals were
@@ -1097,6 +1112,7 @@ class ClimbSession:
 
 if __name__ == "__main__":
     from tempfile import TemporaryDirectory
+    from unittest.mock import patch
 
     from act.back_end.dual_tf.tf_forward import compute_forward_bounds
     from act.back_end.net_factory import LAYER_TESTING_SPECS, NetFactory
@@ -1124,12 +1140,59 @@ if __name__ == "__main__":
             )
             assert result.solution.statuses == (SolveStatus.UNSAT,)
             batch.incremental_alpha, batch.incremental_eta = result.alpha_state, result.eta_state
-            session = ClimbSession(
-                BaBConfig(climb_enabled=True, solver_tier="dual_alpha_eta", branching_method="babsr",
-                          bounding="depth_bound_blend", climb_theta=.5, climb_recheck_k=0),
-                net, OutKind.LINEAR_LE,
-            )
-            session.learn(batch, result.solution.statuses, result, 1)
-            expected = (frozenset({-1}),) if alpha == 1 else (frozenset(),)
-            assert session.library.cores == expected
-            assert session.metadata()["climb_coarsen_replay_fallbacks"] == int(alpha)
+            for coarsening in (True, False):
+                for propagation in (True, False):
+                    config = BaBConfig(
+                        climb_enabled=True, solver_tier="dual_alpha_eta",
+                        branching_method="babsr", bounding="depth_bound_blend",
+                        climb_theta=.5, climb_recheck_k=0,
+                        climb_coarsening_enabled=coarsening,
+                        climb_propagation_enabled=propagation,
+                    )
+                    session = ClimbSession(config, net, OutKind.LINEAR_LE)
+                    with (
+                        patch.object(
+                            DualSolver, "compute_certified_bound", autospec=True,
+                            side_effect=DualSolver.compute_certified_bound,
+                        ) as solve_spy,
+                        patch(f"{__name__}._literal_costs", wraps=_literal_costs) as costs_spy,
+                    ):
+                        session.learn(batch, result.solution.statuses, result, 1)
+                    expected = (
+                        (frozenset({-1}),) if alpha == 1 or not coarsening
+                        else (frozenset(),)
+                    )
+                    assert session.library.cores == expected
+                    assert solve_spy.call_count == 1 + int(coarsening)
+                    assert costs_spy.call_count == int(coarsening)
+                    assert solve_spy.call_args_list[0].kwargs["return_nu_per_layer"] == coarsening
+                    assert session.metadata()["climb_recheck_calls"] == int(coarsening)
+                    assert session.metadata()["climb_coarsen_replay_fallbacks"] == int(alpha) * int(coarsening)
+
+                    pool = TopKBounding()
+                    pool.push(batch)
+                    session.before_pop(pool)
+                    assert len(pool) == int(not propagation)
+                    pool = TopKBounding()
+                    pool.push(batch)
+                    unresolved, kept = session.before_split(pool, batch)
+                    assert len(pool) == unresolved.batch_size == kept.numel() == int(not propagation)
+                    if not propagation:
+                        assert unresolved is batch
+                        assert session.metrics.prebound_discharged == 0
+                        assert session.metrics.presplit_discharged == 0
+                        assert session.metrics.propagate_time_s == 0.0
+
+            # Disabling coarsening must still reject a failed first replay:
+            # alpha=1 only certifies this reference under the inactive literal.
+            if alpha == 1:
+                invalid = batch.select(torch.zeros(1, device=upper.device, dtype=torch.long))
+                invalid.split_signs = {2: torch.zeros_like(batch.split_signs[2])}
+                session = ClimbSession(config, net, OutKind.LINEAR_LE)
+                with patch.object(
+                    DualSolver, "compute_certified_bound", autospec=True,
+                    side_effect=DualSolver.compute_certified_bound,
+                ) as solve_spy:
+                    session.learn(invalid, result.solution.statuses, result, 1)
+                assert solve_spy.call_count == 1
+                assert session.library.core_count == 0

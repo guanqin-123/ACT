@@ -165,6 +165,10 @@ class BaBConfig:
 
     climb_enabled: bool = False
     """Enable query-local CLIMB certificate replay and core propagation."""
+    climb_coarsening_enabled: bool = True
+    """Apply literal-budget coarsening before admitting replay-certified cores."""
+    climb_propagation_enabled: bool = True
+    """Apply learned cores to pending and active subproblems."""
     climb_theta: float = 0.0
     """Fraction of replay slack available to the vector deletion budget."""
     climb_delta_abs: float = 1e-9
@@ -237,6 +241,14 @@ class BaBConfig:
     per_subproblem_refine_rows_cap: int = 64
     """Max refined neurons per layer per batch (top-cap by interval width);
     bounds the K x 2*cap backward cost."""
+
+    presolve_time_fraction: float = 0.0
+    """Root work window as a fraction of the BaB timeout, measured from BaB
+    entry. 0.0 means the root may use the remaining total timeout."""
+
+    child_n_iters: int = 0
+    """Alpha/eta iterations for optimized all-child batches. 0 uses
+    ``DualConfig.n_iters`` on every batch."""
 
     auto_batch_safety: float = 0.55
     """Fraction of GPU memory the auto batch sizer (max_batch_size='auto') may
@@ -318,6 +330,18 @@ class BaBConfig:
             raise ConfigError("climb_max_cores must be positive")
         if self.climb_propagate_core_chunk < 1:
             raise ConfigError("climb_propagate_core_chunk must be positive")
+        if (
+            not math.isfinite(self.presolve_time_fraction)
+            or not 0.0 <= self.presolve_time_fraction <= 1.0
+        ):
+            raise ConfigError(
+                "presolve_time_fraction must be finite and in [0, 1], got "
+                f"{self.presolve_time_fraction}"
+            )
+        if self.child_n_iters < 0:
+            raise ConfigError(
+                f"child_n_iters must be non-negative, got {self.child_n_iters}"
+            )
         if self.top_k > 0 and self.bounding in TOP_K_INCOMPATIBLE_BOUNDINGS:
             raise ConfigError(
                 f"top_k={self.top_k} is not supported by bounding={self.bounding!r}; "

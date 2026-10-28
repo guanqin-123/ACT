@@ -538,6 +538,89 @@ def test_conversion_metadata_roundtrip():
         raise AssertionError("input-dependent ONNX Gather indices were frozen to the sample")
 
 
+def test_direct_vnnlib_export_roundtrip():
+    """Verify and reload a deterministic direct ONNX/VNNLIB instance."""
+    if torch is None:
+        return
+    try:
+        from onnx import TensorProto, helper, save
+    except ImportError:
+        return
+
+    import subprocess
+    import sys
+
+    from act.back_end.serialization.serialization import load_net_from_file
+    from act.back_end.transfer_functions import set_solver_mode, set_transfer_function_mode
+    from act.back_end.verifier import verify_once
+    from act.front_end.vnnlib_loader.vnncomp_instance import load_vnncomp_instance
+    from act.pipeline.verification.act2torch import ACTToTorch
+    from act.util.device_manager import initialize_device
+    from act.util.path_config import get_project_root
+    from act.util.stats import VerifyStatus
+
+    dtype = torch.get_default_dtype()
+    dtype_name = "float32" if dtype == torch.float32 else "float64"
+    onnx_dtype = TensorProto.FLOAT if dtype == torch.float32 else TensorProto.DOUBLE
+    initialize_device("cpu", dtype_name)
+
+    with tempfile.TemporaryDirectory(prefix="act-serialization-vnnlib-") as directory:
+        root = Path(directory)
+        onnx_path = root / "net.onnx"
+        vnnlib_path = root / "property.vnnlib"
+        export_path = root / "verified.json"
+        graph = helper.make_graph(
+            [helper.make_node("Add", ["X", "offset"], ["Y"])],
+            "serialization-direct-instance",
+            [helper.make_tensor_value_info("X", onnx_dtype, [1, 2])],
+            [helper.make_tensor_value_info("Y", onnx_dtype, [1, 2])],
+            [helper.make_tensor("offset", onnx_dtype, [2], [1.0, -2.0])],
+        )
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+        model.ir_version = 8
+        save(model, onnx_path)
+        vnnlib_path.write_text(
+            "(vnnlib-version 2.0)\n(declare-network Net)\n"
+            "(declare-input X Real [1,2])\n(declare-output Y Real [1,2])\n"
+            "(assert (>= X[0,0] -1))\n(assert (<= X[0,0] 1))\n"
+            "(assert (>= X[0,1] -1))\n(assert (<= X[0,1] 1))\n"
+            "(assert (or (>= Y[0,0] 4) (<= Y[0,1] -5)))\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [
+                sys.executable, "-B", "-m", "act.back_end", "--verify",
+                "--onnx", str(onnx_path), "--vnnlib", str(vnnlib_path),
+                "--save-net", str(export_path), "--solver", "torchlp",
+                "--timeout", "12", "--device", "cpu", "--dtype", dtype_name,
+            ],
+            cwd=get_project_root(),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        set_transfer_function_mode("interval")
+        set_solver_mode("torchlp")
+        exported = sorted(root.glob("verified.d*.json"))
+        instance = load_vnncomp_instance(onnx_path, vnnlib_path)
+
+        assert result.returncode == 0
+        assert len(exported) == len(instance.models) == 2
+        for path, seeds in zip(exported, instance.seeds, strict=True):
+            sample = seeds[0].tensor
+            restored = load_net_from_file(str(path), target_device="cpu")
+            torch.testing.assert_close(
+                ACTToTorch(restored).run()(sample)["output"],
+                instance.raw_model(sample),
+                rtol=0,
+                atol=0,
+            )
+            assert all(
+                verification.status is VerifyStatus.CERTIFIED
+                for verification in verify_once(restored)
+            )
+
+
 def run_all_tests():
     """Run all serialization tests."""
     print("🚀 Running ACT Serialization Test Suite")
@@ -549,6 +632,7 @@ def run_all_tests():
         test_device_migration,
         test_schema_validation,
         test_conversion_metadata_roundtrip,
+        test_direct_vnnlib_export_roundtrip,
     ]
     
     passed = 0

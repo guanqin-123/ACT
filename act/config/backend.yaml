@@ -304,6 +304,8 @@ backend:
     per_subproblem_refine: "none"         # per-subproblem refinement: none/tail/all (needs reuse)
     per_subproblem_refine_iters: 0        # Adam iterations (0 = one fixed-slope backward pass)
     per_subproblem_refine_rows_cap: 64    # max refined neurons per layer per batch (widest first)
+    presolve_time_fraction: 0.0           # root time window in [0, 1] of timeout, from BaB entry (0 = remaining timeout)
+    child_n_iters: 0                      # alpha/eta iterations on optimized all-child batches (0 = dual.n_iters)
 
     # Automatic BaB batch sizing. Used only when verify_bab_batched is called with
     # max_batch_size="auto"; the CLI passes the integer bab_max_batch_size.
@@ -332,6 +334,9 @@ backend:
 
     # -- CLIMB certificate reuse (ReLU neuron branching only) ---------------
     climb_enabled: false          # enable CLIMB (see bab_presets.climb above)
+    # Ablation gates default on, preserving the existing CLIMB algorithm.
+    climb_coarsening_enabled: true  # false admits full replay-certified literal rows
+    climb_propagation_enabled: true # false learns cores but does not prune/infer with them
     climb_theta: 0.0              # fraction of replay slack spent on dropping literals
     # Deletion-budget safety margin: delta = climb_delta_abs + climb_delta_rel * |slack|.
     climb_delta_abs: 0.000000001  # absolute part of delta

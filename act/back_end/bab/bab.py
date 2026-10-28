@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Union, cast
 
 import torch
@@ -89,6 +90,8 @@ from act.front_end.specs import OutKind, OutputSpec
 from act.util.stats import VerifyStatus, VerifyResult
 
 log = logging.getLogger(__name__)
+
+_monotonic = time.monotonic
 
 
 # ---------------------------------------------------------------------------
@@ -250,9 +253,17 @@ def _solve_dual_batch(
     keep_rows: Optional[torch.Tensor] = None,
     root_bounds_dict: Optional[Dict[int, Bounds]] = None,
     round_policy: Optional[Any] = None,
+    time_cap: Optional[float] = None,
 ) -> DualBatchResult:
     """Prepare BaB-specific bounds/state policy, then call ``DualSolver``."""
     solver = DualSolver()
+    call_started = _monotonic() if time_cap is not None else 0.0
+
+    def _remaining_cap() -> Optional[float]:
+        if time_cap is None:
+            return None
+        return max(0.0, time_cap - (_monotonic() - call_started))
+
     # Reused root boxes have no lane-matched symbolic frame.
     forward_frame = None
     input_split_child = (
@@ -336,14 +347,34 @@ def _solve_dual_batch(
     )
     eta_enabled = config.solver_tier == "dual_alpha_eta"
     is_child_batch = (
-        bool(batch.depths.min().item() > 0) if batch.depths.numel() else False
+        bool((batch.depths > 0).all().item()) if batch.depths.numel() else False
+    )
+    child_n_iters = int(config.child_n_iters)
+    remaining_cap = _remaining_cap()
+    if remaining_cap is not None and remaining_cap <= 0.0:
+        raise TimeoutError("BaB dual batch time cap exhausted before solving")
+    max_time = dual_config.max_time
+    if remaining_cap is not None:
+        max_time = (
+            remaining_cap
+            if dual_config.max_time <= 0.0
+            else min(dual_config.max_time, remaining_cap)
+        )
+    capped_dual_config = replace(
+        dual_config,
+        max_time=max_time,
+        n_iters=(
+            child_n_iters
+            if optimize and is_child_batch and child_n_iters > 0
+            else dual_config.n_iters
+        ),
     )
     result = solver.solve_spec_batch(
         net,
         bounds_dict,
         out_spec,
         optimize=optimize,
-        dual_config=dual_config,
+        dual_config=capped_dual_config,
         input_shape=tuple(batched_bounds.lb.shape[1:]),
         keep_rows=keep_rows,
         split_signs=batch.split_signs if eta_enabled else None,
@@ -454,8 +485,29 @@ def verify_bab_batched(
             keys iter, K, pool_before, pool_after, pruned_unsat, branched,
             falsified_lane, max_depth, spec_rows_kept, elapsed_s.
     """
+    run_started = _monotonic()
     if config is None:
         config = BaBConfig()
+    budget_s = time_budget_s if time_budget_s is not None else 300.0
+    if not math.isfinite(budget_s) or budget_s < 0.0:
+        raise ValueError(
+            f"time_budget_s must be finite and non-negative, got {budget_s}"
+        )
+    presolve_budget_s = (
+        config.presolve_time_fraction * budget_s
+        if config.presolve_time_fraction > 0.0
+        else budget_s
+    )
+
+    def _elapsed() -> float:
+        return _monotonic() - run_started
+
+    def _remaining() -> float:
+        return max(0.0, budget_s - _elapsed())
+
+    def _root_time_cap() -> float:
+        return max(0.0, min(presolve_budget_s - _elapsed(), _remaining()))
+
     assert_layer = get_assert_layer(net)
     climb = ClimbSession.from_config(
         config, net, cast(str, assert_layer.params["kind"])
@@ -474,8 +526,6 @@ def verify_bab_batched(
     if effective_batch < 1:
         raise ValueError(f"max_batch_size must be >= 1, got {effective_batch}")
     max_k_seen = 0
-
-    budget_s = time_budget_s if time_budget_s is not None else 300.0
 
     fsb_dual_solver = None
     if config.branching_method == "fsb":
@@ -608,21 +658,28 @@ def verify_bab_batched(
     node_root_fwd: Optional[Dict[int, Bounds]] = (
         root_fwd if reuse_mode != "none" else None
     )
+    presolve: Optional[DualBatchResult] = None
     if (
         presolve_tier in ("dual", "dual_alpha", "dual_alpha_eta")
         and assert_layer.params.get("kind") != OutKind.UNSAFE_LINEAR
+        and _root_time_cap() > 0.0
     ):
-        presolve = _solve_dual_batch(
-            net=net,
-            assert_layer=assert_layer,
-            batched_bounds=Bounds(root_bounds.lb, root_bounds.ub),
-            k_actual=root_batch.batch_size,
-            batch=root_batch,
-            config=config,
-            dual_config=dual_config,
-            optimize=presolve_tier in ("dual_alpha", "dual_alpha_eta"),
-            root_bounds_dict=root_fwd,
-        )
+        try:
+            presolve = _solve_dual_batch(
+                net=net,
+                assert_layer=assert_layer,
+                batched_bounds=Bounds(root_bounds.lb, root_bounds.ub),
+                k_actual=root_batch.batch_size,
+                batch=root_batch,
+                config=config,
+                dual_config=dual_config,
+                optimize=presolve_tier in ("dual_alpha", "dual_alpha_eta"),
+                root_bounds_dict=root_fwd,
+                time_cap=_root_time_cap(),
+            )
+        except TimeoutError:
+            presolve = None
+    if presolve is not None:
         presolve_slack = presolve.spec_row_slack()
         if presolve_slack is not None:
             unproven = unproven_spec_rows(presolve_slack).any(dim=0)
@@ -672,13 +729,18 @@ def verify_bab_batched(
                 root_batch = presplit
                 node_counter += root_batch.batch_size
 
+    # A completed root solve can replace a second solve after its optimization
+    # window expires, but only while its spec axis and lane domain still match.
+    if spec_keep_rows is not None or bool((root_batch.depths > 0).any().item()):
+        presolve = None
+
     pool.push(root_batch)
     any_dropped_frontier_cap = False
     if frontier_cap > 0 and len(pool) > frontier_cap:
         if pool.evict_to(frontier_cap) > 0:
             any_dropped_frontier_cap = True
 
-    start = time.time()
+    start = run_started
     processed = 0
     iteration = 0
 
@@ -702,7 +764,7 @@ def verify_bab_batched(
             "spec_rows_kept": (
                 int(spec_keep_rows.numel()) if spec_keep_rows is not None else None
             ),
-            "elapsed_s": time.time() - start,
+            "elapsed_s": _monotonic() - start,
         }
 
     any_dropped_max_depth = False
@@ -736,7 +798,7 @@ def verify_bab_batched(
         )
 
     while not pool.empty:
-        elapsed = time.time() - start
+        elapsed = _monotonic() - start
         if elapsed >= budget_s or processed >= config.max_nodes:
             break
 
@@ -793,35 +855,43 @@ def verify_bab_batched(
             solution = setup_and_solve_batch(
                 net, batched_bounds, solver, timelimit=None,
             )
-        elif solver_tier == "dual":
-            dual_solve_result = _solve_dual_batch(
-                net=net,
-                assert_layer=assert_layer,
-                batched_bounds=batched_bounds,
-                k_actual=k_actual,
-                batch=batch,
-                config=config,
-                dual_config=dual_config,
-                optimize=False,
-                keep_rows=spec_keep_rows,
-                root_bounds_dict=node_root_fwd,
-                round_policy=_wave_policy,
-            )
-            solution = dual_solve_result.lane_solution()
-        elif solver_tier in ("dual_alpha", "dual_alpha_eta"):
-            dual_solve_result = _solve_dual_batch(
-                net=net,
-                assert_layer=assert_layer,
-                batched_bounds=batched_bounds,
-                k_actual=k_actual,
-                batch=batch,
-                config=config,
-                dual_config=dual_config,
-                optimize=True,
-                keep_rows=spec_keep_rows,
-                root_bounds_dict=node_root_fwd,
-                round_policy=_wave_policy,
-            )
+        elif solver_tier in ("dual", "dual_alpha", "dual_alpha_eta"):
+            has_root = bool((batch.depths == 0).any().item())
+            optimize = solver_tier != "dual"
+            if has_root and presolve is not None and _root_time_cap() <= 0.0:
+                dual_solve_result = presolve
+            else:
+                # The root window caps optimization, not search. If setup uses
+                # up that window, a fixed bound still permits root branching.
+                modes = (True, False) if has_root and optimize else (optimize,)
+                for optimize in modes:
+                    dual_time_cap = (
+                        _root_time_cap() if has_root and optimize else _remaining()
+                    )
+                    if dual_time_cap <= 0.0:
+                        continue
+                    try:
+                        dual_solve_result = _solve_dual_batch(
+                            net=net,
+                            assert_layer=assert_layer,
+                            batched_bounds=batched_bounds,
+                            k_actual=k_actual,
+                            batch=batch,
+                            config=config,
+                            dual_config=dual_config,
+                            optimize=optimize,
+                            keep_rows=spec_keep_rows,
+                            root_bounds_dict=node_root_fwd,
+                            round_policy=_wave_policy,
+                            time_cap=dual_time_cap,
+                        )
+                    except TimeoutError:
+                        continue
+                    break
+            presolve = None
+            if dual_solve_result is None:
+                pool.push(batch)
+                break
             solution = dual_solve_result.lane_solution()
             bounds_dict_for_branching = dual_solve_result.intermediate_bounds()
             nu_per_layer_for_branching = dual_solve_result.neuron_sensitivities()
@@ -1186,7 +1256,7 @@ def verify_bab_batched(
             _wave_index += 1
 
     pool_remaining = len(pool)
-    elapsed_total = time.time() - start
+    elapsed_total = _monotonic() - start
     exhausted_time = elapsed_total >= budget_s
     exhausted_nodes = processed >= config.max_nodes
 
@@ -1287,6 +1357,7 @@ def verify_bab(
 
 if __name__ == "__main__":
     from tempfile import TemporaryDirectory
+    from unittest.mock import patch
 
     from act.back_end.net_factory import LAYER_TESTING_SPECS, NetFactory
     from act.config.config import BackendConfig
@@ -1316,3 +1387,131 @@ if __name__ == "__main__":
         assert verdict.status == VerifyStatus.UNKNOWN
         assert len(trace) > 1
         assert any(wave["K"] > 1 for wave in trace if isinstance(wave["K"], int))
+
+        # Control the clock at solver boundaries, not by sleeping. A root-only
+        # deadline must leave the remaining search budget available to children.
+        original_solve = _solve_dual_batch
+        original_forward = compute_forward_bounds
+        for case in (
+            "completed", "timeout", "skipped", "pruned", "presplit",
+            "main_timeout", "global", "default",
+        ):
+            clock = [0.0]
+            calls: list[tuple[tuple[int, ...], bool, Optional[list[int]]]] = []
+            controlled_trace: list[Dict[str, Any]] = []
+            controlled_net = net
+            if case == "pruned":
+                pruned_spec = LAYER_TESTING_SPECS["layer_testing_climb_reuse"]()
+                pruned_spec["layers"][-1]["params"].update(
+                    c=[[1.], [-1.]], d=[10., .1]
+                )
+                controlled_net = factory.create_network("pruned_rows", pruned_spec)
+
+            def controlled_solve(**kwargs: Any) -> DualBatchResult:
+                """Expire only the requested window at a deterministic boundary."""
+                rows = kwargs.get("keep_rows")
+                calls.append((
+                    tuple(kwargs["batch"].depths.tolist()), kwargs["optimize"],
+                    None if rows is None else rows.tolist(),
+                ))
+                if (case == "timeout" and len(calls) == 1) or (
+                    case == "main_timeout" and len(calls) == 2
+                ):
+                    clock[0] = 2.0
+                    raise TimeoutError("controlled root work exhausted")
+                result = original_solve(**kwargs)
+                if case != "main_timeout":
+                    clock[0] = 10.0 if case == "global" else 2.0
+                return result
+
+            def controlled_forward(*args: Any, **kwargs: Any) -> Any:
+                """Cover root setup consuming its window before presolve starts."""
+                result = original_forward(*args, **kwargs)
+                if case == "skipped":
+                    clock[0] = 2.0
+                return result
+
+            with (
+                patch(f"{__name__}._monotonic", lambda: clock[0]),
+                patch("act.back_end.solver.solver_dual._monotonic", lambda: clock[0]),
+                patch(f"{__name__}._solve_dual_batch", controlled_solve),
+                patch(f"{__name__}.compute_forward_bounds", controlled_forward),
+            ):
+                controlled = verify_bab_batched(
+                    controlled_net, DualSolver,
+                    BaBConfig(
+                        solver_tier="dual_alpha_eta", branching_method="babsr",
+                        root_bounds_reuse="plain", bounding="depth_bound_blend",
+                        max_depth=1, max_nodes=3,
+                        presolve_time_fraction=0.0 if case == "default" else .1,
+                        presplit_levels=int(case == "presplit"),
+                    ),
+                    max_batch_size=2, time_budget_s=10,
+                    dual_config=DualConfig(n_iters=1), trace=controlled_trace,
+                )
+            assert controlled.status == VerifyStatus.UNKNOWN, (case, controlled)
+            if case == "global":
+                assert not controlled_trace and len(calls) == 1
+                assert controlled.metadata["exhausted_budget_time"]
+                continue
+            assert controlled_trace, (case, controlled.metadata, calls)
+            assert any(all(depth > 0 for depth in depths) for depths, _, _ in calls), (
+                case, calls
+            )
+            assert not controlled.metadata["exhausted_budget_time"]
+            root_calls = [(optimize, rows) for depths, optimize, rows in calls if depths == (0,)]
+            if case in ("completed", "presplit"):
+                assert root_calls == [(True, None)], (case, calls)
+            elif case == "timeout":
+                assert root_calls == [(True, None), (False, None)], calls
+            elif case == "skipped":
+                assert root_calls == [(False, None)], calls
+            elif case == "pruned":
+                assert root_calls == [(True, None), (False, [1])], calls
+                assert controlled.metadata["spec_rows_kept"] == 1
+            elif case == "main_timeout":
+                assert root_calls == [(True, None), (True, None), (False, None)], calls
+            else:
+                assert root_calls == [(True, None), (True, None)], calls
+
+        # Root/mixed batches retain the base optimizer policy. Only optimized
+        # all-child batches use the override, carried solely by DualConfig.
+        bounds = seed_from_input_specs(gather_input_spec_layers(net))
+        root = SubproblemBatch.from_bounds(bounds)
+        child = SubproblemBatch.from_bounds(bounds, depth=1)
+        children = child.concat(child)
+        mixed = root.concat(child)
+        base_dual = DualConfig(n_iters=3, max_time=7.0)
+        for batch, optimize, child_iters, time_cap, expected_iters in (
+            (root, True, 2, 5.0, 3),
+            (children, True, 2, 5.0, 2),
+            (mixed, True, 2, 5.0, 3),
+            (children, False, 2, 5.0, 3),
+            (children, True, 0, None, 3),
+            (children, True, 2, None, 2),
+        ):
+            with (
+                patch(f"{__name__}._monotonic", return_value=0.0),
+                patch("act.back_end.solver.solver_dual._monotonic", return_value=0.0),
+                patch.object(
+                    DualSolver, "solve_spec_batch", autospec=True,
+                    side_effect=DualSolver.solve_spec_batch,
+                ) as solve_spy,
+            ):
+                _solve_dual_batch(
+                    net=net, assert_layer=get_assert_layer(net),
+                    batched_bounds=Bounds(batch.lb, batch.ub),
+                    k_actual=batch.batch_size, batch=batch,
+                    config=BaBConfig(
+                        solver_tier="dual_alpha_eta", child_n_iters=child_iters,
+                        eta_only_children=True,
+                    ),
+                    dual_config=base_dual, optimize=optimize, time_cap=time_cap,
+                )
+            assert solve_spy.call_count == 1
+            kwargs = solve_spy.call_args.kwargs
+            assert "n_iters" not in kwargs
+            assert kwargs["dual_config"].n_iters == expected_iters
+            assert kwargs["dual_config"].max_time == (7.0 if time_cap is None else 5.0)
+            assert kwargs["optimize_alpha"] == bool((batch.depths == 0).any().item())
+            assert base_dual.n_iters == 3 and base_dual.max_time == 7.0

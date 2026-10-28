@@ -248,14 +248,18 @@ def _resolve_bab_config(
     return replace(backend_cfg.bab, **preset_values) if preset_values else backend_cfg.bab
 
 
-def _verify_one_net(
-    net_path: str,
+def _verify_net(
+    net: Any,
     backend_cfg,
     explicit_bab_fields: Optional[set[str]] = None,
+    *,
+    deadline: Optional[float] = None,
 ) -> tuple[list[Any], Optional[_SkipUnsupported], Optional[int]]:
-    """[BATCHED-API] Verify *net_path* via 3-tier cascade.
+    """[BATCHED-API] Verify one already-constructed Net via the 3-tier cascade.
 
-    Named BaB presets yield to fields pinned by CLI flags.
+    Named BaB presets yield to fields pinned by CLI flags. All stages share
+    one deadline; tensor propagation is not preemptible, but its elapsed time
+    is deducted before launching any refinement.
 
     Returns ``(results, err, n_layers)`` where ``err`` is one of:
       * ``None`` on success
@@ -267,8 +271,8 @@ def _verify_one_net(
     Raises ``ConfigError`` when the resolved configuration is invalid (BaB
     preset application, CLIMB prerequisites) so the caller can exit with 2.
 
-    Tier 1 — interval (verify_once): always runs; certifies or falsifies via
-              pure-tensor bounds propagation.
+    Tier 1 — interval (verify_once): runs while budget remains; certifies or
+              falsifies via pure-tensor bounds propagation.
     Tier 2 — LP-batched (verify_lp_batched): runs on UNKNOWN lanes when
               backend_cfg.lp_enabled is True AND active TF propagates LP
               constraints. Skipped under DualTF (see soundness note below).
@@ -277,18 +281,19 @@ def _verify_one_net(
               constraints. bab_max_batch_size=1 disables K-batching.
     """
     from act.back_end.bab.violation import clear_violation_check_module_cache
-    from act.back_end.serialization.serialization import load_net_from_file
     from act.back_end.transfer_functions import (
         ensure_active_tf,
         is_dual_solver_active,
         is_hybridz_solver_active,
     )
-    from act.back_end.verifier import verify_once, verify_lp_batched
-    from act.util.stats import VerifyStatus
+    from act.back_end.verifier import (
+        gather_input_spec_layers, seed_from_input_specs, verify_once, verify_lp_batched,
+    )
+    from act.util.stats import VerifyResult, VerifyStatus
 
+    stop_at = time.monotonic() + backend_cfg.timeout if deadline is None else deadline
     clear_violation_check_module_cache()
 
-    net = load_net_from_file(net_path, target_device=backend_cfg.device)
     n_layers = len(net.layers)
 
     active_tf = ensure_active_tf("interval")
@@ -328,10 +333,14 @@ def _verify_one_net(
     if blocking:
         return [], _SkipUnsupported(tf_name=authority_name, kinds=blocking), n_layers
 
-    hz_timeout = None
+    remaining = stop_at - time.monotonic()
+    if remaining <= 0.0:
+        batch_size = seed_from_input_specs(gather_input_spec_layers(net)).lb.shape[0]
+        return [VerifyResult(VerifyStatus.TIMEOUT) for _ in range(batch_size)], None, n_layers
+    hz_timeout = remaining
     hz_tolerance = None
     if is_hybridz:
-        hz_timeout = backend_cfg.hybridz.timeout or backend_cfg.timeout
+        hz_timeout = min(backend_cfg.hybridz.timeout or remaining, remaining)
         hz_tolerance = backend_cfg.hybridz.tolerance
     results: List[Any] = list(
         verify_once(
@@ -345,14 +354,15 @@ def _verify_one_net(
 
     # Dual does not produce LP-feed constraints; HybridZ UNKNOWN is the
     # final result of the selected pure solver and must not be rescued.
-    if any_unknown and backend_cfg.lp_enabled and not (is_dual or is_hybridz):
+    remaining = stop_at - time.monotonic()
+    if any_unknown and backend_cfg.lp_enabled and not (is_dual or is_hybridz) and remaining > 0.0:
         try:
             lp_results = verify_lp_batched(
                 net,
             solver_factory=lambda: _make_solver(
                 backend_cfg.solver, backend_cfg.torchlp, backend_cfg.gurobi
             ),
-                timelimit=backend_cfg.timeout,
+                timelimit=remaining,
             )
             results = [
                 lp_results[i] if results[i].status == VerifyStatus.UNKNOWN else results[i]
@@ -370,7 +380,7 @@ def _verify_one_net(
             if "export_to_batch_problem" not in str(e):
                 raise
 
-    if any_unknown and backend_cfg.bab_enabled and not is_hybridz:
+    if any_unknown and backend_cfg.bab_enabled and not is_hybridz and time.monotonic() < stop_at:
         # verify_bab_batched operates on a single-instance (B=1) net and
         # returns one VerifyResult. For multi-sample nets we slice per-lane
         # and dispatch one BaB call per still-UNKNOWN sample.
@@ -385,21 +395,23 @@ def _verify_one_net(
         )
 
         try:
-            results = [
-                _vbb(
-                    slice_net_to_sample(net, i),
+            for i, result in enumerate(results):
+                if result.status != VerifyStatus.UNKNOWN:
+                    continue
+                lane_net = slice_net_to_sample(net, i)
+                remaining = stop_at - time.monotonic()
+                if remaining <= 0.0:
+                    break
+                results[i] = _vbb(
+                    lane_net,
                     solver_factory=lambda: _make_solver(
                         backend_cfg.solver, backend_cfg.torchlp, backend_cfg.gurobi
                     ),
                     config=bab_cfg,
                     max_batch_size=backend_cfg.bab_max_batch_size,
-                    time_budget_s=backend_cfg.timeout,
+                    time_budget_s=remaining,
                     dual_config=backend_cfg.dual,
                 )
-                if results[i].status == VerifyStatus.UNKNOWN
-                else results[i]
-                for i in range(len(results))
-            ]
         except NotImplementedError as e:
             # Same graceful-degradation contract as the Tier-2 LP gate:
             # BaB also runs through cons_exportor (via setup_and_solve_batch
@@ -409,7 +421,25 @@ def _verify_one_net(
             if "export_to_batch_problem" not in str(e):
                 raise
 
+    if time.monotonic() >= stop_at:
+        results = [
+            VerifyResult(VerifyStatus.TIMEOUT)
+            if result.status == VerifyStatus.UNKNOWN else result
+            for result in results
+        ]
     return results, None, n_layers
+
+
+def _verify_one_net(
+    net_path: str,
+    backend_cfg,
+    explicit_bab_fields: Optional[set[str]] = None,
+) -> tuple[list[Any], Optional[_SkipUnsupported], Optional[int]]:
+    """Load one serialized Net and verify it through the shared cascade."""
+    from act.back_end.serialization.serialization import load_net_from_file
+
+    net = load_net_from_file(net_path, target_device=backend_cfg.device)
+    return _verify_net(net, backend_cfg, explicit_bab_fields)
 
 
 def _report_config_error(label: str, err: ConfigError) -> int:
@@ -418,30 +448,68 @@ def _report_config_error(label: str, err: ConfigError) -> int:
     return 2
 
 
-def run_verification(args, backend_cfg):
-    """Run verification on a network using *backend_cfg*.
+def run_vnnlib_verification(args, backend_cfg):
+    """Verify every synthesized ONNX/VNNLIB disjunct through the shared cascade."""
+    from act.back_end.serialization.serialization import save_net_to_file
+    from act.front_end.vnnlib_loader.vnncomp_instance import load_vnncomp_instance
+    from act.pipeline.verification.instance import DisjunctResults, convert_model
+    from act.util.stats import VerifyResult, VerifyStatus
 
-    Returns 0 when every lane received a verdict, 1 on error / no verdict /
-    unsupported network, and 2 on invalid configuration.
-    """
+    deadline = time.monotonic() + backend_cfg.timeout
+    instance = load_vnncomp_instance(args.onnx, args.vnnlib, merge_relus=True)
+    if instance.merged_relus:
+        print(f"Merged {instance.merged_relus} split-ReLU neurons")
+
+    aggregate = DisjunctResults(len(instance.models))
+    exit_status = 0
+    pinned_bab_fields = explicit_bab_fields(args)
+
+    for index, budget in aggregate.pending(deadline):
+        assert budget is not None
+        model_deadline = min(deadline, time.monotonic() + budget)
+        net = convert_model(instance.models[index])
+        remaining = model_deadline - time.monotonic()
+        if remaining <= 0.0:
+            aggregate.record((VerifyResult(VerifyStatus.TIMEOUT),))
+            continue
+        save_path = aggregate.save_path(args.save_net, index)
+        if save_path is not None:
+            save_net_to_file(net, save_path)
+        try:
+            results, err, n_layers = _verify_net(
+                net, backend_cfg, pinned_bab_fields, deadline=model_deadline,
+            )
+        except ConfigError as e:
+            return _report_config_error(f"disjunct {index}", e)
+
+        print(f"Disjunct {index}:")
+        exit_status = max(exit_status, _report_verification_results(
+            f"disjunct {index}", results, err, n_layers, backend_cfg,
+        ))
+        aggregate.record(results)
+        if aggregate.counterexample is not None:
+            break
+
+    print(f"VNNLIB verdict: {aggregate.verdict.upper()}")
+    return exit_status
+
+
+def _report_verification_results(
+    label: str,
+    results: list[Any],
+    err: Optional[_SkipUnsupported],
+    n_layers: Optional[int],
+    backend_cfg: Any,
+) -> int:
+    """Report shared Net-verification results and return the CLI exit status."""
     from act.util.stats import VerifyStatus
 
-    pinned_bab_fields = explicit_bab_fields(args)
-    try:
-        results, err, n_layers = _verify_one_net(
-            args.network, backend_cfg, pinned_bab_fields
-        )
-    except ConfigError as e:
-        return _report_config_error(args.network, e)
     if err is not None:
-        print(
-            f"⏭️  {args.network}: {err.tf_name} cannot handle: "
-            f"{','.join(err.kinds)}"
-        )
+        print(f"⏭️  {label}: {err.tf_name} cannot handle: {','.join(err.kinds)}")
         return 1
-    assert results, f"{args.network}: no verdict"
+    assert results, f"{label}: no verdict"
+    assert n_layers is not None
     print(f"Loaded {n_layers}-layer net; solver={backend_cfg.solver}")
-
     valid_outcomes = (
         VerifyStatus.CERTIFIED,
         VerifyStatus.FALSIFIED,
@@ -449,13 +517,53 @@ def run_verification(args, backend_cfg):
         VerifyStatus.TIMEOUT,
     )
     multi = len(results) > 1
-    for i, result in enumerate(results):
-        prefix = f"Sample {i}: " if multi else f"Lane {i}: "
+    for index, result in enumerate(results):
+        prefix = f"Sample {index}: " if multi else f"Lane {index}: "
         print(f"{prefix}{result.status}")
         if backend_cfg.verbose and result.metadata:
-            for k, v in result.metadata.items():
-                print(f"  {k}: {v}")
-    return 0 if all(r.status in valid_outcomes for r in results) else 1
+            for key, value in result.metadata.items():
+                print(f"  {key}: {value}")
+    return 0 if all(result.status in valid_outcomes for result in results) else 1
+
+
+def run_verification(args, backend_cfg):
+    """Run verification on a network using *backend_cfg*.
+
+    Returns 0 when every lane received a verdict, 1 on error / no verdict /
+    unsupported network, and 2 on invalid configuration.
+    """
+    pinned_bab_fields = explicit_bab_fields(args)
+    try:
+        results, err, n_layers = _verify_one_net(
+            args.network, backend_cfg, pinned_bab_fields
+        )
+    except ConfigError as e:
+        return _report_config_error(args.network, e)
+    return _report_verification_results(args.network, results, err, n_layers, backend_cfg)
+
+
+def run_query_verification(args, backend_cfg):
+    """Build one indexed compact-BERT query and verify its converted Net."""
+    from act.front_end.bert_loader.query_index import (
+        QueryIndexError,
+        build_query_model,
+        read_query,
+    )
+    from act.pipeline.verification.instance import convert_model
+
+    label = f"{args.query_index} query {args.query_id}"
+    try:
+        query = read_query(args.query_index, args.query_id)
+        net = convert_model(build_query_model(query), args.save_net)
+        results, err, n_layers = _verify_net(
+            net, backend_cfg, explicit_bab_fields(args)
+        )
+    except ConfigError as error:
+        return _report_config_error(label, error)
+    except (QueryIndexError, FileNotFoundError, ValueError) as error:
+        print(f"❌ {label}: {error}")
+        return 1
+    return _report_verification_results(label, results, err, n_layers, backend_cfg)
 
 
 def run_network_factory(args, backend_cfg):
@@ -1041,6 +1149,34 @@ Exit status (--verify):
         "--network", "-n", type=str, help="Path to network file (JSON format)"
     )
     verify_group.add_argument(
+        "--onnx",
+        type=str,
+        help="ONNX network paired with --vnnlib for direct verification",
+    )
+    verify_group.add_argument(
+        "--vnnlib",
+        type=str,
+        help="VNNLIB property paired with --onnx for direct verification",
+    )
+    verify_group.add_argument(
+        "--query-index",
+        type=str,
+        dest="query_index",
+        help="CSV index of checkpoint-backed SST/Yelp verification queries",
+    )
+    verify_group.add_argument(
+        "--query-id",
+        type=int,
+        dest="query_id",
+        help="Zero-based data-row id paired with --query-index",
+    )
+    verify_group.add_argument(
+        "--save-net",
+        type=str,
+        dest="save_net",
+        help="Save the exact converted Net(s) verified from a direct input source",
+    )
+    verify_group.add_argument(
         "--solver",
         "-s",
         type=str,
@@ -1408,9 +1544,46 @@ Exit status (--verify):
     args = parser.parse_args()
 
     # Validate arguments based on command
-    if args.verify or args.info:
-        if not args.network:
-            parser.error("--network is required for --verify and --info")
+    if args.info and not args.network:
+        parser.error("--network is required for --info")
+    if not args.verify and (
+        args.onnx is not None
+        or args.vnnlib is not None
+        or args.save_net is not None
+        or args.query_index is not None
+        or args.query_id is not None
+    ):
+        parser.error("dynamic verification sources and --save-net require --verify")
+    if args.verify:
+        direct_source = args.onnx is not None or args.vnnlib is not None
+        query_source = args.query_index is not None or args.query_id is not None
+        source_count = int(bool(args.network)) + int(direct_source) + int(query_source)
+        if source_count > 1:
+            parser.error(
+                "choose exactly one verification source: --network, paired "
+                "--onnx/--vnnlib, or paired --query-index/--query-id"
+            )
+        if (args.onnx is None) != (args.vnnlib is None):
+            parser.error("--onnx and --vnnlib must be provided together")
+        if (args.query_index is None) != (args.query_id is None):
+            parser.error("--query-index and --query-id must be provided together")
+        if args.save_net and not (direct_source or query_source):
+            parser.error(
+                "--save-net requires paired --onnx/--vnnlib or --query-index/--query-id"
+            )
+        if source_count == 0:
+            parser.error(
+                "--network, paired --onnx/--vnnlib, or paired "
+                "--query-index/--query-id is required for --verify"
+            )
+        if direct_source:
+            for label, value in (("--onnx", args.onnx), ("--vnnlib", args.vnnlib)):
+                if not Path(value).is_file():
+                    parser.error(f"{label} must name an existing file: {value}")
+        if query_source and not Path(args.query_index).is_file():
+            parser.error(f"--query-index must name an existing file: {args.query_index}")
+        if (direct_source or query_source) and args.timeout is not None and args.timeout <= 0:
+            parser.error("--timeout must be greater than zero")
 
     if args.diff_nets:
         return run_diff_nets(args)
@@ -1426,7 +1599,7 @@ Exit status (--verify):
             **_collect_backend_overrides(args, _user_set),
         )
     except ConfigError as e:
-        return _report_config_error(args.network or "Error", e)
+        return _report_config_error(args.network or args.query_index or "Error", e)
 
     # Initialize device manager from the resolved config
     import argparse as _ap
@@ -1462,6 +1635,10 @@ Exit status (--verify):
         if args.generate:
             return run_network_factory(args, backend_cfg)
         elif args.verify:
+            if args.onnx is not None:
+                return run_vnnlib_verification(args, backend_cfg)
+            if args.query_index is not None:
+                return run_query_verification(args, backend_cfg)
             return run_verification(args, backend_cfg)
         elif args.info:
             return run_network_info(args)
@@ -1643,11 +1820,56 @@ def _run_cli_cascade_smoke() -> int:
         cfg = BackendConfig()
         assert cfg.bab_max_batch_size == 8
 
+    def _t_cascade_shares_deadline(
+        interval_seconds: float = 3.0,
+        lp_seconds: float = 4.0,
+        expected_limits: tuple[float, ...] = (7.0, 3.0, 2.0),
+    ) -> None:
+        """Every refinement consumes the same budget, including earlier lanes."""
+        from unittest.mock import patch
+        from act.back_end.transfer_functions import set_solver_mode
+        from act.util.stats import VerifyResult
+
+        cfg = BackendConfig(solver="torchlp", timeout=10, lp_enabled=True, bab_enabled=True)
+        net = _build_tiny_net(B=2)
+        set_solver_mode("torchlp")
+        clock = [0.0]
+        limits: list[float] = []
+
+        def interval(*args, **kwargs) -> list[VerifyResult]:
+            clock[0] += interval_seconds
+            return [VerifyResult(VerifyStatus.UNKNOWN) for _ in range(2)]
+
+        def lp(*args, timelimit: float, **kwargs) -> list[VerifyResult]:
+            limits.append(timelimit)
+            clock[0] += lp_seconds
+            return [VerifyResult(VerifyStatus.UNKNOWN) for _ in range(2)]
+
+        def bab(*args, time_budget_s: float, **kwargs) -> VerifyResult:
+            limits.append(time_budget_s)
+            clock[0] += 1.0
+            return VerifyResult(VerifyStatus.UNKNOWN)
+
+        with (
+            patch.object(time, "monotonic", side_effect=lambda: clock[0]),
+            patch("act.back_end.verifier.verify_once", side_effect=interval),
+            patch("act.back_end.verifier.verify_lp_batched", side_effect=lp),
+            patch("act.back_end.bab.bab.verify_bab_batched", side_effect=bab),
+        ):
+            results, err, _ = _verify_net(net, cfg)
+        assert err is None and len(results) == 2
+        assert tuple(limits) == expected_limits, limits
+        expected_status = VerifyStatus.TIMEOUT if clock[0] >= cfg.timeout else VerifyStatus.UNKNOWN
+        assert all(result.status == expected_status for result in results)
+
     print("cli.py cascade smoke tests")
     _check("tier-1 interval verify_once returns VerifyStatus", _t_interval_only)
     _check("cascade with lp_enabled=True dispatches tier-2 on UNKNOWN", _t_cascade_default_config)
     _check("lp_enabled=False skips tier-2", _t_lp_disabled_skips_tier2)
     _check("default bab_max_batch_size=8", _t_bab_max_batch_size_default)
+    _check("cascade shares one deadline across stages and lanes", _t_cascade_shares_deadline)
+    _check("expired LP budget skips BaB", lambda: _t_cascade_shares_deadline(3.0, 8.0, (7.0,)))
+    _check("expired propagation budget skips refinements", lambda: _t_cascade_shares_deadline(11.0, 0.0, ()))
     return 0
 
 

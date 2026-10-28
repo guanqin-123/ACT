@@ -398,6 +398,15 @@ class _LayerGraphBuilder:
         blocks = self._find_bert_encoder_blocks(self.model)
         if not blocks:
             return False
+        embeddings = getattr(self.model, "embeddings", None)
+        input_norm = getattr(embeddings, "LayerNorm", None)
+        pooler = getattr(self.model, "pooler", None)
+        pool_dense = getattr(pooler, "dense", None)
+        pool_activation = getattr(pooler, "activation", None)
+        if pooler is not None and (
+            not isinstance(pool_dense, nn.Linear) or not isinstance(pool_activation, nn.Tanh)
+        ):
+            return False
 
         self._manual_preds = {}
         self._manual_succs = {}
@@ -413,6 +422,12 @@ class _LayerGraphBuilder:
         )
         current_vars = anchor_vars
         current_layer_ids: List[int] = [anchor_id]
+
+        if isinstance(input_norm, nn.Module):
+            current_vars, input_norm_id = self._add_manual_layernorm(
+                input_norm, current_vars, current_shape, current_layer_ids
+            )
+            current_layer_ids = [input_norm_id]
 
         for block in blocks:
             current_vars, current_shape, current_layer_ids = self._build_bert_block(
@@ -456,6 +471,19 @@ class _LayerGraphBuilder:
             current_vars = pooled_vars
             current_shape = (1, int(classifier.in_features))
             current_layer_ids = [pool_id]
+            if pooler is not None:
+                assert isinstance(pool_dense, nn.Linear)
+                current_vars, current_shape, pool_dense_id = self._add_manual_dense(
+                    pool_dense, current_vars, current_shape, current_layer_ids
+                )
+                pool_activation_vars = self._alloc_ids(len(current_vars))
+                pool_activation_id = self._add_manual_layer(
+                    LayerKind.TANH.value,
+                    {"input_shape": current_shape, "output_shape": current_shape},
+                    current_vars, pool_activation_vars, [pool_dense_id],
+                )
+                current_vars = pool_activation_vars
+                current_layer_ids = [pool_activation_id]
             current_vars, current_shape, dense_id = self._add_manual_dense(
                 classifier, current_vars, current_shape, current_layer_ids
             )
@@ -523,106 +551,122 @@ class _LayerGraphBuilder:
         block_output = block_any.output
         seq_len = int(input_shape[1]) if len(input_shape) >= 3 else 1
         hidden_size = int(input_shape[len(input_shape) - 1])
+        num_heads = int(getattr(self_attn, "num_attention_heads", 1))
         head_dim = int(getattr(self_attn, "attention_head_size", hidden_size))
-
-        score_rows: List[int] = []
-        for pos in range(seq_len):
-            q_vars = self._alloc_ids(head_dim)
-            q_id = self._add_manual_layer(
-                LayerKind.MHA_SPLIT.value,
-                self._mha_split_params("query", self_attn.query, pos, None, input_shape, (1, head_dim)),
-                input_vars,
-                q_vars,
-                input_layer_ids,
+        if num_heads <= 0 or head_dim <= 0 or num_heads * head_dim != hidden_size:
+            raise ValueError(
+                f"Transformer attention dimensions require {num_heads} * {head_dim} == {hidden_size}."
             )
-            row_score_ids: List[int] = []
-            row_score_vars: List[int] = []
-            for key_pos in range(seq_len):
-                k_vars = self._alloc_ids(head_dim)
-                k_id = self._add_manual_layer(
+
+        score_rows: Dict[Tuple[int, int], int] = {}
+        for pos in range(seq_len):
+            for head in range(num_heads):
+                q_vars = self._alloc_ids(head_dim)
+                q_id = self._add_manual_layer(
                     LayerKind.MHA_SPLIT.value,
-                    self._mha_split_params("key", self_attn.key, key_pos, None, input_shape, (1, head_dim)),
+                    self._mha_split_params(
+                        "query", self_attn.query, pos, None, head, num_heads, head_dim,
+                        input_shape, (1, head_dim),
+                    ),
                     input_vars,
-                    k_vars,
+                    q_vars,
                     input_layer_ids,
                 )
-                score_vars = self._alloc_ids(1)
-                score_id = self._add_manual_layer(
-                    LayerKind.ATT_SCORES.value,
-                    {
-                        "dk": float(head_dim) ** 0.5,
-                        "q_vars": q_vars,
-                        "k_vars": k_vars,
-                        "q_src": q_id,
-                        "k_src": k_id,
-                        "query_position": pos,
-                        "key_position": key_pos,
-                        "input_shape": (1, head_dim),
-                        "output_shape": (1, 1),
-                    },
-                    q_vars + k_vars,
-                    score_vars,
-                    [q_id, k_id],
+                row_score_ids: List[int] = []
+                row_score_vars: List[int] = []
+                for key_pos in range(seq_len):
+                    k_vars = self._alloc_ids(head_dim)
+                    k_id = self._add_manual_layer(
+                        LayerKind.MHA_SPLIT.value,
+                        self._mha_split_params(
+                            "key", self_attn.key, key_pos, None, head, num_heads, head_dim,
+                            input_shape, (1, head_dim),
+                        ),
+                        input_vars,
+                        k_vars,
+                        input_layer_ids,
+                    )
+                    score_vars = self._alloc_ids(1)
+                    score_id = self._add_manual_layer(
+                        LayerKind.ATT_SCORES.value,
+                        {
+                            "dk": float(head_dim) ** 0.5,
+                            "q_vars": q_vars,
+                            "k_vars": k_vars,
+                            "q_src": q_id,
+                            "k_src": k_id,
+                            "query_position": pos,
+                            "key_position": key_pos,
+                            "input_shape": (1, head_dim),
+                            "output_shape": (1, 1),
+                        },
+                        q_vars + k_vars,
+                        score_vars,
+                        [q_id, k_id],
+                    )
+                    row_score_ids.append(score_id)
+                    row_score_vars.extend(score_vars)
+                if len(row_score_ids) == 1:
+                    softmax_in_vars = row_score_vars
+                    softmax_preds = row_score_ids
+                else:
+                    concat_vars = self._alloc_ids(seq_len)
+                    concat_id = self._add_manual_layer(
+                        LayerKind.CONCAT.value,
+                        {"concat_dim": -1},
+                        row_score_vars,
+                        concat_vars,
+                        row_score_ids,
+                    )
+                    softmax_in_vars = concat_vars
+                    softmax_preds = [concat_id]
+                prob_vars = self._alloc_ids(seq_len)
+                prob_id = self._add_manual_layer(
+                    LayerKind.SOFTMAX.value,
+                    {"axis": -1},
+                    softmax_in_vars,
+                    prob_vars,
+                    softmax_preds,
                 )
-                row_score_ids.append(score_id)
-                row_score_vars.extend(score_vars)
-            if len(row_score_ids) == 1:
-                softmax_in_vars = row_score_vars
-                softmax_preds = row_score_ids
-            else:
-                softmax_in_vars = row_score_vars
-                concat_vars = self._alloc_ids(seq_len)
-                concat_id = self._add_manual_layer(
-                    LayerKind.CONCAT.value,
-                    {"concat_dim": -1},
-                    row_score_vars,
-                    concat_vars,
-                    row_score_ids,
-                )
-                softmax_in_vars = concat_vars
-                softmax_preds = [concat_id]
-            prob_vars = self._alloc_ids(seq_len)
-            prob_id = self._add_manual_layer(
-                LayerKind.SOFTMAX.value,
-                {"axis": -1},
-                softmax_in_vars,
-                prob_vars,
-                softmax_preds,
-            )
-            score_rows.append(prob_id)
+                score_rows[pos, head] = prob_id
 
         context_ids: List[int] = []
         context_vars: List[int] = []
-        for pos, prob_id in enumerate(score_rows):
-            for feature in range(hidden_size):
-                v_vars = self._alloc_ids(seq_len)
-                v_id = self._add_manual_layer(
-                    LayerKind.MHA_SPLIT.value,
-                    self._mha_split_params("value", self_attn.value, None, feature, input_shape, (1, seq_len)),
-                    input_vars,
-                    v_vars,
-                    input_layer_ids,
-                )
-                mix_vars = self._alloc_ids(1)
-                mix_id = self._add_manual_layer(
-                    LayerKind.ATT_MIX.value,
-                    {
-                        "rowsize": seq_len,
-                        "w_vars": self.layers[prob_id].out_vars,
-                        "v_vars": v_vars,
-                        "w_src": prob_id,
-                        "v_src": v_id,
-                        "query_position": pos,
-                        "feature": feature,
-                        "input_shape": (1, seq_len),
-                        "output_shape": (1, 1),
-                    },
-                    self.layers[prob_id].out_vars + v_vars,
-                    mix_vars,
-                    [prob_id, v_id],
-                )
-                context_ids.append(mix_id)
-                context_vars.extend(mix_vars)
+        for pos in range(seq_len):
+            for head in range(num_heads):
+                prob_id = score_rows[pos, head]
+                for feature in range(head_dim):
+                    v_vars = self._alloc_ids(seq_len)
+                    v_id = self._add_manual_layer(
+                        LayerKind.MHA_SPLIT.value,
+                        self._mha_split_params(
+                            "value", self_attn.value, None, feature, head, num_heads, head_dim,
+                            input_shape, (1, seq_len),
+                        ),
+                        input_vars,
+                        v_vars,
+                        input_layer_ids,
+                    )
+                    mix_vars = self._alloc_ids(1)
+                    mix_id = self._add_manual_layer(
+                        LayerKind.ATT_MIX.value,
+                        {
+                            "rowsize": seq_len,
+                            "w_vars": self.layers[prob_id].out_vars,
+                            "v_vars": v_vars,
+                            "w_src": prob_id,
+                            "v_src": v_id,
+                            "query_position": pos,
+                            "feature": head * head_dim + feature,
+                            "input_shape": (1, seq_len),
+                            "output_shape": (1, 1),
+                        },
+                        self.layers[prob_id].out_vars + v_vars,
+                        mix_vars,
+                        [prob_id, v_id],
+                    )
+                    context_ids.append(mix_id)
+                    context_vars.extend(mix_vars)
         joined_vars = self._alloc_ids(seq_len * hidden_size)
         join_id = self._add_manual_layer(
             LayerKind.MHA_JOIN.value,
@@ -687,18 +731,36 @@ class _LayerGraphBuilder:
         projection: nn.Linear,
         position: Optional[int],
         feature: Optional[int],
+        head: Optional[int],
+        num_heads: int,
+        head_dim: int,
         input_shape: Tuple[int, ...],
         output_shape: Tuple[int, ...],
     ) -> Dict[str, Any]:
+        weight = projection.weight.detach()
+        bias = projection.bias.detach() if projection.bias is not None else None
+        if head is not None:
+            start = head * head_dim
+            stop = start + head_dim
+            if not 0 <= head < num_heads or stop > weight.shape[0]:
+                raise ValueError(
+                    f"Transformer projection head {head} is outside {num_heads} heads."
+                )
+            weight = weight[start:stop]
+            if bias is not None:
+                bias = bias[start:stop]
         params: Dict[str, Any] = {
             "role": role,
-            "weight": projection.weight.detach(),
+            "weight": weight,
             "hidden_size": int(projection.in_features),
+            "num_heads": num_heads,
+            "head_dim": head_dim,
+            "seq_len": int(input_shape[-2]) if len(input_shape) >= 3 else 1,
             "input_shape": input_shape,
             "output_shape": output_shape,
         }
-        if projection.bias is not None:
-            params["bias"] = projection.bias.detach()
+        if bias is not None:
+            params["bias"] = bias
         if position is not None:
             params["position"] = int(position)
         if feature is not None:
@@ -753,10 +815,16 @@ class _LayerGraphBuilder:
         gamma = getattr(mod, "weight").detach()
         beta = getattr(mod, "bias").detach()
         eps = float(getattr(mod, "variance_epsilon", getattr(mod, "eps", 1e-5)))
+        variant = str(getattr(mod, "variant", "standard"))
+        if variant not in {"standard", "no", "no_var"}:
+            raise ValueError(f"Unsupported LayerNorm variant {variant!r}.")
         out_vars = self._alloc_ids(len(in_vars))
         layer_id = self._add_manual_layer(
             LayerKind.LAYERNORM.value,
-            {"gamma": gamma, "beta": beta, "eps": eps, "input_shape": in_shape, "output_shape": in_shape},
+            {
+                "gamma": gamma, "beta": beta, "eps": eps, "variant": variant,
+                "input_shape": in_shape, "output_shape": in_shape,
+            },
             in_vars,
             out_vars,
             pred_ids,

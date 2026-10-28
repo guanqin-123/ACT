@@ -277,6 +277,7 @@ jobs:
       - name: BaB branching — BaBSR / FSB
         run: |
           cd ${{ github.workspace }}
+          coverage run -p -m act.config.backend_cli --self-test
           coverage run -p -m act.back_end.bab.bab
           for method in babsr fsb; do
             coverage run -p -m act.pipeline --verify vnnlib --category acasxu_2023 --max-instances 1 \
@@ -379,6 +380,12 @@ jobs:
           coverage run -p -m act.back_end --verify \
             --network "$ACT_NETS_DIR/mlp_plain_3x8_64x64_3962224133.json" \
             --solver dual --bab --bab-preset climb --bab-max-batch-size 16 \
+            --bab-max-depth 14 --bab-max-subproblems 250 --timeout 600 --verbose
+          coverage run -p -m act.back_end --verify \
+            --network "$ACT_NETS_DIR/mlp_plain_3x8_64x64_3962224133.json" \
+            --solver dual --bab --bab-preset climb --bab-max-batch-size 16 \
+            --bab-child-n-iters 1 --bab-presolve-time-fraction 0.5 \
+            --no-bab-climb-coarsening-enabled --no-bab-climb-propagation-enabled \
             --bab-max-depth 14 --bab-max-subproblems 250 --timeout 600 --verbose
           for preset in climb climb_refined; do
             coverage run -p -m act.back_end --verify \
