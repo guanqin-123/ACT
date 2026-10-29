@@ -986,13 +986,15 @@ class ClimbSession:
         self._delta_abs = config.climb_delta_abs
         self._delta_rel = config.climb_delta_rel
         self._recheck_k = config.climb_recheck_k
+        self._terminal_cores = config.terminal_lp_enabled and config.climb_terminal_cores
         self._propagate_core_chunk = config.climb_propagate_core_chunk
         self._refresh_mode = config.root_bounds_reuse
         self._lin_support_refinement = config.climb_lin_support_refinement
         self._refresh_rows_cap = config.per_subproblem_refine_rows_cap
         self._forward_lin_max_perturbed = (dual_config or DualConfig()).forward_lin_max_perturbed
         from act.back_end.verifier import gather_input_spec_layers, seed_from_input_specs
-        self._root_bounds = seed_from_input_specs(gather_input_spec_layers(net))
+        root = seed_from_input_specs(gather_input_spec_layers(net))
+        self._root_bounds = Bounds(root.lb.clone(), root.ub.clone())
         self.codec = LiteralCodec.from_net(net)
         self.library = CoreLibrary(config.climb_max_cores, track_complements=self._complement_bounding)
         self.metrics = ClimbMetrics(enabled=True, library=self.library)
@@ -1311,6 +1313,76 @@ class ClimbSession:
             self.learn(candidate, result.lane_solution().statuses, result, count, allow_complements=False)
         return count
 
+    def learn_terminal(self, batch: SubproblemBatch, *, deadline: float) -> None:
+        """Admit LP cores only after fresh root-domain, decision-only replay.
+
+        The caller has certified these lanes, but that proof may use implied
+        phases or a smaller input box. Neither is evidence for a global core.
+        Every deletion consumes a bounded recheck and earns its own LP proof.
+        """
+        if not self._terminal_cores or batch.decision_literals is None:
+            return
+        root_lb, root_ub = self._root_bounds.lb.flatten(1), self._root_bounds.ub.flatten(1)
+        same_domain = (batch.lb == root_lb).all(1) & (batch.ub == root_ub).all(1)
+        rows = torch.where(same_domain)[0]
+        if not rows.numel() or time.monotonic() >= deadline:
+            return
+        from act.back_end.solver.terminal_lp import solve_terminal_batch
+
+        literals = batch.decision_literals.index_select(0, rows).clone()
+
+        def replay(candidate: torch.Tensor) -> torch.Tensor:
+            """Rebuild the LP without conditioned bounds or implied signs."""
+            count = candidate.shape[0]
+            proof_batch = SubproblemBatch.from_bounds(Bounds(
+                self._root_bounds.lb.expand(count, *self._root_bounds.lb.shape[1:]),
+                self._root_bounds.ub.expand(count, *self._root_bounds.ub.shape[1:]),
+            ))
+            _replace_literal_assignments(proof_batch, candidate, self.codec)
+            started = time.perf_counter()
+            result = solve_terminal_batch(
+                self._net,
+                Bounds(
+                    proof_batch.lb.reshape(count, *self._root_bounds.lb.shape[1:]),
+                    proof_batch.ub.reshape(count, *self._root_bounds.ub.shape[1:]),
+                ),
+                proof_batch.split_signs, deadline=deadline,
+            )
+            self.metrics.recheck_calls += 1
+            self.metrics.recheck_row_passes += count
+            self.metrics.recheck_time_s += time.perf_counter() - started
+            return torch.tensor(
+                [result.has_lp_certificate(i) for i in range(count)],
+                device=candidate.device, dtype=torch.bool,
+            )
+
+        valid = replay(literals)
+        retained = literals[valid].clone()
+        if not retained.shape[0]:
+            return
+        self.metrics.core_literals_original += int((retained != 0).sum())
+        started = time.perf_counter()
+        # Unlike dual replay there is no per-literal cost budget. The existing
+        # explicit recheck budget bounds actual LP deletion attempts.
+        if self._coarsening_enabled:
+            attempts = 0
+            for slot in range(retained.shape[1]):
+                if attempts >= self._recheck_k or time.monotonic() >= deadline:
+                    break
+                active = torch.where(retained[:, slot] != 0)[0]
+                active = active[:self._recheck_k - attempts]
+                if not active.numel():
+                    continue
+                candidate = retained.index_select(0, active).clone()
+                candidate[:, slot] = 0
+                passing = replay(candidate)
+                retained[active[passing]] = candidate[passing]
+                self.metrics.coarsen_replay_fallbacks += int((~passing).sum())
+                attempts += active.numel()
+        self.metrics.coarsen_time_s += time.perf_counter() - started
+        self.metrics.core_literals_retained += int((retained != 0).sum())
+        self.metrics.cores_inserted += self.library.insert(retained)
+
     def steer_scores(self, scores: BranchingScores) -> BranchingScores:
         """Bias finite branching candidates by core frequency, never add facts."""
         if not self._steer or self.library.core_count == 0:
@@ -1460,19 +1532,192 @@ if __name__ == "__main__":
     from unittest.mock import patch
 
     from act.back_end.dual_tf.tf_forward import compute_forward_bounds
+    from act.back_end.bab.violation import (
+        _forward_for_violation_check, clear_violation_check_module_cache,
+    )
+    from act.back_end.core import Layer
     from act.back_end.net_factory import LAYER_TESTING_SPECS, NetFactory
+    from act.back_end.solver.milp_escalate import solve_milp
     from act.back_end.solver.solver_dual import DualSolver
+    from act.back_end.solver.terminal_lp import solve_terminal_batch
     from act.config.config import BackendConfig, DualConfig
     from act.front_end.specs import OutputSpec
     from act.util.device_manager import initialize_device
+    from act.util.stats import VerifyStatus
 
     initialize_device("cpu", "float64")
+
+    def _alias_regression_net(alias: bool, unsafe: bool, *, identity: bool = False) -> Net:
+        """Encode relu(x)-x, or a supported identity alias with repeated operands."""
+        value = torch.ones(1, 1, device=get_default_device(), dtype=get_default_dtype())
+        post = 1 if alias else 2
+        right = post if identity else 0
+        spec = OutputSpec(
+            OutKind.UNSAFE_LINEAR if unsafe else OutKind.LINEAR_LE,
+            c=-value if unsafe else value.flatten(),
+            d=value.flatten() * -.5 if unsafe else value.new_tensor(.25),
+        )
+        layers = [
+            Layer(0, "INPUT", {"shape": (1, 1), "dtype": str(value.dtype)}, [], [0]),
+            Layer(1, "INPUT_SPEC", {"kind": "BOX", "lb": -value, "ub": value}, [0], [0]),
+            Layer(2, "DENSE", {
+                "weight": value, "bias": value.new_zeros(1),
+                "in_features": 1, "out_features": 1,
+            }, [0], [1]),
+            Layer(3, "FLATTEN" if identity else "RELU", {}, [1], [post]),
+            Layer(4, "SUB", {"x_vars": [post], "y_vars": [right]}, [post, right], [post + 1]),
+            Layer(5, "ASSERT", spec.encode_linear(1, 1, value.device, value.dtype), [post + 1], []),
+        ]
+        return Net(
+            layers,
+            {0: [], 1: [0], 2: [1], 3: [2], 4: [3, 3 if identity else 1], 5: [4]},
+            {0: [1], 1: [2] if identity else [2, 4], 2: [3],
+             3: [4, 4] if identity else [4], 4: [5], 5: []},
+        )
+
+    # B3: proof-variable reuse must not erase the concrete x=-1, y=1 witness,
+    # certify either property, or admit an empty global terminal core.
+    for alias in (False, True):
+        for unsafe in (False, True):
+            clear_violation_check_module_cache()
+            alias_net = _alias_regression_net(alias, unsafe)
+            alias_box = Bounds(
+                alias_net.layers[1].params["lb"], alias_net.layers[1].params["ub"],
+            )
+            concrete = _forward_for_violation_check(alias_net, alias_box.lb)
+            assert alias_box.lb.item() == -1. and concrete.item() == 1.
+            assert torch.equal(concrete, torch.relu(alias_box.lb) - alias_box.lb)
+            for affine in (False, True):
+                result = solve_terminal_batch(alias_net, alias_box, prefer_affine=affine)
+                assert result.statuses == (
+                    VerifyStatus.UNKNOWN if alias else VerifyStatus.FALSIFIED,
+                ), (alias, unsafe, affine, result)
+                assert not result.has_lp_certificate(0) and result.certificates == ((),)
+                if alias:
+                    assert result.reasons == ("unsupported_variable_alias:3",)
+            alias_session = ClimbSession(
+                BaBConfig(terminal_lp_enabled=True), alias_net,
+                OutKind.UNSAFE_LINEAR if unsafe else OutKind.LINEAR_LE,
+            )
+            alias_lane = SubproblemBatch.from_bounds(alias_box)
+            alias_lane.decision_literals = torch.empty(
+                (1, 0), dtype=torch.long, device=alias_box.lb.device,
+            )
+            alias_session.learn_terminal(alias_lane, deadline=time.monotonic() + 30.)
+            assert alias_session.library.core_count == 0
+            assert alias_session.library.pack(alias_box.lb.device).shape[0] == 0
+            if unsafe:
+                exact = solve_milp(
+                    alias_net, BaBConfig(milp_escalation=True),
+                    deadline=time.monotonic() + 30.,
+                )
+                reason = exact.metadata["milp_escalation"]["reason"]
+                assert "certificate_kind" not in exact.metadata
+                if alias:
+                    assert exact.status == VerifyStatus.UNKNOWN, exact
+                    assert reason == "unsupported: unsupported_variable_alias:3"
+                elif reason == "unavailable" or reason.startswith("license_unavailable"):
+                    print(f"  SKIP  B3 real MILP control: {reason}")
+                else:
+                    assert exact.status == VerifyStatus.FALSIFIED, exact
+                    assert exact.counterexample is not None
+                    assert (_forward_for_violation_check(alias_net, exact.counterexample) >= .5).all()
+
+    # INPUT_SPEC and FLATTEN may preserve variable IDs; SUB(x, x) is supported.
+    clear_violation_check_module_cache()
+    identity_net = _alias_regression_net(True, False, identity=True)
+    identity_box = Bounds(
+        identity_net.layers[1].params["lb"], identity_net.layers[1].params["ub"],
+    )
+    assert _forward_for_violation_check(identity_net, identity_box.lb).item() == 0.
+    for affine in (False, True):
+        identity_result = solve_terminal_batch(identity_net, identity_box, prefer_affine=affine)
+        assert identity_result.statuses == (VerifyStatus.CERTIFIED,), identity_result
+        assert identity_result.has_lp_certificate(0)
+    clear_violation_check_module_cache()
+
     with TemporaryDirectory(prefix="act-climb-admission-") as directory:
         factory = NetFactory(BackendConfig.from_yaml().generation.net_factory,
                              output_dir=directory, write_manifest=False)
         net = factory.create_network("admission", LAYER_TESTING_SPECS["layer_testing_climb_admission"]())
         upper = torch.ones(1, 1, device=get_default_device(), dtype=get_default_dtype())
         lower = -upper
+        from dataclasses import replace
+        terminal_spec = LAYER_TESTING_SPECS["layer_testing_climb_admission"]()
+        terminal_spec["layers"][-1]["params"].update(c=[[1.], [-1.]], d=[.25, 2.])
+        terminal_net = factory.create_network("terminal_admission", terminal_spec)
+        terminal_config = BaBConfig(
+            terminal_lp_enabled=True, climb_terminal_cores=True,
+            climb_coarsening_enabled=True, climb_recheck_k=1,
+        )
+        terminal_session = ClimbSession(terminal_config, terminal_net, OutKind.LINEAR_LE)
+        terminal_lane = SubproblemBatch.from_bounds(Bounds(lower, upper))
+        terminal_lane.decision_literals = torch.tensor([[-1]], device=upper.device)
+        terminal_lid = terminal_session.codec.layer_ids[0]
+        terminal_lane.split_signs = {terminal_lid: -upper.reshape(1, 1, 1).expand(1, 2, 1)}
+        terminal_deadline = time.monotonic() + 60
+        with patch(
+            "act.back_end.solver.terminal_lp.solve_terminal_batch",
+            wraps=solve_terminal_batch,
+        ) as terminal_spy:
+            terminal_session.learn_terminal(terminal_lane, deadline=terminal_deadline)
+        assert terminal_spy.call_count == 2
+        assert all("reference_bounds" not in call.kwargs for call in terminal_spy.call_args_list)
+        assert torch.equal(terminal_session.library.pack(upper.device), terminal_lane.decision_literals)
+        assert terminal_session.metrics.coarsen_replay_fallbacks == 1
+        for call in terminal_spy.call_args_list:
+            assert torch.equal(call.args[1].lb, lower) and torch.equal(call.args[1].ub, upper)
+        # The required negative literal cannot be deleted. An implication is
+        # also unavailable to a decision-only replay on the original domain.
+        for implied, child_box in ((True, False), (False, True)):
+            excluded = terminal_lane.select(torch.tensor([0], device=upper.device))
+            if implied:
+                excluded.decision_literals = torch.empty((1, 0), dtype=torch.long, device=upper.device)
+            else:
+                excluded.ub.zero_()
+            rejected = ClimbSession(terminal_config, terminal_net, OutKind.LINEAR_LE)
+            with patch(
+                "act.back_end.solver.terminal_lp.solve_terminal_batch",
+                wraps=solve_terminal_batch,
+            ) as rejected_spy:
+                rejected.learn_terminal(excluded, deadline=terminal_deadline)
+            assert rejected.library.core_count == 0
+            assert rejected_spy.call_count == (0 if child_box else 1)
+        checked = solve_terminal_batch(
+            terminal_net, Bounds(lower, upper), terminal_lane.split_signs,
+            deadline=terminal_deadline,
+        )
+        assert checked.has_lp_certificate(0)
+        for forged in (
+            replace(checked, certificates=((),)),
+            replace(checked, certificates=(tuple(
+                replace(certificate, kind="milp_status_infeasible")
+                for certificate in checked.certificates[0]
+            ),)),
+        ):
+            assert not forged.has_lp_certificate(0)
+            rejected = ClimbSession(terminal_config, terminal_net, OutKind.LINEAR_LE)
+            with patch("act.back_end.solver.terminal_lp.solve_terminal_batch", return_value=forged):
+                rejected.learn_terminal(terminal_lane, deadline=terminal_deadline)
+            assert rejected.library.core_count == 0
+        for changes, calls in (
+            ({"climb_terminal_cores": False}, 0),
+            ({"terminal_lp_enabled": False}, 0),
+            ({"climb_coarsening_enabled": False}, 1),
+            ({"climb_recheck_k": 0}, 1),
+        ):
+            gated = ClimbSession(replace(terminal_config, **changes), terminal_net, OutKind.LINEAR_LE)
+            with patch("act.back_end.solver.terminal_lp.solve_terminal_batch", wraps=solve_terminal_batch) as gated_spy:
+                gated.learn_terminal(terminal_lane, deadline=terminal_deadline)
+            assert gated_spy.call_count == calls
+        with patch("act.back_end.solver.terminal_lp.solve_terminal_batch") as expired_spy:
+            terminal_session.learn_terminal(terminal_lane, deadline=time.monotonic() - 1)
+        expired_spy.assert_not_called()
+        empty_session = ClimbSession(terminal_config, net, OutKind.LINEAR_LE)
+        empty_lane = SubproblemBatch.from_bounds(Bounds(lower, upper))
+        empty_lane.decision_literals = torch.empty((1, 0), dtype=torch.long, device=upper.device)
+        empty_session.learn_terminal(empty_lane, deadline=terminal_deadline)
+        assert empty_session.library.pack(upper.device).shape == (1, 0)
         bounds, frame, _ = compute_forward_bounds(net, lower, upper)
         for tile in (1, 2, 128):
             library = CoreLibrary(8)

@@ -255,7 +255,7 @@ def _verify_net(
     *,
     deadline: Optional[float] = None,
 ) -> tuple[list[Any], Optional[_SkipUnsupported], Optional[int]]:
-    """[BATCHED-API] Verify one already-constructed Net via the 3-tier cascade.
+    """[BATCHED-API] Verify one already-constructed Net via the refinement cascade.
 
     Named BaB presets yield to fields pinned by CLI flags. All stages share
     one deadline; tensor propagation is not preemptible, but its elapsed time
@@ -276,6 +276,11 @@ def _verify_net(
     Tier 2 — LP-batched (verify_lp_batched): runs on UNKNOWN lanes when
               backend_cfg.lp_enabled is True AND active TF propagates LP
               constraints. Skipped under DualTF (see soundness note below).
+    Optional MILP (solve_milp): runs after root LP and before BaB if root
+              results remain UNKNOWN and bab.milp_escalation is enabled.
+              Skipped under HybridZ; unsupported exports remain UNKNOWN.
+              Its budget is capped by milp_timeout and the same shared
+              deadline; BaB receives only the remaining time.
     Tier 3 — BaB (verify_bab_batched): runs on remaining UNKNOWN lanes when
               backend_cfg.bab_enabled is True AND active TF propagates LP
               constraints. bab_max_batch_size=1 disables K-batching.
@@ -368,19 +373,34 @@ def _verify_net(
             if "export_to_batch_problem" not in str(e):
                 raise
 
+    bab_cfg = None
+    milp_metadata: dict[int, dict[str, Any]] = {}
+    if any_unknown and not is_hybridz and (
+        backend_cfg.bab.milp_escalation
+        or (backend_cfg.bab_enabled and time.monotonic() < stop_at)
+    ):
+        bab_cfg = _resolve_bab_config(
+            backend_cfg, explicit_bab_fields or set(), is_dual=is_dual,
+        )
+        if bab_cfg.milp_escalation:
+            # Optional import: default commands do not load either numerical
+            # escalation owner or gurobipy through this gate.
+            from act.back_end.solver.milp_escalate import solve_milp
+
+            attempt = solve_milp(net, bab_cfg, deadline=stop_at)
+            for i, result in enumerate(results):
+                if result.status == VerifyStatus.UNKNOWN:
+                    milp_metadata[i] = attempt.metadata["milp_escalation"]
+                    if len(results) == 1:
+                        results[i] = attempt
+            any_unknown = any(r.status == VerifyStatus.UNKNOWN for r in results)
+
     if any_unknown and backend_cfg.bab_enabled and not is_hybridz and time.monotonic() < stop_at:
         # verify_bab_batched operates on a single-instance (B=1) net and
         # returns one VerifyResult. For multi-sample nets we slice per-lane
         # and dispatch one BaB call per still-UNKNOWN sample.
         from act.back_end.bab.bab import verify_bab_batched as _vbb
         from act.back_end.verifier import slice_net_to_sample
-
-        pinned = explicit_bab_fields or set()
-        bab_cfg = _resolve_bab_config(
-            backend_cfg,
-            pinned,
-            is_dual=is_dual,
-        )
 
         try:
             for i, result in enumerate(results):
@@ -411,10 +431,12 @@ def _verify_net(
 
     if time.monotonic() >= stop_at:
         results = [
-            VerifyResult(VerifyStatus.TIMEOUT)
+            VerifyResult(VerifyStatus.TIMEOUT, metadata=dict(result.metadata))
             if result.status == VerifyStatus.UNKNOWN else result
             for result in results
         ]
+    for i, metadata in milp_metadata.items():
+        results[i].metadata["milp_escalation"] = metadata
     return results, None, n_layers
 
 
@@ -1879,6 +1901,195 @@ def _run_cli_cascade_smoke() -> int:
         expected_status = VerifyStatus.TIMEOUT if clock[0] >= cfg.timeout else VerifyStatus.UNKNOWN
         assert all(result.status == expected_status for result in results)
 
+    def _milp_net(threshold: float = -0.1) -> Net:
+        """Identical unstable ReLUs cancel exactly, but not in their relaxation."""
+        from act.util.device_manager import get_default_device, get_default_dtype
+
+        def tensor(value: Any) -> torch.Tensor:
+            """Construct fixture tensors using the managed device and dtype."""
+            return torch.tensor(value, device=get_default_device(), dtype=get_default_dtype())
+        layers = [
+            Layer(0, "INPUT", {"shape": (1, 1), "dtype": str(get_default_dtype())}, [], [0]),
+            Layer(1, "INPUT_SPEC", {"kind": "BOX", "lb": tensor([[-1.0]]), "ub": tensor([[1.0]])}, [0], [0]),
+            Layer(2, "DENSE", {"weight": tensor([[1.0], [1.0]]), "bias": tensor([0.0, 0.0]),
+                               "in_features": 1, "out_features": 2}, [0], [1, 2]),
+            Layer(3, "RELU", {}, [1, 2], [3, 4]),
+            Layer(4, "DENSE", {"weight": tensor([[1.0, -1.0]]), "bias": tensor([0.0]),
+                               "in_features": 2, "out_features": 1}, [3, 4], [5]),
+            Layer(5, "ASSERT", OutputSpec(
+                kind=OutKind.UNSAFE_LINEAR, c=tensor([[1.0]]), d=tensor([threshold]),
+            ).encode_linear(B=1, n_out=1, device=get_default_device(), dtype=get_default_dtype()), [5], [5]),
+        ]
+        return Net(layers, {i: [i - 1] if i else [] for i in range(6)},
+                   {i: [i + 1] if i < 5 else [] for i in range(6)})
+
+    def _t_milp_config_and_default() -> None:
+        """Defaults and invalid values remain enforced through the public config."""
+        from unittest.mock import patch
+        from act.config.config import BaBConfig
+        from act.util.stats import VerifyResult
+
+        cfg = BackendConfig(solver="torchlp", lp_enabled=False, bab_enabled=False)
+        assert not cfg.bab.milp_escalation and not cfg.bab.terminal_lp_enabled
+        assert cfg.bab.climb_terminal_cores
+        assert (cfg.bab.milp_max_variables, cfg.bab.milp_max_constraints, cfg.bab.milp_timeout) == (2000, 2000, 60.0)
+        assert BackendConfig.from_yaml().bab.milp_escalation is False
+        parser = argparse.ArgumentParser()
+        _add_dataclass_config_args(parser)
+        assert parser.parse_args([]).bab_milp_escalation is None
+        assert parser.parse_args(["--bab-milp-escalation"]).bab_milp_escalation is True
+        assert parser.parse_args(["--no-bab-milp-escalation"]).bab_milp_escalation is False
+        for key, values in (
+            ("milp_timeout", (float("nan"), float("inf"), -1.0, 0.0)),
+            ("milp_max_variables", (True, 1.5, 0)),
+            ("milp_max_constraints", (False, 2.5, -1)),
+        ):
+            for value in values:
+                invalid: dict[str, Any] = {key: value}
+                try:
+                    BaBConfig(**invalid)
+                except ConfigError:
+                    pass
+                else:
+                    raise AssertionError((key, value))
+        import builtins
+        original_import = builtins.__import__
+
+        def checked_import(name: str, *args: Any, **kwargs: Any) -> Any:
+            """Reject numerical-tier imports while escalation is disabled."""
+            assert name not in {"act.back_end.solver.milp_escalate", "act.back_end.solver.terminal_lp"}
+            return original_import(name, *args, **kwargs)
+
+        with patch.object(builtins, "__import__", side_effect=checked_import), patch(
+            "act.back_end.verifier.verify_once", return_value=[VerifyResult(VerifyStatus.UNKNOWN)],
+        ), patch(
+            f"{__name__}._resolve_bab_config",
+            side_effect=AssertionError("Disabled refinement stages must not resolve presets"),
+        ):
+            result, error, _ = _verify_net(_milp_net(), cfg)
+        assert error is None and result[0].status == VerifyStatus.UNKNOWN
+
+    def _t_milp_boundaries() -> None:
+        """Failure paths neither certify nor accept an unchecked incumbent."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from act.back_end.solver import milp_escalate as milp
+        from act.config.config import BaBConfig
+
+        cfg = BaBConfig(milp_escalation=True)
+        net = _milp_net()
+
+        def reason(expected: str, **changes) -> None:
+            result = milp.solve_milp(net, replace(cfg, **changes), deadline=time.monotonic() + 30.0)
+            assert result.status == VerifyStatus.UNKNOWN, result
+            assert result.metadata["milp_escalation"]["reason"].startswith(expected), result
+            assert "certificate_kind" not in result.metadata
+
+        reason("variable_limit", milp_max_variables=1)
+        reason("variable_limit", milp_max_variables=6)
+        reason("constraint_limit", milp_max_constraints=1)
+        expired = milp.solve_milp(net, cfg, deadline=time.monotonic() - 1.0)
+        assert expired.metadata["milp_escalation"]["reason"] == "deadline"
+        for deadline in (float("nan"), float("inf")):
+            assert milp.solve_milp(net, cfg, deadline=deadline).status == VerifyStatus.UNKNOWN
+        for unsupported, expected in (
+            (_build_tiny_net(B=2), "unsupported_batch"),
+            (_build_tiny_net(), "unsupported_output"),
+        ):
+            result = milp.solve_milp(unsupported, cfg, deadline=time.monotonic() + 30.0)
+            assert result.status == VerifyStatus.UNKNOWN and result.metadata["milp_escalation"]["reason"] == expected
+        net.layers[3].kind = "TANH"
+        reason("unsupported")
+        net.layers[3].kind = "RELU"
+        for status in ("infeasible_or_unbounded", "time_limit", "solver_status_12"):
+            with patch.object(milp, "_optimize", return_value=(status, None)):
+                reason(status)
+        for value in (0.0, 2.0, float("nan")):
+            candidate = net.layers[1].params["lb"].new_tensor([[value]])
+            with patch.object(milp, "_optimize", return_value=("optimal", candidate)):
+                reason("invalid_incumbent")
+        with patch.object(milp, "import_gurobi", return_value=(False, None, None)):
+            reason("unavailable")
+
+        class LicenseError(Exception):
+            """A deterministic license failure at the actual environment boundary."""
+            errno = 10009
+
+        def unavailable_env(**kwargs: Any) -> Any:
+            """Fail at environment creation without contacting a license service."""
+            raise LicenseError("missing")
+
+        fake_gp = SimpleNamespace(GurobiError=LicenseError, Env=unavailable_env)
+        fake_grb = SimpleNamespace(Error=SimpleNamespace(NO_LICENSE=10009))
+        with patch.object(milp, "import_gurobi", return_value=(True, fake_gp, fake_grb)):
+            reason("license_unavailable")
+
+    def _t_milp_real() -> None:
+        """Real tiny exact SAT/UNSAT solves, explicitly reporting absent licenses."""
+        from unittest.mock import patch
+        from act.back_end.solver.milp_escalate import solve_milp
+        from act.config.config import BaBConfig
+
+        cfg = BaBConfig(milp_escalation=True)
+
+        def solve(net: Net) -> Any:
+            """Exercise real Gurobi while rejecting whole sparse-block densification."""
+            with patch.object(torch.Tensor, "to_dense", side_effect=AssertionError("MILP matrices must stay sparse")):
+                return solve_milp(net, cfg, deadline=time.monotonic() + 30.0)
+
+        for threshold, expected in ((-0.1, VerifyStatus.CERTIFIED), (0.0, VerifyStatus.FALSIFIED)):
+            result = solve(_milp_net(threshold))
+            metadata = result.metadata["milp_escalation"]
+            if metadata["reason"] == "unavailable" or metadata["reason"].startswith("license_unavailable"):
+                print(f"  SKIP  real tiny MILP: {metadata['reason']}")
+                return
+            assert result.status == expected, result
+            assert metadata["binaries"] == 2
+            if expected == VerifyStatus.CERTIFIED:
+                assert result.metadata["certificate_kind"] == "milp_status_infeasible"
+            else:
+                assert result.counterexample is not None
+        stable = _milp_net(0.0)
+        stable.layers[1].params["lb"].fill_(1.0)
+        stable.layers[1].params["ub"].fill_(2.0)
+        result = solve(stable)
+        assert result.status == VerifyStatus.FALSIFIED and result.metadata["milp_escalation"]["binaries"] == 0
+
+    def _t_milp_cascade() -> None:
+        """Escalation consumes the common deadline and retains reasons after BaB."""
+        from unittest.mock import patch
+        from act.back_end.solver import milp_escalate
+        from act.config.config import BaBConfig
+        from act.util.stats import VerifyResult
+
+        for duration in (1.0, 11.0):
+            clock = [0.0]
+            cfg = BackendConfig(solver="torchlp", timeout=10.0, lp_enabled=False, bab_enabled=True,
+                                bab=BaBConfig(milp_escalation=True))
+
+            def escalation(net: Net, config: BaBConfig, *, deadline: float) -> VerifyResult:
+                """Consume root budget without making a terminal claim."""
+                assert deadline == 10.0 and config.milp_escalation
+                clock[0] += 3.0
+                return VerifyResult(VerifyStatus.UNKNOWN, metadata={"milp_escalation": {"reason": "license_unavailable"}})
+
+            def bab(*args: Any, time_budget_s: float, **kwargs: Any) -> VerifyResult:
+                """Assert the remaining budget and simulate a subsequent result."""
+                assert time_budget_s == 7.0
+                clock[0] += duration
+                return VerifyResult(VerifyStatus.UNKNOWN, metadata={"bab": True})
+
+            with (
+                patch.object(time, "monotonic", side_effect=lambda: clock[0]),
+                patch("act.back_end.verifier.verify_once", return_value=[VerifyResult(VerifyStatus.UNKNOWN)]),
+                patch.object(milp_escalate, "solve_milp", side_effect=escalation),
+                patch("act.back_end.bab.bab.verify_bab_batched", side_effect=bab),
+            ):
+                results, error, _ = _verify_net(_milp_net(), cfg)
+            assert error is None
+            assert results[0].status == (VerifyStatus.UNKNOWN if duration == 1.0 else VerifyStatus.TIMEOUT)
+            assert results[0].metadata == {"bab": True, "milp_escalation": {"reason": "license_unavailable"}}
+
     print("cli.py cascade smoke tests")
     _check("tier-1 interval verify_once returns VerifyStatus", _t_interval_only)
     _check("cascade with lp_enabled=True dispatches tier-2 on UNKNOWN", _t_cascade_default_config)
@@ -1888,6 +2099,10 @@ def _run_cli_cascade_smoke() -> int:
     _check("cascade shares one deadline across stages and lanes", _t_cascade_shares_deadline)
     _check("expired LP budget skips BaB", lambda: _t_cascade_shares_deadline(3.0, 8.0, (7.0,)))
     _check("expired propagation budget skips refinements", lambda: _t_cascade_shares_deadline(11.0, 0.0, ()))
+    _check("MILP defaults, invalid config and default-off imports", _t_milp_config_and_default)
+    _check("MILP unsupported, limits, deadlines, license and incumbent boundaries", _t_milp_boundaries)
+    _check("real tiny exact MILP outcomes (or explicit license skip)", _t_milp_real)
+    _check("MILP reason survives BaB and shared deadline timeout", _t_milp_cascade)
     return 0
 
 

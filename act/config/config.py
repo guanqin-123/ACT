@@ -165,6 +165,19 @@ class BaBConfig:
     """Solver tier for BaB bound computation.
     Valid: 'lp', 'dual', 'dual_alpha', 'dual_alpha_eta'."""
 
+    terminal_lp_enabled: bool = False
+    """Solve candidate-less lanes with independently checked terminal LP evidence."""
+    climb_terminal_cores: bool = True
+    """Learn root-box terminal LP cores after replaying their own decisions."""
+    milp_escalation: bool = False
+    """Try a bounded exact ReLU MILP after unresolved root tiers, before BaB."""
+    milp_max_variables: int = 2000
+    """Maximum variables, including ReLU binaries, in the optional MILP."""
+    milp_max_constraints: int = 2000
+    """Maximum linear constraints in the optional MILP."""
+    milp_timeout: float = 60.0
+    """MILP seconds, additionally capped by the shared remaining deadline."""
+
     climb_enabled: bool = False
     """Enable query-local CLIMB certificate replay and core propagation."""
     climb_coarsening_enabled: bool = True
@@ -334,6 +347,12 @@ class BaBConfig:
             )
         if self.top_k < 0:
             raise ConfigError(f"top_k must be non-negative, got {self.top_k}")
+        for name in ("milp_max_variables", "milp_max_constraints"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ConfigError(f"{name} must be a positive integer")
+        if not math.isfinite(self.milp_timeout) or self.milp_timeout <= 0.0:
+            raise ConfigError("milp_timeout must be finite and positive")
         if not math.isfinite(self.climb_theta) or not 0.0 <= self.climb_theta <= 1.0:
             raise ConfigError("climb_theta must be finite and in [0, 1]")
         if not math.isfinite(self.climb_delta_abs) or self.climb_delta_abs < 0.0:

@@ -334,6 +334,14 @@ backend:
     # dual_alpha_eta = optimized alpha and split multipliers (eta). See dual:.
     solver_tier: "lp"
 
+    # -- Terminal evidence and optional exact escalation ------------------
+    terminal_lp_enabled: false    # candidate-less lanes: checked LP certificates
+    climb_terminal_cores: true    # root-box cores replayed on their own decisions
+    milp_escalation: false        # optional exact ReLU solve before BaB; lazy import
+    milp_max_variables: 2000      # includes unstable-ReLU binary variables
+    milp_max_constraints: 2000    # includes exact-ReLU and property constraints
+    milp_timeout: 60.0            # seconds, capped by the shared remaining deadline
+
     # -- CLIMB certificate reuse (ReLU neuron branching only) ---------------
     climb_enabled: false          # enable CLIMB (see bab_presets.climb above)
     # Ablation gates default on, preserving the existing CLIMB algorithm.

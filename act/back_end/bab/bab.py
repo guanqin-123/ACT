@@ -37,6 +37,7 @@ from act.config.config import (
 from act.back_end.bab.node import (
     SubproblemBatch,
     slice_branching_state,
+    split_input,
     split_neurons,
 )
 from act.back_end.bab.climb import ClimbSession
@@ -238,6 +239,14 @@ def _assert_multi_split_invariants(
         f"(k_requested={requested}, k_used={used}, active_k={active_k}, "
         f"waves={waves}, clamped_waves={clamped}, starved_waves={starved})"
     )
+
+
+def _terminal_input_axes(batch: SubproblemBatch) -> tuple[torch.Tensor, torch.Tensor]:
+    """Choose only cuts whose midpoint is finite and strictly inside the box."""
+    midpoint = (batch.lb + batch.ub) / 2
+    valid = torch.isfinite(midpoint) & (midpoint > batch.lb) & (midpoint < batch.ub)
+    widths = batch.widths().masked_fill(~valid, -torch.inf)
+    return valid.any(1), widths.argmax(1)
 
 
 def _solve_dual_batch(
@@ -557,10 +566,19 @@ def verify_bab_batched(
         "multi_split_clamped_wave_count": 0,
         "multi_split_lane_starved_count": 0,
     }
+    terminal_stats: Dict[str, Any] = {
+        "terminal_lp_calls": 0,
+        "terminal_lp_lanes": 0,
+        "terminal_lp_certified": 0,
+        "terminal_input_fallback_lanes": 0,
+        "terminal_retired_lanes": 0,
+        "terminal_failure_reasons": {},
+    } if config.terminal_lp_enabled else {}
 
     def _branching_metadata() -> Dict[str, Any]:
         _assert_multi_split_invariants(multi_split_stats)
         meta: Dict[str, Any] = dict(multi_split_stats)
+        meta.update(terminal_stats)
         meta["bounding_top_k_effective"] = int(getattr(pool, "k", 0))
         if _witness_residual_branching_active(config):
             meta["witness_residual_fallback_count"] = int(getattr(brancher, "fallback_count", 0))
@@ -788,7 +806,30 @@ def verify_bab_batched(
 
     any_dropped_max_depth = False
     any_retired_no_relu_candidate = False
+    any_retired_terminal = False
     _last_input_widths: Optional[list[float]] = None
+
+    def _enqueue_children(
+        parents: SubproblemBatch, children: SubproblemBatch, parent_index: torch.Tensor,
+    ) -> None:
+        """Share provenance, frontier caps and CLIMB accounting for every split."""
+        nonlocal node_counter, any_dropped_frontier_cap
+        if provenance:
+            assert parents.node_id is not None
+            children.parent_id = parents.node_id.index_select(
+                0, parent_index.to(parents.node_id.device),
+            )
+            nc = children.batch_size
+            children.node_id = torch.arange(
+                node_counter, node_counter + nc, device=children.lb.device, dtype=torch.long,
+            )
+            node_counter += nc
+        pool.push(children)
+        if climb is not None:
+            climb.after_children(children.batch_size, len(pool))
+        if frontier_cap > 0 and len(pool) > frontier_cap:
+            if pool.evict_to(frontier_cap) > 0:
+                any_dropped_frontier_cap = True
 
     def _retire_lanes(
         keep: torch.Tensor,
@@ -1026,6 +1067,90 @@ def verify_bab_batched(
             if climb is not None:
                 unresolved, kept_rows = climb.before_split(cast(TopKBounding, pool), unresolved)
                 unresolved_idx = unresolved_idx.index_select(0, kept_rows)
+            if config.terminal_lp_enabled and unresolved.batch_size:
+                from act.back_end.solver.terminal_lp import solve_terminal_batch
+
+                terminal_bounds, terminal_nu = slice_branching_state(
+                    bounds_dict_for_branching, nu_per_layer_for_branching,
+                    unresolved_idx, k_actual,
+                )
+                has_candidate = lanes_with_relu_candidates(
+                    unresolved, terminal_bounds, terminal_nu,
+                )
+                terminal_rows = torch.where(~has_candidate)[0]
+                if terminal_rows.numel():
+                    terminal_batch = unresolved.select(terminal_rows)
+                    terminal_count = terminal_batch.batch_size
+                    terminal_result = solve_terminal_batch(
+                        net, Bounds(
+                            terminal_batch.lb.reshape(terminal_count, *input_shape),
+                            terminal_batch.ub.reshape(terminal_count, *input_shape),
+                        ),
+                        terminal_batch.split_signs, deadline=run_started + budget_s,
+                    )
+                    terminal_stats["terminal_lp_calls"] += 1
+                    terminal_stats["terminal_lp_lanes"] += terminal_count
+                    proved = torch.tensor(
+                        [terminal_result.has_lp_certificate(i) for i in range(terminal_count)],
+                        device=batch.lb.device, dtype=torch.bool,
+                    )
+                    n_unsat += int(proved.sum())
+                    terminal_stats["terminal_lp_certified"] += int(proved.sum())
+                    for local, status in enumerate(terminal_result.statuses):
+                        if status == VerifyStatus.FALSIFIED:
+                            lane = int(unresolved_idx[terminal_rows[local]])
+                            if trace is not None:
+                                trace.append(_trace_row(
+                                    k_actual, _pool_before, n_unsat, branched_lanes,
+                                    lane, batch_max_depth,
+                                ))
+                            return VerifyResult(
+                                VerifyStatus.FALSIFIED,
+                                counterexample=terminal_result.witnesses[local].detach().cpu().clone(),
+                                metadata={
+                                    "nodes": processed + k_actual, "iterations": iteration,
+                                    "lane": lane, "K": k_actual, "nodes_minted": node_counter,
+                                    "resolved_by": "terminal_lp",
+                                    "any_dropped_frontier_cap": any_dropped_frontier_cap,
+                                    **_branching_metadata(),
+                                },
+                            )
+                    if climb is not None and bool(proved.any()):
+                        climb.learn_terminal(
+                            terminal_batch.select(torch.where(proved)[0]),
+                            deadline=run_started + budget_s,
+                        )
+                    splittable, axes = _terminal_input_axes(terminal_batch)
+                    fallback = (~proved & splittable
+                                & (terminal_batch.depths < int(config.max_depth)))
+                    if _remaining() <= 0:
+                        fallback.fill_(False)
+                    fallback_rows = torch.where(fallback)[0]
+                    if fallback_rows.numel():
+                        fallback_batch = terminal_batch.select(fallback_rows)
+                        fallback_children, fallback_parents = split_input(
+                            fallback_batch, axes.index_select(0, fallback_rows),
+                        )
+                        _enqueue_children(fallback_batch, fallback_children, fallback_parents)
+                        branched_lanes += fallback_batch.batch_size
+                        terminal_stats["terminal_input_fallback_lanes"] += fallback_batch.batch_size
+                    for local in torch.where(~proved & ~fallback)[0].tolist():
+                        any_retired_terminal = True
+                        terminal_stats["terminal_retired_lanes"] += 1
+                        failure = terminal_result.reasons[local] or "unproved_terminal"
+                        if _remaining() <= 0:
+                            failure += ":deadline_exhausted"
+                        elif terminal_batch.depths[local] >= int(config.max_depth):
+                            failure += ":max_depth"
+                        elif not bool(splittable[local]):
+                            failure += ":input_unsplittable"
+                        failures = terminal_stats["terminal_failure_reasons"]
+                        failures[failure] = failures.get(failure, 0) + 1
+                        if climb is not None:
+                            climb.retire_lanes_without_relu_candidate(1)
+                    keep = torch.where(has_candidate)[0]
+                    unresolved = unresolved.select(keep)
+                    unresolved_idx = unresolved_idx.index_select(0, keep)
             branch_mask = unresolved.depths < int(config.max_depth)
             if bool((~branch_mask).any().item()):
                 any_dropped_max_depth = True
@@ -1230,25 +1355,8 @@ def verify_bab_batched(
 
                 if children is not None:
                     assert branch_batch is not None
-                    branched_lanes = branch_batch.batch_size
-                    if provenance:
-                        pid = branch_batch.node_id
-                        assert pid is not None
-                        children.parent_id = pid.index_select(0, parent_index.to(pid.device))
-                        nc = children.batch_size
-                        children.node_id = torch.arange(
-                            node_counter,
-                            node_counter + nc,
-                            device=children.lb.device,
-                            dtype=torch.long,
-                        )
-                        node_counter += nc
-                    pool.push(children)
-                    if climb is not None:
-                        climb.after_children(children.batch_size, len(pool))
-                    if frontier_cap > 0 and len(pool) > frontier_cap:
-                        if pool.evict_to(frontier_cap) > 0:
-                            any_dropped_frontier_cap = True
+                    branched_lanes += branch_batch.batch_size
+                    _enqueue_children(branch_batch, children, parent_index)
 
         processed += k_actual
 
@@ -1302,6 +1410,7 @@ def verify_bab_batched(
         not any_dropped_max_depth
         and not any_dropped_frontier_cap
         and not any_retired_no_relu_candidate
+        and not any_retired_terminal
         and pool_remaining == 0
     ):
         return VerifyResult(
@@ -1331,7 +1440,11 @@ def verify_bab_batched(
             "nodes_minted": node_counter,
             "any_dropped_frontier_cap": any_dropped_frontier_cap,
             "reason": (
-                "climb_retired_without_relu_candidate"
+                "budget_exhausted_with_unproven_subboxes"
+                if pool_remaining > 0 and (exhausted_time or exhausted_nodes)
+                else "terminal_lp_unproved_retirement"
+                if any_retired_terminal
+                else "climb_retired_without_relu_candidate"
                 if any_retired_no_relu_candidate
                 else "budget_exhausted_with_unproven_subboxes"
             ),
@@ -1743,6 +1856,292 @@ if __name__ == "__main__":
         assert verdict.status == VerifyStatus.UNKNOWN
         assert len(trace) > 1
         assert any(wave["K"] > 1 for wave in trace if isinstance(wave["K"], int))
+
+        # A real candidate-less M=2 network remains UNKNOWN with the legacy
+        # gate and drains through checked LP proofs when the gate is enabled.
+        terminal_config = BaBConfig(
+            solver_tier="dual_alpha_eta", branching_method="babsr",
+            bounding="depth_bound_blend", climb_enabled=True,
+            climb_coarsening_enabled=False, max_depth=4, max_nodes=31,
+        )
+        import sys
+
+        with patch.dict(sys.modules, {"act.back_end.solver.terminal_lp": None}):
+            gate_off = verify_bab_batched(
+                net, DualSolver, terminal_config, max_batch_size=4,
+                dual_config=DualConfig(n_iters=0),
+            )
+        assert gate_off.status == VerifyStatus.UNKNOWN
+        assert gate_off.metadata["reason"] == "climb_retired_without_relu_candidate"
+        assert "terminal_lp_calls" not in gate_off.metadata
+        for climb_enabled in (False, True):
+            terminal_trace: List[Dict[str, Any]] = []
+            gate_on = verify_bab_batched(
+                net, DualSolver, replace(
+                    terminal_config, terminal_lp_enabled=True, climb_enabled=climb_enabled,
+                ),
+                max_batch_size=4, dual_config=DualConfig(n_iters=0), trace=terminal_trace,
+            )
+            assert gate_on.status == VerifyStatus.CERTIFIED, gate_on.metadata
+            assert gate_on.metadata["terminal_lp_certified"] > 0
+            assert gate_on.metadata["iterations"] == len(terminal_trace)
+            assert all(len(row) == 10 for row in terminal_trace)
+            assert sum(row["K"] for row in terminal_trace) == gate_on.metadata["nodes"]
+        from act.back_end.solver.terminal_lp import solve_terminal_batch
+        import numpy as np
+        from scipy import sparse
+        from types import SimpleNamespace
+        from act.back_end.solver import terminal_lp as terminal_lp_module
+
+        # Concrete ADD supports three operands, but the reused exporter is
+        # binary. A valid Net must not certify a different, truncated graph.
+        from act.back_end.bab.violation import _forward_for_violation_check
+        from act.back_end.solver.milp_escalate import solve_milp
+
+        add_box = Bounds(upper.new_zeros((1, 1)), upper.new_ones((1, 1)))
+        add_layers = [
+            Layer(0, "INPUT", {"shape": (1, 1), "dtype": str(upper.dtype)}, [], [0]),
+            Layer(1, "INPUT_SPEC", {"kind": "BOX", "lb": add_box.lb, "ub": add_box.ub}, [0], [0]),
+            *[Layer(i, "DENSE", {
+                "weight": upper.new_ones((1, 1)), "bias": upper.new_zeros(1),
+                "in_features": 1, "out_features": 1,
+            }, [0], [i - 1]) for i in (2, 3, 4)],
+            Layer(5, "ADD", {"x_vars": [1], "y_vars": [2]}, [1, 2, 3], [4]),
+            Layer(6, "ASSERT", OutputSpec(
+                OutKind.LINEAR_LE, c=upper.new_tensor([1.]), d=upper.new_tensor(2.5),
+            ).encode_linear(1, 1, upper.device, upper.dtype), [4], []),
+        ]
+        add_preds = {0: [], 1: [0], 2: [1], 3: [1], 4: [1], 5: [2, 3, 4], 6: [5]}
+        add_succs = {0: [1], 1: [2, 3, 4], 2: [5], 3: [5], 4: [5], 5: [6], 6: []}
+        add_net = Net(add_layers, add_preds, add_succs)
+        assert _forward_for_violation_check(add_net, add_box.ub).item() == 3.
+        for prefer_affine in (False, True):
+            rejected_add = solve_terminal_batch(add_net, add_box, prefer_affine=prefer_affine)
+            assert rejected_add.statuses == (VerifyStatus.UNKNOWN,), rejected_add.statuses
+            assert "unsupported_operand" in rejected_add.reasons[0]
+        unsafe_add = Net([
+            *add_layers[:-1], replace(add_layers[-1], params=OutputSpec(
+                OutKind.UNSAFE_LINEAR, c=upper.new_tensor([[-1.]]), d=upper.new_tensor([-2.5]),
+            ).encode_linear(1, 1, upper.device, upper.dtype)),
+        ], add_preds, add_succs)
+        rejected_milp = solve_milp(
+            unsafe_add, BaBConfig(milp_escalation=True), deadline=time.monotonic() + 30,
+        )
+        assert rejected_milp.status == VerifyStatus.UNKNOWN
+        assert not rejected_milp.metadata["milp_escalation"]["attempted"]
+        for predecessors, inputs in (([2, 3], [1, 2]), ([2, 2], [1, 1])):
+            binary_layers = [
+                *add_layers[:5], replace(add_layers[5], in_vars=inputs, params={
+                    "x_vars": inputs[:1], "y_vars": inputs[1:],
+                }), add_layers[-1],
+            ]
+            binary_preds = {**add_preds, 5: predecessors}
+            binary_succs = {**add_succs, 2: [5], 3: [5] if 3 in predecessors else [], 4: []}
+            binary_net = Net(binary_layers, binary_preds, binary_succs)
+            assert _forward_for_violation_check(binary_net, add_box.ub).item() == 2.
+            for prefer_affine in (False, True):
+                assert solve_terminal_batch(
+                    binary_net, add_box, prefer_affine=prefer_affine,
+                ).has_lp_certificate(0)
+            malformed = Net([
+                *binary_layers[:5], replace(binary_layers[5], params={
+                    "x_vars": [3], "y_vars": inputs[1:],
+                }), binary_layers[-1],
+            ], binary_preds, binary_succs)
+            assert solve_terminal_batch(malformed, add_box).statuses == (VerifyStatus.UNKNOWN,)
+
+        # Residual proofs, not optimizer labels/objectives, own certification.
+        problem = terminal_lp_module._SparseLP(
+            sparse.csr_matrix((0, 1)), np.empty(0),
+            sparse.csr_matrix([[1.]]), np.array([1.]),
+            np.array([-1.]), np.array([1.]),
+        )
+        objective = np.array([-1.])
+        proof_args = (
+            problem.eq, problem.eq_rhs, problem.le, problem.le_rhs,
+            problem.lb, problem.ub, objective, np.empty(0),
+        )
+        corrected = terminal_lp_module.certified_lower_bound(*proof_args, np.array([-1.]))
+        assert corrected is not None and corrected <= -1.
+        for invalid_dual in (1., float("nan"), float("inf")):
+            assert terminal_lp_module.certified_lower_bound(
+                *proof_args, np.array([invalid_dual]),
+            ) is None
+        forged_optimizer = SimpleNamespace(
+            status=0, fun=1e99, eqlin=SimpleNamespace(marginals=np.empty(0)),
+            ineqlin=SimpleNamespace(marginals=np.zeros(1)),
+        )
+        for optimizer_status in (0, 2):
+            forged_optimizer.status = optimizer_status
+            assert terminal_lp_module._certificate(
+                problem, objective, 0., forged_optimizer, "lp_residual",
+                OutKind.LINEAR_LE, upper.new_tensor(1.),
+            ) is None
+        impossible = replace(
+            problem, le=sparse.csr_matrix([[1.], [-1.]]),
+            le_rhs=np.array([-.5, -.5]),
+        )
+        phase_proof = terminal_lp_module._phase_one(impossible, None, upper.new_tensor(1.))
+        assert phase_proof is not None and phase_proof.verify()
+        assert phase_proof.kind == "phase1_residual"
+        assert not replace(phase_proof, le_dual=np.full_like(phase_proof.le_dual, np.nan)).verify()
+        assert not replace(phase_proof, lower_bound=float("inf")).verify()
+        terminal_box = seed_from_input_specs(gather_input_spec_layers(net))
+        twice = Bounds(terminal_box.lb.repeat(2, 1), terminal_box.ub.repeat(2, 1))
+        relu_id = next(layer.id for layer in net.layers if layer.kind == LayerKind.RELU)
+        fixed_phases = {relu_id: twice.lb.new_tensor(
+            [[[1., 1.], [1., 1.]], [[-1., -1.], [-1., -1.]]],
+        )}
+        generic = solve_terminal_batch(net, twice, fixed_phases, prefer_affine=False)
+        affine = solve_terminal_batch(net, twice, fixed_phases)
+        assert bool(generic.certified.all()) and bool(affine.certified.all())
+        assert generic.statuses == affine.statuses
+        assert generic.tiers == ("generic", "generic") and affine.tiers == ("affine", "affine")
+        unsupported = solve_terminal_batch(lp_net, lp_box)
+        assert unsupported.statuses == (VerifyStatus.UNKNOWN,)
+        assert unsupported.reasons == ("unsupported_finite_p_input",)
+        with patch("act.back_end.solver.terminal_lp._solve", side_effect=ImportError("solver unavailable")):
+            no_solver = solve_terminal_batch(net, terminal_box)
+        assert no_solver.statuses == (VerifyStatus.UNKNOWN,)
+        assert no_solver.reasons == ("no_solver",)
+        with patch("act.back_end.solver.terminal_lp._solve", side_effect=TimeoutError("smoke deadline")):
+            timed_out = solve_terminal_batch(net, terminal_box)
+        assert timed_out.statuses == (VerifyStatus.TIMEOUT,) and not bool(timed_out.certified.any())
+
+        real_bound = _solve_dual_batch
+        mixed_seen: List[SubproblemBatch] = []
+
+        def unresolved_bound(**kwargs: Any) -> DualBatchResult:
+            """Withhold main proofs to isolate terminal orchestration paths."""
+            mixed_seen.append(kwargs["batch"])
+            result = real_bound(**kwargs)
+            return replace(
+                result, row_slack=None,
+                solution=replace(
+                    result.solution, statuses=(SolveStatus.UNKNOWN,) * kwargs["k_actual"],
+                ),
+            )
+
+        def mixed_candidates(
+            candidate: SubproblemBatch, bounds: Any, nu: Any,
+        ) -> torch.Tensor:
+            """One mixed K=2 wave: input fallback beside a normal neuron split."""
+            assert nu is not None
+            if candidate.batch_size == 2:
+                assert all(value.shape[0] == 4 for value in nu.values())
+                assert candidate.split_signs is not None
+                assert all(value.shape[1] == 2 for value in candidate.split_signs.values())
+                return torch.tensor([False, True], device=candidate.lb.device)
+            return torch.full(
+                (candidate.batch_size,), bool((candidate.depths == 0).all()),
+                device=candidate.lb.device,
+            )
+
+        def unproved_terminal(*args: Any, **kwargs: Any) -> Any:
+            """Withhold real LP proofs; status alone must not prune a lane."""
+            result = solve_terminal_batch(*args, **kwargs)
+            return replace(
+                result, statuses=(VerifyStatus.CERTIFIED,) * len(result.statuses),
+                certificates=((),) * len(result.statuses),
+                reasons=("withheld_certificate",) * len(result.statuses),
+            )
+
+        mixed_trace: List[Dict[str, Any]] = []
+        with (
+            patch(f"{__name__}._solve_dual_batch", unresolved_bound),
+            patch(f"{__name__}.lanes_with_relu_candidates", mixed_candidates),
+            patch("act.back_end.solver.terminal_lp.solve_terminal_batch", unproved_terminal),
+        ):
+            mixed_result = verify_bab_batched(
+                net, DualSolver, replace(
+                    terminal_config, terminal_lp_enabled=True, provenance_enabled=True,
+                    max_depth=2, max_nodes=7,
+                ), max_batch_size=4, dual_config=DualConfig(n_iters=0), trace=mixed_trace,
+            )
+        assert mixed_result.status == VerifyStatus.UNKNOWN
+        assert mixed_result.metadata["reason"] == "terminal_lp_unproved_retirement"
+        assert mixed_result.metadata["terminal_lp_certified"] == 0
+        assert mixed_result.metadata["terminal_input_fallback_lanes"] == 1
+        assert mixed_trace[1]["branched"] == 2 and mixed_trace[1]["pool_after"] == 4
+        assert mixed_result.metadata["terminal_failure_reasons"] == {"withheld_certificate:max_depth": 4}
+        final_mixed = mixed_seen[-1]
+        assert final_mixed.batch_size == 4 and final_mixed.split_signs is not None
+        narrow = (final_mixed.widths() < 2).any(1)
+        assert int(narrow.sum()) == 2
+        phases = next(iter(final_mixed.split_signs.values()))
+        assert bool((phases[narrow, 0].ne(0).sum(1) == 1).all())
+        assert bool((phases[~narrow, 0].ne(0).sum(1) == 2).all())
+        assert final_mixed.decision_literals is not None
+        assert bool((final_mixed.decision_literals[narrow].ne(0).sum(1) == 1).all())
+        assert final_mixed.node_id is not None and final_mixed.parent_id is not None
+        assert final_mixed.node_id.unique().numel() == 4
+        assert final_mixed.parent_id[narrow].unique().numel() == 1
+        with (
+            patch(f"{__name__}._solve_dual_batch", unresolved_bound),
+            patch(f"{__name__}.lanes_with_relu_candidates", mixed_candidates),
+            patch("act.back_end.solver.terminal_lp.solve_terminal_batch", unproved_terminal),
+        ):
+            budget_with_retirement = verify_bab_batched(
+                net, DualSolver, replace(
+                    terminal_config, terminal_lp_enabled=True, max_depth=1, max_nodes=2,
+                ), max_batch_size=1, dual_config=DualConfig(n_iters=0),
+            )
+        assert budget_with_retirement.status == VerifyStatus.UNKNOWN
+        assert budget_with_retirement.metadata["pool_remaining"] == 1
+        assert budget_with_retirement.metadata["exhausted_budget_nodes"]
+        assert budget_with_retirement.metadata["terminal_retired_lanes"] == 1
+        assert budget_with_retirement.metadata["reason"] == "budget_exhausted_with_unproven_subboxes"
+        # Adjacent floats and point boxes cannot spawn identical children.
+        point = upper.new_tensor([[1.], [0.]])
+        adjacent = torch.nextafter(point, torch.full_like(point, torch.inf))
+        splittable, _ = _terminal_input_axes(SubproblemBatch.from_bounds(Bounds(point, adjacent)))
+        assert not bool(splittable.any())
+        # The terminal owner validates this counterexample on the concrete
+        # original model; the main bound is deliberately withheld.
+        falsified_spec = LAYER_TESTING_SPECS["layer_testing_climb_reuse"]()
+        falsified_spec["layers"][-1]["params"]["d"] = -.1
+        falsified_net = factory.create_network("terminal_falsified", falsified_spec)
+        falsified_trace: List[Dict[str, Any]] = []
+        with (
+            patch(f"{__name__}._solve_dual_batch", unresolved_bound),
+            patch(f"{__name__}.lanes_with_relu_candidates",
+                  side_effect=lambda candidate, *_: torch.zeros(candidate.batch_size, dtype=torch.bool)),
+        ):
+            terminal_sat = verify_bab_batched(
+                falsified_net, DualSolver, replace(terminal_config, terminal_lp_enabled=True),
+                max_batch_size=2, dual_config=DualConfig(n_iters=0), trace=falsified_trace,
+            )
+        assert terminal_sat.status == VerifyStatus.FALSIFIED
+        assert terminal_sat.counterexample is not None
+        assert terminal_sat.metadata["resolved_by"] == "terminal_lp"
+        assert terminal_sat.metadata["iterations"] == len(falsified_trace) == 1
+        assert falsified_trace[0]["falsified_lane"] == terminal_sat.metadata["lane"] == 0
+        deadline_clock = [0.0]
+
+        def expired_terminal(*args: Any, **kwargs: Any) -> Any:
+            """Expire at the terminal boundary without relying on elapsed time."""
+            assert kwargs["deadline"] == 10.
+            kwargs["deadline"] = time.monotonic() - 1
+            result = solve_terminal_batch(*args, **kwargs)
+            deadline_clock[0] = 10.
+            return result
+
+        with (
+            patch(f"{__name__}._monotonic", lambda: deadline_clock[0]),
+            patch(f"{__name__}._solve_dual_batch", unresolved_bound),
+            patch(f"{__name__}.lanes_with_relu_candidates",
+                  side_effect=lambda candidate, *_: torch.zeros(candidate.batch_size, dtype=torch.bool)),
+            patch("act.back_end.solver.terminal_lp.solve_terminal_batch", expired_terminal),
+        ):
+            terminal_timeout = verify_bab_batched(
+                net, DualSolver, replace(terminal_config, terminal_lp_enabled=True),
+                max_batch_size=2, time_budget_s=10., dual_config=DualConfig(n_iters=0),
+            )
+        assert terminal_timeout.status == VerifyStatus.UNKNOWN
+        assert terminal_timeout.metadata["terminal_input_fallback_lanes"] == 0
+        assert terminal_timeout.metadata["exhausted_budget_time"]
+        assert all(reason.endswith(":deadline_exhausted")
+                   for reason in terminal_timeout.metadata["terminal_failure_reasons"])
 
         # Control the clock at solver boundaries, not by sleeping. A root-only
         # deadline must leave the remaining search budget available to children.
