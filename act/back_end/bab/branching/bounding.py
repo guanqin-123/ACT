@@ -67,7 +67,7 @@ from typing import Callable, Dict, List, Literal, Optional, Protocol, Sequence, 
 
 import torch
 
-from act.back_end.bab.node import SubproblemBatch
+from act.back_end.bab.node import SubproblemBatch, _concat_decisions
 from act.back_end.solver.solver_base import SolveStatus
 from act.back_end.solver.solver_dual import (
     AlphaState,
@@ -357,11 +357,15 @@ class TopKBounding(BoundingStrategy):
         self._incremental_alpha: Optional[AlphaState] = None
         self._incremental_eta: Optional[Dict[int, torch.Tensor]] = None
         self._split_signs: Optional[Dict[int, torch.Tensor]] = None
+        self._decision_literals: Optional[torch.Tensor] = None
+        self._cold_rebound = False
 
     def push(self, batch: SubproblemBatch) -> None:
         size_before = len(self)
         n_new = batch.batch_size
         device, dtype = batch.lb.device, batch.lb.dtype
+        alpha = None if self._cold_rebound else batch.incremental_alpha
+        eta = None if self._cold_rebound else batch.incremental_eta
         lower = (
             batch.lower_bound
             if batch.lower_bound is not None
@@ -383,10 +387,11 @@ class TopKBounding(BoundingStrategy):
             self._node_id = batch.node_id.clone() if batch.node_id is not None else None
             self._parent_id = batch.parent_id.clone() if batch.parent_id is not None else None
             self._incremental_alpha = cast(
-                Optional[AlphaState], _clone_alpha_tree(batch.incremental_alpha)
+                Optional[AlphaState], _clone_alpha_tree(alpha)
             )
-            self._incremental_eta = _clone_optional_dict(batch.incremental_eta)
+            self._incremental_eta = _clone_optional_dict(eta)
             self._split_signs = _clone_optional_dict(batch.split_signs)
+            self._decision_literals = batch.decision_literals.clone() if batch.decision_literals is not None else None
             self._assert_push_transition(size_before, n_new)
             return
 
@@ -395,13 +400,14 @@ class TopKBounding(BoundingStrategy):
         assert (self._node_id is None) == (batch.node_id is None)
         assert (self._parent_id is None) == (batch.parent_id is None)
         n_old = prev_lb.shape[0]
+        self._decision_literals = _concat_decisions(self._decision_literals, batch.decision_literals)
         self._incremental_alpha = cast(
             Optional[AlphaState],
             _alpha_tree_concat_lanes(
-                self._incremental_alpha, batch.incremental_alpha, n_old, n_new
+                self._incremental_alpha, alpha, n_old, n_new
             ),
         )
-        self._incremental_eta = _merge_optional_dict(self._incremental_eta, n_old, batch.incremental_eta, n_new)
+        self._incremental_eta = _merge_optional_dict(self._incremental_eta, n_old, eta, n_new)
         self._split_signs = _merge_optional_dict(self._split_signs, n_old, batch.split_signs, n_new)
         self._lb = torch.cat([prev_lb, batch.lb], dim=0)
         self._ub = torch.cat([prev_ub, batch.ub], dim=0)
@@ -468,10 +474,17 @@ class TopKBounding(BoundingStrategy):
         indices = torch.arange(self._lb.shape[0], device=self._lb.device)
         return self._build(indices)
 
-    def replace_all(self, batch: SubproblemBatch) -> None:
-        """Replace the full frontier without scoring or advancing schedules."""
+    def replace_all(self, batch: SubproblemBatch, *, cold_rebound: bool = False) -> None:
+        """Replace without scoring; retain merge-created cold state until drained.
+
+        While cold rebound is pending, later warm pushes also stay cold. This
+        conservative pool-wide policy avoids zero-padding absent alpha without
+        introducing the per-lane presence machinery of the memory planner.
+        """
+        cold_rebound = cold_rebound or self._cold_rebound
         self._clear()
         if batch.batch_size > 0:
+            self._cold_rebound = cold_rebound
             self.push(batch)
 
     def _priority_scores(self) -> torch.Tensor:
@@ -507,6 +520,8 @@ class TopKBounding(BoundingStrategy):
                 if self._parent_id is not None
                 else None
             ),
+            decision_literals=(self._decision_literals.index_select(0, idx)
+                               if self._decision_literals is not None else None),
         )
 
     def _restrict(self, idx: torch.Tensor) -> None:
@@ -514,6 +529,7 @@ class TopKBounding(BoundingStrategy):
         self._lb, self._ub, self._depths = kept.lb, kept.ub, kept.depths
         self._lower_bound, self._parent_margins = kept.lower_bound, kept.parent_margins
         self._node_id, self._parent_id = kept.node_id, kept.parent_id
+        self._decision_literals = kept.decision_literals
         self._incremental_alpha, self._incremental_eta, self._split_signs = (
             kept.incremental_alpha,
             kept.incremental_eta,
@@ -524,6 +540,8 @@ class TopKBounding(BoundingStrategy):
         self._lb = self._ub = self._depths = None
         self._lower_bound = self._parent_margins = None
         self._node_id = self._parent_id = None
+        self._decision_literals = None
+        self._cold_rebound = False
         self._incremental_alpha = self._incremental_eta = self._split_signs = None
 
     def evict_to(self, cap: int) -> int:

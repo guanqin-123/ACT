@@ -70,6 +70,7 @@ class SubproblemBatch:
     lower_bound: Optional[torch.Tensor] = None
     node_id: Optional[torch.Tensor] = None  # [N] long; logical identity
     parent_id: Optional[torch.Tensor] = None  # [N] long; parent's node_id (-1 for root)
+    decision_literals: Optional[torch.Tensor] = None  # [N, S] ordered decisions, never inferred phases
 
     # -- properties ---------------------------------------------------------
 
@@ -122,6 +123,7 @@ class SubproblemBatch:
             lower_bound=_gather_optional_tensor(self.lower_bound, indices),
             node_id=_gather_optional_tensor(self.node_id, indices),
             parent_id=_gather_optional_tensor(self.parent_id, indices),
+            decision_literals=_gather_optional_tensor(self.decision_literals, indices),
         )
 
     def concat(self, other: SubproblemBatch) -> SubproblemBatch:
@@ -154,6 +156,7 @@ class SubproblemBatch:
             lower_bound=_concat_optional_tensor(self.lower_bound, other.lower_bound),
             node_id=_concat_optional_tensor(self.node_id, other.node_id),
             parent_id=_concat_optional_tensor(self.parent_id, other.parent_id),
+            decision_literals=_concat_decisions(self.decision_literals, other.decision_literals),
         )
 
     # -- geometry -----------------------------------------------------------
@@ -220,6 +223,29 @@ def _layer_neuron_count(layer: Layer) -> int:
     return span
 
 
+def _relu_literal_layout(net: Net) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    """One network-wide numbering layout for decisions and the CLIMB codec."""
+    layers = sorted((layer for layer in net.layers if layer.kind == "RELU"), key=lambda layer: layer.id)
+    widths = tuple(_layer_neuron_count(layer) for layer in layers)
+    offsets: list[int] = []
+    total = 0
+    for width in widths:
+        offsets.append(total)
+        total += width
+    return tuple(layer.id for layer in layers), widths, tuple(offsets)
+
+
+def _encode_literal_tensor(
+    table_ids: tuple[int, ...], table_offsets: tuple[int, ...],
+    layer_ids: torch.Tensor, neurons: torch.Tensor, signs: torch.Tensor,
+) -> torch.Tensor:
+    """Encode signed neuron decisions using the shared codec layout."""
+    ids = torch.tensor(table_ids, dtype=torch.long, device=layer_ids.device)
+    offsets = torch.tensor(table_offsets, dtype=torch.long, device=layer_ids.device)
+    indices = torch.searchsorted(ids, layer_ids.to(torch.long))
+    return signs.to(torch.long) * (offsets.index_select(0, indices) + neurons.to(torch.long) + 1)
+
+
 def _gather_optional_dict(
     d: Optional[Dict[int, torch.Tensor]],
     idx: torch.Tensor,
@@ -247,6 +273,19 @@ def _concat_optional_tensor(
     if x is None or y is None:
         return None
     return torch.cat([x, y.to(device=x.device, dtype=x.dtype)], dim=0)
+
+
+def _concat_decisions(
+    x: Optional[torch.Tensor], y: Optional[torch.Tensor]
+) -> Optional[torch.Tensor]:
+    """Pad ordered literal slots without inventing missing provenance."""
+    if (x is None) != (y is None):
+        raise ValueError("cannot concatenate known and missing decision provenance")
+    if x is None or y is None:
+        return None
+    width = max(x.shape[1], y.shape[1])
+    return torch.cat((torch.nn.functional.pad(x, (0, width - x.shape[1])),
+                      torch.nn.functional.pad(y.to(x), (0, width - y.shape[1]))))
 
 
 def _concat_padded_dict(
@@ -310,6 +349,7 @@ def _child_lanes(
         split_signs=_gather_optional_dict(batch.split_signs, parent_index),
         parent_margins=_gather_optional_tensor(batch.parent_margins, parent_index),
         lower_bound=_gather_optional_tensor(batch.lower_bound, parent_index),
+        decision_literals=_gather_optional_tensor(batch.decision_literals, parent_index),
     )
 
 
@@ -423,6 +463,18 @@ def split_neurons(
                 signs[layer_id][rows, :, neuron_selection] = sign_value
 
     children.split_signs = signs
+    if children.decision_literals is not None:
+        layer_ids, _, offsets = _relu_literal_layout(net)
+        selected = _encode_literal_tensor(
+            layer_ids, offsets,
+            top_layers.reshape(-1), top_neurons.reshape(-1),
+            torch.ones(n_lanes * k, dtype=torch.long, device=device),
+        ).reshape(n_lanes, k)
+        bits = (torch.arange(n_children, device=device)[:, None]
+                >> torch.arange(k, device=device)[None]) & 1
+        polarity = torch.where(bits != 0, -first_sign, first_sign).to(torch.long)
+        added = (selected[None] * polarity[:, None]).reshape(children.batch_size, k)
+        children.decision_literals = torch.cat((children.decision_literals, added), dim=1)
     assert children.batch_size == n_children * n_lanes, (
         f"split_neurons: {children.batch_size} children for {n_lanes} lanes x {n_children} sign combinations"
     )

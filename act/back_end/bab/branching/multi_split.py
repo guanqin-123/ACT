@@ -32,7 +32,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 import torch
 
 from act.config.config import BaBConfig, DualConfig
-from act.back_end.bab.branching.branching import SplitDecision
+from act.back_end.bab.branching.branching import BranchingScores, SplitDecision
 from act.back_end.bab.node import (
     SubproblemBatch,
     _gather_optional_dict,
@@ -105,6 +105,7 @@ def _collect_neuron_candidates(
     branch_batch: SubproblemBatch,
     bounds_dict: Dict[int, Bounds],
     nu_per_layer: Dict[int, torch.Tensor],
+    steer: Optional[Callable[[BranchingScores], BranchingScores]] = None,
 ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Per-lane BaBSR scores (area x |nu|) over all splittable neurons.
 
@@ -135,6 +136,10 @@ def _collect_neuron_candidates(
         sc = torch.where(
             amb & torch.isfinite(raw), raw, torch.full_like(area, float("-inf"))
         )
+        if steer is not None:
+            steered = steer(BranchingScores(per_layer={lid: sc})).per_layer
+            assert steered is not None
+            sc = steered[lid]
         cand_scores.append(sc)
         cand_layers.append(torch.full((kb, n), lid, device=device, dtype=torch.long))
         cand_neurons.append(
@@ -246,6 +251,7 @@ def gain_tested_decision(
     input_shape: tuple[int, ...],
     solve_dual: Callable[..., BatchBoundResult],
     n_candidates: int = 3,
+    steer: Optional[Callable[[BranchingScores], BranchingScores]] = None,
 ) -> Optional[SplitDecision]:
     """Pick each lane's split by measured child bounds, not by score proxy."""
     if bounds_dict is None or nu_per_layer is None:
@@ -254,7 +260,7 @@ def gain_tested_decision(
     device = branch_batch.lb.device
 
     candidates = _collect_neuron_candidates(
-        branch_batch, bounds_dict, nu_per_layer
+        branch_batch, bounds_dict, nu_per_layer, steer
     )
     if candidates is None:
         return None
@@ -355,6 +361,7 @@ def _multi_split_from_decision(
     bounds_dict: Optional[Dict[int, Bounds]],
     nu_per_layer: Optional[Dict[int, torch.Tensor]],
     k_levels: int,
+    steer: Optional[Callable[[BranchingScores], BranchingScores]] = None,
 ) -> Optional[Tuple[SubproblemBatch, torch.Tensor]]:
     """Joint top-k neuron split: each lane emits all 2^k sign combinations.
 
@@ -378,7 +385,7 @@ def _multi_split_from_decision(
     """
     if bounds_dict is None or nu_per_layer is None:
         return None
-    cand = _collect_neuron_candidates(batch, bounds_dict, nu_per_layer)
+    cand = _collect_neuron_candidates(batch, bounds_dict, nu_per_layer, steer)
     if cand is None:
         return None
     all_scores, all_layers, all_neurons = cand

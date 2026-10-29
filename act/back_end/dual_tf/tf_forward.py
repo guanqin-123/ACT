@@ -418,6 +418,13 @@ def _box_dense(layer: Layer, lb: torch.Tensor, ub: torch.Tensor) -> Tuple[torch.
     """
     W = layer.params["weight"]
     b = layer.params.get("bias")
+    if layer.params.get("token_wise", False):
+        if lb.shape[1] % W.shape[1]:
+            raise ValueError(f"token-wise DENSE {layer.id}: incompatible input width")
+        shape = lb.shape
+        lb, ub = lb.reshape(-1, W.shape[1]), ub.reshape(-1, W.shape[1])
+    else:
+        shape = None
     lb = _align_batch(lb, W.shape[1])
     ub = _align_batch(ub, W.shape[1])
     centre = (lb + ub) * 0.5
@@ -426,7 +433,10 @@ def _box_dense(layer: Layer, lb: torch.Tensor, ub: torch.Tensor) -> Tuple[torch.
     spread = radius @ W.abs().T
     if b is not None:
         mid = mid + _align(b.flatten(), W.shape[0])
-    return mid - spread, mid + spread
+    lower, upper = mid - spread, mid + spread
+    if shape is not None:
+        lower, upper = lower.reshape(shape[0], -1), upper.reshape(shape[0], -1)
+    return lower, upper
 
 
 def _box_bias(layer: Layer, lb: torch.Tensor, ub: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

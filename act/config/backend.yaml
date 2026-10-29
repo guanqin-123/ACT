@@ -44,8 +44,9 @@ bab_presets:
   # bounding, and unresolved ones before splitting.
   # validate_climb_config raises ConfigError unless solver_tier is
   # dual_alpha_eta, bounding is a TopKBounding pool, branching splits neurons,
-  # root reuse is "none" or "plain", and per_subproblem_refine is "none".
-  # Root-only refinement is safe; split-dependent references are not.
+  # and per_subproblem_refine is "none". Both split-refresh modes are supported:
+  # replay rebuilds retained conditions from a required split-free base.
+  # Conditioned bounds must never substitute for that base.
   climb:
     # Replay needs the alpha/eta dual certificate.
     solver_tier: "dual_alpha_eta"
@@ -298,7 +299,8 @@ backend:
     # -- Intermediate-bound refinement and root-bound reuse (dual tiers) -----
     intermediate_refine: "none"           # root pre-activation refinement: none/auto/all
     intermediate_refine_ratio: 10.0       # auto mode: refine layers wider than ratio x median
-    root_bounds_reuse: "none"             # children reuse root bounds: none/plain/split_refresh
+    root_bounds_reuse: "none"             # none/plain/split_refresh/split_refresh_linear
+    climb_lin_support_refinement: true   # winning halfspaces only in linear refresh
     eta_only_children: false              # children keep the parent's alpha, optimize only eta
     presplit_levels: 0                    # pre-split k root neurons into 2^k sign combinations
     per_subproblem_refine: "none"         # per-subproblem refinement: none/tail/all (needs reuse)
@@ -337,6 +339,10 @@ backend:
     # Ablation gates default on, preserving the existing CLIMB algorithm.
     climb_coarsening_enabled: true  # false admits full replay-certified literal rows
     climb_propagation_enabled: true # false learns cores but does not prune/infer with them
+    climb_merge_enabled: false     # complementary same-domain siblings return to pending
+    climb_complement_bounding: false # one root-domain complement probe per new core
+    climb_steer: false             # core-frequency bias on finite branching scores only
+    climb_presplit_propagation_enabled: true # total propagation gate still overrides this
     climb_theta: 0.0              # fraction of replay slack spent on dropping literals
     # Deletion-budget safety margin: delta = climb_delta_abs + climb_delta_rel * |slack|.
     climb_delta_abs: 0.000000001  # absolute part of delta

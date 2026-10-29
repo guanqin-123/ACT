@@ -715,12 +715,20 @@ def verify_once(
         # on row i). Sound under-approximation: EXISTS row i such that
         # min_{y in box} (c_i @ y) > d_i. min(c_i @ y) = c_i_pos @ lb + c_i_neg @ ub.
         margin_min = (C_pos * lb_exp + C_neg * ub_exp).sum(dim=-1)
-        certified = (margin_min.view(B, M) > thresholds).any(dim=-1)
+        values = margin_min.view(B, M)
+        slack = values - thresholds
     else:
-        # LINEAR_LE / TOP1_ROBUST / MARGIN_ROBUST / RANGE: certified iff for
-        # all y in the box, ALL rows max_y (c_i @ y) < d_i.
+        # ALL-row properties use upper bounds; the shared predicate below
+        # preserves LINEAR_LE/RANGE equality and rejects closed-unsafe ties.
         margin_max = (C_pos * ub_exp + C_neg * lb_exp).sum(dim=-1)
-        certified = (margin_max.view(B, M) < thresholds).all(dim=-1)
+        values = margin_max.view(B, M)
+        slack = thresholds - values
+    from act.back_end.solver.solver_dual import unproven_spec_rows
+
+    proven = ~unproven_spec_rows(
+        slack, kind, torch.maximum(values.abs(), thresholds.abs())
+    )
+    certified = proven.any(dim=-1) if is_unsafe_linear else proven.all(dim=-1)
 
     # 5. Concrete falsification (optional).
     falsified = torch.zeros(B, dtype=torch.bool, device=device)
@@ -743,11 +751,13 @@ def verify_once(
                 (concrete_violation <= thresholds).all(dim=-1)
             )
         else:
-            # ALL-rows kinds: FALSIFIED iff ANY lane's concrete margin
-            # meets-or-exceeds threshold.
-            falsified = (~certified) & (
-                (concrete_violation >= thresholds).any(dim=-1)
+            # Closed unsafe sets include equality; LINEAR_LE/RANGE do not.
+            violation_rows = (
+                concrete_violation >= thresholds
+                if kind in OutputSpec.CLOSED_KINDS
+                else concrete_violation > thresholds
             )
+            falsified = (~certified) & violation_rows.any(dim=-1)
         if falsified.any():
             x_center_cpu = x_center.detach().cpu()
             # B1 (oracle-verified): single sync via .tolist() replaces B per-element .item() syncs.

@@ -315,21 +315,9 @@ def _verify_net(
     unsupported_kinds = sorted(
         {L.kind for L in net.layers if not kind_authority.supports_layer(L.kind)}
     )
-    # DualSolver rejects UNSAFE_LINEAR (EXISTS quantifier not representable
-    # by sound dual lower bounds — see solver_dual.evaluate_spec). Detect
-    # this distinct skip reason in parallel with the layer-kind check so
-    # users see ALL skip reasons in one pass, not sequentially.
-    unsupported_specs: List[str] = []
-    if is_dual:
-        for L in net.layers:
-            if (
-                L.kind == LayerKind.ASSERT.value
-                and L.params.get("kind") == OutKind.UNSAFE_LINEAR
-            ):
-                unsupported_specs.append(f"{LayerKind.ASSERT.value}:{OutKind.UNSAFE_LINEAR}")
-                break
-
-    blocking = tuple(unsupported_kinds + unsupported_specs)
+    # OutputSpec owns the supported property kinds. DualSolver evaluates
+    # UNSAFE_LINEAR by proving strict escape from at least one unsafe row.
+    blocking = tuple(unsupported_kinds)
     if blocking:
         return [], _SkipUnsupported(tf_name=authority_name, kinds=blocking), n_layers
 
@@ -1323,7 +1311,8 @@ Exit status (--verify):
             "none = every node re-propagates; "
             "plain = children get the root dict untouched; "
             "split_refresh = root dict hardened by the split-derived interval "
-            "refresh and --bab-per-subproblem-refine "
+            "refresh and --bab-per-subproblem-refine; "
+            "split_refresh_linear = affine/ReLU halfspace refresh with interval fallback "
             "(default: from config.yaml)"
         ),
     )
@@ -1820,6 +1809,34 @@ def _run_cli_cascade_smoke() -> int:
         cfg = BackendConfig()
         assert cfg.bab_max_batch_size == 8
 
+    def _t_dual_unsafe_linear() -> None:
+        """The real cascade accepts EXISTS specs without certifying a tie."""
+        from act.back_end.transfer_functions import set_solver_mode
+        from act.util.device_manager import get_default_dtype
+
+        # Initialize the managed dtype before constructing any fixture tensor.
+        get_default_dtype()
+        cfg = BackendConfig(solver="dual", lp_enabled=False, bab_enabled=False)
+        set_solver_mode("dual")
+        try:
+            for threshold in (-2.0, 0.0):
+                net = _build_tiny_net()
+                if threshold == 0.0:
+                    net.layers[2].params["weight"].zero_()
+                    net.layers[2].params["weight_pos"].zero_()
+                    net.layers[2].params["weight_neg"].zero_()
+                weight = net.layers[2].params["weight"]
+                net.layers[-1].params = OutputSpec(
+                    kind=OutKind.UNSAFE_LINEAR,
+                    c=weight.new_tensor([[1.0, 0.0]]),
+                    d=weight.new_tensor([threshold]),
+                ).encode_linear(B=1, n_out=2, device=weight.device, dtype=weight.dtype)
+                results, error, _ = _verify_net(net, cfg)
+                assert error is None and len(results) == 1
+                assert (results[0].status == VerifyStatus.CERTIFIED) == (threshold < 0)
+        finally:
+            set_solver_mode("torchlp")
+
     def _t_cascade_shares_deadline(
         interval_seconds: float = 3.0,
         lp_seconds: float = 4.0,
@@ -1867,6 +1884,7 @@ def _run_cli_cascade_smoke() -> int:
     _check("cascade with lp_enabled=True dispatches tier-2 on UNKNOWN", _t_cascade_default_config)
     _check("lp_enabled=False skips tier-2", _t_lp_disabled_skips_tier2)
     _check("default bab_max_batch_size=8", _t_bab_max_batch_size_default)
+    _check("dual cascade accepts unsafe-linear escape and rejects ties", _t_dual_unsafe_linear)
     _check("cascade shares one deadline across stages and lanes", _t_cascade_shares_deadline)
     _check("expired LP budget skips BaB", lambda: _t_cascade_shares_deadline(3.0, 8.0, (7.0,)))
     _check("expired propagation budget skips refinements", lambda: _t_cascade_shares_deadline(11.0, 0.0, ()))

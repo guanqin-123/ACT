@@ -33,9 +33,11 @@ NO_REFINEMENT_MODE: Final[str] = "none"
 #   ---------------|------------------------------|----------------------------
 #   none           | no (children re-propagate)   | n/a
 #   plain          | yes, untouched               | no
-#   split_refresh  | yes                          | _interval_refresh_bounds +
+#   split_refresh  | yes                          | bound_refresh.refresh_bounds +
 #                  |                              | per_subproblem_refine
-VALID_ROOT_BOUNDS_REUSE: Final[tuple[str, ...]] = ("none", "plain", "split_refresh")
+VALID_ROOT_BOUNDS_REUSE: Final[tuple[str, ...]] = (
+    "none", "plain", "split_refresh", "split_refresh_linear",
+)
 # BaB subproblem-pool selection strategies (``--bab-bounding``).
 #
 #   value                | pool class          | order function                       | --bab-top-k | reference
@@ -169,6 +171,14 @@ class BaBConfig:
     """Apply literal-budget coarsening before admitting replay-certified cores."""
     climb_propagation_enabled: bool = True
     """Apply learned cores to pending and active subproblems."""
+    climb_merge_enabled: bool = False
+    """Merge complementary equal-domain siblings, then rebound the revived parent."""
+    climb_complement_bounding: bool = False
+    """Bound each new core's deepest-decision complement once on the root domain."""
+    climb_steer: bool = False
+    """Bias finite BranchingScores by core frequency without changing conditions."""
+    climb_presplit_propagation_enabled: bool = True
+    """Enable the pre-split hook only when climb_propagation_enabled is also true."""
     climb_theta: float = 0.0
     """Fraction of replay slack available to the vector deletion budget."""
     climb_delta_abs: float = 1e-9
@@ -209,7 +219,7 @@ class BaBConfig:
 
     root_bounds_reuse: str = "none"
     """Reuse of the root box's forward bounds by descendants (dual tiers).
-    Valid: 'none', 'plain', 'split_refresh'.
+    Valid: 'none', 'plain', 'split_refresh', 'split_refresh_linear'.
 
     Sound by monotonicity: a child box is contained in the root box, so the
     root's per-layer bounds remain valid over-approximations. Children only
@@ -223,7 +233,13 @@ class BaBConfig:
     'plain' stops there, while 'split_refresh' additionally hardens the dict
     with the split-derived interval refresh plus per_subproblem_refine. So
     'plain' is the split-independent reference: it skips only the
-    split-derived tightening, not the per-lane input override."""
+    split-derived tightening, not the per-lane input override.
+    'split_refresh_linear' additionally uses affine/ReLU-chain halfspaces;
+    unsupported graphs retain the conservative interval refresh."""
+
+    climb_lin_support_refinement: bool = True
+    """Keep only sufficient winning halfspace supports in linear refresh.
+    False retains all same-frame halfspace dependencies conservatively."""
 
     per_subproblem_refine: str = NO_REFINEMENT_MODE
     """Per-subproblem sparse backward refinement of intermediate bounds in the

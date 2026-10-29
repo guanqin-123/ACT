@@ -82,6 +82,7 @@ class DualBatchResult(BatchBoundResult):
     thresholds: Optional[torch.Tensor] = None
     m_specs: int = 0
     reference_bounds: Optional[Dict[int, Bounds]] = None
+    base_reference_bounds: Optional[Dict[int, Bounds]] = None
     dual_row_slack: Optional[torch.Tensor] = None
     forward_only_certified: Optional[torch.Tensor] = None
 
@@ -258,8 +259,20 @@ def _alpha_tree_select_spec_rows(
     }
 
 
-def unproven_spec_rows(slack: torch.Tensor) -> torch.Tensor:
-    """ALL-row properties require finite, nonnegative slack in every row."""
+def unproven_spec_rows(
+    slack: torch.Tensor,
+    out_kind: str = OutKind.LINEAR_LE,
+    reference: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Reject nonfinite proofs and respect the unsafe set's boundary.
+
+    Closed unsafe sets require strictly positive slack. ``reference`` applies
+    the shared rounding band; omit it only for already adjusted replay slack.
+    LINEAR_LE/RANGE keep their legal equality, without a permissive tolerance.
+    """
+    if out_kind in OutputSpec.CLOSED_KINDS:
+        band = 0.0 if reference is None else certification_tolerance(reference)
+        return ~(torch.isfinite(slack) & (slack > band))
     return (slack < 0) | ~torch.isfinite(slack)
 
 
@@ -271,7 +284,7 @@ def certification_tolerance(reference: torch.Tensor) -> torch.Tensor:
 
 def escaping_spec_rows(slack: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
     """UNSAFE_LINEAR requires at least one finite, strictly escaping row."""
-    return torch.isfinite(slack) & (slack > certification_tolerance(reference))
+    return ~unproven_spec_rows(slack, OutKind.UNSAFE_LINEAR, reference)
 
 
 class DualSolver(Solver):
@@ -413,9 +426,12 @@ class DualSolver(Solver):
             """Use the same row rule for final decoding and early stopping."""
             values = row_bounds.reshape(k_actual, m_specs)
             slack = values - thresholds
+            proven = ~unproven_spec_rows(
+                slack, out_spec.kind, torch.maximum(values.abs(), thresholds.abs())
+            )
             if out_spec.kind == OutKind.UNSAFE_LINEAR:
-                return (escaping_spec_rows(slack, values) & active_mask).any(dim=-1)
-            return ~(unproven_spec_rows(slack) & active_mask).any(dim=-1)
+                return (proven & active_mask).any(dim=-1)
+            return ~(~proven & active_mask).any(dim=-1)
 
         compute_certified_bound = cast(Any, self.compute_certified_bound)
         if optimize:
@@ -469,7 +485,9 @@ class DualSolver(Solver):
                 k_actual, dtype=torch.long, device=device
             )
         else:
-            violations = unproven_spec_rows(slack) & active_mask
+            violations = unproven_spec_rows(
+                slack, out_spec.kind, torch.maximum(margins.abs(), thresholds.abs())
+            ) & active_mask
             candidate_rows = torch.where(
                 violations.any(dim=1),
                 violations.to(torch.int64).argmax(dim=1),
@@ -1360,86 +1378,6 @@ class DualSolver(Solver):
             dual_margins=best_bounds, forward_margins=best_forward,
         )
 
-    def _interval_refresh_bounds(
-        self,
-        net: Net,
-        base: Dict[int, Bounds],
-        split_signs: Dict[int, torch.Tensor],
-    ) -> Optional[Dict[int, Bounds]]:
-        """Re-propagate split phases with interval arithmetic and intersect base."""
-        from act.back_end.dual_tf.tf_forward import _fwd_conv2d_interval
-
-        out = dict(base)
-        vals: Dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
-        for layer in net.layers:
-            k = layer.kind.upper() if isinstance(layer.kind, str) else layer.kind
-            lid = layer.id
-            if k == LayerKind.ASSERT.value:
-                continue
-            if k in (LayerKind.INPUT.value, LayerKind.INPUT_SPEC.value):
-                b = out.get(lid)
-                assert b is not None, f"_interval_refresh_bounds: no bounds for {k} layer {lid}"
-                vals[lid] = (b.lb.flatten(start_dim=1), b.ub.flatten(start_dim=1))
-                continue
-            preds = net.preds.get(lid, [])
-            if k == LayerKind.CONV2D.value:
-                plb, pub = vals[preds[0]]
-                lb, ub = _fwd_conv2d_interval(layer, plb, pub)
-                lb, ub = lb.flatten(start_dim=1), ub.flatten(start_dim=1)
-            elif k == LayerKind.DENSE.value:
-                w = layer.params["weight"]
-                bias = layer.params.get("bias")
-                assert isinstance(w, torch.Tensor), (
-                    f"_interval_refresh_bounds: DENSE layer {lid} weight is {type(w).__name__}"
-                )
-                plb, pub = vals[preds[0]]
-                c = (plb + pub) * 0.5
-                r = (pub - plb) * 0.5
-                m = c @ w.T
-                rho = r @ w.abs().T
-                lb = m - rho
-                ub = m + rho
-                if isinstance(bias, torch.Tensor):
-                    lb, ub = lb + bias, ub + bias
-            elif k == LayerKind.ADD.value:
-                (alb, aub), (blb, bub) = vals[preds[0]], vals[preds[1]]
-                lb, ub = alb + blb, aub + bub
-            elif k in (LayerKind.FLATTEN.value, LayerKind.RESHAPE.value):
-                lb, ub = vals[preds[0]]
-            elif k == LayerKind.RELU.value:
-                lb, ub = vals[preds[0]]
-            else:
-                return None
-
-            b = out.get(lid)
-            if b is not None:
-                lb = torch.maximum(lb, b.lb.flatten(start_dim=1))
-                ub = torch.minimum(ub, b.ub.flatten(start_dim=1))
-                ub = torch.maximum(ub, lb)
-            if k == LayerKind.RELU.value:
-                s = split_signs.get(lid)
-                if s is not None:
-                    sl = s[:, 0, :] if s.dim() == 3 else s
-                    n = min(lb.shape[-1], sl.shape[-1])
-                    sn = sl[..., :n].to(lb.device)
-                    lb, ub = lb.clone(), ub.clone()
-                    lb[..., :n] = torch.where(
-                        sn > 0, lb[..., :n].clamp(min=0.0), lb[..., :n]
-                    )
-                    ub[..., :n] = torch.where(
-                        sn < 0, ub[..., :n].clamp(max=0.0), ub[..., :n]
-                    )
-                    ub[..., :n] = torch.maximum(ub[..., :n], lb[..., :n])
-            if b is not None:
-                out[lid] = Bounds(
-                    lb.view_as(b.lb).clone(), ub.view_as(b.ub).clone()
-                )
-            if k == LayerKind.RELU.value:
-                vals[lid] = (lb.clamp(min=0.0), ub.clamp(min=0.0))
-            else:
-                vals[lid] = (lb, ub)
-        return out
-
     def _harden_split_bounds(
         self,
         bounds_dict: Dict[int, Bounds],
@@ -1797,10 +1735,11 @@ class DualSolver(Solver):
         opposite row aggregators.
 
         - ALL-rows kinds (LINEAR_LE, TOP1_ROBUST, MARGIN_ROBUST, RANGE):
-          ``encode_linear`` emits (C, thresholds) in UB-cert form (CERTIFIED
-          iff ``UB(C @ y) < threshold``). Pass ``-C`` / ``-thresholds`` to
-          ``compute_certified_bound`` and compare; ``slack >= 0`` means the
-          row passes. Certified iff every row passes (``.all()``).
+          ``encode_linear`` emits (C, thresholds) in UB-cert form.
+          Pass ``-C`` / ``-thresholds`` to
+          ``compute_certified_bound`` and compare using the unsafe-set boundary:
+          nonnegative slack for LINEAR_LE/RANGE, strictly escaping slack for
+          TOP1/MARGIN. Certified iff every active row passes (``.all()``).
         - EXISTS-row kind (UNSAFE_LINEAR): the unsafe polytope is
           ``P = {y : c_i^T y <= d_i for ALL i}``. SAFE iff for all reachable
           y, some row i satisfies ``c_i^T y > d_i`` (escape). Sound
@@ -1910,7 +1849,9 @@ class DualSolver(Solver):
                     )
                 margins = margins_flat.view(B, N)
                 slack = margins - thresholds
-                certified = (escaping_spec_rows(slack, margins) & active_mask).any(dim=-1)
+                certified = (escaping_spec_rows(
+                    slack, torch.maximum(margins.abs(), thresholds.abs())
+                ) & active_mask).any(dim=-1)
 
             return SpecBatchResult(
                 margins=margins,
@@ -1940,11 +1881,10 @@ class DualSolver(Solver):
 
             margins = margins_flat.view(B, M)
             slack = margins - thresholds_neg
-            # margins is a SOUND LOWER bound on the true margin: certify iff
-            # every active row has slack >= 0. A positive tolerance band flags
-            # safe near-boundary rows (false UNKNOWN); slack < -cert_tol would be
-            # unsound. Hard zero boundary, matching bab.py.
-            violations = unproven_spec_rows(slack) & active_mask
+            violations = unproven_spec_rows(
+                slack, out_spec.kind,
+                torch.maximum(margins.abs(), thresholds_neg.abs()),
+            ) & active_mask
             certified = ~violations.any(dim=-1)
 
         return SpecBatchResult(
