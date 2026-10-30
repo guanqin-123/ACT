@@ -17,10 +17,11 @@ from __future__ import annotations
 import bisect
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Callable, Collection, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
+from act.back_end.bab.bound_refresh import BoundSupport
 from act.back_end.bab.branching.bounding import TopKBounding
 from act.back_end.bab.branching.branching import BranchingScores
 from act.back_end.bab.node import (
@@ -33,7 +34,7 @@ from act.back_end.bab.node import (
 from act.back_end.core import Bounds, Net
 from act.back_end.solver.solver_base import SolveStatus
 from act.back_end.solver.solver_dual import (
-    DualBatchResult, certification_tolerance, unproven_spec_rows,
+    DualBatchResult, MixedAlpha, certification_tolerance, unproven_spec_rows,
 )
 from act.config.config import (
     BaBConfig,
@@ -47,10 +48,17 @@ from act.config.config import (
 from act.front_end.specs import OutKind, OutputSpec
 from act.util.device_manager import get_default_device, get_default_dtype
 
+if TYPE_CHECKING:
+    from act.back_end.solver.terminal_lp import TerminalResult
+
 
 # ---------------------------------------------------------------------------
 # CLIMB certificate reuse
 # ---------------------------------------------------------------------------
+
+# Partners tried per row and pivot; only exact duplicate rows ever reach this.
+_MERGE_GROUP_FANOUT = 64
+_SPLIT_REFRESH_MODES = ("split_refresh", "split_refresh_linear")
 
 
 @dataclass(frozen=True)
@@ -212,6 +220,8 @@ class ClimbMetrics:
     steered_candidates: int = 0
     core_literals_original: int = 0
     core_literals_retained: int = 0
+    terminal_literals_original: int = 0
+    terminal_literals_retained: int = 0
     library: Optional[CoreLibrary] = None
 
     def observe_frontier(self, pending_plus_active_rows: int) -> None:
@@ -245,6 +255,8 @@ class ClimbMetrics:
             "climb_cores_evicted": self.library.evicted if self.library is not None else 0,
             "climb_core_literals_original": self.core_literals_original,
             "climb_core_literals_retained": self.core_literals_retained,
+            "climb_terminal_literals_original": self.terminal_literals_original,
+            "climb_terminal_literals_retained": self.terminal_literals_retained,
         }
 
 
@@ -317,7 +329,6 @@ class CoreLibrary:
         self.subsumed = 0
         self.resolved = 0
         self.evicted = 0
-        self.generation = 0
         self._cores = torch.empty((0, 0), dtype=torch.long)
         self._ranks = torch.empty((0, 0), dtype=torch.long) if track_complements else None
         self._attempted = torch.empty(0, dtype=torch.bool)
@@ -408,7 +419,6 @@ class CoreLibrary:
         if self._ranks is not None:
             self._ranks = self._ranks[order[:self.max_cores], :self._cores.shape[1]]
             self._attempted = self._attempted[order[:self.max_cores]]
-        self.generation += inserted + self.resolved - counters_before[1]
         counters_after = (self.subsumed, self.resolved, self.evicted)
         assert _counters_non_decreasing(counters_before, counters_after), (
             "CLIMB invariant violated: core-library counters decreased "
@@ -498,6 +508,157 @@ def _replace_literal_assignments(
     columns = torch.searchsorted(variables, literals[lanes, slots].abs() - 1)
     dense[lanes, columns] = literals[lanes, slots].sign().to(torch.int8)
     apply_literal_assignments(batch, dense, variables, codec)
+
+
+def _literal_keys(rows: torch.Tensor) -> List[bytes]:
+    """Exact canonical identities of signed literal rows, independent of layout."""
+    return [row[row != 0].tobytes() for row in _canonical_rows(rows).cpu().numpy()]
+
+
+def _row_literal_counts(batch: SubproblemBatch) -> torch.Tensor:
+    """Count each row's assigned phases without packing their literals."""
+    counts = torch.zeros(batch.batch_size, dtype=torch.long, device=batch.lb.device)
+    for values in (batch.split_signs or {}).values():
+        counts += values.reshape(batch.batch_size, values.shape[1], -1)[:, 0].ne(0).sum(1).to(counts.device)
+    return counts
+
+
+def _merge_hash_weights(count: int, device: torch.device) -> torch.Tensor:
+    """Fixed odd weights: hashes only propose pairs, exact comparison decides."""
+    generator = torch.Generator().manual_seed(0)
+    return (torch.randint(0, 1 << 62, (count,), generator=generator) | 1).to(device)
+
+
+def _complementary_pairs(
+    dense: torch.Tensor, variables: torch.Tensor, eligible: torch.Tensor,
+    fresh: torch.Tensor, undo: Collection[bytes],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Choose disjoint rows equal except one opposed column, lexicographically.
+
+    A pair rebuilding an already bounded unresolved literal set would only undo
+    its split, unless propagation has since given either side a new condition.
+    """
+    rows, columns = torch.nonzero(dense * eligible[:, None].to(dense), as_tuple=True)
+    empty = rows[:0]
+    if not rows.numel():
+        return empty, empty, empty
+    signs = dense[rows, columns].to(torch.long)
+    weights = _merge_hash_weights(dense.shape[1], dense.device)
+    hashes = torch.zeros(dense.shape[0], dtype=torch.long, device=dense.device)
+    hashes.index_add_(0, rows, signs * weights[columns])
+    groups = torch.unique(
+        torch.stack((columns, hashes[rows] - signs * weights[columns]), 1),
+        dim=0, return_inverse=True,
+    )[1]
+    negative = torch.where(signs < 0)[0]
+    negative = negative[groups[negative].argsort(stable=True)]
+    positive = torch.where(signs > 0)[0]
+    sizes = torch.bincount(groups[negative], minlength=int(groups.max()) + 1)
+    starts = sizes.cumsum(0) - sizes
+    fanout = sizes[groups[positive]].clamp(max=_MERGE_GROUP_FANOUT)
+    total = int(fanout.sum())
+    offsets = torch.arange(total, device=dense.device) - torch.repeat_interleave(
+        fanout.cumsum(0) - fanout, fanout,
+    )
+    partners = rows[negative[torch.repeat_interleave(starts[groups[positive]], fanout) + offsets]]
+    anchors = torch.repeat_interleave(rows[positive], fanout)
+    pivots = torch.repeat_interleave(columns[positive], fanout)
+    left, right = torch.minimum(anchors, partners), torch.maximum(anchors, partners)
+    # Exact rows, not their hash, establish the projection.
+    same = dense[left] == dense[right]
+    same[torch.arange(total, device=dense.device), pivots] = True
+    keep = same.all(1)
+    left, right, pivots = left[keep], right[keep], pivots[keep]
+    for key in (pivots, right, left):
+        order = key.argsort(stable=True)
+        left, right, pivots = left[order], right[order], pivots[order]
+    if undo and left.numel():
+        projected = dense[left].to(torch.long) * (variables + 1)
+        projected[torch.arange(left.numel(), device=dense.device), pivots] = 0
+        rebuilds = torch.tensor([key in undo for key in _literal_keys(projected)], device=dense.device)
+        keep = ~rebuilds | fresh[left] | fresh[right]
+        left, right, pivots = left[keep], right[keep], pivots[keep]
+    # Iterating locally minimal edges equals scanning sorted edges greedily.
+    chosen = []
+    ranks = torch.arange(left.numel(), device=dense.device)
+    while ranks.numel():
+        first = torch.full((dense.shape[0],), left.numel(), device=dense.device)
+        first.scatter_reduce_(0, left[ranks], ranks, "amin")
+        first.scatter_reduce_(0, right[ranks], ranks, "amin")
+        minimal = ranks[(first[left[ranks]] == ranks) & (first[right[ranks]] == ranks)]
+        chosen.append(minimal)
+        used = torch.zeros(dense.shape[0], dtype=torch.bool, device=dense.device)
+        used[left[minimal]] = used[right[minimal]] = True
+        ranks = ranks[~(used[left[ranks]] | used[right[ranks]])]
+    if not chosen:
+        return empty, empty, empty
+    selected = torch.cat(chosen).sort().values
+    return left[selected], right[selected], pivots[selected]
+
+
+@dataclass(frozen=True)
+class _FrontierMerge:
+    """Rows surviving a merge fixed point; ``merged`` rows need a fresh bound.
+
+    ``literals`` holds only surviving merged rows, in row order.
+    """
+
+    alive: torch.Tensor
+    merged: torch.Tensor
+    literals: torch.Tensor
+    depths: torch.Tensor
+    decisions: Optional[torch.Tensor]
+    node_ids: Optional[torch.Tensor]
+    parent_ids: Optional[torch.Tensor]
+    pairs: int
+
+
+def _merge_frontier(
+    packed: torch.Tensor, eligible: torch.Tensor, fresh: torch.Tensor,
+    depths: torch.Tensor, decisions: Optional[torch.Tensor],
+    node_ids: Optional[torch.Tensor], parent_ids: Optional[torch.Tensor],
+    undo: Collection[bytes],
+) -> _FrontierMerge:
+    """Replace complementary rows by their union until no pair remains.
+
+    Eligible rows share one input box, so a union's region is exactly its
+    retained conditions. Only decisions in both constituents remain branch
+    history; a decision of one side would not describe the union.
+    """
+    count = packed.shape[0]
+    device = packed.device
+    values = packed[packed != 0]
+    variables, columns = torch.unique(values.abs() - 1, sorted=True, return_inverse=True)
+    dense = torch.zeros((count, variables.numel()), dtype=torch.int8, device=device)
+    dense[torch.nonzero(packed, as_tuple=True)[0], columns] = values.sign().to(torch.int8)
+    alive = torch.ones(count, dtype=torch.bool, device=device)
+    merged = torch.zeros_like(alive)
+    fresh, depths = fresh.clone(), depths.clone()
+    decisions = None if decisions is None else decisions.clone()
+    node_ids = None if node_ids is None else node_ids.clone()
+    parent_ids = None if parent_ids is None else parent_ids.clone()
+    pairs = 0
+    while True:
+        left, right, pivots = _complementary_pairs(dense, variables, eligible & alive, fresh, undo)
+        if not left.numel():
+            break
+        pairs += left.numel()
+        dense[left, pivots] = 0
+        alive[right] = False
+        merged[left] = True
+        fresh[left] |= fresh[right]
+        depths[left] = (torch.minimum(depths[left], depths[right]) - 1).clamp(min=0)
+        if decisions is not None:
+            shared = (decisions[left][:, :, None] == decisions[right][:, None, :]).any(2)
+            decisions[left] = decisions[left].masked_fill(~shared, 0)
+        if node_ids is not None and parent_ids is not None:
+            revived = (parent_ids[left] == parent_ids[right]) & (parent_ids[left] >= 0)
+            node_ids[left] = torch.where(revived, parent_ids[left], node_ids[left])
+            parent_ids[left] = -1
+    return _FrontierMerge(
+        alive, merged, dense[alive & merged].to(torch.long) * (variables + 1), depths,
+        decisions, node_ids, parent_ids, pairs,
+    )
 
 
 @torch.no_grad()
@@ -679,8 +840,12 @@ def certificate_replay(
     lin_support_refinement: bool = True,
     refresh_rows_cap: int = 64,
     forward_lin_max_perturbed: Optional[int] = None,
+    phase_slope_signs: Optional[Dict[int, torch.Tensor]] = None,
 ) -> Optional[tuple[torch.Tensor, Optional[torch.Tensor]]]:
     """Replay a frozen alpha/eta certificate directly through ``DualSolver``.
+
+    With ``phase_slope_signs`` the batch's ``split_signs`` are a reduced core and
+    those signs its source literals; see ``DualSolver.compute_certified_bound``.
 
     Returns ``(slack, costs)`` — for ``UNSAFE_LINEAR`` both are gathered on the
     pinned strict row (``slack [N, 1]``, ``costs [N, 1, W]``); otherwise
@@ -690,7 +855,7 @@ def certificate_replay(
     """
     if with_costs and (literals is None or codec is None):
         raise ValueError("with_costs=True requires packed literals")
-    split_refresh = refresh_mode in ("split_refresh", "split_refresh_linear")
+    split_refresh = refresh_mode in _SPLIT_REFRESH_MODES
     if split_refresh and base_reference_bounds is None:
         raise ValueError("split-dependent replay requires base_reference_bounds")
     if (
@@ -737,6 +902,7 @@ def certificate_replay(
             optimize=False,
             return_nu_per_layer=with_costs,
             local_phase_clamp=True,
+            phase_slope_signs=phase_slope_signs,
         )
     except (RuntimeError, ValueError):
         return None
@@ -769,25 +935,14 @@ def certificate_replay(
                 return None
         assert literals is not None
         assert codec is not None
-        costs = _literal_costs(
-            literals, codec, slack, eta, nu, reference_bounds, pinned_rows
-        )
-        if supports is not None:
-            dependent = torch.zeros_like(literals, dtype=torch.bool)
-            unknown = torch.zeros(n_lanes, dtype=torch.bool, device=literals.device)
-            for layer_id, sensitivity in nu.items():
-                support = supports.get(layer_id)
-                if support is None:
-                    unknown |= sensitivity.flatten(1).ne(0).any(1)
-                    continue
-                used = sensitivity.ne(0).any(1)
-                unknown |= (used & ~support.known).any(1)
-                dependent |= ((support.lower | support.upper) & used[:, :, None]).any(1)
-            # Costs are a proposal heuristic, not a certificate. Dependency
-            # removal must buy a real replay; unknown provenance never grants
-            # a zero-cost deletion.
-            costs += dependent[:, None, :] * (slack.abs().amax(1) + 1)[:, None, None]
-            costs[unknown] = torch.inf
+        if supports is None:
+            costs = _literal_costs(literals, codec, slack, eta, nu, reference_bounds, pinned_rows)
+        else:
+            assert base_reference_bounds is not None
+            costs = _supported_literal_costs(
+                literals, codec, slack, eta, nu, base_reference_bounds, reference_bounds,
+                batch.split_signs, supports, pinned_rows,
+            )
     if pinned_rows is not None:
         slack = slack.gather(1, pinned_rows[:, None])
     return slack, costs
@@ -846,6 +1001,68 @@ def _literal_costs(
 
 
 @torch.no_grad()
+def _supported_literal_costs(
+    literals: torch.Tensor,
+    codec: LiteralCodec,
+    slack: torch.Tensor,
+    eta: Dict[int, torch.Tensor],
+    nu: Dict[int, torch.Tensor],
+    base_bounds: Dict[int, Bounds],
+    reference_bounds: Dict[int, Bounds],
+    split_signs: Dict[int, torch.Tensor],
+    supports: Dict[int, BoundSupport],
+    pinned_rows: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Charge ``eta*m + sum(eps_i)`` for split-refreshed certificates.
+
+    ``m`` and each ``eps_i`` are measured over the split-free reference, which
+    holds on every retained subset. ``eps_i`` is the largest violation there of
+    the upper line frozen on the phase-clamped refreshed interval, weighted by
+    the negative part of its coefficient (lower lines are global). It is charged
+    to the endpoint support that line used. A support needed but unknown makes
+    the whole row undeletable; these costs only propose a row for replay.
+    """
+    zero_nu = {layer_id: torch.zeros_like(value) for layer_id, value in eta.items()}
+    costs = _literal_costs(literals, codec, slack, eta, zero_nu, base_bounds, None)
+    unknown = torch.zeros(literals.shape[0], dtype=torch.bool, device=costs.device)
+    for layer_id, coefficient in nu.items():
+        weight = (-coefficient).clamp(min=0).to(costs)
+        support = supports.get(layer_id)
+        if support is None or layer_id not in reference_bounds or layer_id not in base_bounds:
+            unknown |= weight.flatten(1).gt(0).any(1)
+            continue
+        lower = reference_bounds[layer_id].lb.flatten(1).to(costs)
+        upper = reference_bounds[layer_id].ub.flatten(1).to(costs)
+        if layer_id in split_signs:
+            phase = split_signs[layer_id][:, 0].to(costs)
+            lower = torch.where(phase > 0, lower.clamp(min=0), lower)
+            upper = torch.where(phase < 0, upper.clamp(max=0), upper)
+            upper = torch.maximum(lower, upper)
+        lower0 = base_bounds[layer_id].lb.flatten(1).to(costs)
+        upper0 = base_bounds[layer_id].ub.flatten(1).to(costs)
+        span = (upper - lower).clamp(min=torch.finfo(costs.dtype).tiny)
+        chord = torch.maximum(upper * (lower - lower0), -lower * (upper0 - upper)) / span
+        unstable = (lower < 0) & (upper > 0)
+        known = support.known[:, None]
+        for residual, mask in (
+            (torch.where(unstable, chord.clamp(min=0), 0), support.lower | support.upper),
+            (torch.where(lower >= 0, (-lower0).clamp(min=0), 0), support.lower),
+            (torch.where(upper <= 0, upper0.clamp(min=0), 0), support.upper),
+        ):
+            charge = weight * residual[:, None]
+            unknown |= ((charge > 0) & ~known).flatten(1).any(1)
+            used = charge.ne(0).flatten(0, 1).any(0)
+            if bool(used.any()):
+                costs += charge[..., used].masked_fill(~known[..., used], 0) @ mask[:, used].to(costs)
+    costs = torch.nan_to_num(costs, nan=torch.inf, posinf=torch.inf)
+    costs[unknown] = torch.inf
+    if pinned_rows is not None:
+        rows = pinned_rows.to(device=costs.device, dtype=torch.long)
+        costs = costs.gather(1, rows[:, None, None].expand(-1, 1, costs.shape[2]))
+    return costs
+
+
+@torch.no_grad()
 def coarsen(
     literals: torch.Tensor,
     costs: torch.Tensor,
@@ -854,8 +1071,8 @@ def coarsen(
     theta: float,
     delta_abs: float,
     delta_rel: float,
-    recheck_k: int,
-    recheck: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    recheck_k: int = 0,
+    recheck: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Choose budget deletions plus at most ``recheck_k`` one-step rechecks.
 
@@ -867,7 +1084,9 @@ def coarsen(
     ``slack_m <= delta_m`` never fund a deletion. The budget arithmetic runs
     in the dtype of ``costs``/``slack``. Literals are ordered by
     ``(max_m cost_m / budget_m, column, slot)`` and the longest feasible prefix
-    is deleted. A recheck retries the next literal in that same order for the
+    is deleted; exactly-zero costs are never blocked by a negative budget. At
+    ``(theta, recheck_k) == (0, 0)`` a tensor mask selects exactly those zeros,
+    with no sort. A recheck retries the next literal in that same order for the
     first ``recheck_k`` lanes; ``recheck`` returns the ``BoolTensor[K]``
     certification mask that confirms each candidate deletion.
     """
@@ -883,6 +1102,16 @@ def coarsen(
     if slack.shape != costs.shape[:2]:
         raise ValueError("slack tensor shape must be [N, M]")
     retained = literals != 0
+    if theta == 0.0 and recheck_k == 0:
+        # Rows lacking a finite certificate or a safe slack keep every literal.
+        delta = delta_abs + delta_rel * slack.abs()
+        eligible = (
+            torch.isfinite(slack).all(1)
+            & torch.isfinite(costs).all(2).all(1)
+            & (slack > delta).all(1)
+        )
+        retained &= ~(eligible[:, None] & (costs == 0).all(1))
+        return literals.masked_fill(~retained, 0)
     next_in_cost_order: Dict[int, int] = {}
     for lane in range(n_lanes):
         valid_slots = torch.where(literals[lane] != 0)[0]
@@ -912,7 +1141,7 @@ def coarsen(
         for position in ordered:
             candidate = running + lane_costs[:, position]
             slot = int(valid_slots[position].item())
-            if not bool((candidate <= budget).all().item()):
+            if not bool((candidate <= budget.clamp(min=0)).all().item()):
                 next_in_cost_order[lane] = slot
                 break
             retained[lane, slot] = False
@@ -927,6 +1156,7 @@ def coarsen(
             if len(candidates) == recheck_k:
                 break
     if candidates:
+        assert recheck is not None
         rows = torch.tensor(candidates, dtype=torch.long, device=literals.device)
         candidate_mask = retained.index_select(0, rows).clone()
         for local, slot in enumerate(next_slots):
@@ -984,8 +1214,12 @@ class ClimbSession:
         self._complement_bounding = config.climb_complement_bounding
         self._steer = config.climb_steer
         self._merge_enabled = config.climb_merge_enabled
-        self._merge_generation = 0
-        self._merged_parents = torch.empty(0, dtype=torch.long)
+        # Every core ever considered, independent of later subsumption/eviction.
+        self._seen_cores: set[tuple[int, ...]] = set()
+        self._merge_armed = False
+        self._bounded_unresolved: set[bytes] = set()
+        self._fresh_rows: set[bytes] = set()
+        self._frontier_undo: Optional[Tuple[set[bytes], set[bytes], set[bytes]]] = None
         self._theta = config.climb_theta
         self._delta_abs = config.climb_delta_abs
         self._delta_rel = config.climb_delta_rel
@@ -1012,7 +1246,6 @@ class ClimbSession:
         return cls(config, net, out_kind, dual_config) if config.climb_enabled else None
 
     def before_pop(self, pool: TopKBounding) -> None:
-        self._merge(pool)
         if not self._propagation_enabled:
             self.metrics.observe_frontier(len(pool))
             return
@@ -1021,7 +1254,7 @@ class ClimbSession:
             # bounded. view_all/replace_all never score, cool, or probe.
             pending_before = pool.view_all()
             propagate_started = time.perf_counter()
-            (pending_after,), _ = propagate(
+            (pending_after,), (kept,) = propagate(
                 [pending_before],
                 self.library,
                 self.codec,
@@ -1032,117 +1265,164 @@ class ClimbSession:
                 pending_before.batch_size - pending_after.batch_size
             )
             pool.replace_all(pending_after)
+            self._note_propagation(pending_before, kept, pending_after)
             if pool.empty:
                 return
+        if not self._presplit_propagation_enabled:
+            self._merge(pool)  # The deferred pre-split merge runs on this propagation.
         self.metrics.observe_frontier(len(pool))
+
+    def _on_root_domain(self, batch: SubproblemBatch) -> torch.Tensor:
+        """Rows whose input box is the query's: only these join core lifting."""
+        lower = self._root_bounds.lb.flatten(1).to(batch.lb)
+        upper = self._root_bounds.ub.flatten(1).to(batch.ub)
+        return (batch.lb == lower).all(1) & (batch.ub == upper).all(1)
+
+    def _source_literals(self, batch: SubproblemBatch) -> torch.Tensor:
+        """Pack a row's complete conditions S, each to be proved, not assumed.
+
+        Propagation-written phases precede actual decisions, so insertion order
+        still ranks the deepest decision last for complement probing.
+        """
+        packed = pack_split_matrix(
+            batch.split_signs, batch.batch_size, self.codec, device=batch.lb.device,
+        )
+        decisions = batch.decision_literals
+        if decisions is None or packed.shape[1] == 0:
+            return packed
+        decided = (packed[:, :, None] == decisions[:, None, :]).any(2)
+        applied = (decisions[:, :, None] == packed[:, None, :]).any(2)
+        rows = torch.cat((packed.masked_fill(decided, 0), decisions.masked_fill(~applied, 0)), 1)
+        rows = rows.gather(1, (rows == 0).to(torch.int64).argsort(dim=1, stable=True))
+        return rows[:, :packed.shape[1]]
+
+    def _insert_cores(self, rows: torch.Tensor, *, suppress_complements: bool = False) -> int:
+        """Insert cores; any core not considered before arms one frontier merge."""
+        resolved = self.library.resolved
+        self._consider_cores(rows)
+        inserted = self.library.insert(rows, suppress_complements=suppress_complements)
+        if self.library.resolved != resolved:
+            self._consider_cores(self.library.pack(rows.device))
+        return inserted
+
+    def _consider_cores(self, rows: torch.Tensor) -> None:
+        if not self._merge_enabled:
+            return
+        for row in _canonical_rows(rows).tolist():
+            core = tuple(literal for literal in row if literal)
+            if core not in self._seen_cores:
+                self._seen_cores.add(core)
+                self._merge_armed = True
+
+    def _remember_unresolved(self, rows: SubproblemBatch) -> None:
+        """Record bounded unresolved sets; a merge must not simply rebuild them."""
+        root_rows = rows.select(torch.where(self._on_root_domain(rows))[0])
+        keys = set(_literal_keys(pack_split_matrix(
+            root_rows.split_signs, root_rows.batch_size, self.codec, device=rows.lb.device,
+        )))
+        if self._frontier_undo is not None:
+            self._frontier_undo[0].update(keys - self._bounded_unresolved)
+            self._frontier_undo[2].update(keys & self._fresh_rows)
+        self._bounded_unresolved |= keys
+        self._fresh_rows -= keys
+
+    def _note_propagation(
+        self, before: SubproblemBatch, kept: torch.Tensor, after: SubproblemBatch,
+    ) -> None:
+        """Rows given a new condition may merge past their earlier undo guard."""
+        if not self._merge_enabled or not after.batch_size:
+            return
+        written = _row_literal_counts(after) > _row_literal_counts(before).index_select(0, kept)
+        rows = after.select(torch.where(written)[0])
+        keys = set(_literal_keys(pack_split_matrix(
+            rows.split_signs, rows.batch_size, self.codec, device=rows.lb.device,
+        )))
+        if self._frontier_undo is not None:
+            self._frontier_undo[1].update(keys - self._fresh_rows)
+        self._fresh_rows |= keys
 
     def _merge(
         self, pool: TopKBounding, active: Optional[SubproblemBatch] = None,
     ) -> Tuple[Optional[SubproblemBatch], torch.Tensor]:
-        """Merge equal-domain complementary siblings once per new proof generation.
+        """Merge root-domain complementary rows to a fixed point on an unseen core.
 
-        Only revived parents return to pending; they must be bounded again.
-        A parent id can be revived once, preventing split/undo-split loops.
+        Merged rows return to pending with no warm state, so they are bounded
+        again before any split; untouched rows keep theirs. Nothing is committed
+        before ``replace_all``, so a failure leaves the trigger armed.
         """
-        active_device = active.lb.device if active is not None else None
-        device = active_device if active_device is not None else self._root_bounds.lb.device
-        keep_active = torch.arange(active.batch_size if active is not None else 0, device=device)
-        if not self._merge_enabled or self._merge_generation == self.library.generation:
+        keep_active = torch.arange(
+            active.batch_size if active is not None else 0,
+            device=active.lb.device if active is not None else self._root_bounds.lb.device,
+        )
+        if not self._merge_armed:
             return active, keep_active
-        n_pending = len(pool)
-        joint = pool.view_all() if n_pending else active
-        if joint is None:
+        resident = pool.checkpoint()
+        parts = [part for part in (resident, active) if part is not None and part.batch_size]
+        if not parts:
+            self._merge_armed = False
             return active, keep_active
-        if n_pending and active is not None:
-            joint = joint.concat(active)
+        n_pending = resident.batch_size if resident is not None else 0
+        joint = parts[0].drop_warm_state()
+        if len(parts) == 2:
+            joint = joint.concat(parts[1].drop_warm_state())
         device = joint.lb.device
-        if joint.parent_id is None or joint.node_id is None or joint.decision_literals is None:
+        packed = pack_split_matrix(joint.split_signs, joint.batch_size, self.codec, device=device)
+        fresh = torch.tensor(
+            [key in self._fresh_rows for key in _literal_keys(packed)] if self._fresh_rows
+            else [False] * joint.batch_size,
+            dtype=torch.bool, device=device,
+        )
+        plan = _merge_frontier(
+            packed, self._on_root_domain(joint), fresh, joint.depths, joint.decision_literals,
+            joint.node_id, joint.parent_id, self._bounded_unresolved,
+        )
+        if not plan.pairs:
+            self._merge_armed = False
             return active, keep_active
-        phases = pack_split_matrix(joint.split_signs, joint.batch_size, self.codec, device=device)
-        decisions = joint.decision_literals
-        used = torch.zeros(joint.batch_size, dtype=torch.bool, device=device)
-        partners = torch.full((joint.batch_size,), -1, dtype=torch.long, device=device)
-        blocked = torch.isin(joint.parent_id, self._merged_parents.to(device)) | (joint.parent_id < 0)
-        width = max(1, joint.input_dim, phases.shape[1], decisions.shape[1])
-        chunk = min(self._propagate_core_chunk, 128, max(1, int((1048576 / width) ** .5)))
-        for i in range(0, joint.batch_size, chunk):
-            for j in range(i, joint.batch_size, chunk):
-                a, b = phases[i:i + chunk], phases[j:j + chunk]
-                diff = a[:, None] != b[None]
-                da, db = decisions[i:i + chunk], decisions[j:j + chunk]
-                ddiff = da[:, None] != db[None]
-                pairs = ((a[:, None].abs() == b[None].abs()).all(2) & (diff.sum(2) == 1)
-                         & (da[:, None].abs() == db[None].abs()).all(2) & (ddiff.sum(2) == 1))
-                # The erased phase must be a real decision, not an implication.
-                pairs &= (a[:, None].masked_fill(~diff, 0).abs().sum(2)
-                          == da[:, None].expand(-1, db.shape[0], -1).masked_fill(~ddiff, 0).abs().sum(2))
-                pairs &= (joint.parent_id[i:i + chunk, None] == joint.parent_id[None, j:j + chunk])
-                pairs &= (joint.depths[i:i + chunk, None] == joint.depths[None, j:j + chunk])
-                pairs &= (joint.lb[i:i + chunk, None] == joint.lb[None, j:j + chunk]).all(2)
-                pairs &= (joint.ub[i:i + chunk, None] == joint.ub[None, j:j + chunk]).all(2)
-                pairs &= ~blocked[i:i + chunk, None] & ~blocked[None, j:j + chunk]
-                row_index = torch.arange(a.shape[0], device=device)
-                while True:
-                    available = pairs & ~used[i:i + a.shape[0], None] & ~used[None, j:j + b.shape[0]]
-                    choice = available.to(torch.int64).argmax(1)
-                    if i == j:
-                        # Symmetric tile: mutual choices are disjoint undirected
-                        # edges. Process all such pairs in one device operation.
-                        mutual = (choice[choice] == row_index) & (row_index < choice)
-                    else:
-                        reverse = available.to(torch.int64).argmax(0)
-                        mutual = reverse[choice] == row_index
-                    selected = torch.where(available.any(1) & mutual)[0]
-                    if not selected.numel():
-                        break
-                    left, right = selected + i, choice[selected] + j
-                    used[left] = used[right] = True
-                    partners[left] = right
-        left = torch.where(partners >= 0)[0]
-        if not left.numel():
-            self._merge_generation = self.library.generation
-            return active, keep_active
-        right = partners[left]
-        merged = joint.select(left)
-        assert merged.parent_id is not None and merged.decision_literals is not None
-        merged.node_id = merged.parent_id.clone()
-        merged_parents = torch.cat((self._merged_parents.to(device), merged.node_id))
-        merged.parent_id = torch.full_like(merged.node_id, -1)
-        merged.depths -= 1
-        merged.decision_literals.masked_fill_(decisions[left] != decisions[right], 0)
-        if merged.split_signs:
-            assert joint.split_signs is not None
-            for lid, values in merged.split_signs.items():
-                values.masked_fill_(joint.split_signs[lid][left] != joint.split_signs[lid][right], 0)
-        # Clearing the entire affected pool avoids pretending zero alpha padding
-        # is a cold start for the revived lanes.
-        joint = joint.drop_warm_state()
-        merged = merged.drop_warm_state()
+        rows = torch.where(plan.alive & plan.merged)[0]
+        merged = joint.select(rows)
+        _replace_literal_assignments(merged, plan.literals, self.codec)
+        merged.depths = plan.depths[rows]
+        merged.decision_literals = plan.decisions[rows] if plan.decisions is not None else None
+        merged.node_id = plan.node_ids[rows] if plan.node_ids is not None else None
+        merged.parent_id = plan.parent_ids[rows] if plan.parent_ids is not None else None
         merged.lower_bound = torch.full_like(merged.depths, -torch.inf, dtype=merged.lb.dtype)
         merged.parent_margins = merged.lower_bound.clone()
-        pending = joint.select(torch.where(~used[:n_pending])[0])
-        keep_active = torch.where(~used[n_pending:])[0]
+        untouched = plan.alive & ~plan.merged
+        pending_rows = torch.where(untouched[:n_pending])[0]
+        assert resident is not None or not pending_rows.numel()
+        pool.replace_all(
+            resident.select(pending_rows).concat(merged)
+            if resident is not None and pending_rows.numel() else merged
+        )
         if active is not None:
-            assert active_device is not None
-            active = joint.select(keep_active + n_pending).to(active_device)
-            keep_active = keep_active.to(active_device)
-        pool.replace_all(pending.concat(merged), cold_rebound=True)
-        self._merged_parents = merged_parents
-        self._merge_generation = self.library.generation
-        self.metrics.merged_pairs += int(left.numel())
+            keep_active = torch.where(untouched[n_pending:])[0].to(active.lb.device)
+            active = active.select(keep_active)
+        self._merge_armed = False
+        self.metrics.merged_pairs += plan.pairs
         return active, keep_active
 
-    def checkpoint_frontier(self) -> Tuple[int, torch.Tensor, int, int, int]:
-        """Retain reference-only merge/pruning state for an uncommitted wave."""
-        return (self._merge_generation, self._merged_parents,
-                self.metrics.merged_pairs, self.metrics.prebound_discharged,
-                self.metrics.presplit_discharged)
+    def checkpoint_frontier(self) -> Tuple[bool, int, int, int]:
+        """Open an undo journal for this wave's uncommitted frontier bookkeeping."""
+        self._frontier_undo = (set(), set(), set())
+        return (self._merge_armed, self.metrics.merged_pairs,
+                self.metrics.prebound_discharged, self.metrics.presplit_discharged)
 
-    def restore_frontier(self, state: Tuple[int, torch.Tensor, int, int, int]) -> None:
-        """Roll back frontier bookkeeping, retaining independently learned proofs."""
-        (self._merge_generation, self._merged_parents,
-         self.metrics.merged_pairs, self.metrics.prebound_discharged,
-         self.metrics.presplit_discharged) = state
+    def restore_frontier(self, state: Tuple[bool, int, int, int]) -> None:
+        """Roll back frontier bookkeeping, retaining independently learned proofs.
+
+        A merge undone here is owed again; a core seen since the checkpoint
+        stays armed, because the set of considered cores is never rolled back.
+        """
+        armed, self.metrics.merged_pairs, self.metrics.prebound_discharged, \
+            self.metrics.presplit_discharged = state
+        self._merge_armed |= armed
+        assert self._frontier_undo is not None
+        bounded, fresh, cleared = self._frontier_undo
+        self._bounded_unresolved -= bounded
+        self._fresh_rows -= fresh
+        self._fresh_rows |= cleared
+        self._frontier_undo = None
 
     def after_pop(self, frontier_rows: int) -> None:
         self.metrics.observe_frontier(frontier_rows)
@@ -1169,7 +1449,7 @@ class ClimbSession:
         # replay must certify it before admission, or restore the original.
         if k_actual != batch.batch_size or len(statuses) != k_actual:
             raise ValueError("CLIMB admission lane count mismatch")
-        if self._refresh_mode in ("split_refresh", "split_refresh_linear") and dual_solve_result.base_reference_bounds is None:
+        if self._refresh_mode in _SPLIT_REFRESH_MODES and dual_solve_result.base_reference_bounds is None:
             raise ValueError("split-dependent learning requires base_reference_bounds")
         unsat_idx = torch.tensor(
             [i for i, status in enumerate(statuses) if status == SolveStatus.UNSAT],
@@ -1181,9 +1461,7 @@ class ClimbSession:
             unsat_idx = unsat_idx[~forward_only.index_select(0, unsat_idx)]
         # A proof learned on a smaller input box cannot become a global
         # root-domain core, even when that lane still carries ReLU decisions.
-        root_lb, root_ub = self._root_bounds.lb.flatten(1), self._root_bounds.ub.flatten(1)
-        same_domain = (batch.lb == root_lb).all(1) & (batch.ub == root_ub).all(1)
-        unsat_idx = unsat_idx[same_domain.index_select(0, unsat_idx)]
+        unsat_idx = unsat_idx[self._on_root_domain(batch).index_select(0, unsat_idx)]
         if (
             int(unsat_idx.numel()) == 0
             or dual_solve_result.c_rows is None
@@ -1210,15 +1488,7 @@ class ClimbSession:
         replay_thresholds = dual_solve_result.thresholds.index_select(
             0, unsat_idx.to(dual_solve_result.thresholds.device)
         )
-        packed = pack_split_matrix(
-            replay_batch.split_signs,
-            replay_batch.batch_size,
-            self.codec,
-            device=replay_batch.lb.device,
-        )
-        if replay_batch.decision_literals is not None:
-            packed = replay_batch.decision_literals
-            _replace_literal_assignments(replay_batch, packed, self.codec)
+        packed = self._source_literals(replay_batch)
         replay = certificate_replay(
             net=self._net,
             batch=replay_batch,
@@ -1298,7 +1568,7 @@ class ClimbSession:
         )
         valid_rows = torch.where(valid)[0]
         valid_cores = retained.index_select(0, valid_rows)
-        self.metrics.cores_inserted += self.library.insert(
+        self.metrics.cores_inserted += self._insert_cores(
             valid_cores, suppress_complements=not allow_complements,
         )
 
@@ -1337,25 +1607,21 @@ class ClimbSession:
         return count
 
     def learn_terminal(self, batch: SubproblemBatch, *, deadline: float) -> None:
-        """Admit LP cores only after fresh root-domain, decision-only replay.
+        """Admit LP cores only after fresh root-domain replay of their own literals.
 
-        The caller has certified these lanes, but that proof may use implied
-        phases or a smaller input box. Neither is evidence for a global core.
-        Every deletion consumes a bounded recheck and earns its own LP proof.
+        The caller's proof used lane bounds, possibly on a smaller box, so it is
+        no evidence for a global core. The complete conditions S are proved
+        first; failure publishes nothing. Checked duals then propose a subset
+        within theta's slack budget, which needs its own LP certificate, and
+        otherwise the admitted complete row stands.
         """
-        if not self._terminal_cores or batch.decision_literals is None:
+        rows = torch.where(self._on_root_domain(batch))[0]
+        if not self._terminal_cores or not rows.numel() or time.monotonic() >= deadline:
             return
-        root_lb, root_ub = self._root_bounds.lb.flatten(1), self._root_bounds.ub.flatten(1)
-        same_domain = (batch.lb == root_lb).all(1) & (batch.ub == root_ub).all(1)
-        rows = torch.where(same_domain)[0]
-        if not rows.numel() or time.monotonic() >= deadline:
-            return
-        from act.back_end.solver.terminal_lp import solve_terminal_batch
+        from act.back_end.solver.terminal_lp import TerminalResult, solve_terminal_batch
 
-        literals = batch.decision_literals.index_select(0, rows).clone()
-
-        def replay(candidate: torch.Tensor) -> torch.Tensor:
-            """Rebuild the LP without conditioned bounds or implied signs."""
+        def replay(candidate: torch.Tensor, *, prefer_affine: bool) -> TerminalResult:
+            """Rebuild the LP without conditioned bounds."""
             count = candidate.shape[0]
             proof_batch = SubproblemBatch.from_bounds(Bounds(
                 self._root_bounds.lb.expand(count, *self._root_bounds.lb.shape[1:]),
@@ -1369,42 +1635,70 @@ class ClimbSession:
                     proof_batch.lb.reshape(count, *self._root_bounds.lb.shape[1:]),
                     proof_batch.ub.reshape(count, *self._root_bounds.ub.shape[1:]),
                 ),
-                proof_batch.split_signs, deadline=deadline,
+                proof_batch.split_signs, deadline=deadline, prefer_affine=prefer_affine,
             )
             self.metrics.recheck_calls += 1
             self.metrics.recheck_row_passes += count
             self.metrics.recheck_time_s += time.perf_counter() - started
-            return torch.tensor(
-                [result.has_lp_certificate(i) for i in range(count)],
-                device=candidate.device, dtype=torch.bool,
-            )
+            return result
 
-        valid = replay(literals)
-        retained = literals[valid].clone()
-        if not retained.shape[0]:
+        literals = self._source_literals(batch.select(rows))
+        source = replay(literals, prefer_affine=False)
+        admitted = [lane for lane in range(literals.shape[0]) if source.has_lp_certificate(lane)]
+        if not admitted:
             return
-        self.metrics.core_literals_original += int((retained != 0).sum())
+        retained = literals[admitted].clone()
+        self.metrics.terminal_literals_original += int((retained != 0).sum())
         started = time.perf_counter()
-        # Unlike dual replay there is no per-literal cost budget. The existing
-        # explicit recheck budget bounds actual LP deletion attempts.
         if self._coarsening_enabled:
-            attempts = 0
-            for slot in range(retained.shape[1]):
-                if attempts >= self._recheck_k or time.monotonic() >= deadline:
-                    break
-                active = torch.where(retained[:, slot] != 0)[0]
-                active = active[:self._recheck_k - attempts]
-                if not active.numel():
-                    continue
-                candidate = retained.index_select(0, active).clone()
-                candidate[:, slot] = 0
-                passing = replay(candidate)
-                retained[active[passing]] = candidate[passing]
+            proposal = coarsen(
+                retained, *self._terminal_costs(source, admitted, retained),
+                theta=self._theta, delta_abs=self._delta_abs, delta_rel=self._delta_rel,
+            )
+            changed = torch.where((proposal != retained).any(1))[0]
+            if changed.numel():
+                reduced = replay(proposal[changed], prefer_affine=True)
+                passing = torch.tensor(
+                    [reduced.has_lp_certificate(lane) for lane in range(changed.numel())],
+                    dtype=torch.bool, device=changed.device,
+                )
+                accepted = changed[passing]
+                retained[accepted] = proposal[accepted]
                 self.metrics.coarsen_replay_fallbacks += int((~passing).sum())
-                attempts += active.numel()
         self.metrics.coarsen_time_s += time.perf_counter() - started
-        self.metrics.core_literals_retained += int((retained != 0).sum())
-        self.metrics.cores_inserted += self.library.insert(retained)
+        self.metrics.terminal_literals_retained += int((retained != 0).sum())
+        self.metrics.cores_inserted += self._insert_cores(retained)
+
+    def _terminal_costs(
+        self, result: TerminalResult, lanes: Sequence[int], literals: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Align checked LP charges with slots; an unattributable lane stays full.
+
+        Float64 throughout: narrowing could round a tiny positive charge to an
+        exact zero, which the deletion rule treats as free.
+        """
+        from act.back_end.solver.terminal_lp import terminal_literal_costs
+
+        rows = max(len(result.certificates[lane]) for lane in lanes)
+        costs = torch.full((*literals.shape[:1], rows, literals.shape[1]), torch.inf,
+                           dtype=torch.float64, device=literals.device)
+        slack = torch.ones(literals.shape[0], rows, dtype=torch.float64, device=literals.device)
+        for index, lane in enumerate(lanes):
+            charged = terminal_literal_costs(result, lane)
+            if charged is None:
+                continue
+            keys, charges, slacks = charged
+            slots = {literal: slot for slot, literal in enumerate(literals[index].tolist()) if literal}
+            columns = [slots.get(self.codec.encode(*key), -1) for key in keys]
+            if sorted(column for column in columns if column >= 0) != sorted(slots.values()):
+                continue
+            # A single infeasibility proof covers every spec row at once.
+            costs[index, :] = 0
+            values = torch.as_tensor(charges, device=costs.device)
+            positions = torch.tensor(columns, dtype=torch.long, device=costs.device)
+            costs[index, :, positions[positions >= 0]] = values[:, positions >= 0]
+            slack[index] = torch.as_tensor(slacks, device=slack.device)
+        return costs, slack
 
     def steer_scores(self, scores: BranchingScores) -> BranchingScores:
         """Bias finite branching candidates by core frequency, never add facts."""
@@ -1435,6 +1729,26 @@ class ClimbSession:
         rows: torch.Tensor,
     ) -> torch.Tensor:
         candidate_batch = context.batch.select(rows)
+        source_signs = candidate_batch.split_signs
+        if self._refresh_mode in _SPLIT_REFRESH_MODES and candidate_batch.incremental_alpha is not None:
+            # A neuron the source interval made stable used slope 1 or 0, not its
+            # dormant alpha. Those slopes remain global lower lines afterwards.
+            source_bounds = slice_bounds_dict(context.bounds, rows)
+            slopes = dict(candidate_batch.incremental_alpha)
+            for lid in self.codec.layer_ids:
+                alpha = slopes.get(lid)
+                if isinstance(alpha, MixedAlpha):
+                    alpha = alpha.materialize(context.m_specs)
+                if isinstance(alpha, torch.Tensor) and lid in source_bounds:
+                    lower = source_bounds[lid].lb.flatten(1).to(alpha)
+                    upper = source_bounds[lid].ub.flatten(1).to(alpha)
+                    if alpha.dim() == 3:
+                        lower, upper = lower[:, None], upper[:, None]
+                    slopes[lid] = torch.where(
+                        lower >= 0, torch.ones_like(alpha),
+                        torch.where(upper <= 0, torch.zeros_like(alpha), alpha),
+                    )
+            candidate_batch.incremental_alpha = slopes
         # The solver indexes split_signs[lid] for every incremental_eta layer, so a
         # layer whose literals were all coarsened away stays as an all-zero block.
         _replace_literal_assignments(candidate_batch, candidate, self.codec)
@@ -1471,6 +1785,7 @@ class ClimbSession:
             lin_support_refinement=self._lin_support_refinement,
             refresh_rows_cap=self._refresh_rows_cap,
             forward_lin_max_perturbed=self._forward_lin_max_perturbed,
+            phase_slope_signs=source_signs,
         )
         if replayed is None:
             return torch.zeros(
@@ -1499,10 +1814,12 @@ class ClimbSession:
         self, pool: TopKBounding, unresolved: SubproblemBatch
     ) -> Tuple[SubproblemBatch, torch.Tensor]:
         original_rows = torch.arange(unresolved.batch_size, device=unresolved.lb.device)
-        merged_active, original_rows = self._merge(pool, unresolved)
-        assert merged_active is not None
-        unresolved = merged_active
-        if not self._propagation_enabled or not self._presplit_propagation_enabled:
+        if not self._propagation_enabled:
+            self.metrics.observe_frontier(len(pool) + unresolved.batch_size)
+            return unresolved, original_rows
+        if self._merge_enabled:
+            self._remember_unresolved(unresolved)
+        if not self._presplit_propagation_enabled:
             self.metrics.observe_frontier(len(pool) + unresolved.batch_size)
             return unresolved, original_rows
         if self.library.core_count == 0:
@@ -1530,10 +1847,15 @@ class ClimbSession:
             self.metrics.prebound_discharged += (
                 propagation_groups[0].batch_size - propagation[0].batch_size
             )
+            self._note_propagation(propagation_groups[0], kept_rows[0], propagation[0])
+        self._note_propagation(unresolved, kept_rows[-1], propagation[-1])
         unresolved = propagation[-1]
         self.metrics.presplit_discharged += presplit_before - unresolved.batch_size
-        self.metrics.observe_frontier(len(pool) + unresolved.batch_size)
-        return unresolved, original_rows.index_select(0, kept_rows[-1])
+        original_rows = original_rows.index_select(0, kept_rows[-1])
+        merged_active, kept = self._merge(pool, unresolved)
+        assert merged_active is not None
+        self.metrics.observe_frontier(len(pool) + merged_active.batch_size)
+        return merged_active, original_rows.index_select(0, kept)
 
     def after_children(self, generated: int, frontier_rows: int) -> None:
         self.metrics.generated_children += generated
@@ -1547,13 +1869,18 @@ class ClimbSession:
             "climb_steer": self._steer,
             "climb_propagation_enabled": self._propagation_enabled,
             "climb_presplit_propagation_enabled": self._presplit_propagation_enabled,
+            # Host-side merge memory, outside the planner's tensor accounting.
+            "climb_merge_memo_rows": len(self._seen_cores) + len(self._bounded_unresolved) + len(self._fresh_rows),
         }
 
 
 if __name__ == "__main__":
+    from dataclasses import replace
     from tempfile import TemporaryDirectory
+    from typing import Any
     from unittest.mock import patch
 
+    from act.back_end.bab.bound_refresh import _inherited_support
     from act.back_end.dual_tf.tf_forward import compute_forward_bounds
     from act.back_end.bab.violation import (
         _forward_for_violation_check, clear_violation_check_module_cache,
@@ -1562,7 +1889,7 @@ if __name__ == "__main__":
     from act.back_end.net_factory import LAYER_TESTING_SPECS, NetFactory
     from act.back_end.solver.milp_escalate import solve_milp
     from act.back_end.solver.solver_dual import DualSolver
-    from act.back_end.solver.terminal_lp import solve_terminal_batch
+    from act.back_end.solver.terminal_lp import solve_terminal_batch, terminal_literal_costs
     from act.config.config import BackendConfig, DualConfig
     from act.front_end.specs import OutputSpec
     from act.util.device_manager import initialize_device
@@ -1623,9 +1950,6 @@ if __name__ == "__main__":
                 OutKind.UNSAFE_LINEAR if unsafe else OutKind.LINEAR_LE,
             )
             alias_lane = SubproblemBatch.from_bounds(alias_box)
-            alias_lane.decision_literals = torch.empty(
-                (1, 0), dtype=torch.long, device=alias_box.lb.device,
-            )
             alias_session.learn_terminal(alias_lane, deadline=time.monotonic() + 30.)
             assert alias_session.library.core_count == 0
             assert alias_session.library.pack(alias_box.lb.device).shape[0] == 0
@@ -1665,7 +1989,6 @@ if __name__ == "__main__":
         net = factory.create_network("admission", LAYER_TESTING_SPECS["layer_testing_climb_admission"]())
         upper = torch.ones(1, 1, device=get_default_device(), dtype=get_default_dtype())
         lower = -upper
-        from dataclasses import replace
         terminal_spec = LAYER_TESTING_SPECS["layer_testing_climb_admission"]()
         terminal_spec["layers"][-1]["params"].update(c=[[1.], [-1.]], d=[.25, 2.])
         terminal_net = factory.create_network("terminal_admission", terminal_spec)
@@ -1675,7 +1998,6 @@ if __name__ == "__main__":
         )
         terminal_session = ClimbSession(terminal_config, terminal_net, OutKind.LINEAR_LE)
         terminal_lane = SubproblemBatch.from_bounds(Bounds(lower, upper))
-        terminal_lane.decision_literals = torch.tensor([[-1]], device=upper.device)
         terminal_lid = terminal_session.codec.layer_ids[0]
         terminal_lane.split_signs = {terminal_lid: -upper.reshape(1, 1, 1).expand(1, 2, 1)}
         terminal_deadline = time.monotonic() + 60
@@ -1684,28 +2006,107 @@ if __name__ == "__main__":
             wraps=solve_terminal_batch,
         ) as terminal_spy:
             terminal_session.learn_terminal(terminal_lane, deadline=terminal_deadline)
-        assert terminal_spy.call_count == 2
+        # A positive charge within no budget costs no second LP.
+        assert terminal_spy.call_count == 1
         assert all("reference_bounds" not in call.kwargs for call in terminal_spy.call_args_list)
-        assert torch.equal(terminal_session.library.pack(upper.device), terminal_lane.decision_literals)
-        assert terminal_session.metrics.coarsen_replay_fallbacks == 1
+        assert torch.equal(terminal_session.library.pack(upper.device), torch.tensor([[-1]], device=upper.device))
+        assert terminal_session.metrics.terminal_literals_original == 1
+        assert terminal_session.metrics.terminal_literals_retained == 1
         for call in terminal_spy.call_args_list:
             assert torch.equal(call.args[1].lb, lower) and torch.equal(call.args[1].ub, upper)
-        # The required negative literal cannot be deleted. An implication is
-        # also unavailable to a decision-only replay on the original domain.
+        # The LP's own row duals price the phase: u0 * |Pi| for y <= d under z = 0.
+        priced = solve_terminal_batch(terminal_net, Bounds(lower, upper), terminal_lane.split_signs,
+                                      deadline=terminal_deadline, prefer_affine=False)
+        priced_costs = terminal_literal_costs(priced, 0)
+        assert priced_costs is not None and priced._export is not None
+        keys, charges, margins = priced_costs
+        assert keys == ((terminal_lid, 0, -1),) and charges.shape == (2, 1)
+        assert charges[0, 0] == 1. and charges[1, 0] == 0. and margins.tolist() == [.25, 2.]
+        reduced_tier = solve_terminal_batch(terminal_net, Bounds(lower, upper), terminal_lane.split_signs,
+                                            deadline=terminal_deadline)
+        assert reduced_tier.tiers == ("affine",) and terminal_literal_costs(reduced_tier, 0) is None
+        # A phase row in an uneliminated LP must be attributable, or nothing is proposed.
+        assert terminal_literal_costs(replace(priced, _export=None), 0) is None
+        misread = replace(priced, _export=replace(priced._export, _phase_rows=((replace(
+            priced._export._phase_rows[0][0], sign=1,
+        ),),)))
+        assert terminal_literal_costs(misread, 0) is None
         for implied, child_box in ((True, False), (False, True)):
             excluded = terminal_lane.select(torch.tensor([0], device=upper.device))
             if implied:
+                # A propagation-written phase is still part of S, and needed here.
                 excluded.decision_literals = torch.empty((1, 0), dtype=torch.long, device=upper.device)
             else:
                 excluded.ub.zero_()
-            rejected = ClimbSession(terminal_config, terminal_net, OutKind.LINEAR_LE)
+            learner = ClimbSession(terminal_config, terminal_net, OutKind.LINEAR_LE)
             with patch(
                 "act.back_end.solver.terminal_lp.solve_terminal_batch",
                 wraps=solve_terminal_batch,
-            ) as rejected_spy:
-                rejected.learn_terminal(excluded, deadline=terminal_deadline)
-            assert rejected.library.core_count == 0
-            assert rejected_spy.call_count == (0 if child_box else 1)
+            ) as excluded_spy:
+                learner.learn_terminal(excluded, deadline=terminal_deadline)
+            assert learner.library.core_count == int(implied)
+            assert excluded_spy.call_count == (0 if child_box else 1)
+        def terminal_spec_net(name: str, kind: str, c: List[List[float]], d: Sequence[float]) -> Net:
+            """Vary only the output property of the one-neuron admission net."""
+            spec = LAYER_TESTING_SPECS["layer_testing_climb_admission"]()
+            spec["layers"][-1]["params"].update(kind=kind, c=c, d=list(d))
+            return factory.create_network(name, spec)
+
+        for theta, recheck_k, d, core in (
+            (0., 0, (1.5,), [[-1]]),      # default never spends a positive charge
+            (1., 0, (1.5,), [[]]),        # budget pays 1 from slack 1.5
+            (1., 3, (1.5,), [[]]),        # K does not alter terminal admission
+            (0., 3, (1.5,), [[-1]]),
+            (1., 0, (.25,), [[-1]]),      # no slack would pay it, and no LP would pass
+        ):
+            budget_net = terminal_spec_net(f"terminal_budget_{theta}_{recheck_k}_{d[0]}", "LINEAR_LE", [[1.]], d)
+            budgeted = ClimbSession(replace(terminal_config, climb_theta=theta, climb_recheck_k=recheck_k),
+                                    budget_net, OutKind.LINEAR_LE)
+            budgeted.learn_terminal(terminal_lane, deadline=terminal_deadline)
+            assert budgeted.library.pack(upper.device).tolist() == core, (theta, recheck_k, d)
+        # Default terminal admission: y >= -2 under z = 0 has Pi > 0, so the
+        # literal is free, yet its removal still pays for a fresh LP.
+        free_net = terminal_spec_net("terminal_free", "LINEAR_LE", [[-1.]], (2.,))
+        for coarsening, calls, core in ((True, 2, [[]]), (False, 1, [[-1]])):
+            free = ClimbSession(replace(terminal_config, climb_recheck_k=0, climb_coarsening_enabled=coarsening),
+                                free_net, OutKind.LINEAR_LE)
+            with patch("act.back_end.solver.terminal_lp.solve_terminal_batch",
+                       wraps=solve_terminal_batch) as free_spy:
+                free.learn_terminal(terminal_lane, deadline=terminal_deadline)
+            assert free_spy.call_count == calls and free.library.pack(upper.device).tolist() == core
+        # A failed or expired changed admission retains the admitted full row.
+        real_terminal = solve_terminal_batch
+        solves: List[int] = []
+
+        def fail_second(*args: Any, **kwargs: Any) -> Any:
+            solves.append(1)
+            result = real_terminal(*args, **kwargs)
+            if len(solves) == 2:
+                return replace(result, statuses=(VerifyStatus.TIMEOUT,), certificates=((),))
+            return result
+
+        expired = ClimbSession(replace(terminal_config, climb_recheck_k=0), free_net, OutKind.LINEAR_LE)
+        with patch("act.back_end.solver.terminal_lp.solve_terminal_batch", side_effect=fail_second):
+            expired.learn_terminal(terminal_lane, deadline=terminal_deadline)
+        assert expired.library.pack(upper.device).tolist() == [[-1]]
+        assert expired.metrics.coarsen_replay_fallbacks == 1
+        unpriced = ClimbSession(replace(terminal_config, climb_recheck_k=0), free_net, OutKind.LINEAR_LE)
+        with patch("act.back_end.solver.terminal_lp.terminal_literal_costs", return_value=None):
+            unpriced.learn_terminal(terminal_lane, deadline=terminal_deadline)
+        assert unpriced.library.pack(upper.device).tolist() == [[-1]]
+        # Farkas: the closed unsafe set is empty only under the inactive phase.
+        unsafe_terminal = terminal_spec_net("terminal_unsafe", "UNSAFE_LINEAR", [[-1.]], (-.5,))
+        farkas = solve_terminal_batch(unsafe_terminal, Bounds(lower, upper), terminal_lane.split_signs,
+                                      deadline=terminal_deadline, prefer_affine=False)
+        assert farkas.certificate_kinds == ("phase1_residual",)
+        farkas_priced = terminal_literal_costs(farkas, 0)
+        assert farkas_priced is not None
+        farkas_keys, farkas_costs, farkas_slack = farkas_priced
+        assert farkas_keys == ((terminal_lid, 0, -1),) and farkas_slack[0] > 0
+        assert farkas_costs.shape == (1, 1) and farkas_costs[0, 0] > 0
+        unsafe_session = ClimbSession(replace(terminal_config, climb_recheck_k=0), unsafe_terminal, OutKind.UNSAFE_LINEAR)
+        unsafe_session.learn_terminal(terminal_lane, deadline=terminal_deadline)
+        assert unsafe_session.library.pack(upper.device).tolist() == [[-1]]
         checked = solve_terminal_batch(
             terminal_net, Bounds(lower, upper), terminal_lane.split_signs,
             deadline=terminal_deadline,
@@ -1727,7 +2128,7 @@ if __name__ == "__main__":
             ({"climb_terminal_cores": False}, 0),
             ({"terminal_lp_enabled": False}, 0),
             ({"climb_coarsening_enabled": False}, 1),
-            ({"climb_recheck_k": 0}, 1),
+            ({"climb_recheck_k": 9}, 1),
         ):
             gated = ClimbSession(replace(terminal_config, **changes), terminal_net, OutKind.LINEAR_LE)
             with patch("act.back_end.solver.terminal_lp.solve_terminal_batch", wraps=solve_terminal_batch) as gated_spy:
@@ -1738,7 +2139,6 @@ if __name__ == "__main__":
         expired_spy.assert_not_called()
         empty_session = ClimbSession(terminal_config, net, OutKind.LINEAR_LE)
         empty_lane = SubproblemBatch.from_bounds(Bounds(lower, upper))
-        empty_lane.decision_literals = torch.empty((1, 0), dtype=torch.long, device=upper.device)
         empty_session.learn_terminal(empty_lane, deadline=terminal_deadline)
         assert empty_session.library.pack(upper.device).shape == (1, 0)
         bounds, frame, _ = compute_forward_bounds(net, lower, upper)
@@ -1766,8 +2166,7 @@ if __name__ == "__main__":
             assert chronological.insert(torch.tensor([[1, 2], [1, 0], [1, 3]])) == 2
             assert chronological.subsumed == 2
             assert torch.equal(chronological.pack(upper.device), torch.tensor([[1]], device=upper.device))
-        merge_config = BaBConfig(climb_enabled=True, climb_merge_enabled=True,
-                                 climb_propagation_enabled=False, climb_propagate_core_chunk=1)
+        merge_config = BaBConfig(climb_enabled=True, climb_merge_enabled=True, climb_propagate_core_chunk=1)
         empty_active = SubproblemBatch(
             lb=lower[:0], ub=upper[:0],
             depths=torch.empty(0, dtype=torch.long, device=upper.device),
@@ -1782,68 +2181,192 @@ if __name__ == "__main__":
         )
         assert pending_after.batch_size == 1
         assert active_after.batch_size == active_rows.numel() == 0
-        for mismatch in ("none", "box", "ancestry", "implied", "rest"):
-            merge_session = ClimbSession(merge_config, net, OutKind.LINEAR_LE)
-            merge_session.codec = LiteralCodec((2,), (3,), (0,))
-            siblings = SubproblemBatch(
-                lb=lower.expand(2, -1).clone(), ub=upper.expand(2, -1).clone(),
-                depths=torch.ones(2, dtype=torch.long),
-                split_signs={2: upper.new_tensor([[[-1, 1, 0], [-1, 1, 0]], [[1, 1, 0], [1, 1, 0]]])},
-                incremental_alpha={2: upper.new_tensor([[.2, .3, .4], [.7, .8, .9]])},
-                incremental_eta={2: upper.new_ones(2, 2, 3)},
-                node_id=torch.tensor([1, 2]), parent_id=torch.tensor([0, 0]),
-                decision_literals=torch.tensor([[-1, 2], [1, 2]]),
+        def frontier_rows(literals: List[List[int]], **fields: Any) -> SubproblemBatch:
+            """Root-box rows over one six-neuron layer, one spec row, no solve state."""
+            count = len(literals)
+            signs = upper.new_zeros(count, 1, 6)
+            for row, literal_row in enumerate(literals):
+                for literal in literal_row:
+                    signs[row, 0, abs(literal) - 1] = 1. if literal > 0 else -1.
+            state: Dict[str, Any] = {
+                "depths": torch.full((count,), 3, dtype=torch.long),
+                "node_id": torch.arange(1, count + 1),
+                "parent_id": torch.arange(100, 100 + count),
+                "decision_literals": torch.zeros(count, 1, dtype=torch.long),
+                **fields,
+            }
+            return SubproblemBatch(lb=lower.expand(count, -1).clone(), ub=upper.expand(count, -1).clone(),
+                                   split_signs={2: signs}, **state)
+
+        def merge_fixture(config: BaBConfig = merge_config) -> ClimbSession:
+            session = ClimbSession(config, net, OutKind.LINEAR_LE)
+            session.codec = LiteralCodec((2,), (6,), (0,))
+            return session
+
+        def pool_of(rows: SubproblemBatch) -> TopKBounding:
+            frontier = TopKBounding()
+            frontier.push(rows)
+            return frontier
+
+        def row_sets(frontier: TopKBounding, codec: LiteralCodec) -> set[tuple[int, ...]]:
+            rows = frontier.view_all()
+            packed = pack_split_matrix(rows.split_signs, rows.batch_size, codec, device=rows.lb.device)
+            return {tuple(row[row != 0].tolist()) for row in _canonical_rows(packed)}
+
+        # The paper's four-row frontier: propagation, then two merge rounds.
+        paper = merge_fixture()
+        paper_rows = frontier_rows([[-1, 6], [1, -2], [1, 2, -3, -6], [1, 2, -3, 6]])
+        paper_pool = pool_of(paper_rows)
+        paper._insert_cores(torch.tensor([[-6], [3]]))
+        no_active = paper_rows.select(torch.empty(0, dtype=torch.long))
+        kept_after, kept_rows = paper.before_split(paper_pool, no_active)
+        assert kept_after.batch_size == kept_rows.numel() == 0
+        assert row_sets(paper_pool, paper.codec) == {(-3, 6)}
+        assert paper.metrics.merged_pairs == 2 and paper.metrics.prebound_discharged == 1
+        revived = paper_pool.pop()
+        assert revived.warm_state_present is not None and not bool(revived.warm_state_present.any())
+        assert revived.incremental_alpha is revived.incremental_eta is None
+        assert revived.lower_bound is not None and bool(torch.isneginf(revived.lower_bound).all())
+        assert revived.depths.item() == 1, "each merge removes one level"
+        assert torch.equal(revived.lb, lower) and torch.equal(revived.ub, upper)
+        # A cross-ancestor union keeps only the decisions both sides made.
+        for left, right, parents, node, parent, decided in (
+            ([1, 2], [-1, 2], [7, 7], 7, -1, [[0, 2]]),   # siblings revive their parent
+            ([1, 2], [-1, 2], [7, 8], 1, -1, [[0, 2]]),   # different ancestors merge too
+        ):
+            pair = merge_fixture()
+            pending = frontier_rows(
+                [left, right], parent_id=torch.tensor(parents), depths=torch.tensor([3, 5]),
+                decision_literals=torch.tensor([left, right]),
             )
-            assert siblings.parent_id is not None and siblings.decision_literals is not None
-            assert siblings.split_signs is not None and siblings.incremental_alpha is not None
-            if mismatch == "box":
-                siblings.lb[1] += .1
-            elif mismatch == "ancestry":
-                siblings.parent_id[1] = 4
-            elif mismatch == "implied":
-                siblings.decision_literals[:, 0] = 0
-            elif mismatch == "rest":
-                siblings.split_signs[2][1, :, 2] = 1
-            pool = TopKBounding(k=1)
-            pool.push(siblings)
-            viewed = pool.view_all()
-            assert viewed.incremental_alpha is not None
-            viewed_alpha, sibling_alpha = viewed.incremental_alpha[2], siblings.incremental_alpha[2]
-            assert isinstance(viewed_alpha, torch.Tensor) and isinstance(sibling_alpha, torch.Tensor)
-            assert torch.equal(viewed_alpha, sibling_alpha)
-            assert viewed.decision_literals is not None
-            assert torch.equal(viewed.decision_literals, siblings.decision_literals)
-            pool.replace_all(viewed)
-            active = pool.pop()
-            # No fresh proof means no gather and no immediate split undo.
-            with patch.object(pool, "view_all", side_effect=AssertionError("unneeded gather")):
-                merge_session.before_split(pool, active)
-            merge_session.library.insert(torch.tensor([[3]]))
-            active_after, selected = merge_session.before_split(pool, active)
-            if mismatch == "none":
-                assert active_after.batch_size == selected.numel() == 0 and len(pool) == 1
-                revived = pool.pop()
-                assert revived.node_id is not None and revived.parent_id is not None
-                assert revived.lower_bound is not None and revived.split_signs is not None
-                assert revived.decision_literals is not None
-                assert revived.node_id.item() == 0 and revived.parent_id.item() == -1
-                assert revived.depths.item() == 0
-                assert revived.incremental_alpha is revived.incremental_eta is None
-                assert bool(torch.isneginf(revived.lower_bound).all())
-                assert torch.equal(revived.split_signs[2], upper.new_tensor([[[0, 1, 0], [0, 1, 0]]]))
-                assert torch.equal(revived.decision_literals, torch.tensor([[0, 2]]))
-                # A second proof cannot undo another split of the revived parent.
-                pool.push(siblings)
-                merge_session.library.insert(torch.tensor([[2]]))
-                merge_session.before_pop(pool)
-                assert len(pool) == 2 and merge_session.metrics.merged_pairs == 1
+            pair_pool = pool_of(pending)
+            active = pair_pool.pop()
+            # Waves without an unseen core never gather the frontier to merge.
+            with patch.object(pair_pool, "checkpoint", side_effect=AssertionError("unneeded gather")):
+                pair.before_split(pair_pool, active)
+            assert pair._bounded_unresolved
+            pair._insert_cores(torch.tensor([[-3, -2]]))  # This core writes nothing.
+            active_after, selected = pair.before_split(pair_pool, active)
+            assert active_after.batch_size == selected.numel() == 0 and len(pair_pool) == 1
+            merged_row = pair_pool.pop()
+            assert merged_row.node_id is not None and merged_row.parent_id is not None
+            assert merged_row.node_id.item() == node and merged_row.parent_id.item() == parent
+            assert merged_row.depths.item() == 2
+            assert merged_row.decision_literals is not None
+            assert merged_row.decision_literals.tolist() == decided
+            assert merged_row.split_signs is not None
+            assert merged_row.split_signs[2].flatten().tolist() == [0., 1., 0., 0., 0., 0.]
+            # Re-offering a considered core arms nothing.
+            pair._insert_cores(torch.tensor([[-3, -2]]))
+            assert not pair._merge_armed
+        # Different boxes, remaining literals, or a hash collision never merge.
+        for case in ("box", "rest", "collision", "same_sign"):
+            rows = frontier_rows({
+                "box": [[1, 2], [-1, 2]], "rest": [[1, 2], [-1, 3]],
+                "collision": [[1, 2], [-1, 3]], "same_sign": [[1, 2], [1, 2]],
+            }[case])
+            if case == "box":
+                rows.lb[1] += .1
+            refused = merge_fixture()
+            refused_pool = pool_of(rows)
+            refused._insert_cores(torch.tensor([[-4, -5]]))
+            weights = (lambda count, device: torch.zeros(count, dtype=torch.long, device=device)
+                       ) if case == "collision" else _merge_hash_weights
+            with patch(f"{__name__}._merge_hash_weights", side_effect=weights):
+                refused.before_split(refused_pool, rows.select(torch.empty(0, dtype=torch.long)))
+            assert refused.metrics.merged_pairs == 0 and not refused._merge_armed
+            assert len(refused_pool) == 2
+        # Merging may not undo a split bounded unresolved, until propagation adds a condition.
+        for writes in (False, True):
+            guarded = merge_fixture()
+            guarded._remember_unresolved(frontier_rows([[2, -4] if writes else [2]]))
+            guarded_rows = frontier_rows([[1, 2], [-1, 2]])
+            guarded_pool = pool_of(guarded_rows)
+            guarded._insert_cores(torch.tensor([[4]]) if writes else torch.tensor([[-3, -2]]))
+            guarded.before_split(guarded_pool, guarded_rows.select(torch.empty(0, dtype=torch.long)))
+            assert guarded.metrics.merged_pairs == int(writes)
+            assert row_sets(guarded_pool, guarded.codec) == ({(2, -4)} if writes else {(1, 2), (-1, 2)})
+        # Consideration is permanent across subsumption and eviction.
+        permanent = merge_fixture(replace(merge_config, climb_max_cores=1))
+        permanent._insert_cores(torch.tensor([[5, 6]]))
+        assert permanent._merge_armed
+        permanent._merge_armed = False
+        permanent._insert_cores(torch.tensor([[5]]))      # unseen though it subsumes
+        assert permanent._merge_armed
+        permanent._merge_armed = False
+        permanent._insert_cores(torch.tensor([[3]]))      # unseen, and evicts a shorter tie
+        permanent._merge_armed = False
+        permanent._insert_cores(torch.tensor([[5, 6]]))   # subsumed/evicted, still seen
+        permanent._insert_cores(torch.tensor([[5]]))
+        permanent._insert_cores(torch.tensor([[3]]))
+        assert not permanent._merge_armed
+        resolvent = merge_fixture()
+        resolvent._insert_cores(torch.tensor([[5, 6], [5, -6]]))
+        assert (5,) in resolvent._seen_cores
+        # An allocation failure leaves frontier, trigger and counts untouched.
+        failing_merge = merge_fixture()
+        failing_rows = frontier_rows([[1, 2], [-1, 2]])
+        failing_pool = pool_of(failing_rows)
+        failing_merge._insert_cores(torch.tensor([[-3, -2]]))
+        no_rows = failing_rows.select(torch.empty(0, dtype=torch.long))
+        with patch.object(failing_pool, "replace_all", side_effect=torch.cuda.OutOfMemoryError("merge")):
+            try:
+                failing_merge._merge(failing_pool, no_rows)
+            except torch.cuda.OutOfMemoryError:
+                pass
             else:
-                assert active_after.batch_size == selected.numel() == len(pool) == 1
-                assert merge_session.metrics.merged_pairs == 0
+                raise AssertionError("injected failure did not fire")
+        assert failing_merge._merge_armed and failing_merge.metrics.merged_pairs == 0
+        assert row_sets(failing_pool, failing_merge.codec) == {(1, 2), (-1, 2)}
+        failing_merge._merge(failing_pool, no_rows)
+        assert row_sets(failing_pool, failing_merge.codec) == {(2,)} and not failing_merge._merge_armed
+        # A wave rollback re-owes its merge and forgets its uncommitted memo,
+        # while a core first seen after the checkpoint stays armed.
+        rolled = merge_fixture()
+        rolled_rows = frontier_rows([[1, 2], [-1, 2]])
+        rolled_pool = pool_of(rolled_rows)
+        rolled._insert_cores(torch.tensor([[-3, -2]]))
+        frontier_state = rolled_pool.checkpoint()
+        wave_state = rolled.checkpoint_frontier()
+        rolled.before_split(rolled_pool, frontier_rows([[3]]))
+        assert rolled.metrics.merged_pairs == 1 and not rolled._merge_armed
+        assert rolled._bounded_unresolved
+        rolled_pool.restore(frontier_state)
+        rolled.restore_frontier(wave_state)
+        assert rolled._merge_armed and rolled.metrics.merged_pairs == 0
+        assert not rolled._bounded_unresolved and row_sets(rolled_pool, rolled.codec) == {(1, 2), (-1, 2)}
+        # The total gate stops merge; the pre-split gate only defers it to pre-bound.
+        for total, presplit, merged_at_split, merged_at_pop in (
+            (False, True, 0, 0), (False, False, 0, 0), (True, True, 1, 1), (True, False, 0, 1),
+        ):
+            gated_merge = merge_fixture(replace(
+                merge_config, climb_propagation_enabled=total, climb_presplit_propagation_enabled=presplit,
+            ))
+            gated_rows = frontier_rows([[1, 2], [-1, 2]])
+            gated_pool = pool_of(gated_rows)
+            gated_merge._insert_cores(torch.tensor([[-3, -2]]))
+            gated_merge.before_split(gated_pool, gated_rows.select(torch.empty(0, dtype=torch.long)))
+            assert gated_merge.metrics.merged_pairs == merged_at_split, (total, presplit)
+            gated_merge.before_pop(gated_pool)
+            assert gated_merge.metrics.merged_pairs == merged_at_pop, (total, presplit)
+        # Pending and active rows pair up; an untouched row keeps its warm state.
+        warm_rows = frontier_rows([[1, 2], [4]])
+        warm_rows.incremental_alpha = {2: upper.new_ones(2, 6)}
+        warm_rows.incremental_eta = {2: upper.new_zeros(2, 1, 6)}
+        warm_rows.warm_state_present = torch.ones(2, dtype=torch.bool)
+        warm_pool = pool_of(warm_rows)
+        mixed_merge = merge_fixture()
+        mixed_merge._insert_cores(torch.tensor([[-3, -2]]))
+        mixed_active, mixed_kept = mixed_merge.before_split(warm_pool, frontier_rows([[-1, 2], [5]]))
+        assert mixed_active.batch_size == 1 and mixed_kept.tolist() == [1]
+        assert mixed_merge.metrics.merged_pairs == 1 and len(warm_pool) == 2
+        warm_view = warm_pool.view_all()
+        assert warm_view.warm_state_present is not None
+        assert warm_view.warm_state_present.tolist() == [True, False]
         disabled = ClimbSession(BaBConfig(climb_propagation_enabled=False), net, OutKind.LINEAR_LE)
         disabled.library.insert(torch.tensor([[1]]))
         pool = TopKBounding()
-        with patch.object(pool, "view_all", side_effect=AssertionError("disabled merge gathered")):
+        with patch.object(pool, "view_all", side_effect=AssertionError("disabled propagation gathered")):
             disabled.before_pop(pool)
         ordered = CoreLibrary(8, track_complements=True)
         ordered.insert(torch.tensor([[2, -1]]))
@@ -1961,9 +2484,17 @@ if __name__ == "__main__":
             unsupported = factory.create_network(f"unsupported_{precision}", unsupported_spec)
             unknown_base, _, _ = compute_forward_bounds(unsupported, -refresh_box, refresh_box)
             unknown = refresh_bounds(unsupported, unknown_base, phases, literals=packed, codec=codec)
+            # The split-free fallback's only local fact is each ReLU's own phase,
+            # so an additional operator's root-valid relaxation charges nothing.
             assert unknown.supports is not None
-            assert all(not bool(s.known.any()) for s in unknown.supports.values())
             assert unknown.bounds[2] is unknown_base[2]
+            assert all(bool(s.known.all()) for s in unknown.supports.values())
+            assert unknown.supports[2].lower[0].tolist() == [[True]]
+            assert unknown.supports[2].upper[1].tolist() == [[True]]
+            assert not bool(unknown.supports[0].lower.any())
+            # Without the row's literals that local fact has unknown provenance.
+            nameless = refresh_bounds(unsupported, unknown_base, phases, literals=packed[:, :0], codec=codec)
+            assert nameless.supports is not None and not bool(nameless.supports[2].known.any())
             unknown_batch = SubproblemBatch.from_bounds(Bounds(-refresh_box, refresh_box), depth=1)
             unknown_batch.split_signs = {2: -torch.ones(2, 1, 1, dtype=refresh_box.dtype)}
             unknown_batch.incremental_alpha = {2: torch.ones(2, 1, 1, dtype=refresh_box.dtype)}
@@ -1978,7 +2509,19 @@ if __name__ == "__main__":
                 refresh_mode="split_refresh",
             )
             assert unknown_replay is not None and unknown_replay[1] is not None
-            assert bool(torch.isinf(unknown_replay[1]).all()), "unknown support cannot fund deletion"
+            assert bool(torch.isfinite(unknown_replay[1]).all())
+            assert nameless.supports is not None
+            for layer_id, support in nameless.supports.items():
+                nameless.supports[layer_id] = BoundSupport(
+                    torch.zeros(*support.known.shape, 1, dtype=torch.bool), support.upper[..., :0].new_zeros(
+                        *support.known.shape, 1), support.known,
+                )
+            unknown_costs = _supported_literal_costs(
+                unknown_literals, codec, unknown_replay[0], unknown_batch.incremental_eta,
+                {2: -torch.ones(2, 1, 1, dtype=refresh_box.dtype)}, unknown_base, unknown_base,
+                unknown_batch.split_signs, nameless.supports, None,
+            )
+            assert bool(torch.isinf(unknown_costs).all()), "unknown support cannot fund deletion"
             token_net = factory.create_network(
                 f"token_{precision}", LAYER_TESTING_SPECS["layer_testing_token_wise_dense"]()
             )
@@ -1990,6 +2533,221 @@ if __name__ == "__main__":
                         + (token_lb + .1) @ weight.clamp(max=0).T + bias).flatten(1)
             assert token_refresh.bounds[2].lb.shape == (2, 4)
             assert torch.allclose(token_refresh.bounds[2].lb, exact_lo)
+        for precision in ("float32", "float64"):
+            initialize_device("cpu", precision)
+            dtype = get_default_dtype()
+            # Default extraction deletes exactly the eligible zero-cost slots.
+            def default_mask(
+                rows: List[List[int]], cost: List[List[List[float]]], margin: List[List[float]],
+            ) -> List[List[int]]:
+                return coarsen(
+                    torch.tensor(rows), torch.tensor(cost, dtype=dtype), torch.tensor(margin, dtype=dtype),
+                    theta=0., delta_abs=1e-9, delta_rel=1e-7,
+                ).tolist()
+
+            tiny = torch.finfo(dtype).tiny
+            assert default_mask([[1, 2]], [[[0., 0.]]], [[1.]]) == [[0, 0]]
+            assert default_mask([[1, 2]], [[[0., 1.]]], [[1.]]) == [[0, 2]]
+            assert default_mask([[1, 2]], [[[0., tiny]]], [[1.]]) == [[0, 2]], "near zero is not zero"
+            assert default_mask([[1, 2], [3, 0], [0, 0]], [[[1., 0.]], [[0., 0.]], [[0., 0.]]],
+                                [[1.], [1.], [1.]]) == [[1, 0], [0, 0], [0, 0]]
+            for bad_cost, bad_slack in (
+                (torch.nan, 1.), (torch.inf, 1.), (0., torch.nan), (0., torch.inf), (0., 0.), (0., 1e-10),
+            ):
+                assert default_mask([[1, 2]], [[[0., bad_cost]]], [[bad_slack]]) == [[1, 2]], (bad_cost, bad_slack)
+            # Every spec row must agree, on a two-lane two-row tensor.
+            assert default_mask([[1, 2], [3, 4]], [[[0., 0.], [0., 1.]], [[1., 0.], [0., 0.]]],
+                                [[1., 1.], [1., 1.]]) == [[0, 2], [3, 0]]
+            assert default_mask([[1, 2]], [[[0., 0.], [0., 0.]]], [[1., 1e-10]]) == [[1, 2]]
+            # A negative budget cannot block exact zeros when theta buys nothing else.
+            assert coarsen(torch.tensor([[1, 2]]), torch.tensor([[[0., 1.]]], dtype=dtype),
+                           torch.tensor([[1e-8]], dtype=dtype), theta=.01, delta_abs=1e-9, delta_rel=0.,
+                           ).tolist() == [[0, 2]]
+            with patch(f"{__name__}.sorted", create=True, side_effect=AssertionError("default path sorted")):
+                assert default_mask([[1]], [[[0.]]], [[1.]]) == [[0]]
+
+            # The four-row frontier does not depend on the bound dtype.
+            typed_rows = frontier_rows([[-1, 6], [1, -2], [1, 2, -3, -6], [1, 2, -3, 6]])
+            assert typed_rows.split_signs is not None
+            typed_rows = replace(typed_rows, lb=typed_rows.lb.to(dtype), ub=typed_rows.ub.to(dtype),
+                                 split_signs={2: typed_rows.split_signs[2].to(dtype)})
+            typed_session = merge_fixture()
+            typed_pool = pool_of(typed_rows)
+            typed_session._insert_cores(torch.tensor([[-6], [3]]))
+            typed_session.before_split(typed_pool, typed_rows.select(torch.empty(0, dtype=torch.long)))
+            assert row_sets(typed_pool, typed_session.codec) == {(-3, 6)}
+
+            # Dense supports follow endpoint direction, drop zero weights, and a
+            # post-ReLU lower endpoint of zero is global.
+            weights = torch.tensor([[1., -1., 0.], [0., 0., 1.]], dtype=dtype)
+            direction_spec = LAYER_TESTING_SPECS["layer_testing_climb_reuse"]()
+            direction_spec["layers"] = direction_spec["layers"][:2] + [
+                {"kind": "DENSE", "params": {"weight": torch.tensor([[1., 0.], [0., 1.], [1., 1.]], dtype=dtype),
+                                             "bias": torch.zeros(3, dtype=dtype),
+                                             "in_features": 2, "out_features": 3}},
+                {"kind": "RELU", "params": {}},
+                {"kind": "DENSE", "params": {"weight": weights, "bias": torch.zeros(2, dtype=dtype),
+                                             "in_features": 3, "out_features": 2}},
+                {"kind": "ASSERT", "params": {"kind": "LINEAR_LE", "c": [1., 1.], "d": 9.}},
+            ]
+            direction_net = factory.create_network(f"direction_{precision}", direction_spec)
+            direction_box = torch.ones(1, 2, dtype=dtype)
+            direction_base, _, _ = compute_forward_bounds(direction_net, -direction_box, direction_box)
+            direction_codec = LiteralCodec.from_net(direction_net)
+            direction_lid = direction_codec.layer_ids[0]
+            direction_signs = {direction_lid: torch.tensor([[[-1., -1., 1.]]], dtype=dtype)}
+            direction_literals = pack_split_matrix(direction_signs, 1, direction_codec, device=direction_box.device)
+            direction = refresh_bounds(
+                direction_net, direction_base, direction_signs,
+                literals=direction_literals, codec=direction_codec,
+            ).supports
+            assert direction is not None
+            output_lid = direction_lid + 1
+            assert direction[output_lid].lower[0].tolist() == [[False, True, False], [False, False, False]]
+            assert direction[output_lid].upper[0].tolist() == [[True, False, False], [False, False, False]]
+            assert bool(direction[output_lid].known.all())
+            # An unknown operand taints only outputs that actually read it.
+            tainted = {direction_lid: BoundSupport(
+                direction[direction_lid].lower, direction[direction_lid].upper,
+                torch.tensor([[True, False, True]]),
+            )}
+            assert _inherited_support(
+                direction_net.by_id[output_lid], [direction_lid], tainted, (1, 2), 3, direction_box.device,
+            ).known.tolist() == [[False, True]]
+
+            # The paper's running example, f = 2 z5 - z6 over [-1, 1]^2.
+            toy_spec = LAYER_TESTING_SPECS["layer_testing_climb_reuse"]()
+            toy_layers = (
+                ([[1., 1.], [1., -1.]], [0., 0.]),
+                ([[1., -1.], [1., -1.]], [-1., 1.]),
+                ([[1., 1.], [1., 1.]], [-.25, -.5]),
+            )
+            toy_spec["layers"] = toy_spec["layers"][:2]
+            for weight, bias in toy_layers:
+                toy_spec["layers"] += [
+                    {"kind": "DENSE", "params": {
+                        "weight": torch.tensor(weight, dtype=dtype), "bias": torch.tensor(bias, dtype=dtype),
+                        "in_features": 2, "out_features": 2,
+                    }},
+                    {"kind": "RELU", "params": {}},
+                ]
+            toy_spec["layers"].append({"kind": "ASSERT", "params": {"kind": "LINEAR_LE", "c": [-2., 1.], "d": .25}})
+            toy = factory.create_network(f"paper_toy_{precision}", toy_spec)
+            toy_codec = LiteralCodec.from_net(toy)
+            toy_ids = toy_codec.layer_ids
+            toy_box = torch.ones(1, 2, dtype=dtype)
+            toy_base, _, _ = compute_forward_bounds(toy, -toy_box, toy_box)
+            assert toy_base[toy_ids[2]].lb.flatten().tolist() == [-.25, -.5]
+            assert toy_base[toy_ids[2]].ub.flatten().tolist() == [3.75, 3.5]
+            assert toy_base[toy_ids[1]].lb.flatten().tolist() == [-3., -1.]
+
+            def toy_cost(
+                literals: List[int], eta_values: Dict[int, List[float]], nu_values: Dict[int, List[float]],
+                reference: Dict[int, Bounds], supports: Dict[int, BoundSupport],
+            ) -> torch.Tensor:
+                packed_row = torch.tensor([literals])
+                signs = {
+                    lid: torch.zeros(1, 1, 2, dtype=dtype) for lid in toy_ids
+                }
+                for literal in literals:
+                    lid, neuron, sign = toy_codec.decode(literal)
+                    signs[lid][0, 0, neuron] = float(sign)
+                return _supported_literal_costs(
+                    packed_row, toy_codec, torch.ones(1, 1, dtype=dtype),
+                    {lid: torch.tensor([[eta_values.get(lid, [0., 0.])]], dtype=dtype) for lid in toy_ids},
+                    {lid: torch.tensor([[nu_values.get(lid, [0., 0.])]], dtype=dtype) for lid in toy_ids},
+                    toy_base, reference, signs, supports, None,
+                )[0, 0]
+
+            def toy_supports(width: int, lower: Dict[tuple[int, int], int] | None = None,
+                             upper: Dict[tuple[int, int], int] | None = None) -> Dict[int, BoundSupport]:
+                masks = {}
+                for lid in toy_ids:
+                    low = torch.zeros(1, 2, width, dtype=torch.bool)
+                    high = low.clone()
+                    for (layer, neuron), slot in (lower or {}).items():
+                        if layer == lid:
+                            low[0, neuron, slot] = True
+                    for (layer, neuron), slot in (upper or {}).items():
+                        if layer == lid:
+                            high[0, neuron, slot] = True
+                    masks[lid] = BoundSupport(low, high, torch.ones(1, 2, dtype=torch.bool))
+                return masks
+
+            first, second, third = toy_ids
+            # C1 = z1- & z6-: removing z6- invalidates z6 = 0, costing 7/2; z1- is free.
+            assert toy_cost([-1, -6], {}, {third: [0., -1.]}, toy_base,
+                            toy_supports(2, upper={(third, 1): 1})).tolist() == [0., 3.5]
+            # C2 = z1+ & z2+ & z3+: eta 2 on z3+ (m = 3) and the z6 = zhat6 line
+            # supported only by z3+ (eps = 1/2) give 13/2; the others are free.
+            conditioned_toy = dict(toy_base)
+            conditioned_toy[second] = Bounds(torch.tensor([[0., -1.]], dtype=dtype), toy_base[second].ub)
+            conditioned_toy[third] = Bounds(torch.tensor([[-.25, 1.5]], dtype=dtype), toy_base[third].ub)
+            assert toy_cost(
+                [1, 2, 3], {second: [2., 0.]}, {third: [2., -1.], second: [1., 1.], first: [0., 0.]},
+                conditioned_toy, toy_supports(3, lower={(third, 1): 2, (second, 0): 2}),
+            ).tolist() == [0., 0., 6.5]
+            # P1 = z1- & z6+: both multipliers zero, yet z6+ costs 1/2.
+            assert toy_cost([-1, 6], {}, {third: [1., -1.]}, toy_base,
+                            toy_supports(2, lower={(third, 1): 1})).tolist() == [0., .5]
+            # A chord frozen on a narrower interval charges what supports it; the
+            # same dependency on an unchanged interval has zero residual.
+            narrowed = dict(toy_base)
+            narrowed[third] = Bounds(toy_base[third].lb, torch.tensor([[3.75, 1.5]], dtype=dtype))
+            chord_support = toy_supports(1, upper={(third, 1): 0})
+            assert toy_cost([1], {}, {third: [0., -1.]}, narrowed, chord_support).tolist() == [
+                .5 * (3.5 - 1.5) / 2.]
+            assert toy_cost([1], {}, {third: [0., -1.]}, toy_base, chord_support).tolist() == [0.]
+            # Positive coefficients use global lower lines, so they are never charged.
+            assert toy_cost([1], {}, {third: [0., 4.]}, narrowed, chord_support).tolist() == [0.]
+            # UNSAFE_LINEAR charges only the row that proved it.
+            pinned_costs = _supported_literal_costs(
+                torch.tensor([[-6]]), toy_codec, torch.ones(1, 2, dtype=dtype),
+                {lid: torch.zeros(1, 2, 2, dtype=dtype) for lid in toy_ids},
+                {third: torch.tensor([[[0., 0.], [0., -1.]]], dtype=dtype)},
+                toy_base, toy_base,
+                {**{lid: torch.zeros(1, 2, 2, dtype=dtype) for lid in toy_ids},
+                 third: torch.tensor([[[0., -1.], [0., -1.]]], dtype=dtype)},
+                toy_supports(1, upper={(third, 1): 0}), torch.tensor([1]),
+            )
+            assert pinned_costs.shape == (1, 1, 1) and pinned_costs.item() == 3.5
+
+            # Real replay of C1: the z6- literal survives, the z1- literal is proved free,
+            # and the bound itself is re-established with a fresh pass.
+            c1_signs = {lid: torch.zeros(1, 1, 2, dtype=dtype) for lid in toy_ids}
+            c1_signs[first][0, 0, 0] = -1.
+            c1_signs[third][0, 0, 1] = -1.
+            c1 = SubproblemBatch.from_bounds(Bounds(-toy_box, toy_box), depth=2)
+            c1.split_signs = c1_signs
+            c1.decision_literals = torch.tensor([[-1, -6]])
+            c1.incremental_alpha = {lid: torch.zeros(1, 1, 2, dtype=dtype) for lid in toy_ids}
+            c1.incremental_eta = {lid: torch.zeros(1, 1, 2, dtype=dtype) for lid in toy_ids}
+            assert c1.warm_state_present is not None
+            c1.warm_state_present.fill_(True)
+            toy_spec_out = OutputSpec(OutKind.LINEAR_LE, c=torch.tensor([-2., 1.], dtype=dtype),
+                                      d=torch.tensor(.25, dtype=dtype))
+            c1_reference = refresh_bounds(toy, toy_base, c1_signs).bounds
+            c1_result = DualSolver().solve_spec_batch(
+                toy, c1_reference, toy_spec_out, optimize=True, dual_config=DualConfig(n_iters=0),
+                input_shape=(2,), split_signs=c1_signs, incremental_alphas=c1.incremental_alpha,
+                refresh_forward=False,
+            )
+            assert c1_result.solution.statuses == (SolveStatus.UNSAT,)
+            c1_result = replace(c1_result, base_reference_bounds=toy_base)
+            c1.incremental_alpha, c1.incremental_eta = c1_result.alpha_state, c1_result.eta_state
+            c1_session = ClimbSession(BaBConfig(root_bounds_reuse="split_refresh"), toy, OutKind.LINEAR_LE)
+            c1_session.learn(c1, c1_result.solution.statuses, c1_result, 1)
+            assert c1_session.library.pack(toy_box.device).tolist() == [[-6]]
+            assert c1_session.metrics.core_literals_original == 2
+            assert c1_session.metrics.core_literals_retained == 1
+            assert c1_session.metrics.coarsen_replay_fallbacks == 0
+            # Terminal admission reaches the same proper subset through LP duals.
+            terminal_c1 = ClimbSession(BaBConfig(terminal_lp_enabled=True), toy, OutKind.LINEAR_LE)
+            terminal_c1.learn_terminal(c1, deadline=time.monotonic() + 60)
+            terminal_core = terminal_c1.library.pack(toy_box.device).tolist()
+            assert terminal_core == [[-6]], terminal_core
+            assert terminal_c1.metrics.terminal_literals_original == 2
+            assert terminal_c1.metrics.terminal_literals_retained == 1
         initialize_device("cpu", "float64")
         for alpha in (1., 0.):
             batch = SubproblemBatch.from_bounds(Bounds(lower, upper), depth=1)
@@ -2022,13 +2780,14 @@ if __name__ == "__main__":
                         patch(f"{__name__}._literal_costs", wraps=_literal_costs) as costs_spy,
                     ):
                         session.learn(batch, result.solution.statuses, result, 1)
-                    expected = torch.tensor([[-1]] if alpha == 1 or not coarsening else [[]], dtype=torch.long)
+                    # Literal -1 keeps its slope 0 whatever the dormant alpha, so y >= 0 survives.
+                    expected = torch.tensor([[-1]] if not coarsening else [[]], dtype=torch.long)
                     assert torch.equal(session.library.pack(upper.device), expected.to(upper.device))
                     assert solve_spy.call_count == 1 + int(coarsening)
                     assert costs_spy.call_count == int(coarsening)
                     assert solve_spy.call_args_list[0].kwargs["return_nu_per_layer"] == coarsening
                     assert session.metadata()["climb_recheck_calls"] == int(coarsening)
-                    assert session.metadata()["climb_coarsen_replay_fallbacks"] == int(alpha) * int(coarsening)
+                    assert session.metadata()["climb_coarsen_replay_fallbacks"] == 0
 
                     pool = TopKBounding()
                     pool.push(batch)
@@ -2072,8 +2831,6 @@ if __name__ == "__main__":
             split_signs=replay_batch.split_signs,
             incremental_alphas=replay_batch.incremental_alpha, refresh_forward=False,
         )
-        from dataclasses import replace
-
         replay_result = replace(replay_result, base_reference_bounds=bounds)
         replay_batch.incremental_alpha, replay_batch.incremental_eta = replay_result.alpha_state, replay_result.eta_state
         assert replay_batch.warm_state_present is not None
@@ -2084,7 +2841,8 @@ if __name__ == "__main__":
             root_bounds_reuse="split_refresh", climb_coarsening_enabled=False,
         ), net, OutKind.LINEAR_LE)
         implied_session.learn(implied_only, replay_result.solution.statuses, replay_result, 1)
-        assert implied_session.library.core_count == 0
+        # Propagation-written phases are source conditions of the proved region.
+        assert implied_session.library.pack(upper.device).tolist() == [[-1]]
         objective_rows, threshold_rows = replay_result.c_rows, replay_result.thresholds
         assert objective_rows is not None and threshold_rows is not None
 
@@ -2116,9 +2874,20 @@ if __name__ == "__main__":
         )
         validate_climb_config(split_config)
         split_session = ClimbSession(split_config, net, OutKind.LINEAR_LE)
-        # The heuristic may be arbitrarily optimistic; admission cannot be.
+        # The heuristic may be arbitrarily optimistic; admission cannot be: y <= .25
+        # needs the phase, and slope 0 with its upper line max(0, u) cannot replace it.
+        needed = replace(replay_batch, incremental_alpha={2: torch.ones_like(upper[:, None])})
+        needed_result = DualSolver().solve_spec_batch(
+            net, conditioned, OutputSpec(OutKind.LINEAR_LE, c=upper[0], d=upper.new_tensor(.25)),
+            optimize=True, dual_config=DualConfig(n_iters=0), input_shape=(1,),
+            split_signs=needed.split_signs, incremental_alphas=needed.incremental_alpha,
+            refresh_forward=False,
+        )
+        assert needed_result.solution.statuses == (SolveStatus.UNSAT,)
+        needed_result = replace(needed_result, base_reference_bounds=bounds)
+        needed.incremental_alpha, needed.incremental_eta = needed_result.alpha_state, needed_result.eta_state
         with patch(f"{__name__}.coarsen", side_effect=lambda packed, *args, **kwargs: torch.zeros_like(packed)):
-            split_session.learn(replay_batch, replay_result.solution.statuses, replay_result, 1)
+            split_session.learn(needed, needed_result.solution.statuses, needed_result, 1)
         assert torch.equal(split_session.library.pack(upper.device), torch.tensor([[-1]], device=upper.device))
         assert split_session.metrics.coarsen_replay_fallbacks == 1
         cheap = replace(replay_batch, incremental_alpha={2: torch.zeros_like(upper[:, None])})

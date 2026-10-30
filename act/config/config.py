@@ -172,7 +172,7 @@ class BaBConfig:
     terminal_lp_enabled: bool = False
     """Solve candidate-less lanes with independently checked terminal LP evidence."""
     climb_terminal_cores: bool = True
-    """Learn root-box terminal LP cores after replaying their own decisions."""
+    """Publish root-box terminal LP cores; theta-budget subsets need their own LP proof."""
     milp_escalation: bool = False
     """Try a bounded exact ReLU MILP after unresolved root tiers, before BaB."""
     milp_max_variables: int = 2000
@@ -187,23 +187,23 @@ class BaBConfig:
     climb_coarsening_enabled: bool = True
     """Apply literal-budget coarsening before admitting replay-certified cores."""
     climb_propagation_enabled: bool = True
-    """Apply learned cores to pending and active subproblems."""
+    """Apply learned cores to pending and active subproblems; false also disables merging."""
     climb_merge_enabled: bool = False
-    """Merge complementary equal-domain siblings, then rebound the revived parent."""
+    """Merge complementary root-domain rows to a fixed point on an unseen core, then rebound."""
     climb_complement_bounding: bool = False
     """Bound each new core's deepest-decision complement once on the root domain."""
     climb_steer: bool = False
     """Bias finite BranchingScores by core frequency without changing conditions."""
     climb_presplit_propagation_enabled: bool = True
-    """Enable the pre-split hook only when climb_propagation_enabled is also true."""
+    """Run propagation and merge before splitting; false defers both to the next pre-bound step."""
     climb_theta: float = 0.0
-    """Fraction of replay slack available to the vector deletion budget."""
+    """Fraction of slack available to the vector deletion budget; exact zero costs need none."""
     climb_delta_abs: float = 1e-9
     """Absolute deletion-budget margin: delta = climb_delta_abs + climb_delta_rel * |slack|."""
     climb_delta_rel: float = 1e-7
     """Relative deletion-budget margin: delta = climb_delta_abs + climb_delta_rel * |slack|."""
     climb_recheck_k: int = 0
-    """Maximum lanes given one extra direct replay after budget coarsening."""
+    """Maximum dual lanes given one extra direct replay after budget coarsening."""
     climb_max_cores: int = 1024
     """Maximum retained cores after subsumption and deterministic eviction."""
     climb_propagate_core_chunk: int = 4096

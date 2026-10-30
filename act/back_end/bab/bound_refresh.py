@@ -4,18 +4,19 @@
 # Licensed under the GNU Affero General Public License v3.0 or later.
 # Distributed without any warranty; see <http://www.gnu.org/licenses/>.
 #===---------------------------------------------------------------------===#
-"""One split refresh traversal, with optional decision-slot dependencies.
+"""One split refresh traversal, with optional literal-slot dependencies.
 
 Bounds remain ordinary Bounds objects. Supports are sufficient (not minimal):
-each bit names a packed decision slot, never a spec row or an implied phase.
-Unknown provenance must not be interpreted as an empty dependency set.
+each bit names a packed literal slot, never a spec row. An endpoint equal to
+its split-free reference needs no bits, because that reference holds on every
+retained subset. Unknown provenance must not be read as an empty set.
 """
 from dataclasses import dataclass, replace
 from typing import Protocol
 
 import torch
 
-from act.back_end.core import Bounds, Net, topological_sort
+from act.back_end.core import Bounds, Layer, Net, topological_sort
 from act.back_end.dual_tf.tf_forward import (
     Frame, LinearBound, _entry_lin_frame, _fwd_relu,
     _box_bias, _box_bn, _box_dense, _box_scale, _fwd_conv2d_interval,
@@ -24,13 +25,20 @@ from act.back_end.dual_tf.tf_forward import (
 from act.back_end.layer_schema import LayerKind
 from act.config.config import DualConfig
 
+# Each output endpoint reads only the same endpoint of the same-index operand.
+_ENDPOINT_PRESERVING = frozenset({
+    LayerKind.ADD.value, LayerKind.BIAS.value, LayerKind.FLATTEN.value,
+    LayerKind.RELU.value, LayerKind.RESHAPE.value,
+})
+
+
 class _LiteralDecoder(Protocol):
     """The existing LiteralCodec surface needed by the numerical traversal."""
 
     def decode_tensor(
         self, literals: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Decode packed decision slots into layer, neuron and sign tensors."""
+        """Decode packed literal slots into layer, neuron and sign tensors."""
         ...
 
 
@@ -50,6 +58,107 @@ class RefreshResult:
     bounds: dict[int, Bounds]
     supports: dict[int, BoundSupport] | None
     linear_refined: bool = False
+
+
+def _lane_phase(split_signs: dict[int, torch.Tensor], lid: int) -> torch.Tensor | None:
+    """Return one layer's [K,N] phases after checking spec invariance."""
+    phase = split_signs.get(lid)
+    if phase is None or phase.dim() != 3:
+        return phase
+    if not torch.equal(phase, phase[:, :1].expand_as(phase)):
+        raise ValueError("split phases must be spec invariant")
+    return phase[:, 0]
+
+
+def _phase_bits(
+    phase: torch.Tensor, lid: int, layers: torch.Tensor, neurons: torch.Tensor,
+    signs: torch.Tensor, active: torch.Tensor,
+) -> torch.Tensor:
+    """Name the slot behind each phase; an unnamed phase needs its whole row."""
+    bits = torch.zeros(*phase.shape, active.shape[1], dtype=torch.bool, device=phase.device)
+    own = torch.zeros_like(phase, dtype=torch.bool)
+    lanes, slots = torch.where(active & (layers == lid))
+    indices = neurons[lanes, slots]
+    matching = signs[lanes, slots] == phase[lanes, indices]
+    own[lanes[matching], indices[matching]] = True
+    bits[lanes[matching], indices[matching], slots[matching]] = True
+    return bits | (((phase != 0) & ~own)[:, :, None] & active[:, None, :])
+
+
+def _root_valid_supports(
+    net: Net, base: dict[int, Bounds], split_signs: dict[int, torch.Tensor],
+    literals: torch.Tensor, codec: _LiteralDecoder,
+) -> dict[int, BoundSupport]:
+    """Supports of the split-free fallback: only a ReLU's own phase clamp.
+
+    Every interval, including those of additional nonlinear operators, is the
+    root reference, so no residual depends on any other literal.
+    """
+    layers, neurons, signs = codec.decode_tensor(literals.masked_fill(literals == 0, 1))
+    active = literals != 0
+    supports = {}
+    for lid, box in base.items():
+        lb, ub = box.lb.flatten(1), box.ub.flatten(1)
+        lower = torch.zeros(*lb.shape, literals.shape[1], dtype=torch.bool, device=lb.device)
+        upper = lower.clone()
+        known = torch.ones_like(lb, dtype=torch.bool)
+        phase = _lane_phase(split_signs, lid) if net.by_id[lid].kind == LayerKind.RELU.value else None
+        if phase is not None:
+            bits = _phase_bits(phase, lid, layers, neurons, signs, active)
+            lower = bits & ((phase > 0) & (lb < 0))[:, :, None]
+            upper = bits & ((phase < 0) & (ub > 0))[:, :, None]
+            known &= ~(phase.ne(0).any(1) & ~active.any(1))[:, None]
+        supports[lid] = BoundSupport(lower, upper, known)
+    return supports
+
+
+def _inherited_support(
+    layer: Layer, preds: list[int], post_support: dict[int, BoundSupport],
+    shape: tuple[int, int], width: int, device: torch.device,
+) -> BoundSupport:
+    """Follow the operands each output endpoint used, per endpoint when known."""
+    k, n = shape
+    operands = [post_support[pid] for pid in preds]
+    if layer.kind in _ENDPOINT_PRESERVING and all(ps.known.shape == shape for ps in operands):
+        lower = torch.zeros(k, n, width, dtype=torch.bool, device=device)
+        upper = lower.clone()
+        known = torch.ones(shape, dtype=torch.bool, device=device)
+        for operand in operands:
+            lower |= operand.lower
+            upper |= operand.upper
+            known &= operand.known
+        return BoundSupport(lower, upper, known)
+    weight = layer.params.get("weight") if layer.kind == LayerKind.DENSE.value else None
+    lower = torch.zeros(k, n, width, dtype=torch.bool, device=device)
+    upper = lower.clone()
+    known = torch.ones(shape, dtype=torch.bool, device=device)
+    # Bound the temporary union by slots rather than materializing
+    # [K,N_parent,N_output,S] adjacency or broadcasting across specs.
+    if (isinstance(weight, torch.Tensor) and weight.dim() == 2 and weight.shape[0] == n
+            and operands[0].known.shape[1] == weight.shape[1]):
+        parent = operands[0]
+        positive = (weight > 0).T.to(device=device, dtype=torch.float32)
+        negative = (weight < 0).T.to(device=device, dtype=torch.float32)
+
+        def reaches(mask: torch.Tensor, selector: torch.Tensor) -> torch.Tensor:
+            return (mask.transpose(1, 2).to(selector) @ selector).transpose(1, 2) > 0
+
+        for start in range(0, width, 64):
+            end = start + 64
+            low, high = parent.lower[..., start:end], parent.upper[..., start:end]
+            lower[..., start:end] = reaches(low, positive) | reaches(high, negative)
+            upper[..., start:end] = reaches(high, positive) | reaches(low, negative)
+        known = ((~parent.known).to(positive) @ (positive + negative)) == 0
+        return BoundSupport(lower, upper, known)
+    for start in range(0, width, 64):
+        end = start + 64
+        inherited = torch.zeros(k, min(end, width) - start, dtype=torch.bool, device=device)
+        for operand in operands:
+            inherited |= (operand.lower[..., start:end] | operand.upper[..., start:end]).any(1)
+        lower[..., start:end] = inherited[:, None, :]
+    for operand in operands:
+        known &= operand.known.all(1, keepdim=True)
+    return BoundSupport(lower, lower.clone(), known)
 
 
 def _halfspace_lower(
@@ -221,52 +330,31 @@ def refresh_bounds(
             # Some stored boxes are PRE-activation, so treating an unsupported
             # layer's root entry as its output would be unsound downstream.
             # Fall back for the complete traversal, not just this operator.
-            unknown = None
-            if literals is not None:
-                unknown = {}
-                for key, box in base.items():
-                    shape = box.lb.flatten(1).shape
-                    bits = torch.zeros(*shape, literals.shape[1], dtype=torch.bool, device=box.lb.device)
-                    unknown[key] = BoundSupport(
-                        bits, bits.clone(), torch.zeros(shape, dtype=torch.bool, device=box.lb.device)
-                    )
-            return RefreshResult(dict(base), unknown)
+            if literals is None:
+                return RefreshResult(dict(base), None)
+            assert codec is not None
+            return RefreshResult(dict(base), _root_valid_supports(net, base, split_signs, literals, codec))
 
         lower = upper = known = None
         if supports is not None:
             assert literals is not None
             if literals.shape[0] != k:
-                raise ValueError("decision slots must match refresh lanes")
-            width = literals.shape[1]
-            lower = torch.zeros(k, n, width, dtype=torch.bool, device=lb.device)
-            known = torch.ones(k, n, dtype=torch.bool, device=lb.device)
-            # Bound the temporary union by slots rather than materializing
-            # [K,N_parent,N_output,S] adjacency or broadcasting across specs.
-            for start in range(0, width, 64):
-                end = min(start + 64, width)
-                inherited = torch.zeros(k, end - start, dtype=torch.bool, device=lb.device)
-                for pid in preds:
-                    ps = post_support[pid]
-                    inherited |= (ps.lower[..., start:end] | ps.upper[..., start:end]).any(1)
-                    known &= ps.known.all(1, keepdim=True)
-                lower[..., start:end] = inherited[:, None, :]
-            upper = lower.clone()
+                raise ValueError("literal slots must match refresh lanes")
+            inherited = _inherited_support(
+                layer, preds, post_support, (k, n), literals.shape[1], lb.device,
+            )
+            lower, upper, known = inherited.lower, inherited.upper, inherited.known
             if linear:
                 assert lin_support is not None
                 lower |= lin_support[:, None, :]
                 upper |= lin_support[:, None, :]
-            # Choosing either equal endpoint is sufficient; union on ties is
-            # deliberately conservative. A strictly stronger root endpoint is
-            # split free and needs no inherited bits.
-            lower &= (lb >= root_lb).unsqueeze(-1)
-            upper &= (ub <= root_ub).unsqueeze(-1)
+            # An endpoint no stronger than the root is the split-free root
+            # endpoint after intersection, so it needs no inherited bits.
+            lower &= (lb > root_lb).unsqueeze(-1)
+            upper &= (ub < root_ub).unsqueeze(-1)
         lb, ub = _intersect_boxes(lb, ub, root_lb, root_ub)
-        phase = split_signs.get(lid) if kind == LayerKind.RELU.value else None
+        phase = _lane_phase(split_signs, lid) if kind == LayerKind.RELU.value else None
         if phase is not None:
-            if phase.dim() == 3:
-                if not torch.equal(phase, phase[:, :1].expand_as(phase)):
-                    raise ValueError("split phases must be spec invariant")
-                phase = phase[:, 0]
             if phase.shape != lb.shape:
                 raise ValueError("split phases must match [K,N] preactivation bounds")
             if known is not None:
@@ -346,23 +434,14 @@ def refresh_bounds(
                 if supports is not None:
                     assert active is not None and layers is not None and neurons is not None and signs is not None
                     assert lower is not None and upper is not None
-                    own = torch.zeros_like(phase, dtype=torch.bool)
-                    lanes, slots = torch.where(active & (layers == lid))
-                    indices = neurons[lanes, slots]
-                    own[lanes, indices] = signs[lanes, slots] == phase[lanes, indices]
-                    # An implied literal carries the full decision context.
-                    implied = (phase != 0) & ~own
-                    neuron_axis = torch.arange(n, device=lb.device)[None, :, None]
-                    for start in range(0, active.shape[1], 64):
-                        end = min(start + 64, active.shape[1])
-                        bits = (
-                            (layers[:, None, start:end] == lid)
-                            & (neurons[:, None, start:end] == neuron_axis)
-                            & (signs[:, None, start:end] == phase[:, :, None])
-                        ) | implied[:, :, None]
-                        bits &= active[:, None, start:end]
-                        lower[..., start:end] |= bits & (phase > 0)[:, :, None]
-                        upper[..., start:end] |= bits & (phase < 0)[:, :, None]
+                    # A clamped endpoint rests only on its own literal; an
+                    # already stable endpoint does not need the literal at all.
+                    bits = _phase_bits(phase, lid, layers, neurons, signs, active)
+                    lower = torch.where(((phase > 0) & (lb < 0))[:, :, None], bits, lower)
+                    upper = torch.where(((phase < 0) & (ub > 0))[:, :, None], bits, upper)
+                    # An inverted box's repaired upper endpoint is its lower one.
+                    empty = ((phase > 0) & (ub < 0)) | ((phase < 0) & (lb > 0))
+                    upper = torch.where(empty[:, :, None], lower | upper, upper)
                 lb = torch.where(phase > 0, lb.clamp(min=0), lb)
                 ub = torch.where(phase < 0, ub.clamp(max=0), ub)
                 # A contradictory split denotes an empty region. Keep a valid
@@ -371,8 +450,11 @@ def refresh_bounds(
         out[lid] = Bounds(lb.reshape_as(root.lb), ub.reshape_as(root.ub))
         if supports is not None:
             assert lower is not None and upper is not None and known is not None
-            support = BoundSupport(lower, upper, known)
-            supports[lid] = post_support[lid] = support
+            supports[lid] = post_support[lid] = BoundSupport(lower, upper, known)
+            if kind == LayerKind.RELU.value:
+                # relu(z) >= 0 is global; the post-activation upper endpoint
+                # still rests on the preactivation endpoint that produced it.
+                post_support[lid] = BoundSupport(lower & (lb > 0)[:, :, None], upper, known)
         values[lid] = Bounds(lb.clamp(min=0), ub.clamp(min=0)) if kind == LayerKind.RELU.value else Bounds(lb, ub)
         if linear and kind == LayerKind.RELU.value:
             assert lin is not None

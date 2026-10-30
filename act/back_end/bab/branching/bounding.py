@@ -386,7 +386,6 @@ class TopKBounding(BoundingStrategy):
         self._split_signs: Optional[Dict[int, torch.Tensor]] = None
         self._decision_literals: Optional[torch.Tensor] = None
         self._warm_state_present: Optional[torch.Tensor] = None
-        self._cold_rebound = False
 
     def push(self, batch: SubproblemBatch) -> None:
         if not batch.batch_size:
@@ -394,9 +393,8 @@ class TopKBounding(BoundingStrategy):
         size_before = len(self)
         n_new = batch.batch_size
         device, dtype = batch.lb.device, batch.lb.dtype
-        incoming = batch.drop_warm_state() if self._cold_rebound else batch
         incoming = replace(
-            incoming,
+            batch,
             lower_bound=(batch.lower_bound if batch.lower_bound is not None
                          else torch.zeros(n_new, dtype=dtype, device=device)),
             parent_margins=(batch.parent_margins if batch.parent_margins is not None
@@ -460,27 +458,19 @@ class TopKBounding(BoundingStrategy):
         indices = torch.arange(self._lb.shape[0], device=self._lb.device)
         return self._build(indices)
 
-    def checkpoint(self) -> tuple[Optional[SubproblemBatch], bool]:
+    def checkpoint(self) -> Optional[SubproblemBatch]:
         """Retain resident references without copying the frontier payload."""
-        return self._resident_batch(), self._cold_rebound
+        return self._resident_batch()
 
-    def restore(self, state: tuple[Optional[SubproblemBatch], bool]) -> None:
+    def restore(self, state: Optional[SubproblemBatch]) -> None:
         """Restore a pre-commit frontier without allocating tensor storage."""
-        self._assign(state[0])
-        self._cold_rebound = state[1]
+        self._assign(state)
 
-    def replace_all(self, batch: SubproblemBatch, *, cold_rebound: bool = False) -> None:
-        """Replace without scoring; retain merge-created cold state until drained.
-
-        While cold rebound is pending, later warm pushes also stay cold. This
-        preserves the existing conservative merge policy; ordinary heterogeneous
-        pushes instead retain each lane's explicit warm-state presence.
-        """
+    def replace_all(self, batch: SubproblemBatch) -> None:
+        """Replace without scoring; each lane keeps its own warm-state presence."""
         staged = TopKBounding()
-        staged._cold_rebound = cold_rebound or self._cold_rebound
         staged.push(batch)
         self._assign(staged._resident_batch())
-        self._cold_rebound = staged._cold_rebound if len(staged) else False
 
     def _priority_scores(self, *, next_wave: bool = False) -> torch.Tensor:
         depths_t, lb = self._depths, self._lower_bound
@@ -507,8 +497,6 @@ class TopKBounding(BoundingStrategy):
     def _assign(self, batch: Optional[SubproblemBatch]) -> None:
         for field in fields(SubproblemBatch):
             setattr(self, "_" + field.name, None if batch is None else getattr(batch, field.name))
-        if batch is None:
-            self._cold_rebound = False
 
     def _restrict(self, idx: torch.Tensor) -> None:
         self._assign(self._build(idx))

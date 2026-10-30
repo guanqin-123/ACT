@@ -960,8 +960,8 @@ def verify_bab_batched(
         restored = original_batch is None
         prepop_relieved = False
         if not wave_committed and planner.active:
-            if frontier_checkpoint is not None:
-                assert climb is not None and climb_checkpoint is not None
+            if climb_checkpoint is not None:
+                assert climb is not None
                 cast(TopKBounding, pool).restore(frontier_checkpoint)
                 climb.restore_frontier(climb_checkpoint)
                 planner.offloaded, planner.evicted_nodes = memory_checkpoint
@@ -1050,8 +1050,8 @@ def verify_bab_batched(
         terminal_before: Dict[str, Any] = dict(terminal_stats) if planner.active else {}
         if planner.active and terminal_stats:
             terminal_before["terminal_failure_reasons"] = dict(terminal_stats["terminal_failure_reasons"])
-        frontier_checkpoint: Optional[tuple[Optional[SubproblemBatch], bool]] = None
-        climb_checkpoint: Optional[tuple[int, torch.Tensor, int, int, int]] = None
+        frontier_checkpoint: Optional[SubproblemBatch] = None
+        climb_checkpoint: Optional[tuple[bool, int, int, int]] = None
         checkpoint_tensors: tuple[torch.Tensor, ...] = ()
         memory_checkpoint: tuple[bool, int] = planner.offloaded, planner.evicted_nodes
         with planner.wave():
@@ -1260,11 +1260,9 @@ def verify_bab_batched(
                         memory_checkpoint = planner.offloaded, planner.evicted_nodes
                         frontier_checkpoint = cast(TopKBounding, pool).checkpoint()
                         climb_checkpoint = climb.checkpoint_frontier()
-                        checkpoint_batch = frontier_checkpoint[0]
                         checkpoint_tensors = (
-                            tuple(checkpoint_batch.tensors()) if checkpoint_batch is not None else ()
+                            tuple(frontier_checkpoint.tensors()) if frontier_checkpoint is not None else ()
                         )
-                        checkpoint_batch = None
                     unresolved, kept_rows = climb.before_split(cast(TopKBounding, pool), unresolved)
                     unresolved_idx = unresolved_idx.index_select(0, kept_rows)
                 if config.terminal_lp_enabled and unresolved.batch_size:
@@ -2008,28 +2006,27 @@ if __name__ == "__main__":
         cold_config = BaBConfig(
             climb_enabled=True, solver_tier="dual_alpha_eta", branching_method="babsr",
             bounding="depth_bound_blend", root_bounds_reuse="plain",
-            climb_merge_enabled=True, climb_propagation_enabled=False,
+            climb_merge_enabled=True, climb_presplit_propagation_enabled=False,
         )
         cold_session = ClimbSession(cold_config, cold_net, OutKind.LINEAR_LE)
         cold_lid = cold_session.codec.layer_ids[0]
         cold_box = seed_from_input_specs(gather_input_spec_layers(cold_net))
         cold_siblings = SubproblemBatch(
-            lb=cold_box.lb.expand(4, -1).clone(), ub=cold_box.ub.expand(4, -1).clone(),
-            depths=torch.full((4,), 2, dtype=torch.long),
+            lb=cold_box.lb.expand(3, -1).clone(), ub=cold_box.ub.expand(3, -1).clone(),
+            depths=torch.full((3,), 2, dtype=torch.long),
             split_signs={cold_lid: upper.new_tensor([
-                [[-1., 1.]], [[1., 1.]], [[-1., -1.]], [[1., -1.]],
+                [[-1., 1.]], [[-1., -1.]], [[1., -1.]],
             ])},
-            decision_literals=torch.tensor([[2, -1], [2, 1], [-2, -1], [-2, 1]]),
-            node_id=torch.tensor([11, 12, 21, 22]), parent_id=torch.tensor([10, 10, 20, 20]),
+            decision_literals=torch.tensor([[-1, 2], [-1, -2], [1, -2]]),
+            node_id=torch.tensor([11, 12, 21]), parent_id=torch.tensor([10, 10, 20]),
         )
         cold_pool = TopKBounding()
         cold_pool.push(cold_siblings)
-        cold_session.library.insert(torch.tensor([[1, 2]]))
+        cold_session._insert_cores(torch.tensor([[1, 2]]))
         cold_session.before_pop(cold_pool)
-        assert cold_session.metrics.merged_pairs == 2
+        assert cold_session.metrics.merged_pairs == 1
         cold_active = cold_pool.pop(1)
-        pending_ids = cold_pool.view_all().node_id
-        assert pending_ids is not None and cold_active.node_id is not None
+        assert cold_active.node_id is not None
         cold_base, _, _ = compute_forward_bounds(cold_net, cold_active.lb, cold_active.ub)
         cold_result = _solve_dual_batch(
             net=cold_net, assert_layer=cold_net.layers[-1],
@@ -2046,24 +2043,10 @@ if __name__ == "__main__":
         warm_children.parent_id = cold_active.node_id[child_parents]
         cold_pool.push(warm_children)
         cold_pool.replace_all(cold_pool.view_all())
+        # A merged lane stays cold beside warm lanes; zero padding is never a warm start.
         frontier = cold_pool.view_all()
-        assert frontier.node_id is not None
-        revived = frontier.select(torch.where(frontier.node_id == pending_ids[0])[0])
-        assert revived.incremental_alpha is revived.incremental_eta is None
-        cold_solver = DualSolver()
-        hardened = cold_solver._harden_split_bounds(cold_base, revived.split_signs)
-        actual_alpha = cold_solver._init_alpha(
-            cold_net, cold_net.by_id[cold_lid], hardened, 1, 1, revived.lb.device,
-            revived.lb.dtype, per_class_alpha=True, optimize_alpha=False,
-            incremental_alphas=revived.incremental_alpha,
-        )
-        true_cold = cold_solver._init_alpha(
-            cold_net, cold_net.by_id[cold_lid], hardened, 1, 1, revived.lb.device,
-            revived.lb.dtype, per_class_alpha=True, optimize_alpha=False,
-            incremental_alphas=None,
-        )
-        assert isinstance(actual_alpha, torch.Tensor) and isinstance(true_cold, torch.Tensor)
-        assert torch.equal(actual_alpha, true_cold) and bool(true_cold.ne(0).any())
+        assert frontier.node_id is not None and frontier.warm_state_present is not None
+        assert frontier.warm_state_present.tolist() == (frontier.node_id >= 31).tolist()
         cold_pool.pop(len(cold_pool))
         cold_pool.push(warm_children)
         assert cold_pool.pop().incremental_alpha is not None
@@ -2886,7 +2869,7 @@ if __name__ == "__main__":
         ) -> tuple[SubproblemBatch, torch.Tensor]:
             """Fail after an actual pending/active sibling pair revives its parent."""
             if not merge_injected[0] and bool((candidate.depths == 1).all()):
-                session.library.insert(torch.tensor([[-1]]))
+                session._insert_cores(torch.tensor([[2]]))
                 merged = real_before_split(session, frontier, candidate)
                 assert session.metrics.merged_pairs == 1 and merged[0].batch_size == 0
                 merge_injected[0] = True
@@ -2906,7 +2889,7 @@ if __name__ == "__main__":
                 cold_net, DualSolver, BaBConfig(
                     solver_tier="dual_alpha_eta", branching_method="babsr",
                     bounding="depth_bound_blend", climb_enabled=True,
-                    climb_merge_enabled=True, climb_propagation_enabled=False,
+                    climb_merge_enabled=True,
                     frontier_mem_safety=.6, frontier_offload=False, max_nodes=8,
                 ), max_batch_size=1, dual_config=DualConfig(n_iters=0),
             )
@@ -2953,7 +2936,7 @@ if __name__ == "__main__":
         assert live_at_recovery == [False] and temporary_refs[-1]() is None
         assert lifetime_result.status == VerifyStatus.UNKNOWN
 
-        # Root device is not the storage device of an offloaded pending pool.
+        # A deferred merge keeps an offloaded pending pool on its storage device.
         host_siblings = SubproblemBatch(
             cold_box.lb.expand(2, -1), cold_box.ub.expand(2, -1), torch.ones(2, dtype=torch.long),
             node_id=torch.tensor([1, 2]), parent_id=torch.tensor([0, 0]),
@@ -2963,13 +2946,10 @@ if __name__ == "__main__":
         host_pool = TopKBounding()
         host_pool.push(host_siblings)
         host_session = ClimbSession(
-            BaBConfig(climb_merge_enabled=True, climb_propagation_enabled=False),
+            BaBConfig(climb_merge_enabled=True, climb_presplit_propagation_enabled=False),
             cold_net, OutKind.LINEAR_LE,
         )
-        host_session.library.insert(torch.tensor([[2]]))
-        host_session._root_bounds = Bounds(
-            torch.empty_like(cold_box.lb, device="meta"), torch.empty_like(cold_box.ub, device="meta"),
-        )
+        host_session._insert_cores(torch.tensor([[2]]))
         host_session.before_pop(host_pool)
         assert len(host_pool) == 1 and host_session.metrics.merged_pairs == 1
         assert host_pool.view_all().lb.device.type == "cpu"

@@ -170,6 +170,18 @@ class TerminalCertificate:
         ).item())
 
 
+@dataclass(frozen=True)
+class _PhaseRows:
+    """Where one literal's sign and phase-equality rows live in its lane LP."""
+    layer_id: int
+    neuron: int
+    sign: int
+    pre_var: int
+    post_var: int
+    le_row: int
+    eq_row: int
+
+
 @dataclass
 class TerminalResult:
     """K-aligned outcomes; only ``has_lp_certificate`` authorizes retirement."""
@@ -180,6 +192,7 @@ class TerminalResult:
     tiers: tuple[str, ...]
     certificate_kinds: tuple[str, ...]
     _required_rows: int = field(default=1, repr=False)
+    _export: Optional["TerminalExport"] = field(default=None, repr=False)
 
     def has_lp_certificate(self, lane: int) -> bool:
         """Reject empty, forged, nonfinite, or incomplete row evidence."""
@@ -212,6 +225,7 @@ class TerminalExport:
     relu_upper_rows: tuple[int, ...]
     relu_layers: tuple[Layer, ...]
     _lanes: tuple[_SparseLP, ...] = field(repr=False)
+    _phase_rows: tuple[tuple[_PhaseRows, ...], ...] = field(repr=False)
 
     @cached_property
     def problem(self) -> BatchLPProblem:
@@ -321,7 +335,7 @@ def export_terminal_problem(
     """Export all K lanes once, without trusting supplied intermediate boxes.
 
     ``reference_bounds`` is accepted for caller symmetry but deliberately not
-    used: root decision-only replay cannot inherit conditioned lane bounds.
+    used: root replay of a core cannot inherit conditioned lane bounds.
     Signs have shape [K,n] or identical [K,M,n] copies. Unsupported inputs or
     incomplete affine encodings raise ``NotImplementedError`` explicitly.
     """
@@ -431,6 +445,7 @@ def export_terminal_problem(
             raise ValueError("invalid_split_signs")
         signs[lid] = value.to(device=input_bounds.lb.device)
     lanes: list[_SparseLP] = []
+    phase_rows: list[tuple[_PhaseRows, ...]] = []
     for k in range(k_count):
         p = _SparseLP(eqs[k], eq_rhs[k].copy(), les[k][:-1].tocsr(),
                       le_rhs[k, :-1].copy(), np.full(n, -np.inf), np.full(n, np.inf))
@@ -439,6 +454,7 @@ def export_terminal_problem(
         _derive_boxes(p, input_ids, relus)
         le, rhs = p.le.tolil(), list(p.le_rhs)
         erows, evalues = [], []
+        lane_phases: list[_PhaseRows] = []
         count = 0
         for layer in relus:
             for j, (x, z) in enumerate(zip(layer.in_vars, layer.out_vars)):
@@ -458,6 +474,9 @@ def export_terminal_problem(
                 active = sign > 0 or p.lb[x] >= 0
                 inactive = sign < 0 or p.ub[x] <= 0
                 if sign:
+                    lane_phases.append(_PhaseRows(
+                        layer.id, j, sign, x, z, len(rhs), p.eq.shape[0] + len(erows),
+                    ))
                     phase_row = sparse.csr_matrix(([-float(sign)], ([0], [x])), shape=(1, n))
                     le = sparse.lil_matrix(sparse.vstack((le, phase_row)))
                     rhs.append(0.0)
@@ -470,6 +489,7 @@ def export_terminal_problem(
             p.eq_rhs = np.concatenate((p.eq_rhs, evalues))
         p.le, p.le_rhs = le.tocsr(), np.asarray(rhs)
         lanes.append(p)
+        phase_rows.append(tuple(lane_phases))
     ref = seed.lb
     params = assertion.params
     if "C" in params and "thresholds" in params:
@@ -485,8 +505,8 @@ def export_terminal_problem(
         d = encoded["thresholds"]
     if not torch.isfinite(c).all() or not torch.isfinite(d).all():
         raise ValueError("nonfinite_output_spec")
-    return TerminalExport(input_ids, output_ids, c, d, params["kind"],
-                          net, input_bounds, signs, upper_rows, relus, tuple(lanes))
+    return TerminalExport(input_ids, output_ids, c, d, params["kind"], net, input_bounds,
+                          signs, upper_rows, relus, tuple(lanes), tuple(phase_rows))
 
 
 @torch.no_grad()
@@ -745,6 +765,7 @@ def solve_terminal_batch(
     Ordinary properties need every violation row bounded; UNSAFE_LINEAR
     instead asks whether the entire closed unsafe polytope is feasible.
     FALSIFIED is produced only after original-domain/concrete validation.
+    ``prefer_affine=False`` keeps phase rows, as ``terminal_literal_costs`` needs.
     """
     count = input_bounds.lb.shape[0]
     statuses = [VerifyStatus.UNKNOWN] * count
@@ -833,4 +854,61 @@ def solve_terminal_batch(
             statuses[k], witnesses[k] = VerifyStatus.FALSIFIED, batch[k]
             evidence[k], reasons[k], kinds[k] = (), "validated_counterexample", ""
     return TerminalResult(tuple(statuses), witnesses, tuple(evidence), tuple(reasons),
-                          tuple(tiers), tuple(kinds), required)
+                          tuple(tiers), tuple(kinds), required, exported)
+
+
+def terminal_literal_costs(
+    result: TerminalResult, lane: int,
+) -> Optional[tuple[tuple[tuple[int, int, int], ...], np.ndarray, np.ndarray]]:
+    """Charge each literal from a checked, uneliminated source LP's duals.
+
+    Returns ``(literal keys, costs [rows, literals], slack [rows])``, or None
+    when a dual cannot be attributed to its original row. Costs only propose a
+    subset: a changed core still needs its own LP certificate. Deleting a row
+    keeps the ReLU triangle, on which ``z-x`` (active) or ``z`` (inactive) lies
+    in ``[0, reach]`` with reach ``max(0,-l)`` or ``max(0,u)``; that is the
+    violation range of the sign row too, unlike the chord intercept at zero.
+    Since ``c = A.T*y + r``, only a negative multiplier loses bound.
+    """
+    export = result._export
+    if export is None or result.tiers[lane] != "generic" or not result.has_lp_certificate(lane):
+        return None
+    original = export._lanes[lane]
+    equalities = original.eq.shape[0]
+    phases = export._phase_rows[lane]
+    proofs = sorted(result.certificates[lane], key=lambda proof: proof.row_index)
+    costs = np.zeros((len(proofs), len(phases)))
+    for row, proof in enumerate(proofs):
+        problem = proof._problem
+        # Phase I stacks (le, eq, -eq) under one artificial column; equality
+        # multipliers split into two nonpositive inequality multipliers.
+        phase_one = proof.kind == "phase1_residual"
+        inequalities = problem.le.shape[0] - (2 * equalities if phase_one else 0)
+        if len(proof.le_dual) != problem.le.shape[0] or (
+            len(proof.eq_dual) != (0 if phase_one else equalities)
+        ):
+            return None
+        for column, phase in enumerate(phases):
+            eq_matrix, eq_index = (
+                (problem.le, inequalities + phase.eq_row) if phase_one
+                else (problem.eq, phase.eq_row)
+            )
+            if (problem.le[phase.le_row, phase.pre_var] != -phase.sign
+                    or eq_matrix[eq_index, phase.post_var] != 1
+                    or eq_matrix[eq_index, phase.pre_var] not in (0, -1)):
+                return None
+            equality = (
+                proof.le_dual[eq_index] - proof.le_dual[eq_index + equalities] if phase_one
+                else proof.eq_dual[eq_index]
+            )
+            reach = max(0.0, -original.lb[phase.pre_var] if phase.sign > 0
+                        else original.ub[phase.pre_var])
+            costs[row, column] = (
+                max(0.0, -proof.le_dual[phase.le_row]) + max(0.0, -equality)
+            ) * reach
+    if not np.isfinite(costs).all():
+        return None
+    return (
+        tuple((phase.layer_id, phase.neuron, phase.sign) for phase in phases), costs,
+        np.array([proof.lower_bound for proof in proofs]),
+    )

@@ -73,6 +73,36 @@ AlphaTree: TypeAlias = Union[
 AlphaState: TypeAlias = Dict[int, AlphaTree]
 
 
+def _source_phase_strip(
+    nu: torch.Tensor, bounds: Bounds, split_signs: torch.Tensor,
+    phase_slope_signs: torch.Tensor, m_specs: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Relax a dropped ReLU literal with its source slope, without its phase.
+
+    Slope 1 (active) or 0 (inactive) is a global lower line. The matching upper
+    line ``z + max(0, -l)`` or ``max(0, u)`` holds on the candidate interval
+    ``[l, u]``, so it never assumes the deleted condition. Returns the ``nu``
+    the ordinary kernel must still relax, plus the strip's predecessor ``nu``
+    and objective contribution.
+    """
+    bm = nu.shape[0]
+    values = nu.flatten(1).view(bm // m_specs, m_specs, -1)
+    current = split_signs.reshape(bm // m_specs, -1, values.shape[-1]).expand_as(values)
+    source = phase_slope_signs.reshape(bm // m_specs, -1, values.shape[-1]).expand_as(values)
+    current, source = current.to(values.device), source.to(values.device)
+    dropped = source.ne(0) & current.eq(0)
+    active = source > 0
+    lower = bounds.lb.flatten(1).unsqueeze(1).to(values)
+    upper = bounds.ub.flatten(1).unsqueeze(1).to(values)
+    intercept = torch.where(active, (-lower).clamp(min=0), upper.clamp(min=0))
+    contribution = (values.clamp(max=0) * intercept).masked_fill(~dropped, 0)
+    predecessor = (values * active.to(values)).masked_fill(~dropped, 0)
+    return (
+        values.masked_fill(dropped, 0).view(bm, -1), predecessor.view(bm, -1),
+        contribution.sum(-1).view(bm),
+    )
+
+
 @dataclass(frozen=True)
 class DualResult(BoundResult):
     """Result of ``compute_certified_bound``. Fields depend on caller flags."""
@@ -737,6 +767,7 @@ class DualSolver(Solver):
         forward_frame: Optional[ForwardFrame] = None,
         dual_config: Optional[DualConfig] = None,
         stop_criterion: Optional[Callable[[torch.Tensor], bool]] = None,
+        phase_slope_signs: Optional[Dict[int, torch.Tensor]] = None,
     ) -> DualResult:
         """Batched certified lower bound on c^T @ output (DAG-aware).
 
@@ -776,6 +807,10 @@ class DualSolver(Solver):
         local_phase_clamp: For fixed-parameter replay, shallow-copy and clamp only
             the current ReLU handler's bounds. Reference bounds remain immutable;
             optimization is rejected because it requires globally hardened bounds.
+        phase_slope_signs: For fixed-parameter replay of a reduced core, the
+            source literals. A literal absent from ``split_signs`` keeps its
+            source slope on a line valid over the candidate interval; its
+            multiplier and phase clamp stay removed.
         η is applied to the TRUE pre-activation variable (immediately AFTER the
         activation handler in the reverse-topological backward loop):
         nu_pre = slope · nu_post − η · sign, so the multiplier acts on the
@@ -804,8 +839,10 @@ class DualSolver(Solver):
             # backward pass (no leading-K vectorization).
             if not split_signs:
                 raise ValueError("split_signs list cannot be empty")
-            if optimize:
-                raise ValueError("list-form split_signs is only supported with optimize=False")
+            if optimize or phase_slope_signs is not None:
+                raise ValueError(
+                    "list-form split_signs requires optimize=False and no phase_slope_signs"
+                )
             if return_optimized:
                 raise ValueError("return_optimized requires optimize=True and single split_signs")
             stacked_split_signs = self._stack_split_sign_hypotheses(split_signs)
@@ -851,8 +888,10 @@ class DualSolver(Solver):
                 dual_margins=torch.stack(dual_margins, dim=0),
             )
 
-        if optimize and local_phase_clamp:
-            raise ValueError("local_phase_clamp is only valid for fixed-parameter replay")
+        if optimize and (local_phase_clamp or phase_slope_signs is not None):
+            raise ValueError(
+                "local_phase_clamp and phase_slope_signs are only valid for fixed-parameter replay"
+            )
         if not local_phase_clamp:
             bounds_dict = self._harden_split_bounds(bounds_dict, split_signs)
 
@@ -982,12 +1021,26 @@ class DualSolver(Solver):
                         net, handler_bounds,
                         [cast(int, layer.params[key]) for key in source_keys],
                     )
+                strip = None
+                if (
+                    phase_slope_signs is not None
+                    and split_signs is not None
+                    and k == LayerKind.RELU.value
+                    and lid in phase_slope_signs
+                ):
+                    nu_here, *strip = _source_phase_strip(
+                        nu_here, bounds_dict[lid], split_signs[lid],
+                        phase_slope_signs[lid], M,
+                    )
                 if alpha is None:
                     pred_nus, contrib = handler(layer, nu_here, handler_bounds, preds, M)
                 else:
                     pred_nus, contrib = handler(
                         layer, nu_here, handler_bounds, preds, M, alpha=alpha.get(lid)
                     )
+                if strip is not None:
+                    pred_nus = [pred_nus[0] + strip[0], *pred_nus[1:]]
+                    contrib = contrib + strip[1]
 
                 if eta is not None and split_signs is not None and lid in eta:
                     # Split Lagrangian on the TRUE pre-activation variable:

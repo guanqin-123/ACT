@@ -95,9 +95,9 @@ bab_presets:
     intermediate_refine: "all"           # tighten the root reference
     per_subproblem_refine: "none"        # preserve the replay contract
     climb_enabled: true                 # learn and propagate checked cores
-    climb_merge_enabled: true           # merge complementary sibling domains
+    climb_merge_enabled: true           # merge complementary root-domain rows
     climb_complement_bounding: true      # bound newly learned core complements
-    climb_theta: 0.0                    # no slack-budget deletion
+    climb_theta: 0.0                    # delete only exact zero-cost literals
     climb_recheck_k: 0                   # no extra deletion probes
     multi_split_levels: 1               # binary neuron splitting
     terminal_lp_enabled: true            # checked terminal LP fallback
@@ -113,10 +113,10 @@ bab_presets:
     intermediate_refine: "all"           # tighten the root reference
     per_subproblem_refine: "none"        # preserve the replay contract
     climb_enabled: true                 # learn and propagate checked cores
-    climb_merge_enabled: true           # merge complementary sibling domains
+    climb_merge_enabled: true           # merge complementary root-domain rows
     climb_complement_bounding: false     # linear refresh replaces extra probes
     climb_lin_support_refinement: false  # conservative halfspace supports
-    climb_theta: 0.0                    # no slack-budget deletion
+    climb_theta: 0.0                    # delete only exact zero-cost literals
     climb_recheck_k: 0                   # no extra deletion probes
     multi_split_levels: 1               # binary neuron splitting
     terminal_lp_enabled: true            # checked terminal LP fallback
@@ -376,7 +376,7 @@ backend:
 
     # -- Terminal evidence and optional exact escalation ------------------
     terminal_lp_enabled: false    # candidate-less lanes: checked LP certificates
-    climb_terminal_cores: true    # root-box cores replayed on their own decisions
+    climb_terminal_cores: true    # publish root-box LP cores; theta-budget subsets need a fresh LP
     milp_escalation: false        # optional exact ReLU solve before BaB; lazy import
     milp_max_variables: 2000      # includes unstable-ReLU binary variables
     milp_max_constraints: 2000    # includes exact-ReLU and property constraints
@@ -386,16 +386,16 @@ backend:
     climb_enabled: false          # enable CLIMB (see bab_presets.climb above)
     # Ablation gates default on, preserving the existing CLIMB algorithm.
     climb_coarsening_enabled: true  # false admits full replay-certified literal rows
-    climb_propagation_enabled: true # false learns cores but does not prune/infer with them
-    climb_merge_enabled: false     # complementary same-domain siblings return to pending
+    climb_propagation_enabled: true # false learns cores but neither prunes, infers nor merges with them
+    climb_merge_enabled: false     # on an unseen core, merge root-domain complementary rows to a fixed point
     climb_complement_bounding: false # one root-domain complement probe per new core
     climb_steer: false             # core-frequency bias on finite branching scores only
-    climb_presplit_propagation_enabled: true # total propagation gate still overrides this
-    climb_theta: 0.0              # fraction of replay slack spent on dropping literals
+    climb_presplit_propagation_enabled: true # false defers propagation and merge to the next pre-bound step
+    climb_theta: 0.0              # fraction of slack spent on dropping literals; zero-cost ones always drop
     # Deletion-budget safety margin: delta = climb_delta_abs + climb_delta_rel * |slack|.
     climb_delta_abs: 0.000000001  # absolute part of delta
     climb_delta_rel: 0.0000001    # relative part of delta (scaled by |slack|)
-    climb_recheck_k: 0            # lanes that get one extra replay after coarsening
+    climb_recheck_k: 0            # dual lanes that get one extra replay after coarsening
     climb_max_cores: 1024         # max cores kept (after subsumption, then eviction)
     # Cores per propagate matmul chunk (memory only; fixpoint is chunk-independent).
     climb_propagate_core_chunk: 4096
