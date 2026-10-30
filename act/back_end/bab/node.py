@@ -21,9 +21,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 import math
-from typing import Dict, Optional, cast
+from typing import Dict, Iterable, Iterator, Optional, cast
 
 import torch
 
@@ -34,6 +34,8 @@ from act.back_end.solver.solver_dual import (
     _alpha_spec_row_count,
     _alpha_tree_concat_lanes,
     _alpha_tree_gather_lanes,
+    _alpha_tree_leaves,
+    _alpha_tree_map,
 )
 
 
@@ -71,6 +73,16 @@ class SubproblemBatch:
     node_id: Optional[torch.Tensor] = None  # [N] long; logical identity
     parent_id: Optional[torch.Tensor] = None  # [N] long; parent's node_id (-1 for root)
     decision_literals: Optional[torch.Tensor] = None  # [N, S] ordered decisions, never inferred phases
+    warm_state_present: Optional[torch.Tensor] = None  # [N] bool; padded alpha is not a warm start
+
+    def __post_init__(self) -> None:
+        """Record whether each lane owns real, complete optimizer state."""
+        if self.warm_state_present is None:
+            self.warm_state_present = torch.full(
+                (self.batch_size,),
+                next(_alpha_tree_leaves(self.incremental_alpha), None) is not None,
+                dtype=torch.bool, device=self.lb.device,
+            )
 
     # -- properties ---------------------------------------------------------
 
@@ -124,6 +136,7 @@ class SubproblemBatch:
             node_id=_gather_optional_tensor(self.node_id, indices),
             parent_id=_gather_optional_tensor(self.parent_id, indices),
             decision_literals=_gather_optional_tensor(self.decision_literals, indices),
+            warm_state_present=_gather_optional_tensor(self.warm_state_present, indices),
         )
 
     def concat(self, other: SubproblemBatch) -> SubproblemBatch:
@@ -135,28 +148,65 @@ class SubproblemBatch:
         the other. Zero padding is exact for ``split_signs`` and
         ``incremental_eta`` (0 = unconstrained / no multiplier), so it
         preserves each side's feasible region. Missing ``incremental_alpha``
-        subtrees are zero-initialized through the shared alpha-tree helper.
+        subtrees are zero-initialized through the shared alpha-tree helper, but
+        their lanes are marked cold and must not use those placeholders as proof.
         """
+        if other.lb.device != self.lb.device:
+            other = other.to(self.lb.device)
         n_self, n_other = self.batch_size, other.batch_size
+        alpha = _alpha_tree_concat_lanes(
+            self.incremental_alpha, other.incremental_alpha, n_self, n_other
+        )
+        leaf_count = sum(1 for _ in _alpha_tree_leaves(alpha, logical=True))
+        presence = []
+        for batch in (self, other):
+            assert batch.warm_state_present is not None
+            complete = leaf_count > 0 and leaf_count == sum(
+                1 for _ in _alpha_tree_leaves(batch.incremental_alpha, logical=True)
+            )
+            presence.append(batch.warm_state_present & complete)
         return SubproblemBatch(
             lb=torch.cat([self.lb, other.lb.to(self.lb.device)], dim=0),
             ub=torch.cat([self.ub, other.ub.to(self.ub.device)], dim=0),
             depths=torch.cat([self.depths, other.depths.to(self.depths.device)], dim=0),
-            incremental_alpha=cast(
-                Optional[AlphaState],
-                _alpha_tree_concat_lanes(
-                    self.incremental_alpha, other.incremental_alpha, n_self, n_other
-                ),
-            ),
+            incremental_alpha=cast(Optional[AlphaState], alpha),
             incremental_eta=_concat_padded_dict(
                 self.incremental_eta, other.incremental_eta, n_self, n_other
             ),
             split_signs=_concat_padded_dict(self.split_signs, other.split_signs, n_self, n_other),
-            parent_margins=_concat_optional_tensor(self.parent_margins, other.parent_margins),
-            lower_bound=_concat_optional_tensor(self.lower_bound, other.lower_bound),
+            parent_margins=_concat_optional_tensor(
+                self.parent_margins, other.parent_margins, n_self, n_other
+            ),
+            lower_bound=_concat_optional_tensor(
+                self.lower_bound, other.lower_bound, n_self, n_other
+            ),
             node_id=_concat_optional_tensor(self.node_id, other.node_id),
             parent_id=_concat_optional_tensor(self.parent_id, other.parent_id),
             decision_literals=_concat_decisions(self.decision_literals, other.decision_literals),
+            warm_state_present=torch.cat((presence[0], presence[1].to(self.lb.device))),
+        )
+
+    def tensors(self) -> Iterator[torch.Tensor]:
+        """Yield resident tensors without gathering or allocating their payload."""
+        for field in fields(self):
+            yield from _alpha_tree_leaves(getattr(self, field.name))
+
+    def to(self, device: torch.device | str) -> SubproblemBatch:
+        """Return all state on ``device``, leaving this batch intact on failure."""
+        return replace(self, **{
+            field.name: _alpha_tree_map(
+                getattr(self, field.name), lambda tensor: tensor.to(device=device)
+            )
+            for field in fields(self)
+        })
+
+    def drop_warm_state(self) -> SubproblemBatch:
+        """Discard optimizer state only; retain geometry, phases and provenance."""
+        return replace(
+            self, incremental_alpha=None, incremental_eta=None,
+            warm_state_present=torch.zeros(
+                self.batch_size, dtype=torch.bool, device=self.lb.device
+            ),
         )
 
     # -- geometry -----------------------------------------------------------
@@ -169,6 +219,26 @@ class SubproblemBatch:
 # ---------------------------------------------------------------------------
 # Lane gather / bounds slicing / concat helpers
 # ---------------------------------------------------------------------------
+
+def tensor_storage_bytes(
+    tensors: Iterable[torch.Tensor], device: torch.device | str | None = None
+) -> int:
+    """Count unique actual storages, including the full backing of tensor views."""
+    target = None if device is None else torch.device(device)
+    seen: set[tuple[torch.device, int]] = set()
+    total = 0
+    for tensor in tensors:
+        if target is not None and (
+            tensor.device.type != target.type
+            or (target.index is not None and tensor.device.index != target.index)
+        ):
+            continue
+        storage = tensor.untyped_storage()
+        key = (tensor.device, storage._cdata)
+        if key not in seen:
+            seen.add(key)
+            total += storage.nbytes()
+    return total
 
 
 def slice_bounds_dict(
@@ -268,10 +338,21 @@ def _gather_optional_tensor(
 def _concat_optional_tensor(
     x: Optional[torch.Tensor],
     y: Optional[torch.Tensor],
+    n_x: int = 0,
+    n_y: int = 0,
 ) -> Optional[torch.Tensor]:
-    """Stack two optional per-lane tensors; ``None`` unless both are present."""
-    if x is None or y is None:
+    """Stack optional rows, filling absent scores but refusing absent identities."""
+    if x is None and y is None:
         return None
+    if x is None:
+        if not n_x:
+            raise ValueError("cannot concatenate known and missing node identity")
+        assert y is not None
+        x = y.new_zeros((n_x, *y.shape[1:]))
+    if y is None:
+        if not n_y:
+            raise ValueError("cannot concatenate known and missing node identity")
+        y = x.new_zeros((n_y, *x.shape[1:]))
     return torch.cat([x, y.to(device=x.device, dtype=x.dtype)], dim=0)
 
 
@@ -294,7 +375,17 @@ def _concat_padded_dict(
     n_x: int,
     n_y: int,
 ) -> Optional[Dict[int, torch.Tensor]]:
-    """Stack two per-layer dicts, zero-filling a layer block missing on one side."""
+    """Stack multipliers/phases, broadcasting their shared spec axis as needed."""
+    if x is not None and y is not None:
+        x, y = dict(x), dict(y)
+        for lid in x.keys() & y.keys():
+            left, right = x[lid], y[lid]
+            if left.ndim == right.ndim == 3 and left.shape[1] != right.shape[1]:
+                rows = max(left.shape[1], right.shape[1])
+                if left.shape[1] not in (1, rows) or right.shape[1] not in (1, rows):
+                    raise ValueError("multiplier/phase spec-row counts must agree")
+                x[lid] = left.expand(-1, rows, -1)
+                y[lid] = right.expand(-1, rows, -1)
     return cast(
         Optional[Dict[int, torch.Tensor]],
         _alpha_tree_concat_lanes(cast(AlphaTree, x), cast(AlphaTree, y), n_x, n_y),
@@ -350,6 +441,7 @@ def _child_lanes(
         parent_margins=_gather_optional_tensor(batch.parent_margins, parent_index),
         lower_bound=_gather_optional_tensor(batch.lower_bound, parent_index),
         decision_literals=_gather_optional_tensor(batch.decision_literals, parent_index),
+        warm_state_present=_gather_optional_tensor(batch.warm_state_present, parent_index),
     )
 
 

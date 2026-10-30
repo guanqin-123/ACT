@@ -533,6 +533,7 @@ def propagate(
             torch.arange(batch.batch_size, device=batch.lb.device) for batch in batches
         )
     device = batches[0].lb.device
+    packed_batches = [packed.to(device) for packed in packed_batches]
     packed_cores = library.pack(device)
     batch_values = torch.cat(
         [packed[packed != 0] for packed in packed_batches]
@@ -560,7 +561,7 @@ def propagate(
     # already carry ordered slots; this also covers manually constructed batches.
     for batch, packed in zip(batches, packed_batches):
         if batch.decision_literals is None:
-            batch.decision_literals = packed
+            batch.decision_literals = packed.to(batch.lb.device)
     core_dense = torch.zeros(
         (library.core_count, active_variables.numel()), dtype=torch.int8, device=device
     )
@@ -635,11 +636,12 @@ def propagate(
     for batch, size in zip(batches, group_sizes):
         group_active = active[offset : offset + size]
         keep = torch.where(group_active)[0]
-        kept_rows.append(keep)
+        kept_rows.append(keep.to(batch.lb.device))
         restricted = batch.select(keep)
         restricted_assignments = assignments[offset : offset + size].index_select(0, keep)
         propagated = apply_literal_assignments(
-            restricted, restricted_assignments, active_variables, codec
+            restricted, restricted_assignments.to(batch.lb.device),
+            active_variables.to(batch.lb.device), codec
         )
         assert propagated.batch_size <= size, (
             "CLIMB invariant violated: propagation increased a group batch size "
@@ -693,6 +695,8 @@ def certificate_replay(
         raise ValueError("split-dependent replay requires base_reference_bounds")
     if (
         batch.incremental_alpha is None
+        or (batch.warm_state_present is not None
+            and not bool(batch.warm_state_present.all()))
         or batch.incremental_eta is None
         or batch.split_signs is None
         or m_specs < 1
@@ -1040,17 +1044,18 @@ class ClimbSession:
         Only revived parents return to pending; they must be bounded again.
         A parent id can be revived once, preventing split/undo-split loops.
         """
-        device = active.lb.device if active is not None else self._root_bounds.lb.device
+        active_device = active.lb.device if active is not None else None
+        device = active_device if active_device is not None else self._root_bounds.lb.device
         keep_active = torch.arange(active.batch_size if active is not None else 0, device=device)
         if not self._merge_enabled or self._merge_generation == self.library.generation:
             return active, keep_active
-        self._merge_generation = self.library.generation
         n_pending = len(pool)
         joint = pool.view_all() if n_pending else active
         if joint is None:
             return active, keep_active
         if n_pending and active is not None:
             joint = joint.concat(active)
+        device = joint.lb.device
         if joint.parent_id is None or joint.node_id is None or joint.decision_literals is None:
             return active, keep_active
         phases = pack_split_matrix(joint.split_signs, joint.batch_size, self.codec, device=device)
@@ -1095,12 +1100,13 @@ class ClimbSession:
                     partners[left] = right
         left = torch.where(partners >= 0)[0]
         if not left.numel():
+            self._merge_generation = self.library.generation
             return active, keep_active
         right = partners[left]
         merged = joint.select(left)
         assert merged.parent_id is not None and merged.decision_literals is not None
         merged.node_id = merged.parent_id.clone()
-        self._merged_parents = torch.cat((self._merged_parents.to(device), merged.node_id))
+        merged_parents = torch.cat((self._merged_parents.to(device), merged.node_id))
         merged.parent_id = torch.full_like(merged.node_id, -1)
         merged.depths -= 1
         merged.decision_literals.masked_fill_(decisions[left] != decisions[right], 0)
@@ -1110,16 +1116,33 @@ class ClimbSession:
                 values.masked_fill_(joint.split_signs[lid][left] != joint.split_signs[lid][right], 0)
         # Clearing the entire affected pool avoids pretending zero alpha padding
         # is a cold start for the revived lanes.
-        joint.incremental_alpha = joint.incremental_eta = None
-        merged.incremental_alpha = merged.incremental_eta = None
+        joint = joint.drop_warm_state()
+        merged = merged.drop_warm_state()
         merged.lower_bound = torch.full_like(merged.depths, -torch.inf, dtype=merged.lb.dtype)
         merged.parent_margins = merged.lower_bound.clone()
         pending = joint.select(torch.where(~used[:n_pending])[0])
-        pool.replace_all(pending.concat(merged), cold_rebound=True)
         keep_active = torch.where(~used[n_pending:])[0]
-        active = joint.select(keep_active + n_pending) if active is not None else None
+        if active is not None:
+            assert active_device is not None
+            active = joint.select(keep_active + n_pending).to(active_device)
+            keep_active = keep_active.to(active_device)
+        pool.replace_all(pending.concat(merged), cold_rebound=True)
+        self._merged_parents = merged_parents
+        self._merge_generation = self.library.generation
         self.metrics.merged_pairs += int(left.numel())
         return active, keep_active
+
+    def checkpoint_frontier(self) -> Tuple[int, torch.Tensor, int, int, int]:
+        """Retain reference-only merge/pruning state for an uncommitted wave."""
+        return (self._merge_generation, self._merged_parents,
+                self.metrics.merged_pairs, self.metrics.prebound_discharged,
+                self.metrics.presplit_discharged)
+
+    def restore_frontier(self, state: Tuple[int, torch.Tensor, int, int, int]) -> None:
+        """Roll back frontier bookkeeping, retaining independently learned proofs."""
+        (self._merge_generation, self._merged_parents,
+         self.metrics.merged_pairs, self.metrics.prebound_discharged,
+         self.metrics.presplit_discharged) = state
 
     def after_pop(self, frontier_rows: int) -> None:
         self.metrics.observe_frontier(frontier_rows)
@@ -1944,6 +1967,8 @@ if __name__ == "__main__":
             unknown_batch = SubproblemBatch.from_bounds(Bounds(-refresh_box, refresh_box), depth=1)
             unknown_batch.split_signs = {2: -torch.ones(2, 1, 1, dtype=refresh_box.dtype)}
             unknown_batch.incremental_alpha = {2: torch.ones(2, 1, 1, dtype=refresh_box.dtype)}
+            assert unknown_batch.warm_state_present is not None
+            unknown_batch.warm_state_present.fill_(True)
             unknown_batch.incremental_eta = {2: torch.zeros(2, 1, 1, dtype=refresh_box.dtype)}
             unknown_literals = pack_split_matrix(unknown_batch.split_signs, 2, codec, device=refresh_box.device)
             unknown_replay = certificate_replay(
@@ -1977,6 +2002,8 @@ if __name__ == "__main__":
             )
             assert result.solution.statuses == (SolveStatus.UNSAT,)
             batch.incremental_alpha, batch.incremental_eta = result.alpha_state, result.eta_state
+            assert batch.warm_state_present is not None
+            batch.warm_state_present.fill_(True)
             for coarsening in (True, False):
                 for propagation in (True, False):
                     config = BaBConfig(
@@ -2049,6 +2076,8 @@ if __name__ == "__main__":
 
         replay_result = replace(replay_result, base_reference_bounds=bounds)
         replay_batch.incremental_alpha, replay_batch.incremental_eta = replay_result.alpha_state, replay_result.eta_state
+        assert replay_batch.warm_state_present is not None
+        replay_batch.warm_state_present.fill_(True)
         implied_only = replay_batch.select(torch.tensor([0], device=upper.device))
         implied_only.decision_literals = torch.empty((1, 0), dtype=torch.long, device=upper.device)
         implied_session = ClimbSession(BaBConfig(

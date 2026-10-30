@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from functools import wraps
 from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Union, cast
 
@@ -39,8 +40,12 @@ from act.back_end.bab.node import (
     slice_branching_state,
     split_input,
     split_neurons,
+    tensor_storage_bytes,
 )
 from act.back_end.bab.climb import ClimbSession
+from act.back_end.bab.frontier_memory import (
+    FrontierMemoryPlanner, allow_per_class_alpha, allow_warm_state,
+)
 from act.back_end.bab.branching.branching import (
     BranchingStrategy,
     SplitDecision,
@@ -77,6 +82,7 @@ from act.back_end.solver.solver_dual import (
     DualBatchResult,
     DualSolver,
     _alpha_tree_select_spec_rows,
+    _alpha_tree_leaves,
     expand_bounds_dict,
     unproven_spec_rows,
 )
@@ -263,9 +269,16 @@ def _solve_dual_batch(
     root_bounds_dict: Optional[Dict[int, Bounds]] = None,
     round_policy: Optional[Any] = None,
     time_cap: Optional[float] = None,
+    memory_planner: Optional[FrontierMemoryPlanner] = None,
 ) -> DualBatchResult:
     """Prepare BaB-specific bounds/state policy, then call ``DualSolver``."""
     solver = DualSolver()
+    # A mixed pool may pad absent alpha leaves. Padding is storage, not a
+    # certificate or a valid optimizer initialization: solve such waves cold.
+    if (batch.warm_state_present is not None
+            and not bool(batch.warm_state_present.all())):
+        batch.incremental_alpha = None
+        batch.incremental_eta = None
     call_started = _monotonic() if time_cap is not None else 0.0
 
     def _remaining_cap() -> Optional[float]:
@@ -326,6 +339,7 @@ def _solve_dual_batch(
                     mode=refine_mode,
                     rows_cap=refine_rows_cap,
                     optimize_iters=refine_iters,
+                    max_tensor_mib=config.intermediate_refine_max_tensor_mib,
                 )
     else:
         bounds_dict, forward_frame, _ = compute_forward_bounds(
@@ -386,6 +400,13 @@ def _solve_dual_batch(
             else dual_config.n_iters
         ),
     )
+    memory_enabled = batched_bounds.lb.device.type == "cuda" and config.frontier_mem_safety > 0
+    if memory_enabled and capped_dual_config.per_class_alpha:
+        m_specs = int(keep_rows.numel()) if keep_rows is not None else int(assert_layer.params["M"])
+        relu_width = sum(len(layer.out_vars) for layer in net.layers if layer.kind == LayerKind.RELU)
+        estimated_alpha = k_actual * m_specs * relu_width * batched_bounds.lb.element_size()
+        if not allow_per_class_alpha(estimated_alpha, enabled=True):
+            capped_dual_config = replace(capped_dual_config, per_class_alpha=False)
     result = solver.solve_spec_batch(
         net,
         bounds_dict,
@@ -417,8 +438,24 @@ def _solve_dual_batch(
     result = replace(result, base_reference_bounds=base_reference_bounds)
     if optimize:
         batch.incremental_alpha = result.alpha_state
+        assert batch.warm_state_present is not None
+        batch.warm_state_present.fill_(result.alpha_state is not None)
         if eta_enabled:
             batch.incremental_eta = result.eta_state
+        if memory_planner is not None:
+            layout = "per_row" if capped_dual_config.per_class_alpha else "shared"
+            memory_planner.alpha_waves[layout] += 1
+        if memory_enabled and not allow_warm_state(
+            tensor_storage_bytes((
+                *_alpha_tree_leaves(batch.incremental_alpha),
+                *_alpha_tree_leaves(batch.incremental_eta),
+            )), k_actual, enabled=True,
+        ):
+            batch.incremental_alpha = batch.incremental_eta = None
+            batch.warm_state_present.fill_(False)
+            result = replace(result, alpha_state=None, eta_state=None)
+            if memory_planner is not None:
+                memory_planner.warm_drop_count += 1
     return result
 
 
@@ -430,18 +467,23 @@ def _auto_batch_budget_bytes(safety: float) -> float:
     return min(float(total) * safety, float(reclaimable) * 0.9)
 
 
-def _auto_initial_batch(net: Net, config: BaBConfig) -> int:
+def _auto_initial_batch(
+    net: Net, config: BaBConfig, budget_bytes: Optional[float] = None,
+) -> int:
     """Conservative first batch from net size; the loop recalibrates it from
     the measured per-lane peak after the first real round."""
     safety = float(config.auto_batch_safety)
     cap = int(config.auto_batch_cap)
     floor = int(config.auto_batch_floor)
     per_lane = 4.0 * max(1, _net_bound_elements(net)) * 256.0
-    k = int(_auto_batch_budget_bytes(safety) / per_lane)
+    k = int((_auto_batch_budget_bytes(safety) if budget_bytes is None else budget_bytes) / per_lane)
     return max(floor, min(cap, k))
 
 
-def _auto_recalibrate_batch(peak_bytes: float, max_k_seen: int, config: BaBConfig) -> int:
+def _auto_recalibrate_batch(
+    peak_bytes: float, max_k_seen: int, config: BaBConfig,
+    budget_bytes: Optional[float] = None,
+) -> int:
     """Batch for the next round = budget / measured bytes-per-lane.
 
     ``peak_bytes / max_k_seen`` over-estimates the marginal per-lane cost (it
@@ -452,10 +494,27 @@ def _auto_recalibrate_batch(peak_bytes: float, max_k_seen: int, config: BaBConfi
     cap = int(config.auto_batch_cap)
     floor = int(config.auto_batch_floor)
     bpl = max(peak_bytes / max(1, max_k_seen), 1.0)
-    k = int(_auto_batch_budget_bytes(safety) / bpl)
+    k = int((_auto_batch_budget_bytes(safety) if budget_bytes is None else budget_bytes) / bpl)
     return max(floor, min(cap, k))
 
 
+def _root_oom_guard(function: Callable[..., VerifyResult]) -> Callable[..., VerifyResult]:
+    """Root setup has no committed frontier yet; OOM cannot prove its domain."""
+    @wraps(function)
+    def guarded(*args: Any, **kwargs: Any) -> VerifyResult:
+        """Translate only allocator OOM, leaving all other errors visible."""
+        try:
+            return function(*args, **kwargs)
+        except torch.cuda.OutOfMemoryError:
+            return VerifyResult(VerifyStatus.UNKNOWN, metadata={
+                "reason": "root_out_of_memory", "nodes": 0, "iterations": 0,
+                "pool_remaining": 1, "oom_failures": 1,
+                "any_dropped_frontier_memory": False,
+            })
+    return guarded
+
+
+@_root_oom_guard
 @torch.no_grad()
 def verify_bab_batched(
     net: Net,
@@ -534,11 +593,7 @@ def verify_bab_batched(
     )
     auto_batch = isinstance(max_batch_size, str) and max_batch_size == "auto"
     if auto_batch:
-        effective_batch = (
-            _auto_initial_batch(net, config)
-            if torch.cuda.is_available()
-            else int(config.auto_batch_cap)
-        )
+        effective_batch = int(config.auto_batch_cap)
     else:
         effective_batch = int(max_batch_size)
     if effective_batch < 1:
@@ -574,11 +629,21 @@ def verify_bab_batched(
         "terminal_retired_lanes": 0,
         "terminal_failure_reasons": {},
     } if config.terminal_lp_enabled else {}
+    planner: Optional[FrontierMemoryPlanner] = None
 
     def _branching_metadata() -> Dict[str, Any]:
         _assert_multi_split_invariants(multi_split_stats)
         meta: Dict[str, Any] = dict(multi_split_stats)
         meta.update(terminal_stats)
+        if planner is not None:
+            meta.update(planner.metadata())
+        meta.update(
+            any_dropped_max_depth=any_dropped_max_depth,
+            dropped_max_depth_nodes=dropped_max_depth_nodes,
+            dropped_frontier_cap_nodes=dropped_frontier_cap_nodes,
+            any_retired_no_relu_candidate=any_retired_no_relu_candidate,
+            any_retired_terminal=any_retired_terminal,
+        )
         meta["bounding_top_k_effective"] = int(getattr(pool, "k", 0))
         if _witness_residual_branching_active(config):
             meta["witness_residual_fallback_count"] = int(getattr(brancher, "fallback_count", 0))
@@ -625,6 +690,20 @@ def verify_bab_batched(
 
     spec_layers = gather_input_spec_layers(net)
     root_bounds = seed_from_input_specs(spec_layers)
+    planner = FrontierMemoryPlanner(
+        root_bounds.lb.device, config.frontier_mem_safety, config.frontier_offload,
+        4 * max(1, _net_bound_elements(net)) * 256,
+    )
+    if auto_batch and root_bounds.lb.device.type == "cuda":
+        effective_batch = _auto_initial_batch(
+            net, config, planner.snapshot(pool).available if planner.active else None,
+        )
+    batch_policy = (
+        replace(
+            config, auto_batch_cap=config.auto_batch_cap if auto_batch else effective_batch,
+            auto_batch_floor=config.auto_batch_floor if auto_batch else 1,
+        ) if planner.active else config
+    )
     if root_bounds.lb.shape[0] != 1:
         raise ValueError("verify_bab_batched requires one root sample; slice the net before BaB")
     input_shape: tuple[int, ...] = tuple(root_bounds.lb.shape[1:])
@@ -678,6 +757,7 @@ def verify_bab_batched(
                 root_fwd,
                 mode=refine_mode,
                 blowup_ratio=config.intermediate_refine_ratio,
+                max_tensor_mib=config.intermediate_refine_max_tensor_mib,
             )
     # Per-node bound reuse is governed solely by root_bounds_reuse: root_fwd may
     # exist just for the root presolve/refine above, and passing it to descendant
@@ -771,10 +851,14 @@ def verify_bab_batched(
     if spec_keep_rows is not None or bool((root_batch.depths > 0).any().item()):
         presolve = None
 
-    pool.push(root_batch)
+    pool.push(planner.prepare_push(pool, root_batch, allow_evict=True))
+    del root_batch
+    presplit = presolve_bounds = presolve_sensitivities = None
     any_dropped_frontier_cap = False
+    dropped_frontier_cap_nodes = 0
     if frontier_cap > 0 and len(pool) > frontier_cap:
-        if pool.evict_to(frontier_cap) > 0:
+        dropped_frontier_cap_nodes = pool.evict_to(frontier_cap)
+        if dropped_frontier_cap_nodes > 0:
             any_dropped_frontier_cap = True
 
     start = run_started
@@ -807,13 +891,17 @@ def verify_bab_batched(
     any_dropped_max_depth = False
     any_retired_no_relu_candidate = False
     any_retired_terminal = False
+    any_oom_exhausted = False
+    pending_oom_nodes = 0
+    dropped_max_depth_nodes = 0
+    pending_children: List[SubproblemBatch] = []
     _last_input_widths: Optional[list[float]] = None
 
     def _enqueue_children(
         parents: SubproblemBatch, children: SubproblemBatch, parent_index: torch.Tensor,
     ) -> None:
         """Share provenance, frontier caps and CLIMB accounting for every split."""
-        nonlocal node_counter, any_dropped_frontier_cap
+        nonlocal node_counter, any_dropped_frontier_cap, dropped_frontier_cap_nodes
         if provenance:
             assert parents.node_id is not None
             children.parent_id = parents.node_id.index_select(
@@ -824,12 +912,18 @@ def verify_bab_batched(
                 node_counter, node_counter + nc, device=children.lb.device, dtype=torch.long,
             )
             node_counter += nc
-        pool.push(children)
-        if climb is not None:
-            climb.after_children(children.batch_size, len(pool))
-        if frontier_cap > 0 and len(pool) > frontier_cap:
-            if pool.evict_to(frontier_cap) > 0:
-                any_dropped_frontier_cap = True
+        # Commit terminal fallback and ordinary children together. A later
+        # allocation failure must never requeue parents of already-pushed rows.
+        if planner.active:
+            pending_children.append(children)
+        else:
+            pool.push(children)
+            if climb is not None:
+                climb.after_children(children.batch_size, len(pool))
+            if frontier_cap > 0 and len(pool) > frontier_cap:
+                dropped = pool.evict_to(frontier_cap)
+                dropped_frontier_cap_nodes += dropped
+                any_dropped_frontier_cap |= dropped > 0
 
     def _retire_lanes(
         keep: torch.Tensor,
@@ -857,547 +951,733 @@ def verify_bab_batched(
             branch_batch, bounds_dict, nu_per_layer, witness_preact, keep
         )
 
+    def _recover_wave() -> bool:
+        """Restore uncommitted domains after the failed traceback is released."""
+        nonlocal any_dropped_max_depth, any_oom_exhausted, any_retired_no_relu_candidate, any_retired_terminal
+        nonlocal checkpoint_tensors, climb_checkpoint, dropped_max_depth_nodes, effective_batch
+        nonlocal frontier_checkpoint, node_counter, original_batch, pending_oom_nodes
+        nonlocal processed
+        restored = original_batch is None
+        prepop_relieved = False
+        if not wave_committed and planner.active:
+            if frontier_checkpoint is not None:
+                assert climb is not None and climb_checkpoint is not None
+                cast(TopKBounding, pool).restore(frontier_checkpoint)
+                climb.restore_frontier(climb_checkpoint)
+                planner.offloaded, planner.evicted_nodes = memory_checkpoint
+                frontier_checkpoint = climb_checkpoint = None
+                checkpoint_tensors = ()
+            # Completed complement probes retain their consumed node budget
+            # and valid learned cores even when the main wave retries.
+            node_counter = counter_before
+            (any_dropped_max_depth, any_retired_no_relu_candidate,
+             any_retired_terminal, dropped_max_depth_nodes) = retirement_before
+            terminal_calls = {
+                key: terminal_stats[key]
+                for key in ("terminal_lp_calls", "terminal_lp_lanes")
+                if key in terminal_stats
+            }
+            terminal_stats.clear()
+            terminal_stats.update(terminal_before)
+            terminal_stats.update(terminal_calls)
+            try:
+                if original_batch is None:
+                    before_relief = planner.offload_count, planner.warm_drop_count
+                    planner._relieve(pool)
+                    prepop_relieved = before_relief != (
+                        planner.offload_count, planner.warm_drop_count,
+                    )
+                else:
+                    original_batch = original_batch.drop_warm_state()
+                    planner._relieve(pool)
+                    if planner.offloaded:
+                        original_batch = original_batch.to("cpu")
+                    pool.push(original_batch)
+                    restored = True
+            except torch.cuda.OutOfMemoryError:
+                # Retain the domain count even if requeue itself cannot
+                # allocate. This is an UNKNOWN, never an empty-pool proof.
+                if original_batch is not None:
+                    pending_oom_nodes = original_batch.batch_size
+        if wave_committed and not wave_accounted:
+            processed += k_actual
+        if trace is not None and len(trace) == trace_before:
+            trace.append(_trace_row(
+                k_actual or min(effective_batch, _pool_before), _pool_before,
+                0, 0, None, batch_max_depth,
+            ))
+        failed_k = k_actual or k_requested or effective_batch
+        if in_prepop_climb and prepop_relieved:
+            # Pre-pop CLIMB work gathers the full frontier, independently of K.
+            # Retry only after offload or warm-state removal actually helped.
+            planner.oom_retries += 1
+            return True
+        if not (planner.active and restored and not wave_committed
+                and not in_prepop_climb and failed_k > 1):
+            if original_batch is not None and not restored and not wave_committed:
+                pending_oom_nodes = original_batch.batch_size
+            planner.oom_failures += 1
+            any_oom_exhausted = True
+            return False
+        effective_batch = max(1, min(effective_batch // 2, failed_k // 2))
+        batch_policy.auto_batch_cap = min(batch_policy.auto_batch_cap, effective_batch)
+        batch_policy.auto_batch_floor = min(batch_policy.auto_batch_floor, effective_batch)
+        planner.oom_retries += 1
+        return True
+
     while not pool.empty:
         elapsed = _monotonic() - start
         if elapsed >= budget_s or processed >= config.max_nodes:
             break
 
-        if climb is not None:
-            climb.before_pop(cast(TopKBounding, pool))
-        if pool.empty:
-            break
-
-        remaining_nodes = config.max_nodes - processed
-        k_requested = min(len(pool), effective_batch, remaining_nodes)
-        if k_requested <= 0:
-            break
-
-        _wave_t0 = time.time()
+        original_batch: Optional[SubproblemBatch] = None
+        in_prepop_climb = False
+        wave_committed = False
+        wave_accounted = False
+        k_actual = 0
+        k_requested = min(len(pool), effective_batch, config.max_nodes - processed)
         _pool_before = len(pool)
-        _wave_policy = None
-        _wave_split_used = None
-        if llm_probe is not None and _llm is not None:
-            _wave_policy = llm_probe.begin_wave(_llm.build_frontier_stats(
-                wave_index=_wave_index,
-                pool_size=len(pool),
-                effective_batch=effective_batch,
-                remaining_nodes=remaining_nodes,
-                elapsed_s=elapsed,
-                remaining_s=max(0.0, budget_s - elapsed),
-                input_widths=_last_input_widths,
-            ))
-            if _wave_policy.k_requested is not None:
-                k_requested = max(1, min(_wave_policy.k_requested, len(pool), effective_batch, remaining_nodes))
-
-        batch = pool.pop(batch_size=k_requested)
-        k_actual = batch.batch_size
-        iteration += 1
-        batch_max_depth = int(batch.depths.max().item()) if trace is not None else 0
-        if climb is not None:
-            climb.after_pop(len(pool) + k_actual)
-
-        if input_shape:
-            k_lb = batch.lb.reshape(k_actual, *input_shape)
-            k_ub = batch.ub.reshape(k_actual, *input_shape)
-        else:
-            k_lb = batch.lb
-            k_ub = batch.ub
-        batched_bounds = Bounds(k_lb, k_ub)
-
-        solver_tier = config.solver_tier
-        neuron_branching_supported = _neuron_branching_supported(config)
-        bounds_dict_for_branching: Optional[Dict[int, Bounds]] = None
-        nu_per_layer_for_branching: Optional[Dict[int, torch.Tensor]] = None
-        witness_input_for_branching: Optional[torch.Tensor] = None
-        dual_solve_result: Optional[DualBatchResult] = None
-        if solver_tier == "lp":
-            solver = solver_factory()
-            solution = setup_and_solve_batch(
-                net, batched_bounds, solver, timelimit=None,
-            )
-        elif solver_tier in ("dual", "dual_alpha", "dual_alpha_eta"):
-            has_root = bool((batch.depths == 0).any().item())
-            optimize = solver_tier != "dual"
-            if has_root and presolve is not None and _root_time_cap() <= 0.0:
-                dual_solve_result = presolve
-            else:
-                # The root window caps optimization, not search. If setup uses
-                # up that window, a fixed bound still permits root branching.
-                modes = (True, False) if has_root and optimize else (optimize,)
-                for optimize in modes:
-                    dual_time_cap = (
-                        _root_time_cap() if has_root and optimize else _remaining()
-                    )
-                    if dual_time_cap <= 0.0:
-                        continue
-                    try:
-                        dual_solve_result = _solve_dual_batch(
-                            net=net,
-                            assert_layer=assert_layer,
-                            batched_bounds=batched_bounds,
-                            k_actual=k_actual,
-                            batch=batch,
-                            config=config,
-                            dual_config=dual_config,
-                            optimize=optimize,
-                            keep_rows=spec_keep_rows,
-                            root_bounds_dict=node_root_fwd,
-                            round_policy=_wave_policy,
-                            time_cap=dual_time_cap,
-                        )
-                    except TimeoutError:
-                        continue
-                    break
-            presolve = None
-            if dual_solve_result is None:
-                pool.push(batch)
+        batch_max_depth = 0
+        iteration_before = iteration
+        trace_before = len(trace) if trace is not None else 0
+        pending_children.clear()
+        # Optimizer output may mutate warm state, never domain geometry.
+        counter_before: int = node_counter
+        retirement_before: tuple[bool, bool, bool, int] = (
+            any_dropped_max_depth, any_retired_no_relu_candidate,
+            any_retired_terminal, dropped_max_depth_nodes,
+        )
+        terminal_before: Dict[str, Any] = dict(terminal_stats) if planner.active else {}
+        if planner.active and terminal_stats:
+            terminal_before["terminal_failure_reasons"] = dict(terminal_stats["terminal_failure_reasons"])
+        frontier_checkpoint: Optional[tuple[Optional[SubproblemBatch], bool]] = None
+        climb_checkpoint: Optional[tuple[int, torch.Tensor, int, int, int]] = None
+        checkpoint_tensors: tuple[torch.Tensor, ...] = ()
+        memory_checkpoint: tuple[bool, int] = planner.offloaded, planner.evicted_nodes
+        with planner.wave():
+            if climb is not None:
+                in_prepop_climb = True
+                climb.before_pop(cast(TopKBounding, pool))
+                in_prepop_climb = False
+            if pool.empty:
                 break
-            solution = dual_solve_result.lane_solution()
-            bounds_dict_for_branching = dual_solve_result.intermediate_bounds()
-            nu_per_layer_for_branching = dual_solve_result.neuron_sensitivities()
-            witness_input_for_branching = dual_solve_result.lane_witness_inputs()
-        else:
-            raise ValueError(
-                f"Unknown solver_tier={solver_tier!r}. Valid: {VALID_SOLVER_TIERS}."
-            )
 
-        if climb is not None:
-            climb.after_main_bound(k_actual)
+            remaining_nodes = config.max_nodes - processed
+            k_requested = min(len(pool), effective_batch, remaining_nodes)
+            if k_requested <= 0:
+                break
 
-        n_unsat = sum(1 for s in solution.statuses if s == SolveStatus.UNSAT)
-        branched_lanes = 0
-        node_lower_bound = (-solution.max_viol).detach()
-        if batch.lower_bound is not None:
-            # Bound inheritance: a child region is a subset of its parent, so
-            # the parent's certified lower bound stays valid; clamping removes
-            # per-subproblem optimization regressions (observed: re-optimized
-            # children reporting bounds below their parent's).
-            node_lower_bound = torch.maximum(
-                node_lower_bound, batch.lower_bound.to(node_lower_bound.device)
-            )
+            iteration += 1
+            _wave_t0 = time.time()
+            _pool_before = len(pool)
+            _wave_policy = None
+            _wave_split_used = None
+            if llm_probe is not None and _llm is not None:
+                _wave_policy = llm_probe.begin_wave(_llm.build_frontier_stats(
+                    wave_index=_wave_index,
+                    pool_size=len(pool),
+                    effective_batch=effective_batch,
+                    remaining_nodes=remaining_nodes,
+                    elapsed_s=elapsed,
+                    remaining_s=max(0.0, budget_s - elapsed),
+                    input_widths=_last_input_widths,
+                ))
+                if _wave_policy.k_requested is not None:
+                    k_requested = max(1, min(_wave_policy.k_requested, len(pool), effective_batch, remaining_nodes))
 
-        sat_lane_idx = [
-            i for i, s in enumerate(solution.statuses) if s == SolveStatus.SAT
-        ]
-        if sat_lane_idx:
-            input_ids = get_input_ids(net)
-            input_index = torch.tensor(
-                input_ids, device=solution.x.device, dtype=torch.long,
-            )
-            sat_idx_t = torch.tensor(
-                sat_lane_idx, device=solution.x.device, dtype=torch.long,
-            )
-            x_full = solution.x.index_select(0, sat_idx_t)
-            x_input_flat = x_full.index_select(1, input_index)
-            x_input_shaped = (
-                x_input_flat.reshape(len(sat_lane_idx), *input_shape)
-                if input_shape
-                else x_input_flat
-            )
-            in_region = _check_input_specs_batched(x_input_shaped, spec_layers)
-            violations = check_violations_batched(net, x_input_shaped, assert_layer) & in_region
-            for j, lane in enumerate(sat_lane_idx):
-                if bool(violations[j].item()):
+            planned_k = planner.plan_wave(pool, k_requested)
+            if planner.active and 0 < planned_k < k_requested:
+                effective_batch = planned_k
+            k_requested = planned_k
+            if not k_requested or pool.empty:
+                if pool.empty:
+                    if trace is not None:
+                        trace.append(_trace_row(0, _pool_before, 0, 0, None, 0))
+                    break
+                raise torch.cuda.OutOfMemoryError("one wave lane exceeds memory budget")
+            original_batch = pool.pop(batch_size=k_requested)
+            k_actual = original_batch.batch_size
+            batch_max_depth = int(original_batch.depths.max().item()) if trace is not None else 0
+            batch = original_batch.to(root_bounds.lb.device) if planner.active else original_batch
+            if climb is not None:
+                climb.after_pop(len(pool) + k_actual)
+
+            if input_shape:
+                k_lb = batch.lb.reshape(k_actual, *input_shape)
+                k_ub = batch.ub.reshape(k_actual, *input_shape)
+            else:
+                k_lb = batch.lb
+                k_ub = batch.ub
+            batched_bounds = Bounds(k_lb, k_ub)
+            wave_start_bytes = planner.begin_bound()
+
+            solver_tier = config.solver_tier
+            neuron_branching_supported = _neuron_branching_supported(config)
+            bounds_dict_for_branching: Optional[Dict[int, Bounds]] = None
+            nu_per_layer_for_branching: Optional[Dict[int, torch.Tensor]] = None
+            witness_input_for_branching: Optional[torch.Tensor] = None
+            dual_solve_result: Optional[DualBatchResult] = None
+            if solver_tier == "lp":
+                solver = solver_factory()
+                solution = setup_and_solve_batch(
+                    net, batched_bounds, solver, timelimit=None,
+                )
+            elif solver_tier in ("dual", "dual_alpha", "dual_alpha_eta"):
+                has_root = bool((batch.depths == 0).any().item())
+                optimize = solver_tier != "dual"
+                if has_root and presolve is not None and _root_time_cap() <= 0.0:
+                    dual_solve_result = presolve
+                else:
+                    # The root window caps optimization, not search. If setup uses
+                    # up that window, a fixed bound still permits root branching.
+                    modes = (True, False) if has_root and optimize else (optimize,)
+                    for optimize in modes:
+                        dual_time_cap = (
+                            _root_time_cap() if has_root and optimize else _remaining()
+                        )
+                        if dual_time_cap <= 0.0:
+                            continue
+                        try:
+                            dual_solve_result = _solve_dual_batch(
+                                net=net,
+                                assert_layer=assert_layer,
+                                batched_bounds=batched_bounds,
+                                k_actual=k_actual,
+                                batch=batch,
+                                config=config,
+                                dual_config=dual_config,
+                                optimize=optimize,
+                                keep_rows=spec_keep_rows,
+                                root_bounds_dict=node_root_fwd,
+                                round_policy=_wave_policy,
+                                time_cap=dual_time_cap,
+                                memory_planner=planner,
+                            )
+                        except TimeoutError:
+                            continue
+                        break
+                presolve = None
+                if dual_solve_result is None:
+                    pool.push(batch)
                     if trace is not None:
                         trace.append(_trace_row(
-                            k_actual, _pool_before, n_unsat, 0, lane, batch_max_depth,
+                            k_actual, _pool_before, 0, 0, None, batch_max_depth,
                         ))
-                    return VerifyResult(
-                        VerifyStatus.FALSIFIED,
-                        counterexample=x_input_shaped[j].detach().cpu().clone(),
-                        metadata={
-                            "nodes": processed + k_actual,
-                            "iterations": iteration,
-                            "lane": lane,
-                            "K": k_actual,
-                            "nodes_minted": node_counter,
-                            "any_dropped_frontier_cap": any_dropped_frontier_cap,
-                            **_branching_metadata(),
-                        },
-                    )
+                    break
+                solution = dual_solve_result.lane_solution()
+                bounds_dict_for_branching = dual_solve_result.intermediate_bounds()
+                nu_per_layer_for_branching = dual_solve_result.neuron_sensitivities()
+                witness_input_for_branching = dual_solve_result.lane_witness_inputs()
+            else:
+                raise ValueError(
+                    f"Unknown solver_tier={solver_tier!r}. Valid: {VALID_SOLVER_TIERS}."
+                )
 
-        # Must run post-validation: a SAT lane whose counterexample fails the
-        # concrete forward check is spurious, stays unresolved, and so must earn
-        # the ordinary lb reward instead of a terminal one.
-        if isinstance(pool, MCTSBounding):
-            assert batch.node_id is not None
-            n_unstable = 1
-            if bounds_dict_for_branching is not None:
-                # Entries are batched over the K lanes; divide to recover the
-                # per-lane unstable count the depth reward normalises by.
-                n_unstable = max(1, sum(
-                    int(((b.lb < 0) & (b.ub > 0)).sum().item())
-                    for b in bounds_dict_for_branching.values()
-                ) // k_actual)
-            pool.observe(
-                batch.node_id,
-                node_lower_bound,
-                solution.statuses,
-                batch.depths,
-                n_unstable,
-            )
+            if climb is not None:
+                climb.after_main_bound(k_actual)
 
-        unresolved_idx = torch.tensor(
-            [i for i, status in enumerate(solution.statuses) if status != SolveStatus.UNSAT],
-            device=batch.lb.device,
-            dtype=torch.long,
-        )
-        if climb is not None:
-            assert dual_solve_result is not None
-            climb.learn(batch, solution.statuses, dual_solve_result, k_actual)
-            processed += climb.bound_complements(
-                lambda candidate, cap: _solve_dual_batch(
-                    net=net, assert_layer=assert_layer,
-                    batched_bounds=Bounds(
-                        candidate.lb.reshape(candidate.batch_size, *input_shape),
-                        candidate.ub.reshape(candidate.batch_size, *input_shape),
-                    ),
-                    k_actual=candidate.batch_size, batch=candidate, config=config,
-                    dual_config=dual_config, optimize=True, keep_rows=spec_keep_rows,
-                    root_bounds_dict=node_root_fwd, time_cap=cap,
-                ),
-                _remaining, min(effective_batch, config.max_nodes - processed - k_actual),
-            )
+            n_unsat = sum(1 for s in solution.statuses if s == SolveStatus.UNSAT)
+            branched_lanes = 0
+            node_lower_bound = (-solution.max_viol).detach()
+            if batch.lower_bound is not None:
+                # Bound inheritance: a child region is a subset of its parent, so
+                # the parent's certified lower bound stays valid; clamping removes
+                # per-subproblem optimization regressions (observed: re-optimized
+                # children reporting bounds below their parent's).
+                node_lower_bound = torch.maximum(
+                    node_lower_bound, batch.lower_bound.to(node_lower_bound.device)
+                )
 
-        if int(unresolved_idx.numel()) > 0:
-            unresolved = batch.select(unresolved_idx)
-            unresolved.lower_bound = node_lower_bound.index_select(
-                0, unresolved_idx.to(node_lower_bound.device)
+            sat_lane_idx = [
+                i for i, s in enumerate(solution.statuses) if s == SolveStatus.SAT
+            ]
+            if sat_lane_idx:
+                input_ids = get_input_ids(net)
+                input_index = torch.tensor(
+                    input_ids, device=solution.x.device, dtype=torch.long,
+                )
+                sat_idx_t = torch.tensor(
+                    sat_lane_idx, device=solution.x.device, dtype=torch.long,
+                )
+                x_full = solution.x.index_select(0, sat_idx_t)
+                x_input_flat = x_full.index_select(1, input_index)
+                x_input_shaped = (
+                    x_input_flat.reshape(len(sat_lane_idx), *input_shape)
+                    if input_shape
+                    else x_input_flat
+                )
+                in_region = _check_input_specs_batched(x_input_shaped, spec_layers)
+                violations = check_violations_batched(net, x_input_shaped, assert_layer) & in_region
+                for j, lane in enumerate(sat_lane_idx):
+                    if bool(violations[j].item()):
+                        if trace is not None:
+                            trace.append(_trace_row(
+                                k_actual, _pool_before, n_unsat, 0, lane, batch_max_depth,
+                            ))
+                        return VerifyResult(
+                            VerifyStatus.FALSIFIED,
+                            counterexample=x_input_shaped[j].detach().cpu().clone(),
+                            metadata={
+                                "nodes": processed + k_actual,
+                                "iterations": iteration,
+                                "lane": lane,
+                                "K": k_actual,
+                                "nodes_minted": node_counter,
+                                "any_dropped_frontier_cap": any_dropped_frontier_cap,
+                                **_branching_metadata(),
+                            },
+                        )
+
+            unresolved_idx = torch.tensor(
+                [i for i, status in enumerate(solution.statuses) if status != SolveStatus.UNSAT],
+                device=batch.lb.device,
+                dtype=torch.long,
             )
             if climb is not None:
-                unresolved, kept_rows = climb.before_split(cast(TopKBounding, pool), unresolved)
-                unresolved_idx = unresolved_idx.index_select(0, kept_rows)
-            if config.terminal_lp_enabled and unresolved.batch_size:
-                from act.back_end.solver.terminal_lp import solve_terminal_batch
-
-                terminal_bounds, terminal_nu = slice_branching_state(
-                    bounds_dict_for_branching, nu_per_layer_for_branching,
-                    unresolved_idx, k_actual,
-                )
-                has_candidate = lanes_with_relu_candidates(
-                    unresolved, terminal_bounds, terminal_nu,
-                )
-                terminal_rows = torch.where(~has_candidate)[0]
-                if terminal_rows.numel():
-                    terminal_batch = unresolved.select(terminal_rows)
-                    terminal_count = terminal_batch.batch_size
-                    terminal_result = solve_terminal_batch(
-                        net, Bounds(
-                            terminal_batch.lb.reshape(terminal_count, *input_shape),
-                            terminal_batch.ub.reshape(terminal_count, *input_shape),
+                assert dual_solve_result is not None
+                climb.learn(batch, solution.statuses, dual_solve_result, k_actual)
+                processed += climb.bound_complements(
+                    lambda candidate, cap: _solve_dual_batch(
+                        net=net, assert_layer=assert_layer,
+                        batched_bounds=Bounds(
+                            candidate.lb.reshape(candidate.batch_size, *input_shape),
+                            candidate.ub.reshape(candidate.batch_size, *input_shape),
                         ),
-                        terminal_batch.split_signs, deadline=run_started + budget_s,
+                        k_actual=candidate.batch_size, batch=candidate, config=config,
+                        dual_config=dual_config, optimize=True, keep_rows=spec_keep_rows,
+                        root_bounds_dict=node_root_fwd, time_cap=cap,
+                    ),
+                    _remaining, min(effective_batch, config.max_nodes - processed - k_actual),
+                )
+
+            if int(unresolved_idx.numel()) > 0:
+                unresolved = batch.select(unresolved_idx)
+                unresolved.lower_bound = node_lower_bound.index_select(
+                    0, unresolved_idx.to(node_lower_bound.device)
+                )
+                if climb is not None:
+                    if planner.active:
+                        memory_checkpoint = planner.offloaded, planner.evicted_nodes
+                        frontier_checkpoint = cast(TopKBounding, pool).checkpoint()
+                        climb_checkpoint = climb.checkpoint_frontier()
+                        checkpoint_batch = frontier_checkpoint[0]
+                        checkpoint_tensors = (
+                            tuple(checkpoint_batch.tensors()) if checkpoint_batch is not None else ()
+                        )
+                        checkpoint_batch = None
+                    unresolved, kept_rows = climb.before_split(cast(TopKBounding, pool), unresolved)
+                    unresolved_idx = unresolved_idx.index_select(0, kept_rows)
+                if config.terminal_lp_enabled and unresolved.batch_size:
+                    from act.back_end.solver.terminal_lp import solve_terminal_batch
+
+                    terminal_bounds, terminal_nu = slice_branching_state(
+                        bounds_dict_for_branching, nu_per_layer_for_branching,
+                        unresolved_idx, k_actual,
                     )
-                    terminal_stats["terminal_lp_calls"] += 1
-                    terminal_stats["terminal_lp_lanes"] += terminal_count
-                    proved = torch.tensor(
-                        [terminal_result.has_lp_certificate(i) for i in range(terminal_count)],
-                        device=batch.lb.device, dtype=torch.bool,
+                    has_candidate = lanes_with_relu_candidates(
+                        unresolved, terminal_bounds, terminal_nu,
                     )
-                    n_unsat += int(proved.sum())
-                    terminal_stats["terminal_lp_certified"] += int(proved.sum())
-                    for local, status in enumerate(terminal_result.statuses):
-                        if status == VerifyStatus.FALSIFIED:
-                            lane = int(unresolved_idx[terminal_rows[local]])
-                            if trace is not None:
-                                trace.append(_trace_row(
-                                    k_actual, _pool_before, n_unsat, branched_lanes,
-                                    lane, batch_max_depth,
-                                ))
-                            return VerifyResult(
-                                VerifyStatus.FALSIFIED,
-                                counterexample=terminal_result.witnesses[local].detach().cpu().clone(),
-                                metadata={
-                                    "nodes": processed + k_actual, "iterations": iteration,
-                                    "lane": lane, "K": k_actual, "nodes_minted": node_counter,
-                                    "resolved_by": "terminal_lp",
-                                    "any_dropped_frontier_cap": any_dropped_frontier_cap,
-                                    **_branching_metadata(),
-                                },
-                            )
-                    if climb is not None and bool(proved.any()):
-                        climb.learn_terminal(
-                            terminal_batch.select(torch.where(proved)[0]),
-                            deadline=run_started + budget_s,
-                        )
-                    splittable, axes = _terminal_input_axes(terminal_batch)
-                    fallback = (~proved & splittable
-                                & (terminal_batch.depths < int(config.max_depth)))
-                    if _remaining() <= 0:
-                        fallback.fill_(False)
-                    fallback_rows = torch.where(fallback)[0]
-                    if fallback_rows.numel():
-                        fallback_batch = terminal_batch.select(fallback_rows)
-                        fallback_children, fallback_parents = split_input(
-                            fallback_batch, axes.index_select(0, fallback_rows),
-                        )
-                        _enqueue_children(fallback_batch, fallback_children, fallback_parents)
-                        branched_lanes += fallback_batch.batch_size
-                        terminal_stats["terminal_input_fallback_lanes"] += fallback_batch.batch_size
-                    for local in torch.where(~proved & ~fallback)[0].tolist():
-                        any_retired_terminal = True
-                        terminal_stats["terminal_retired_lanes"] += 1
-                        failure = terminal_result.reasons[local] or "unproved_terminal"
-                        if _remaining() <= 0:
-                            failure += ":deadline_exhausted"
-                        elif terminal_batch.depths[local] >= int(config.max_depth):
-                            failure += ":max_depth"
-                        elif not bool(splittable[local]):
-                            failure += ":input_unsplittable"
-                        failures = terminal_stats["terminal_failure_reasons"]
-                        failures[failure] = failures.get(failure, 0) + 1
-                        if climb is not None:
-                            climb.retire_lanes_without_relu_candidate(1)
-                    keep = torch.where(has_candidate)[0]
-                    unresolved = unresolved.select(keep)
-                    unresolved_idx = unresolved_idx.index_select(0, keep)
-            branch_mask = unresolved.depths < int(config.max_depth)
-            if bool((~branch_mask).any().item()):
-                any_dropped_max_depth = True
-            branch_idx = torch.where(branch_mask)[0]
-            if int(branch_idx.numel()) > 0:
-                branch_batch = unresolved.select(branch_idx)
-                children: Optional[SubproblemBatch] = None
-                parent_index = torch.empty(0, dtype=torch.long, device=branch_batch.lb.device)
-                if neuron_branching_supported:
-                    full_branch_idx = unresolved_idx.index_select(
-                        0, branch_idx.to(unresolved_idx.device)
-                    )
-                    bd_branch, nu_branch = slice_branching_state(
-                        bounds_dict_for_branching,
-                        nu_per_layer_for_branching,
-                        full_branch_idx,
-                        k_actual,
-                    )
-                    witness_preact_branch: Optional[Dict[int, torch.Tensor]] = None
-                    if _witness_residual_branching_active(config) and witness_input_for_branching is not None:
-                        witness_branch = witness_input_for_branching.index_select(
-                            0,
-                            full_branch_idx.to(witness_input_for_branching.device),
-                        )
-                        witness_preact_branch = witness_relu_preactivations(
-                            net,
-                            witness_branch,
-                            input_shape,
-                            dual_config,
-                        )
-                    multi = None
-                    multi_k = int(config.multi_split_levels)
-                    if llm_probe is not None and _llm is not None and llm_probe.wants_neuron:
-                        # neuron_topk>0 => never bail on candidate count: enumerate the
-                        # full set (limit=None) and let advise_neuron_groups truncate to
-                        # the top-K by score, so the LLM always decides (with a bounded
-                        # view) instead of falling back to FSB. neuron_topk==0 keeps the
-                        # legacy "bail to FSB when > max_candidates_total" behavior.
-                        _neuron_topk = int(config.llm_probe_neuron_topk)
-                        _cand_dicts = enumerate_unstable_candidates(
-                            branch_batch, bd_branch, nu_branch,
-                            limit=None if _neuron_topk > 0
-                            else config.llm_probe_max_candidates_total,
-                        )
-                        if _cand_dicts:
-                            _ngroups = llm_probe.advise_neuron_groups(_llm.build_frontier_stats(
-                                wave_index=_wave_index,
-                                pool_size=len(pool),
-                                effective_batch=effective_batch,
-                                remaining_nodes=remaining_nodes,
-                                elapsed_s=elapsed,
-                                branch_batch_size=branch_batch.batch_size,
-                                candidates=[_llm.CandidateSummary(**_d) for _d in _cand_dicts],
-                            ))
-                            if _ngroups is not None:
-                                _tl, _tn, _keff = groups_to_tensors(_ngroups, branch_batch)
-                                if _tl is not None and _tn is not None:
-                                    multi = split_neurons(branch_batch, net, _tl, _tn, _keff)
-                                    _wave_split_used = _keff
-                    # Joint splitting is orthogonal to how a split is SCORED, so
-                    # it is no longer keyed on branching_method == "gain": the k
-                    # neurons come from the BaBSR heuristic inside
-                    # _multi_split_from_decision either way. The enclosing
-                    # neuron_branching_supported guard already restricts this to a
-                    # neuron-branching method on a dual_alpha* tier.
-                    if multi is None and multi_k > 1:
-                        # Adaptive split depth: fan out so children roughly
-                        # fill one bounding batch; n_branch lanes x 2^k <=
-                        # max_batch_size keeps the frontier from flooding
-                        # the pool. Note this needs
-                        # effective_batch >= 4 * branch_batch.batch_size before
-                        # k_adaptive can exceed 1 at all, so joint splitting
-                        # stays dormant on waves where most lanes are
-                        # unresolved. The clamp is a memory guard and must stay
-                        # (forcing exact k risks OOM); the user's lever is
-                        # --bab-max-batch-size.
-                        k_adaptive = max(
-                            1,
-                            min(
-                                multi_k,
-                                int(math.log2(max(2, effective_batch // max(1, branch_batch.batch_size)))),
+                    terminal_rows = torch.where(~has_candidate)[0]
+                    if terminal_rows.numel():
+                        terminal_batch = unresolved.select(terminal_rows)
+                        terminal_count = terminal_batch.batch_size
+                        terminal_result = solve_terminal_batch(
+                            net, Bounds(
+                                terminal_batch.lb.reshape(terminal_count, *input_shape),
+                                terminal_batch.ub.reshape(terminal_count, *input_shape),
                             ),
+                            terminal_batch.split_signs, deadline=run_started + budget_s,
                         )
-                        if _wave_policy is not None and _wave_policy.split_k is not None and _llm is not None:
-                            k_adaptive = _llm.clip_split_k(
-                                _wave_policy.split_k,
-                                branch_batch_size=branch_batch.batch_size,
-                                effective_batch=effective_batch,
-                                multi_split_levels=multi_k,
-                            )
-                        if k_adaptive < multi_k:
-                            if multi_split_stats["multi_split_clamped_wave_count"] == 0:
-                                log.warning(
-                                    "joint multi-split clamped: requested k=%d but "
-                                    "effective_batch=%d / branch lanes=%d allows only "
-                                    "k=%d (needs effective_batch >= %d for k=%d); "
-                                    "raise --bab-max-batch-size to lift this",
-                                    multi_k, effective_batch, branch_batch.batch_size,
-                                    k_adaptive, branch_batch.batch_size * (2 ** multi_k),
-                                    multi_k,
+                        terminal_stats["terminal_lp_calls"] += 1
+                        terminal_stats["terminal_lp_lanes"] += terminal_count
+                        proved = torch.tensor(
+                            [terminal_result.has_lp_certificate(i) for i in range(terminal_count)],
+                            device=batch.lb.device, dtype=torch.bool,
+                        )
+                        n_unsat += int(proved.sum())
+                        terminal_stats["terminal_lp_certified"] += int(proved.sum())
+                        for local, status in enumerate(terminal_result.statuses):
+                            if status == VerifyStatus.FALSIFIED:
+                                lane = int(unresolved_idx[terminal_rows[local]])
+                                if trace is not None:
+                                    trace.append(_trace_row(
+                                        k_actual, _pool_before, n_unsat, branched_lanes,
+                                        lane, batch_max_depth,
+                                    ))
+                                return VerifyResult(
+                                    VerifyStatus.FALSIFIED,
+                                    counterexample=terminal_result.witnesses[local].detach().cpu().clone(),
+                                    metadata={
+                                        "nodes": processed + k_actual, "iterations": iteration,
+                                        "lane": lane, "K": k_actual, "nodes_minted": node_counter,
+                                        "resolved_by": "terminal_lp",
+                                        "any_dropped_frontier_cap": any_dropped_frontier_cap,
+                                        **_branching_metadata(),
+                                    },
                                 )
-                            multi_split_stats["multi_split_clamped_wave_count"] += 1
-                        _wave_split_used = k_adaptive
-                        if k_adaptive > 1:
-                            multi = _multi_split_from_decision(
-                                branch_batch, net, bd_branch, nu_branch, k_adaptive,
-                                steer=climb.steer_scores if climb is not None and config.climb_steer else None,
+                        if climb is not None and bool(proved.any()):
+                            climb.learn_terminal(
+                                terminal_batch.select(torch.where(proved)[0]),
+                                deadline=run_started + budget_s,
                             )
-                            if multi is not None:
-                                multi_split_stats["multi_split_wave_count"] += 1
-                                multi_split_stats["multi_split_k_used"] = k_adaptive
-                                if multi[0].batch_size != branch_batch.batch_size * (2 ** k_adaptive):
-                                    multi_split_stats["multi_split_lane_starved_count"] += 1
-                    if multi is not None:
-                        _assert_multi_split_invariants(
-                            multi_split_stats, active_k=_wave_split_used
-                        )
-                        children, parent_index = multi
-                    else:
-                        decision = None
-                        if climb is not None and config.branching_method == "gain":
-                            branch_batch, bd_branch, nu_branch, witness_preact_branch = _retire_lanes(
-                                lanes_with_relu_candidates(branch_batch, bd_branch, nu_branch),
-                                branch_batch, bd_branch, nu_branch, witness_preact_branch,
+                        splittable, axes = _terminal_input_axes(terminal_batch)
+                        fallback = (~proved & splittable
+                                    & (terminal_batch.depths < int(config.max_depth)))
+                        if _remaining() <= 0:
+                            fallback.fill_(False)
+                        fallback_rows = torch.where(fallback)[0]
+                        if fallback_rows.numel():
+                            fallback_batch = terminal_batch.select(fallback_rows)
+                            fallback_children, fallback_parents = split_input(
+                                fallback_batch, axes.index_select(0, fallback_rows),
                             )
-                        if branch_batch is not None and config.branching_method == "gain":
-                            decision = gain_tested_decision(
-                                branch_batch,
-                                net,
-                                assert_layer,
-                                config,
-                                dual_config,
-                                spec_keep_rows,
-                                node_root_fwd,
-                                bd_branch,
-                                nu_branch,
-                                input_shape,
-                                solve_dual=_solve_dual_batch,
-                                steer=climb.steer_scores if climb is not None and config.climb_steer else None,
-                            )
-                        if branch_batch is not None and decision is None:
-                            extra_branch_kwargs = (
-                                {"witness_preact_per_layer": witness_preact_branch}
-                                if _witness_residual_branching_active(config)
-                                else {}
-                            )
-                            scores = cast(Any, brancher).compute_scores(
-                                branch_batch,
-                                net,
-                                bounds_dict=bd_branch,
-                                nu_per_layer=nu_branch,
-                                **extra_branch_kwargs,
-                            )
+                            _enqueue_children(fallback_batch, fallback_children, fallback_parents)
+                            branched_lanes += fallback_batch.batch_size
+                            terminal_stats["terminal_input_fallback_lanes"] += fallback_batch.batch_size
+                        for local in torch.where(~proved & ~fallback)[0].tolist():
+                            any_retired_terminal = True
+                            terminal_stats["terminal_retired_lanes"] += 1
+                            failure = terminal_result.reasons[local] or "unproved_terminal"
+                            if _remaining() <= 0:
+                                failure += ":deadline_exhausted"
+                            elif terminal_batch.depths[local] >= int(config.max_depth):
+                                failure += ":max_depth"
+                            elif not bool(splittable[local]):
+                                failure += ":input_unsplittable"
+                            failures = terminal_stats["terminal_failure_reasons"]
+                            failures[failure] = failures.get(failure, 0) + 1
                             if climb is not None:
-                                scores = climb.steer_scores(scores)
-                            decision = cast(SplitDecision, cast(Any, brancher).select(scores))
-                            if climb is not None and decision.lane_mask is not None:
+                                climb.retire_lanes_without_relu_candidate(1)
+                        keep = torch.where(has_candidate)[0]
+                        unresolved = unresolved.select(keep)
+                        unresolved_idx = unresolved_idx.index_select(0, keep)
+                branch_mask = unresolved.depths < int(config.max_depth)
+                if bool((~branch_mask).any().item()):
+                    any_dropped_max_depth = True
+                    dropped_max_depth_nodes += int((~branch_mask).sum().item())
+                branch_idx = torch.where(branch_mask)[0]
+                if int(branch_idx.numel()) > 0:
+                    branch_batch = unresolved.select(branch_idx)
+                    children: Optional[SubproblemBatch] = None
+                    parent_index = torch.empty(0, dtype=torch.long, device=branch_batch.lb.device)
+                    if neuron_branching_supported:
+                        full_branch_idx = unresolved_idx.index_select(
+                            0, branch_idx.to(unresolved_idx.device)
+                        )
+                        bd_branch, nu_branch = slice_branching_state(
+                            bounds_dict_for_branching,
+                            nu_per_layer_for_branching,
+                            full_branch_idx,
+                            k_actual,
+                        )
+                        witness_preact_branch: Optional[Dict[int, torch.Tensor]] = None
+                        if _witness_residual_branching_active(config) and witness_input_for_branching is not None:
+                            witness_branch = witness_input_for_branching.index_select(
+                                0,
+                                full_branch_idx.to(witness_input_for_branching.device),
+                            )
+                            witness_preact_branch = witness_relu_preactivations(
+                                net,
+                                witness_branch,
+                                input_shape,
+                                dual_config,
+                            )
+                        multi = None
+                        multi_k = int(config.multi_split_levels)
+                        if llm_probe is not None and _llm is not None and llm_probe.wants_neuron:
+                            # neuron_topk>0 => never bail on candidate count: enumerate the
+                            # full set (limit=None) and let advise_neuron_groups truncate to
+                            # the top-K by score, so the LLM always decides (with a bounded
+                            # view) instead of falling back to FSB. neuron_topk==0 keeps the
+                            # legacy "bail to FSB when > max_candidates_total" behavior.
+                            _neuron_topk = int(config.llm_probe_neuron_topk)
+                            _cand_dicts = enumerate_unstable_candidates(
+                                branch_batch, bd_branch, nu_branch,
+                                limit=None if _neuron_topk > 0
+                                else config.llm_probe_max_candidates_total,
+                            )
+                            if _cand_dicts:
+                                _ngroups = llm_probe.advise_neuron_groups(_llm.build_frontier_stats(
+                                    wave_index=_wave_index,
+                                    pool_size=len(pool),
+                                    effective_batch=effective_batch,
+                                    remaining_nodes=remaining_nodes,
+                                    elapsed_s=elapsed,
+                                    branch_batch_size=branch_batch.batch_size,
+                                    candidates=[_llm.CandidateSummary(**_d) for _d in _cand_dicts],
+                                ))
+                                if _ngroups is not None:
+                                    _tl, _tn, _keff = groups_to_tensors(_ngroups, branch_batch)
+                                    if _tl is not None and _tn is not None:
+                                        multi = split_neurons(branch_batch, net, _tl, _tn, _keff)
+                                        _wave_split_used = _keff
+                        # Joint splitting is orthogonal to how a split is SCORED, so
+                        # it is no longer keyed on branching_method == "gain": the k
+                        # neurons come from the BaBSR heuristic inside
+                        # _multi_split_from_decision either way. The enclosing
+                        # neuron_branching_supported guard already restricts this to a
+                        # neuron-branching method on a dual_alpha* tier.
+                        if multi is None and multi_k > 1:
+                            # Adaptive split depth: fan out so children roughly
+                            # fill one bounding batch; n_branch lanes x 2^k <=
+                            # max_batch_size keeps the frontier from flooding
+                            # the pool. Note this needs
+                            # effective_batch >= 4 * branch_batch.batch_size before
+                            # k_adaptive can exceed 1 at all, so joint splitting
+                            # stays dormant on waves where most lanes are
+                            # unresolved. The clamp is a memory guard and must stay
+                            # (forcing exact k risks OOM); the user's lever is
+                            # --bab-max-batch-size.
+                            k_adaptive = max(
+                                1,
+                                min(
+                                    multi_k,
+                                    int(math.log2(max(2, effective_batch // max(1, branch_batch.batch_size)))),
+                                ),
+                            )
+                            if _wave_policy is not None and _wave_policy.split_k is not None and _llm is not None:
+                                k_adaptive = _llm.clip_split_k(
+                                    _wave_policy.split_k,
+                                    branch_batch_size=branch_batch.batch_size,
+                                    effective_batch=effective_batch,
+                                    multi_split_levels=multi_k,
+                                )
+                            if k_adaptive < multi_k:
+                                if multi_split_stats["multi_split_clamped_wave_count"] == 0:
+                                    log.warning(
+                                        "joint multi-split clamped: requested k=%d but "
+                                        "effective_batch=%d / branch lanes=%d allows only "
+                                        "k=%d (needs effective_batch >= %d for k=%d); "
+                                        "raise --bab-max-batch-size to lift this",
+                                        multi_k, effective_batch, branch_batch.batch_size,
+                                        k_adaptive, branch_batch.batch_size * (2 ** multi_k),
+                                        multi_k,
+                                    )
+                                multi_split_stats["multi_split_clamped_wave_count"] += 1
+                            _wave_split_used = k_adaptive
+                            if k_adaptive > 1:
+                                multi = _multi_split_from_decision(
+                                    branch_batch, net, bd_branch, nu_branch, k_adaptive,
+                                    steer=climb.steer_scores if climb is not None and config.climb_steer else None,
+                                )
+                                if multi is not None:
+                                    multi_split_stats["multi_split_wave_count"] += 1
+                                    multi_split_stats["multi_split_k_used"] = k_adaptive
+                                    if multi[0].batch_size != branch_batch.batch_size * (2 ** k_adaptive):
+                                        multi_split_stats["multi_split_lane_starved_count"] += 1
+                        if multi is not None:
+                            _assert_multi_split_invariants(
+                                multi_split_stats, active_k=_wave_split_used
+                            )
+                            children, parent_index = multi
+                        else:
+                            decision = None
+                            if climb is not None and config.branching_method == "gain":
                                 branch_batch, bd_branch, nu_branch, witness_preact_branch = _retire_lanes(
-                                    decision.lane_mask,
+                                    lanes_with_relu_candidates(branch_batch, bd_branch, nu_branch),
                                     branch_batch, bd_branch, nu_branch, witness_preact_branch,
                                 )
-                            if branch_batch is not None and _witness_residual_branching_active(config):
-                                _assert_witness_residual_decision_unstable(
-                                    decision, bd_branch
+                            if branch_batch is not None and config.branching_method == "gain":
+                                decision = gain_tested_decision(
+                                    branch_batch,
+                                    net,
+                                    assert_layer,
+                                    config,
+                                    dual_config,
+                                    spec_keep_rows,
+                                    node_root_fwd,
+                                    bd_branch,
+                                    nu_branch,
+                                    input_shape,
+                                    solve_dual=_solve_dual_batch,
+                                    steer=climb.steer_scores if climb is not None and config.climb_steer else None,
                                 )
-                        if branch_batch is not None and decision is not None:
-                            if decision.kind == "input_axis":
-                                decision.fanout = fanout
-                            children, parent_index = decision.apply(branch_batch, net)
-                else:
-                    scores = brancher.compute_scores(branch_batch, net)
-                    legacy_decision = cast(Any, brancher).select(scores)
-                    if isinstance(legacy_decision, SplitDecision):
-                        decision = legacy_decision
-                        split_dims = decision.input_axes(branch_batch)
+                            if branch_batch is not None and decision is None:
+                                extra_branch_kwargs = (
+                                    {"witness_preact_per_layer": witness_preact_branch}
+                                    if _witness_residual_branching_active(config)
+                                    else {}
+                                )
+                                scores = cast(Any, brancher).compute_scores(
+                                    branch_batch,
+                                    net,
+                                    bounds_dict=bd_branch,
+                                    nu_per_layer=nu_branch,
+                                    **extra_branch_kwargs,
+                                )
+                                if climb is not None:
+                                    scores = climb.steer_scores(scores)
+                                decision = cast(SplitDecision, cast(Any, brancher).select(scores))
+                                if climb is not None and decision.lane_mask is not None:
+                                    branch_batch, bd_branch, nu_branch, witness_preact_branch = _retire_lanes(
+                                        decision.lane_mask,
+                                        branch_batch, bd_branch, nu_branch, witness_preact_branch,
+                                    )
+                                if branch_batch is not None and _witness_residual_branching_active(config):
+                                    _assert_witness_residual_decision_unstable(
+                                        decision, bd_branch
+                                    )
+                            if branch_batch is not None and decision is not None:
+                                if decision.kind == "input_axis":
+                                    decision.fanout = fanout
+                                children, parent_index = decision.apply(branch_batch, net)
                     else:
-                        split_dims = torch.as_tensor(
-                            legacy_decision,
-                            device=branch_batch.lb.device,
-                            dtype=torch.long,
-                        ).reshape(-1)
-                        decision = SplitDecision(
-                            kind="input_axis",
-                            input_axis=split_dims,
-                            fanout=fanout,
+                        scores = brancher.compute_scores(branch_batch, net)
+                        legacy_decision = cast(Any, brancher).select(scores)
+                        if isinstance(legacy_decision, SplitDecision):
+                            decision = legacy_decision
+                            split_dims = decision.input_axes(branch_batch)
+                        else:
+                            split_dims = torch.as_tensor(
+                                legacy_decision,
+                                device=branch_batch.lb.device,
+                                dtype=torch.long,
+                            ).reshape(-1)
+                            decision = SplitDecision(
+                                kind="input_axis",
+                                input_axis=split_dims,
+                                fanout=fanout,
+                            )
+                        widths = branch_batch.widths()
+                        _last_input_widths = (
+                            widths.mean(dim=0).tolist() if widths.shape[1] <= 32 else None
                         )
-                    widths = branch_batch.widths()
-                    _last_input_widths = (
-                        widths.mean(dim=0).tolist() if widths.shape[1] <= 32 else None
-                    )
-                    if _wave_policy is not None and _wave_policy.input_split_dim is not None:
-                        # LLM-advised input dimension (already range-clipped). Lanes where
-                        # the advised dim has zero width keep the brancher's choice:
-                        # splitting a zero-width dim yields identical children (livelock).
-                        advised = torch.full_like(split_dims, int(_wave_policy.input_split_dim))
-                        has_width = widths.gather(1, advised.unsqueeze(1)).squeeze(1) > 0
-                        split_dims = torch.where(has_width, advised, split_dims)
-                    decision.input_axis = split_dims
-                    if _wave_policy is not None and _wave_policy.input_split_fanout is not None:
-                        decision.fanout = int(_wave_policy.input_split_fanout)
-                    children, parent_index = decision.apply(branch_batch, net)
+                        if _wave_policy is not None and _wave_policy.input_split_dim is not None:
+                            # LLM-advised input dimension (already range-clipped). Lanes where
+                            # the advised dim has zero width keep the brancher's choice:
+                            # splitting a zero-width dim yields identical children (livelock).
+                            advised = torch.full_like(split_dims, int(_wave_policy.input_split_dim))
+                            has_width = widths.gather(1, advised.unsqueeze(1)).squeeze(1) > 0
+                            split_dims = torch.where(has_width, advised, split_dims)
+                        decision.input_axis = split_dims
+                        if _wave_policy is not None and _wave_policy.input_split_fanout is not None:
+                            decision.fanout = int(_wave_policy.input_split_fanout)
+                        children, parent_index = decision.apply(branch_batch, net)
 
-                if children is not None:
-                    assert branch_batch is not None
-                    branched_lanes += branch_batch.batch_size
-                    _enqueue_children(branch_batch, children, parent_index)
+                    if children is not None:
+                        assert branch_batch is not None
+                        branched_lanes += branch_batch.batch_size
+                        _enqueue_children(branch_batch, children, parent_index)
 
-        processed += k_actual
+            if pending_children:
+                incoming = pending_children[0]
+                for extra_children in pending_children[1:]:
+                    # Both sources and the concat destination coexist at peak.
+                    sources = tuple(incoming.tensors()) + tuple(extra_children.tensors())
+                    temporary = sum(t.numel() * t.element_size() for t in sources)
+                    if not planner.snapshot(
+                        pool, incoming, (*batch.tensors(), *extra_children.tensors(), *checkpoint_tensors),
+                        temporary,
+                    ).fits:
+                        raise torch.cuda.OutOfMemoryError("staged children concatenation budget")
+                    incoming = incoming.concat(extra_children)
+                incoming = planner.prepare_push(
+                    pool, incoming, (*batch.tensors(), *checkpoint_tensors),
+                    allow_evict=effective_batch == 1,
+                )
+                pool.push(incoming)
+                wave_committed = True
+                if climb is not None:
+                    climb.after_children(incoming.batch_size, len(pool))
+                pending_children.clear()
+            if frontier_cap > 0 and len(pool) > frontier_cap:
+                dropped = pool.evict_to(frontier_cap)
+                dropped_frontier_cap_nodes += dropped
+                any_dropped_frontier_cap |= dropped > 0
 
-        if trace is not None:
-            trace.append(_trace_row(
-                k_actual, _pool_before, n_unsat, branched_lanes, None, batch_max_depth,
-            ))
+            processed += k_actual
+            wave_accounted = True
+            wave_committed = True
+            if isinstance(pool, MCTSBounding):
+                # Only a committed, concretely checked wave earns a visit/reward.
+                assert batch.node_id is not None
+                n_unstable = max(1, sum(
+                    int(((b.lb < 0) & (b.ub > 0)).sum().item())
+                    for b in (bounds_dict_for_branching or {}).values()
+                ) // k_actual)
+                pool.observe(
+                    batch.node_id, node_lower_bound, solution.statuses,
+                    batch.depths, n_unstable,
+                )
 
-        if isinstance(pool, MCTSBounding):
-            log.info(
-                "mcts: nodes=%d n_tot=%d frontier N[parent] histogram=%s",
-                processed,
-                pool.n_tot,
-                pool.frontier_parent_visit_histogram(),
-            )
+            if trace is not None:
+                trace.append(_trace_row(
+                    k_actual, _pool_before, n_unsat, branched_lanes, None, batch_max_depth,
+                ))
 
-        if auto_batch and torch.cuda.is_available():
-            max_k_seen = max(max_k_seen, k_actual)
-            effective_batch = _auto_recalibrate_batch(
-                torch.cuda.max_memory_allocated(), max_k_seen, config,
-            )
+            if isinstance(pool, MCTSBounding):
+                log.info(
+                    "mcts: nodes=%d n_tot=%d frontier N[parent] histogram=%s",
+                    processed,
+                    pool.n_tot,
+                    pool.frontier_parent_visit_histogram(),
+                )
 
-        if llm_probe is not None and _llm is not None:
-            llm_probe.end_wave(_llm.WaveOutcome(
-                wave_index=_wave_index,
-                pool_before=_pool_before,
-                pool_after=len(pool),
-                k_requested_used=k_actual,
-                split_k_used=_wave_split_used if _wave_split_used is not None else 1,
-                refine_iters_used=(_wave_policy.refine_iters if (_wave_policy is not None and _wave_policy.refine_iters is not None) else 0),
-                certified_count=0,
-                falsified_found=False,
-                branched_count=0,
-                best_lb_before=None,
-                best_lb_after=None,
-                wave_time_s=time.time() - _wave_t0,
-                fallback_used=False,
-            ))
-            _wave_index += 1
+            if planner.active:
+                planner.observe_wave(
+                    torch.cuda.max_memory_allocated(planner.device) - wave_start_bytes, k_actual,
+                )
+            if (auto_batch or planner.active) and root_bounds.lb.device.type == "cuda":
+                max_k_seen = max(max_k_seen, k_actual)
+                effective_batch = _auto_recalibrate_batch(
+                    (planner.lane_bytes * max_k_seen if planner.active
+                     else torch.cuda.max_memory_allocated(root_bounds.lb.device)),
+                    max_k_seen, batch_policy,
+                    budget_bytes=(planner.snapshot(pool).available if planner.active else None),
+                )
 
-    pool_remaining = len(pool)
+            if llm_probe is not None and _llm is not None:
+                llm_probe.end_wave(_llm.WaveOutcome(
+                    wave_index=_wave_index,
+                    pool_before=_pool_before,
+                    pool_after=len(pool),
+                    k_requested_used=k_actual,
+                    split_k_used=_wave_split_used if _wave_split_used is not None else 1,
+                    refine_iters_used=(_wave_policy.refine_iters if (_wave_policy is not None and _wave_policy.refine_iters is not None) else 0),
+                    certified_count=0,
+                    falsified_found=False,
+                    branched_count=0,
+                    best_lb_before=None,
+                    best_lb_after=None,
+                    wave_time_s=time.time() - _wave_t0,
+                    fallback_used=False,
+                ))
+                _wave_index += 1
+
+            if planner.active:
+                # Finished-wave tensors must not masquerade as outside memory
+                # when planning the next wave.
+                original_batch = batch = batched_bounds = dual_solve_result = solution = None
+                bounds_dict_for_branching = nu_per_layer_for_branching = None
+                witness_input_for_branching = unresolved = branch_batch = children = None
+                terminal_batch = fallback_batch = fallback_children = incoming = None
+                extra_children = sources = terminal_result = None
+                bd_branch = nu_branch = witness_preact_branch = terminal_bounds = terminal_nu = None
+                multi = witness_branch = x_full = x_input_flat = x_input_shaped = None
+                k_lb = k_ub = node_lower_bound = None
+                frontier_checkpoint = climb_checkpoint = None
+                checkpoint_tensors = ()
+
+        if planner.wave_oom:
+            # Leave the exception handler before allocating during recovery:
+            # its traceback otherwise retains the failing solver's work tensors.
+            # The pool commits each mutation atomically. No children are pushed
+            # before the whole active-planner wave succeeds, so the exact
+            # original rows are still a complete cover of unfinished work.
+            iteration = max(iteration, iteration_before + 1)
+            pending_children.clear()
+            batch = batched_bounds = dual_solve_result = solution = None
+            bounds_dict_for_branching = nu_per_layer_for_branching = None
+            witness_input_for_branching = unresolved = branch_batch = children = None
+            terminal_batch = fallback_batch = fallback_children = incoming = None
+            extra_children = sources = terminal_result = None
+            bd_branch = nu_branch = witness_preact_branch = terminal_bounds = terminal_nu = None
+            multi = witness_branch = x_full = x_input_flat = x_input_shaped = None
+            k_lb = k_ub = node_lower_bound = None
+            presolve = None
+            if not _recover_wave():
+                break
+    pool_remaining = len(pool) + pending_oom_nodes
     elapsed_total = _monotonic() - start
     exhausted_time = elapsed_total >= budget_s
     exhausted_nodes = processed >= config.max_nodes
@@ -1411,6 +1691,8 @@ def verify_bab_batched(
         and not any_dropped_frontier_cap
         and not any_retired_no_relu_candidate
         and not any_retired_terminal
+        and not any_oom_exhausted
+        and planner.evicted_nodes == 0
         and pool_remaining == 0
     ):
         return VerifyResult(
@@ -1439,13 +1721,22 @@ def verify_bab_batched(
             "exhausted_budget_nodes": exhausted_nodes,
             "nodes_minted": node_counter,
             "any_dropped_frontier_cap": any_dropped_frontier_cap,
+            "unrequeued_oom_nodes": pending_oom_nodes,
             "reason": (
                 "budget_exhausted_with_unproven_subboxes"
                 if pool_remaining > 0 and (exhausted_time or exhausted_nodes)
+                else "out_of_memory"
+                if any_oom_exhausted
+                else "frontier_memory_eviction"
+                if planner.evicted_nodes
+                else "frontier_cap_eviction"
+                if any_dropped_frontier_cap
                 else "terminal_lp_unproved_retirement"
                 if any_retired_terminal
                 else "climb_retired_without_relu_candidate"
                 if any_retired_no_relu_candidate
+                else "max_depth_unproved_retirement"
+                if any_dropped_max_depth
                 else "budget_exhausted_with_unproven_subboxes"
             ),
             **_branching_metadata(),
@@ -1517,6 +1808,197 @@ if __name__ == "__main__":
         factory = NetFactory(BackendConfig.from_yaml().generation.net_factory,
                              output_dir=directory, write_manifest=False)
         upper = torch.ones(1, 1, dtype=get_default_dtype())
+        from act.back_end.bab.frontier_memory import (
+            MemoryBudget, PER_CLASS_ALPHA_MAX_BYTES, WARM_STATE_MAX_BYTES_PER_LANE,
+        )
+        from act.back_end.solver.solver_dual import MixedAlpha
+        from dataclasses import fields
+
+        # Statistics visit backing storage, not copies or materialized views.
+        backing = torch.arange(48, dtype=upper.dtype).reshape(4, 12)
+        assert tensor_storage_bytes((backing[:1, :2], backing[2:, 3:])) == backing.untyped_storage().nbytes()
+        transport = SubproblemBatch(
+            lb=backing[:2, :2], ub=backing[:2, :2] + 1,
+            depths=torch.tensor([1, 2]), node_id=torch.tensor([1, 2]),
+            parent_id=torch.tensor([-1, -1]), decision_literals=torch.tensor([[1, 0], [2, -1]]),
+            parent_margins=upper.new_tensor([.2, .3]), lower_bound=upper.new_tensor([-.1, .4]),
+            incremental_alpha={2: {"nested": [upper.new_full((2, 3, 2), .5)]}},
+            incremental_eta={2: upper.new_zeros((2, 3, 2))},
+            split_signs={2: upper.new_ones((2, 3, 2))},
+        )
+        pool_factories = (
+            RandomBounding, lambda: TopKBounding(SAOrder()),
+            lambda: DiverseTopKBounding(SAOrder()), lambda: MCTSBounding(SAOrder()),
+        )
+        for make_pool in pool_factories:
+            state_pool = make_pool()
+            state_pool.push(transport)
+            with (
+                patch.object(SubproblemBatch, "select", side_effect=AssertionError("statistics allocated")),
+                patch.object(TopKBounding, "view_all", side_effect=AssertionError("statistics gathered")),
+            ):
+                assert state_pool.storage_bytes() == tensor_storage_bytes(state_pool.resident_tensors())
+                assert state_pool.projected_push_bytes(transport) > 0
+            state_pool.to("cpu")
+            transported = state_pool.pop(2)
+            assert transported.node_id is not None
+            transported = transported.select(torch.argsort(transported.node_id))
+            for field in fields(transport):
+                expected, actual = getattr(transport, field.name), getattr(transported, field.name)
+                if isinstance(expected, torch.Tensor):
+                    assert torch.equal(expected, actual), (type(state_pool), field.name)
+                elif isinstance(expected, dict):
+                    assert all(torch.equal(a, b) for a, b in zip(
+                        _alpha_tree_leaves(expected), _alpha_tree_leaves(actual),
+                    ))
+            state_pool.push(transported)
+            state_pool.drop_warm_state()
+            dropped_state = state_pool.pop(2)
+            assert dropped_state.incremental_alpha is dropped_state.incremental_eta is None
+            assert dropped_state.warm_state_present is not None
+            assert not bool(dropped_state.warm_state_present.any())
+            assert dropped_state.split_signs is not None
+            state_pool.push(dropped_state)
+            assert state_pool.evict_to(0) == 2 and state_pool.empty
+
+            # Failure on a late allocation leaves payload and scheduling intact.
+            for operation in ("push", "pop"):
+                atomic_pool = make_pool()
+                atomic_pool.push(transport)
+                resident_ids = tuple(id(t) for t in atomic_pool.resident_tensors())
+                parents_before = dict(atomic_pool.parent) if isinstance(atomic_pool, MCTSBounding) else None
+                schedule_before = vars(atomic_pool.order).copy() if isinstance(atomic_pool, TopKBounding) else None
+                allocs = [0]
+                allocator = torch.cat if operation == "push" else torch.Tensor.index_select
+
+                def fail_late(*args: Any, **kwargs: Any) -> torch.Tensor:
+                    """Fail after earlier output tensors have already allocated."""
+                    allocs[0] += 1
+                    if allocs[0] == 4:
+                        raise torch.cuda.OutOfMemoryError("injected late allocation")
+                    return allocator(*args, **kwargs)
+
+                target, attribute = (torch, "cat") if operation == "push" else (torch.Tensor, "index_select")
+                try:
+                    with patch.object(target, attribute, fail_late):
+                        if operation == "push":
+                            atomic_pool.push(replace(transport, node_id=torch.tensor([3, 4])))
+                        else:
+                            atomic_pool.pop(1)
+                except torch.cuda.OutOfMemoryError:
+                    pass
+                else:
+                    raise AssertionError((type(atomic_pool), operation, allocs))
+                assert tuple(id(t) for t in atomic_pool.resident_tensors()) == resident_ids
+                assert len(atomic_pool) == 2
+                if isinstance(atomic_pool, MCTSBounding):
+                    assert atomic_pool.parent == parents_before
+                if isinstance(atomic_pool, TopKBounding):
+                    assert vars(atomic_pool.order) == schedule_before
+
+        nested_warm = transport.select(torch.tensor([0]))
+        nested_cold = replace(
+            transport.select(torch.tensor([1])),
+            incremental_alpha={2: {"nested": [upper.new_full((1, 3, 2), .6)], "missing": upper}},
+            incremental_eta=None, split_signs=None, warm_state_present=torch.tensor([True]),
+        )
+        missing = nested_warm.concat(nested_cold)
+        assert missing.warm_state_present is not None
+        assert missing.warm_state_present.tolist() == [False, True]
+        assert missing.incremental_eta is not None and not bool(missing.incremental_eta[2][1].any())
+        assert missing.split_signs is not None and not bool(missing.split_signs[2][1].any())
+        assert allow_per_class_alpha(PER_CLASS_ALPHA_MAX_BYTES, enabled=True)
+        assert not allow_per_class_alpha(PER_CLASS_ALPHA_MAX_BYTES + 1, enabled=True)
+        assert allow_per_class_alpha(PER_CLASS_ALPHA_MAX_BYTES + 1, enabled=False)
+        assert allow_warm_state(2 * WARM_STATE_MAX_BYTES_PER_LANE, 2, enabled=True)
+        assert not allow_warm_state(2 * WARM_STATE_MAX_BYTES_PER_LANE + 1, 2, enabled=True)
+
+        inactive = FrontierMemoryPlanner(upper.device, .6, True, 100)
+        inactive_pool = TopKBounding()
+        with patch("torch.cuda.mem_get_info", side_effect=AssertionError("CPU queried CUDA")):
+            assert inactive.plan_wave(inactive_pool, 4) == 4
+            assert inactive.prepare_push(inactive_pool, transport) is transport
+            assert inactive.begin_bound() == 0
+        calibration_pool = TopKBounding()
+        calibration_pool.push(SubproblemBatch.from_bounds(Bounds(
+            -upper.expand(16, -1), upper.expand(16, -1),
+        )))
+        calibrated = FrontierMemoryPlanner(upper.device, .6, False, 10000)
+        calibrated.active = True
+        allocator_peak = [10_000_000]  # old root peak is not marginal wave memory
+        with (
+            patch("torch.cuda.memory_allocated", return_value=2000),
+            patch("torch.cuda.reset_peak_memory_stats",
+                  side_effect=lambda *_: allocator_peak.__setitem__(0, 2000)),
+        ):
+            bound_start = calibrated.begin_bound()
+        allocator_peak[0] = max(allocator_peak[0], 2200)
+        calibrated.observe_wave(allocator_peak[0] - bound_start, 2)
+        batch_limit = BaBConfig(auto_batch_floor=1, auto_batch_cap=16)
+        expected_k = _auto_recalibrate_batch(200, 2, batch_limit, budget_bytes=1000)
+        with patch.object(calibrated, "snapshot", return_value=MemoryBudget(1000, 0, 0, 0, 0, 0)):
+            assert calibrated.plan_wave(calibration_pool, 16) == expected_k == 10
+            calibrated.observe_wave(40, 2)
+            assert calibrated.plan_wave(calibration_pool, 16) == 10
+            calibrated.observe_wave(600, 3)
+            assert calibrated.plan_wave(calibration_pool, 16) == 5
+        # Script pressure by byte state, not timing or actual accelerator use.
+        pressure_pool = TopKBounding()
+        pressure_pool.push(transport)
+        simulated = FrontierMemoryPlanner(upper.device, .6, False, 100)
+        simulated.active = True
+        def pressure_snapshot(*args: Any, **kwargs: Any) -> MemoryBudget:
+            """Warm storage is relieved before shrinking the requested wave."""
+            resident_pressure = pressure_pool._resident_batch()
+            assert resident_pressure is not None
+            warm = resident_pressure.incremental_alpha is not None
+            return MemoryBudget(250 if not warm else 50, 0, 0, 0, 0, 0)
+        with patch.object(simulated, "snapshot", side_effect=pressure_snapshot):
+            assert simulated.plan_wave(pressure_pool, 4) == 2
+        assert simulated.warm_drop_count == simulated.wave_shrinks == 1
+        assert simulated.evicted_nodes == 0 and len(pressure_pool) == 2
+        with patch.object(simulated, "snapshot", side_effect=lambda *_args, **_kw:
+                          MemoryBudget(100, 0, 100 * len(pressure_pool), 0, 0, 0)):
+            assert simulated.plan_wave(pressure_pool, 1) == 1
+        assert simulated.evicted_nodes == 2 and pressure_pool.empty
+        offloader = FrontierMemoryPlanner(upper.device, .6, True, 100)
+        offloader.active = True
+        pressure_pool.push(transport)
+        with (
+            patch.object(offloader, "_host_available", return_value=10**9),
+            patch.object(offloader, "snapshot", side_effect=lambda *_args, **_kw:
+                         MemoryBudget(1000 if offloader.offloaded else 0, 0, 0, 0, 0, 0)),
+        ):
+            assert offloader.plan_wave(pressure_pool, 4) == 4
+        assert offloader.offload_count == 1 and offloader.warm_drop_count == 0
+        byte_probe = FrontierMemoryPlanner(upper.device, .6, False, 100)
+        owned_bytes = tensor_storage_bytes((*pressure_pool.resident_tensors(), *transport.tensors()))
+        with (
+            patch("torch.cuda.mem_get_info", side_effect=[(5000, 10000), (1000, 10000)]),
+            patch("torch.cuda.memory_reserved", return_value=2000),
+            patch("torch.cuda.memory_allocated", return_value=owned_bytes + 500),
+        ):
+            first_budget = byte_probe.snapshot(pressure_pool, transport, (transport.lb,), temporary=77)
+            changed_budget = byte_probe.snapshot(pressure_pool, transport, (transport.lb,), temporary=77)
+        assert first_budget.outside == changed_budget.outside == 500
+        assert first_budget.inflight == 0 and first_budget.temporary == 77
+        assert first_budget.limit == 6000 and changed_budget.limit == 2700
+        assert byte_probe.pop_temporary(pressure_pool) >= sum(
+            t.numel() * t.element_size() for t in pressure_pool.resident_tensors()
+        )
+        byte_probe.active = True
+        with patch.object(byte_probe, "snapshot", side_effect=lambda pool, incoming=None, inflight=(), temporary=0:
+                          MemoryBudget(100000, 0, len(pool) * 100000, 0, 0, temporary)):
+            try:
+                byte_probe.prepare_push(pressure_pool, transport)
+            except torch.cuda.OutOfMemoryError:
+                pass
+            else:
+                raise AssertionError("push peak ignored before K backoff")
+            assert len(pressure_pool) == 2 and byte_probe.evicted_nodes == 0
+            byte_probe.prepare_push(pressure_pool, transport, allow_evict=True)
+        assert pressure_pool.empty and byte_probe.evicted_nodes == 2
+
         # Two revived parents must stay genuinely cold when K=1 leaves one
         # pending while the first parent's real solve pushes warm children.
 
@@ -1717,6 +2199,99 @@ if __name__ == "__main__":
         spec = LAYER_TESTING_SPECS["layer_testing_climb_reuse"]()
         spec["layers"][-1]["params"].update(c=[[1.], [-1.]], d=[.1, .1])
         net = factory.create_network("shared_multirow", spec)
+        layout_spec = LAYER_TESTING_SPECS["layer_testing_climb_reuse"]()
+        layout_spec["layers"][-1]["params"].update(c=[[1.], [-1.], [.5]], d=[.1, .1, .2])
+        layout_net = factory.create_network("mixed_three_rows", layout_spec)
+        layout_box = seed_from_input_specs(gather_input_spec_layers(layout_net))
+        layout_lid = next(layer.id for layer in layout_net.layers if layer.kind == LayerKind.RELU)
+        shared_lane = SubproblemBatch(
+            lb=layout_box.lb, ub=layout_box.ub, depths=torch.ones(1, dtype=torch.long),
+            incremental_alpha={layout_lid: upper.new_full((1, 2), .25)},
+            incremental_eta={layout_lid: upper.new_zeros((1, 1, 2))},
+            split_signs={layout_lid: upper.new_zeros((1, 1, 2))},
+        )
+        per_row_lane = replace(
+            shared_lane, incremental_alpha={layout_lid: upper.new_tensor([[[.3, .6], [.4, .7], [.5, .8]]])},
+            incremental_eta={layout_lid: upper.new_zeros((1, 3, 2))},
+            split_signs={layout_lid: upper.new_zeros((1, 3, 2))},
+        )
+        mixed_pool = TopKBounding()
+        mixed_pool.push(shared_lane)
+        mixed_pool.push(per_row_lane)
+        mixed_pool.to("cpu")
+        mixed_layout = mixed_pool.pop(2)
+        assert mixed_layout.incremental_alpha is not None
+        assert mixed_layout.warm_state_present is not None
+        assert mixed_layout.split_signs is not None and mixed_layout.incremental_eta is not None
+        assert isinstance(mixed_layout.incremental_alpha[layout_lid], MixedAlpha)
+        assert tensor_storage_bytes(_alpha_tree_leaves(mixed_layout.incremental_alpha)) == (
+            8 * upper.element_size() + 2 * 8
+        )
+        assert bool(mixed_layout.warm_state_present.all())
+        assert mixed_layout.split_signs[layout_lid].shape == mixed_layout.incremental_eta[layout_lid].shape == (2, 3, 2)
+        layout_config = BaBConfig(solver_tier="dual_alpha_eta")
+        layout_dual = DualConfig(n_iters=0, incremental_start_enabled=True)
+        def solve_layout(candidate: SubproblemBatch) -> DualBatchResult:
+            """Run the real mixed-layout and genuine cold-start consumers."""
+            return _solve_dual_batch(
+                net=layout_net, assert_layer=get_assert_layer(layout_net),
+                batched_bounds=Bounds(candidate.lb, candidate.ub),
+                k_actual=candidate.batch_size, batch=candidate,
+                config=layout_config, dual_config=layout_dual, optimize=True,
+            )
+        independent = [solve_layout(shared_lane), solve_layout(per_row_lane)]
+        layout_result = solve_layout(mixed_layout)
+        assert torch.allclose(layout_result.margins, torch.cat([r.margins for r in independent]))
+        assert layout_result.m_specs == 3 and bool(mixed_layout.warm_state_present.all())
+        assert layout_result.reference_bounds is not None
+        refine_bounds = layout_result.reference_bounds
+        refine_solver = DualSolver()
+        uncapped = refine_solver.refine_intermediate_bounds_batched(
+            layout_net, refine_bounds, mode="all", rows_cap=2, lane_chunk=2,
+        )
+        two_queries_mib = 8 * sum(
+            box.lb[0].numel() * box.lb.element_size() for box in refine_bounds.values()
+        ) / 1024**2
+        with patch.object(DualSolver, "compute_certified_bound", autospec=True,
+                          side_effect=DualSolver.compute_certified_bound) as refine_spy:
+            capped = refine_solver.refine_intermediate_bounds_batched(
+                layout_net, refine_bounds, mode="all", rows_cap=2, lane_chunk=2,
+                max_tensor_mib=two_queries_mib,
+            )
+        assert len(refine_spy.call_args_list) >= 2
+        assert all(torch.equal(capped[lid].lb, box.lb) and torch.equal(capped[lid].ub, box.ub)
+                   for lid, box in uncapped.items())
+        with patch.object(DualSolver, "compute_certified_bound",
+                          side_effect=AssertionError("unaffordable optional refinement")):
+            skipped = refine_solver.refine_intermediate_bounds_batched(
+                layout_net, refine_bounds, mode="all", max_tensor_mib=1e-12,
+            )
+        assert all(torch.equal(skipped[lid].lb, box.lb) and torch.equal(skipped[lid].ub, box.ub)
+                   for lid, box in refine_bounds.items())
+        cold_layout = mixed_layout.drop_warm_state()
+        cold_reference = SubproblemBatch(
+            lb=cold_layout.lb, ub=cold_layout.ub, depths=cold_layout.depths,
+            split_signs=cold_layout.split_signs,
+        )
+        assert torch.equal(cold_layout.lb, mixed_layout.lb)
+        assert cold_layout.split_signs is not None
+        assert torch.equal(cold_layout.split_signs[layout_lid], mixed_layout.split_signs[layout_lid])
+        with patch.object(DualSolver, "solve_spec_batch", autospec=True,
+                          side_effect=DualSolver.solve_spec_batch) as cold_spy:
+            cold_result = solve_layout(cold_layout)
+        assert cold_spy.call_args.kwargs["incremental_alphas"] is None
+        assert cold_spy.call_args.kwargs["incremental_etas"] is None
+        assert torch.equal(cold_result.margins, solve_layout(cold_reference).margins)
+        from act.back_end.bab.climb import certificate_replay
+        replay_cold = replace(mixed_layout, warm_state_present=torch.tensor([True, False]))
+        assert layout_result.c_rows is not None and layout_result.thresholds is not None
+        with patch.object(DualSolver, "compute_certified_bound",
+                          side_effect=AssertionError("cold placeholders replayed")):
+            assert certificate_replay(
+                net=layout_net, batch=replay_cold, reference_bounds=layout_result.reference_bounds,
+                c_rows=layout_result.c_rows, thresholds=layout_result.thresholds,
+                m_specs=3, out_kind=OutKind.LINEAR_LE, with_costs=False,
+            ) is None
         from act.back_end.bab.bound_refresh import refresh_bounds
 
         for mode in ("split_refresh", "split_refresh_linear"):
@@ -2091,6 +2666,329 @@ if __name__ == "__main__":
         assert budget_with_retirement.metadata["exhausted_budget_nodes"]
         assert budget_with_retirement.metadata["terminal_retired_lanes"] == 1
         assert budget_with_retirement.metadata["reason"] == "budget_exhausted_with_unproven_subboxes"
+
+        # Inject at every owned wave boundary, including after terminal
+        # fallback children have been staged but before normal children exist.
+        planner_init = FrontierMemoryPlanner.__init__
+        real_push, real_pop, real_apply = TopKBounding.push, TopKBounding.pop, SplitDecision.apply
+
+        def simulated_init(self: FrontierMemoryPlanner, *args: Any, **kwargs: Any) -> None:
+            """Activate deterministic policy testing without touching CUDA."""
+            planner_init(self, *args, **kwargs)
+            self.active = True
+
+        for oom_site in ("pop", "solve", "split_after_terminal", "push", "k1", "root"):
+            injected = [False]
+            requeued: List[SubproblemBatch] = []
+            attempted: List[SubproblemBatch] = []
+            solved_ids: List[int] = []
+            oom_trace: List[Dict[str, Any]] = []
+
+            def observed_pop(self: TopKBounding, batch_size: int = 1) -> SubproblemBatch:
+                """A failed pop must leave the original pool untouched."""
+                if oom_site == "pop" and batch_size == 2 and not injected[0]:
+                    injected[0] = True
+                    raise torch.cuda.OutOfMemoryError("injected pop")
+                value = real_pop(self, batch_size)
+                if value.batch_size == 2 and bool((value.depths == 1).all()):
+                    attempted.append(value.select(torch.arange(2)))
+                return value
+
+            def observed_push(self: TopKBounding, value: SubproblemBatch) -> None:
+                """Record the exact original domains returned by recovery."""
+                if oom_site == "push" and value.batch_size == 4 and not injected[0]:
+                    injected[0] = True
+                    raise torch.cuda.OutOfMemoryError("injected child push")
+                if injected[0] and value.batch_size == 2 and bool((value.depths == 1).all()):
+                    requeued.append(value)
+                real_push(self, value)
+
+            def failing_bound(**kwargs: Any) -> DualBatchResult:
+                """Fail one whole K=2 wave, or the first real K=1 wave."""
+                candidate = kwargs["batch"]
+                if ((oom_site == "solve" and candidate.batch_size == 2)
+                        or (oom_site == "k1" and kwargs.get("memory_planner") is not None)
+                        or oom_site == "root") and not injected[0]:
+                    injected[0] = True
+                    raise torch.cuda.OutOfMemoryError("injected bound")
+                result = unresolved_bound(**kwargs)
+                if candidate.batch_size == 1 and bool((candidate.depths == 1).all()):
+                    solved_ids.extend(candidate.node_id.tolist())
+                return result
+
+            def failing_split(self: SplitDecision, candidate: SubproblemBatch, network: Net) -> Any:
+                """Fail after the sibling terminal fallback has been staged."""
+                if (oom_site == "split_after_terminal"
+                        and bool((candidate.depths == 1).all()) and not injected[0]):
+                    injected[0] = True
+                    raise torch.cuda.OutOfMemoryError("injected post-terminal split")
+                return real_apply(self, candidate, network)
+
+            with (
+                patch.object(FrontierMemoryPlanner, "__init__", simulated_init),
+                patch.object(FrontierMemoryPlanner, "begin_bound", return_value=0),
+                patch.object(FrontierMemoryPlanner, "snapshot", return_value=MemoryBudget(10**12, 0, 0, 0, 0, 0)),
+                patch("torch.cuda.max_memory_allocated", return_value=0),
+                patch(f"{__name__}._build_bounding",
+                      side_effect=lambda *_args, **_kw: TopKBounding(lambda depths, lower_bound: -depths)),
+                patch.object(TopKBounding, "push", observed_push),
+                patch.object(TopKBounding, "pop", observed_pop),
+                patch.object(SplitDecision, "apply", failing_split),
+                patch(f"{__name__}._solve_dual_batch", failing_bound),
+                patch(f"{__name__}.lanes_with_relu_candidates", mixed_candidates),
+                patch("act.back_end.solver.terminal_lp.solve_terminal_batch", unproved_terminal),
+            ):
+                recovered = verify_bab_batched(
+                    net, DualSolver, replace(
+                        terminal_config, terminal_lp_enabled=True, provenance_enabled=True,
+                        climb_enabled=False, frontier_mem_safety=.6, frontier_offload=False,
+                        max_depth=3, max_nodes=3,
+                    ), max_batch_size=2, dual_config=DualConfig(n_iters=0), trace=oom_trace,
+                )
+            assert injected[0], oom_site
+            assert recovered.status == VerifyStatus.UNKNOWN, (oom_site, recovered.metadata)
+            assert recovered.metadata["iterations"] == len(oom_trace)
+            assert all(len(row) == 10 for row in oom_trace)
+            if oom_site == "root":
+                assert recovered.metadata["reason"] == "root_out_of_memory"
+                assert recovered.metadata["nodes"] == 0 and not oom_trace
+            elif oom_site == "k1":
+                assert recovered.metadata["reason"] == "out_of_memory"
+                assert recovered.metadata["nodes"] == recovered.metadata["oom_retries"] == 0
+                assert recovered.metadata["pool_remaining"] == 1 and len(oom_trace) == 1
+            else:
+                assert recovered.metadata["oom_retries"] == 1
+                assert recovered.metadata["oom_failures"] == 0
+                assert recovered.metadata["nodes"] == 3
+                assert recovered.metadata["pool_remaining"] == 4
+                assert sorted(solved_ids) == [1, 2], (oom_site, solved_ids)
+                assert sum(row["K"] for row in oom_trace) == 5
+                if oom_site != "pop":
+                    assert len(requeued) == 1 and attempted
+                    for field in ("lb", "ub", "depths", "node_id", "parent_id", "decision_literals"):
+                        left, right = getattr(attempted[0], field), getattr(requeued[0], field)
+                        assert (left is right is None) or torch.equal(left, right), (oom_site, field)
+                    assert attempted[0].split_signs is not None and requeued[0].split_signs is not None
+                    assert all(torch.equal(value, requeued[0].split_signs[lid])
+                               for lid, value in attempted[0].split_signs.items())
+                assert recovered.metadata["terminal_input_fallback_lanes"] == 2
+
+        # Pre-pop CLIMB gathers the whole frontier: shrinking K cannot relieve it.
+        real_before_pop, real_view = ClimbSession.before_pop, TopKBounding.view_all
+        for remedy in ("offload", "cold", "exhausted"):
+            for max_k in (1, 2):
+                prepop_pool = TopKBounding()
+                prepop_planners: list[FrontierMemoryPlanner] = []
+                prepop_failures: list[int] = []
+                prepop_pops: list[int] = []
+                prepop_cover: list[SubproblemBatch] = []
+                prepop_pressure = [False]
+
+                def prepop_init(self: FrontierMemoryPlanner, *args: Any, **kwargs: Any) -> None:
+                    """Activate the real policy with deterministic CPU budgets."""
+                    simulated_init(self, *args, **kwargs)
+                    prepop_planners.append(self)
+
+                def needs_relief(frontier: BoundingStrategy) -> bool:
+                    """Model pressure removed by offload or optional-state removal."""
+                    resident = frontier._resident_batch()
+                    return prepop_pressure[0] and (
+                        remedy == "exhausted"
+                        or (not prepop_planners[-1].offloaded if remedy == "offload"
+                            else resident is not None and resident.incremental_alpha is not None)
+                    )
+
+                def prepop_snapshot(
+                    self: FrontierMemoryPlanner, frontier: BoundingStrategy, *args: Any, **kwargs: Any,
+                ) -> MemoryBudget:
+                    """Expose the same pressure to the existing planner."""
+                    return MemoryBudget(0 if needs_relief(frontier) else 10**12, 0, 0, 0, 0, 0)
+
+                def prepop_hook(session: ClimbSession, frontier: TopKBounding) -> None:
+                    """Enable the real propagation path after the root branches."""
+                    if len(frontier) >= 2:
+                        prepop_pressure[0] = True
+                        if not session.library.core_count:
+                            session.library.insert(torch.tensor([[1, 2]]))
+                    real_before_pop(session, frontier)
+
+                def prepop_view(frontier: TopKBounding) -> SubproblemBatch:
+                    """Fail the whole-pool gather until the real mitigation helps."""
+                    if needs_relief(frontier):
+                        if not prepop_cover:
+                            prepop_cover.append(real_view(frontier))
+                        prepop_failures.append(len(frontier))
+                        raise torch.cuda.OutOfMemoryError("pre-pop frontier pressure")
+                    return real_view(frontier)
+
+                def prepop_pop(frontier: TopKBounding, batch_size: int = 1) -> SubproblemBatch:
+                    """Observe the first actual wave after pre-pop recovery."""
+                    if prepop_pressure[0]:
+                        prepop_pops.append(batch_size)
+                    return real_pop(frontier, batch_size)
+
+                prepop_trace: List[Dict[str, Any]] = []
+                with (
+                    patch.object(FrontierMemoryPlanner, "__init__", prepop_init),
+                    patch.object(FrontierMemoryPlanner, "begin_bound", return_value=0),
+                    patch.object(FrontierMemoryPlanner, "snapshot", prepop_snapshot),
+                    patch.object(FrontierMemoryPlanner, "_host_available", return_value=10**9),
+                    patch("torch.cuda.max_memory_allocated", return_value=0),
+                    patch(f"{__name__}._build_bounding", return_value=prepop_pool),
+                    patch(f"{__name__}._solve_dual_batch", unresolved_bound),
+                    patch.object(ClimbSession, "before_pop", prepop_hook),
+                    patch.object(TopKBounding, "view_all", prepop_view),
+                    patch.object(TopKBounding, "pop", prepop_pop),
+                ):
+                    prepop_result = verify_bab_batched(
+                        cold_net, DualSolver, BaBConfig(
+                            solver_tier="dual_alpha_eta", branching_method="babsr",
+                            bounding="depth_bound_blend", climb_enabled=True,
+                            climb_coarsening_enabled=False, provenance_enabled=True,
+                            frontier_mem_safety=.6, frontier_offload=remedy == "offload",
+                            max_nodes=3,
+                        ), max_batch_size=max_k, dual_config=DualConfig(n_iters=0),
+                        trace=prepop_trace,
+                    )
+                assert prepop_result.status == VerifyStatus.UNKNOWN
+                assert prepop_result.metadata["iterations"] == len(prepop_trace)
+                assert all(len(row) == 10 for row in prepop_trace)
+                assert prepop_result.metadata["frontier_memory_evicted_nodes"] == 0
+                if remedy == "exhausted":
+                    assert prepop_result.metadata["reason"] == "out_of_memory"
+                    assert prepop_failures == [2, 2] and not prepop_pops
+                    assert prepop_result.metadata["nodes"] == 1
+                    assert prepop_result.metadata["pool_remaining"] == 2
+                    remaining = real_view(prepop_pool)
+                    for field in ("lb", "ub", "depths", "node_id", "parent_id", "decision_literals"):
+                        assert torch.equal(getattr(prepop_cover[0], field), getattr(remaining, field))
+                    assert prepop_result.metadata["oom_failures"] == 1
+                else:
+                    assert prepop_result.metadata["reason"] != "out_of_memory", (
+                        remedy, max_k, prepop_result.metadata
+                    )
+                    assert prepop_failures == [2] and prepop_pops[0] == max_k
+                    assert prepop_result.metadata["nodes"] == 3
+                    assert prepop_result.metadata["oom_failures"] == 0
+                    if remedy == "offload":
+                        assert prepop_result.metadata["frontier_offload_count"] == 1
+                    else:
+                        assert prepop_result.metadata["frontier_warm_drop_count"] == 1
+                assert prepop_result.metadata["oom_retries"] == 1
+
+        # CLIMB frontier replacement belongs to the same transaction as children.
+        real_before_split = ClimbSession.before_split
+        merge_injected = [False]
+        merge_pool = TopKBounding()
+
+        def merge_then_fail(
+            session: ClimbSession, frontier: TopKBounding, candidate: SubproblemBatch,
+        ) -> tuple[SubproblemBatch, torch.Tensor]:
+            """Fail after an actual pending/active sibling pair revives its parent."""
+            if not merge_injected[0] and bool((candidate.depths == 1).all()):
+                session.library.insert(torch.tensor([[-1]]))
+                merged = real_before_split(session, frontier, candidate)
+                assert session.metrics.merged_pairs == 1 and merged[0].batch_size == 0
+                merge_injected[0] = True
+                raise torch.cuda.OutOfMemoryError("after pending-active merge")
+            return real_before_split(session, frontier, candidate)
+
+        with (
+            patch.object(FrontierMemoryPlanner, "__init__", simulated_init),
+            patch.object(FrontierMemoryPlanner, "begin_bound", return_value=0),
+            patch.object(FrontierMemoryPlanner, "snapshot", return_value=MemoryBudget(10**12, 0, 0, 0, 0, 0)),
+            patch("torch.cuda.max_memory_allocated", return_value=0),
+            patch(f"{__name__}._build_bounding", return_value=merge_pool),
+            patch(f"{__name__}._solve_dual_batch", unresolved_bound),
+            patch.object(ClimbSession, "before_split", merge_then_fail),
+        ):
+            merge_oom = verify_bab_batched(
+                cold_net, DualSolver, BaBConfig(
+                    solver_tier="dual_alpha_eta", branching_method="babsr",
+                    bounding="depth_bound_blend", climb_enabled=True,
+                    climb_merge_enabled=True, climb_propagation_enabled=False,
+                    frontier_mem_safety=.6, frontier_offload=False, max_nodes=8,
+                ), max_batch_size=1, dual_config=DualConfig(n_iters=0),
+            )
+        resident = merge_pool.view_all()
+        assert resident.node_id is not None and resident.decision_literals is not None
+        assert merge_injected[0] and set(resident.node_id.tolist()) == {1, 2}
+        assert not bool(resident.decision_literals.eq(0).all(1).any())
+        assert merge_oom.metadata["climb_merged_pairs"] == 0
+        assert merge_oom.metadata["nodes"] == 1 and merge_oom.metadata["pool_remaining"] == 2
+
+        # A real failed frame's tensor must die before recovery allocates.
+        import weakref
+        temporary_refs: list[weakref.ReferenceType[torch.Tensor]] = []
+        live_at_recovery: list[bool] = []
+        real_relieve = FrontierMemoryPlanner._relieve
+
+        def fail_with_temporary(**kwargs: Any) -> DualBatchResult:
+            """Leave the only strong work-buffer reference in the failing frame."""
+            if kwargs.get("memory_planner") is not None:
+                temporary = upper.new_ones(1024)
+                temporary_refs.append(weakref.ref(temporary))
+                raise torch.cuda.OutOfMemoryError("live solver work buffer")
+            return unresolved_bound(**kwargs)
+
+        def observe_recovery(planner: FrontierMemoryPlanner, frontier: BoundingStrategy) -> None:
+            """Observe lifetime at the first allocating recovery boundary."""
+            live_at_recovery.append(temporary_refs[-1]() is not None)
+            real_relieve(planner, frontier)
+
+        with (
+            patch.object(FrontierMemoryPlanner, "__init__", simulated_init),
+            patch.object(FrontierMemoryPlanner, "begin_bound", return_value=0),
+            patch.object(FrontierMemoryPlanner, "snapshot", return_value=MemoryBudget(10**12, 0, 0, 0, 0, 0)),
+            patch.object(FrontierMemoryPlanner, "_relieve", observe_recovery),
+            patch(f"{__name__}._solve_dual_batch", fail_with_temporary),
+        ):
+            lifetime_result = verify_bab_batched(
+                cold_net, DualSolver, BaBConfig(
+                    solver_tier="dual_alpha_eta", branching_method="babsr",
+                    bounding="depth_bound_blend", frontier_mem_safety=.6,
+                    frontier_offload=False,
+                ), max_batch_size=1, dual_config=DualConfig(n_iters=0),
+            )
+        assert live_at_recovery == [False] and temporary_refs[-1]() is None
+        assert lifetime_result.status == VerifyStatus.UNKNOWN
+
+        # Root device is not the storage device of an offloaded pending pool.
+        host_siblings = SubproblemBatch(
+            cold_box.lb.expand(2, -1), cold_box.ub.expand(2, -1), torch.ones(2, dtype=torch.long),
+            node_id=torch.tensor([1, 2]), parent_id=torch.tensor([0, 0]),
+            decision_literals=torch.tensor([[-1], [1]]),
+            split_signs={cold_lid: upper.new_tensor([[[-1., 0.]], [[1., 0.]]])},
+        )
+        host_pool = TopKBounding()
+        host_pool.push(host_siblings)
+        host_session = ClimbSession(
+            BaBConfig(climb_merge_enabled=True, climb_propagation_enabled=False),
+            cold_net, OutKind.LINEAR_LE,
+        )
+        host_session.library.insert(torch.tensor([[2]]))
+        host_session._root_bounds = Bounds(
+            torch.empty_like(cold_box.lb, device="meta"), torch.empty_like(cold_box.ub, device="meta"),
+        )
+        host_session.before_pop(host_pool)
+        assert len(host_pool) == 1 and host_session.metrics.merged_pairs == 1
+        assert host_pool.view_all().lb.device.type == "cpu"
+
+        warm_host = TopKBounding()
+        warm_host.push(SubproblemBatch(
+            -upper, upper, torch.zeros(1, dtype=torch.long),
+            incremental_alpha={cold_lid: upper.new_ones((1, 512))},
+        ))
+        restore_planner = FrontierMemoryPlanner(torch.device("meta"), .6, True, 100)
+        restore_planner.active = True
+        with (
+            patch.object(restore_planner, "snapshot", return_value=MemoryBudget(1000, 0, 0, 0, 0, 0)),
+            patch.object(restore_planner, "_host_available", return_value=10**9),
+        ):
+            assert restore_planner.plan_wave(warm_host, 1) == 1
+        assert restore_planner.warm_drop_count == 1
+        assert warm_host.pop().incremental_alpha is None
+
         # Adjacent floats and point boxes cannot spawn identical children.
         point = upper.new_tensor([[1.], [0.]])
         adjacent = torch.nextafter(point, torch.full_like(point, torch.inf))

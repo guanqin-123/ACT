@@ -87,6 +87,43 @@ bab_presets:
     climb_recheck_k: 2
     multi_split_levels: 1
 
+  climb_split:
+    solver_tier: "dual_alpha_eta"         # optimize slopes and split multipliers
+    branching_method: "babsr"            # neuron decisions shared by CLIMB
+    bounding: "depth_bound_blend"         # ordered frontier with merge support
+    root_bounds_reuse: "split_refresh"   # replay only retained split conditions
+    intermediate_refine: "all"           # tighten the root reference
+    per_subproblem_refine: "none"        # preserve the replay contract
+    climb_enabled: true                 # learn and propagate checked cores
+    climb_merge_enabled: true           # merge complementary sibling domains
+    climb_complement_bounding: true      # bound newly learned core complements
+    climb_theta: 0.0                    # no slack-budget deletion
+    climb_recheck_k: 0                   # no extra deletion probes
+    multi_split_levels: 1               # binary neuron splitting
+    terminal_lp_enabled: true            # checked terminal LP fallback
+    climb_terminal_cores: true           # checked root-domain terminal cores
+    frontier_mem_safety: 0.6             # opt into CUDA memory planning
+    intermediate_refine_max_tensor_mib: 1024.0 # cap optional refinement tensors
+
+  climb_split_lin:
+    solver_tier: "dual_alpha_eta"         # optimize slopes and split multipliers
+    branching_method: "babsr"            # neuron decisions shared by CLIMB
+    bounding: "depth_bound_blend"         # ordered frontier with merge support
+    root_bounds_reuse: "split_refresh_linear" # affine/ReLU halfspace refresh
+    intermediate_refine: "all"           # tighten the root reference
+    per_subproblem_refine: "none"        # preserve the replay contract
+    climb_enabled: true                 # learn and propagate checked cores
+    climb_merge_enabled: true           # merge complementary sibling domains
+    climb_complement_bounding: false     # linear refresh replaces extra probes
+    climb_lin_support_refinement: false  # conservative halfspace supports
+    climb_theta: 0.0                    # no slack-budget deletion
+    climb_recheck_k: 0                   # no extra deletion probes
+    multi_split_levels: 1               # binary neuron splitting
+    terminal_lp_enabled: true            # checked terminal LP fallback
+    climb_terminal_cores: true           # checked root-domain terminal cores
+    frontier_mem_safety: 0.6             # opt into CUDA memory planning
+    intermediate_refine_max_tensor_mib: 1024.0 # cap optional refinement tensors
+
 backend:
 
   # ─────────────────────────────────────────────────────────────────────────
@@ -235,6 +272,8 @@ backend:
     # Max pending subproblems; above it the lowest-priority ones are evicted,
     # which also rules out CERTIFIED. 0 = no cap.
     frontier_cap: 0
+    frontier_mem_safety: 0.0       # CUDA planner fraction; 0 preserves the existing path
+    frontier_offload: true        # allow host storage only when CUDA planner is active
     # Pieces per input-axis split (values below 2 are raised to 2).
     input_split_fanout: 2
     # -- Branching: which over-approximated activation (or input axis) to split
@@ -299,6 +338,7 @@ backend:
     # -- Intermediate-bound refinement and root-bound reuse (dual tiers) -----
     intermediate_refine: "none"           # root pre-activation refinement: none/auto/all
     intermediate_refine_ratio: 10.0       # auto mode: refine layers wider than ratio x median
+    intermediate_refine_max_tensor_mib: 0.0 # extra refinement cap; 0 preserves existing chunks
     root_bounds_reuse: "none"             # none/plain/split_refresh/split_refresh_linear
     climb_lin_support_refinement: true   # winning halfspaces only in linear refresh
     eta_only_children: false              # children keep the parent's alpha, optimize only eta
@@ -310,7 +350,7 @@ backend:
     child_n_iters: 0                      # alpha/eta iterations on optimized all-child batches (0 = dual.n_iters)
 
     # Automatic BaB batch sizing. Used only when verify_bab_batched is called with
-    # max_batch_size="auto"; the CLI passes the integer bab_max_batch_size.
+    # max_batch_size="auto"; bab_max_batch_size accepts a positive integer or auto.
     auto_batch_safety: 0.55       # fraction of total GPU memory the sizer may target
     auto_batch_cap: 2048          # upper bound on the auto batch size (also the CPU fallback)
     auto_batch_floor: 8           # lower bound on the auto batch size

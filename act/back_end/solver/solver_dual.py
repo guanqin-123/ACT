@@ -11,6 +11,7 @@
 # justification: torch C-extension stubs are absent in CI; DualSolver and verifier share result utilities during type analysis
 
 from __future__ import annotations
+import math
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeAlias, Union, cast
@@ -37,9 +38,37 @@ from act.util.stats import SpecBatchResult
 
 _monotonic = time.monotonic
 
+
+@dataclass(frozen=True)
+class MixedAlpha:
+    """Compact ReLU slopes for a wave containing shared and per-row lanes.
+
+    Row maps preserve logical lane order without expanding shared payloads
+    along the spec axis in the frontier. Only a numerical consumer expands.
+    """
+
+    shared: torch.Tensor
+    per_row: torch.Tensor
+    shared_rows: torch.Tensor
+    per_row_rows: torch.Tensor
+
+    def materialize(self, rows: int, *, shared: bool = False) -> torch.Tensor:
+        """Restore logical lane order at a solver or replay boundary."""
+        n = self.shared.shape[0] + self.per_row.shape[0]
+        width = self.shared.shape[-1]
+        if self.per_row.shape[1] not in (1, rows):
+            raise ValueError("mixed alpha spec rows do not match the consumer")
+        out = self.shared.new_empty((n, width) if shared else (n, rows, width))
+        shared_values = self.shared if shared else self.shared.unsqueeze(1).expand(-1, rows, -1)
+        row_values = self.per_row.mean(1) if shared else self.per_row.expand(-1, rows, -1)
+        out.index_copy_(0, self.shared_rows.to(out.device), shared_values)
+        out.index_copy_(0, self.per_row_rows.to(out.device), row_values.to(out))
+        return out
+
+
 AlphaTree: TypeAlias = Union[
     torch.Tensor, Dict[Any, "AlphaTree"], List["AlphaTree"],
-    Tuple["AlphaTree", ...], None,
+    Tuple["AlphaTree", ...], MixedAlpha, None,
 ]
 AlphaState: TypeAlias = Dict[int, AlphaTree]
 
@@ -141,25 +170,34 @@ def expand_bounds_dict(bounds_dict: Dict[int, Bounds], M: int) -> Dict[int, Boun
     return out
 
 
-def _alpha_tree_leaves(tree: AlphaTree) -> Iterator[torch.Tensor]:
+def _alpha_tree_leaves(
+    tree: Union[AlphaTree, Dict[int, torch.Tensor]], *, logical: bool = False,
+) -> Iterator[torch.Tensor]:
     """Yield the tensor leaves of a dual-alpha pytree.
 
     A per-layer alpha is a pytree whose shape is interpreted by the matching
     backward kernel: RELU is a single tensor leaf; future per-kind allocators
     may nest leaves in lists/dicts. ``None`` marks a fixed-slope kind with no
     alpha. The optimizer, projection, and keep-best clone all walk these leaves
-    so they cannot drift out of agreement on the pytree shape.
+    so they cannot drift out of agreement on the pytree shape. ``logical``
+    counts one ReLU leaf for mixed storage, excluding its lane-map tensors.
     """
     if tree is None:
         return
     if isinstance(tree, torch.Tensor):
         yield tree
+    elif isinstance(tree, MixedAlpha):
+        yield tree.shared
+        if not logical:
+            yield tree.per_row
+            yield tree.shared_rows
+            yield tree.per_row_rows
     elif isinstance(tree, dict):
         for value in tree.values():
-            yield from _alpha_tree_leaves(value)
+            yield from _alpha_tree_leaves(value, logical=logical)
     elif isinstance(tree, (list, tuple)):
         for value in tree:
-            yield from _alpha_tree_leaves(value)
+            yield from _alpha_tree_leaves(value, logical=logical)
     else:
         raise TypeError(f"unsupported alpha pytree node: {type(tree)!r}")
 
@@ -172,6 +210,10 @@ def _alpha_tree_map(
         return None
     if isinstance(tree, torch.Tensor):
         return transform(tree)
+    if isinstance(tree, MixedAlpha):
+        shared, per_row = transform(tree.shared), transform(tree.per_row)
+        return MixedAlpha(shared, per_row, tree.shared_rows.to(shared.device),
+                          tree.per_row_rows.to(per_row.device))
     if isinstance(tree, dict):
         return {key: _alpha_tree_map(value, transform) for key, value in tree.items()}
     if isinstance(tree, (list, tuple)):
@@ -186,6 +228,28 @@ def _clone_alpha_tree(tree: AlphaTree) -> AlphaTree:
 
 def _alpha_tree_gather_lanes(tree: AlphaTree, indices: torch.Tensor) -> AlphaTree:
     """Gather axis-zero lanes, including repeated indices, into owned storage."""
+    if isinstance(tree, MixedAlpha):
+        # A dense lane-to-payload lookup is O(K), never O(K*M*N).
+        n = tree.shared.shape[0] + tree.per_row.shape[0]
+        lookup = torch.empty(n, device=tree.shared.device, dtype=torch.long)
+        lookup[tree.shared_rows.to(lookup.device)] = torch.arange(
+            tree.shared.shape[0], device=lookup.device)
+        lookup[tree.per_row_rows.to(lookup.device)] = -1 - torch.arange(
+            tree.per_row.shape[0], device=lookup.device)
+        selected = lookup.index_select(0, indices.to(lookup.device))
+        shared_rows = torch.where(selected >= 0)[0]
+        per_row_rows = torch.where(selected < 0)[0]
+        shared = tree.shared.index_select(0, selected[shared_rows])
+        per_row = tree.per_row.index_select(0, (-1 - selected[per_row_rows]).to(tree.per_row.device))
+        if not per_row_rows.numel():
+            return shared
+        if not shared_rows.numel():
+            return per_row
+        return MixedAlpha(shared, per_row, shared_rows, per_row_rows)
+    if isinstance(tree, dict):
+        return {key: _alpha_tree_gather_lanes(value, indices) for key, value in tree.items()}
+    if isinstance(tree, (list, tuple)):
+        return type(tree)(_alpha_tree_gather_lanes(value, indices) for value in tree)
     return _alpha_tree_map(tree, lambda leaf: leaf.index_select(0, indices.to(leaf.device)))
 
 
@@ -193,11 +257,25 @@ def _alpha_tree_repeat_lanes(tree: AlphaTree, repeats: int) -> AlphaTree:
     """Repeat each lane consecutively, matching repeat_interleave bound rows."""
     if repeats < 1:
         raise ValueError(f"alpha lane repeats must be positive, got {repeats}")
+    if isinstance(tree, MixedAlpha):
+        count = tree.shared.shape[0] + tree.per_row.shape[0]
+        return _alpha_tree_gather_lanes(
+            tree, torch.arange(count, device=tree.shared.device).repeat_interleave(repeats))
+    if isinstance(tree, dict):
+        return {key: _alpha_tree_repeat_lanes(value, repeats) for key, value in tree.items()}
+    if isinstance(tree, (list, tuple)):
+        return type(tree)(_alpha_tree_repeat_lanes(value, repeats) for value in tree)
     return _alpha_tree_map(tree, lambda leaf: leaf.repeat_interleave(repeats, dim=0))
 
 
 def _alpha_tree_zero_lanes(tree: AlphaTree, lanes: int) -> AlphaTree:
     """Preserve payload shapes while zero-initializing missing warm-start lanes."""
+    if isinstance(tree, MixedAlpha):
+        return tree.shared.new_zeros((lanes, tree.shared.shape[-1]))
+    if isinstance(tree, dict):
+        return {key: _alpha_tree_zero_lanes(value, lanes) for key, value in tree.items()}
+    if isinstance(tree, (list, tuple)):
+        return type(tree)(_alpha_tree_zero_lanes(value, lanes) for value in tree)
     return _alpha_tree_map(tree, lambda leaf: leaf.new_zeros((lanes, *leaf.shape[1:])))
 
 
@@ -211,6 +289,43 @@ def _alpha_tree_concat_lanes(
         left = _alpha_tree_zero_lanes(right, n_left)
     if right is None:
         right = _alpha_tree_zero_lanes(left, n_right)
+    if isinstance(left, (torch.Tensor, MixedAlpha)) and isinstance(right, (torch.Tensor, MixedAlpha)):
+        mixed = isinstance(left, MixedAlpha) or isinstance(right, MixedAlpha)
+        if isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor):
+            mixed = (
+                left.ndim != right.ndim and {left.ndim, right.ndim} == {2, 3}
+            ) or (
+                left.ndim == right.ndim == 3 and left.shape[1] != right.shape[1]
+                and 1 in (left.shape[1], right.shape[1])
+            )
+        if mixed:
+            parts = []
+            for value, count in ((left, n_left), (right, n_right)):
+                if isinstance(value, torch.Tensor) and value.ndim == 3 and value.shape[1] == 1:
+                    value = value[:, 0]
+                if isinstance(value, MixedAlpha):
+                    parts.append(value)
+                elif value.ndim == 2:
+                    parts.append(MixedAlpha(
+                        value, value.new_empty((0, 1, value.shape[-1])),
+                        torch.arange(count, device=value.device),
+                        torch.empty(0, device=value.device, dtype=torch.long)))
+                elif value.ndim == 3:
+                    parts.append(MixedAlpha(
+                        value.new_empty((0, value.shape[-1])), value,
+                        torch.empty(0, device=value.device, dtype=torch.long),
+                        torch.arange(count, device=value.device)))
+                else:
+                    raise ValueError("mixed alpha requires ReLU lane/spec layouts")
+            a, b = parts
+            m = max(a.per_row.shape[1], b.per_row.shape[1])
+            if any(part.per_row.shape[1] not in (1, m) for part in parts):
+                raise ValueError("mixed alpha spec-row counts must agree")
+            return MixedAlpha(
+                torch.cat((a.shared, b.shared.to(a.shared))),
+                torch.cat((a.per_row.expand(-1, m, -1), b.per_row.to(a.per_row).expand(-1, m, -1))),
+                torch.cat((a.shared_rows, b.shared_rows.to(a.shared_rows) + n_left)),
+                torch.cat((a.per_row_rows, b.per_row_rows.to(a.per_row_rows) + n_left)))
     if isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor):
         if left.shape[1:] != right.shape[1:]:
             raise ValueError("alpha leaf trailing shapes must agree when concatenating lanes")
@@ -238,6 +353,8 @@ def _alpha_spec_row_count(state: Optional[AlphaState]) -> int:
         int(tree.shape[1]) for tree in (state or {}).values()
         if isinstance(tree, torch.Tensor) and tree.dim() >= 3 and tree.shape[1] != 1
     }
+    counts.update(tree.per_row.shape[1] for tree in (state or {}).values()
+                  if isinstance(tree, MixedAlpha) and tree.per_row.shape[1] != 1)
     if len(counts) > 1:
         raise ValueError(f"inconsistent alpha spec-row counts: {sorted(counts)}")
     return next(iter(counts), 1)
@@ -251,6 +368,10 @@ def _alpha_tree_select_spec_rows(
         return None
     return {
         lid: (
+            MixedAlpha(tree.shared, tree.per_row.index_select(1, keep_rows.to(tree.per_row.device))
+                       if tree.per_row.shape[1] != 1 else tree.per_row,
+                       tree.shared_rows, tree.per_row_rows)
+            if isinstance(tree, MixedAlpha) else
             tree.index_select(1, keep_rows.to(tree.device))
             if isinstance(tree, torch.Tensor) and tree.dim() >= 3 and tree.shape[1] != 1
             else _alpha_tree_map(tree, lambda leaf: leaf.clone())
@@ -670,6 +791,11 @@ class DualSolver(Solver):
         dual_config: optional stopping policy; direct optimizer arguments
             still determine iterations and learning rates.
         """
+        if alpha is not None:
+            alpha = {
+                lid: tree.materialize(M) if isinstance(tree, MixedAlpha) else tree
+                for lid, tree in alpha.items()
+            }
         if forward_lin_max_perturbed is None:
             forward_lin_max_perturbed = DualConfig().forward_lin_max_perturbed
         if isinstance(split_signs, list):
@@ -1009,7 +1135,13 @@ class DualSolver(Solver):
         assert b is not None, f"_init_alpha: no bounds for RELU layer {layer.id}"
         if incremental_alphas is not None and layer.id in incremental_alphas:
             previous = incremental_alphas[layer.id]
+            if isinstance(previous, MixedAlpha):
+                previous = previous.materialize(M, shared=not per_class_alpha)
             assert isinstance(previous, torch.Tensor)
+            if not per_class_alpha and previous.ndim == 3:
+                previous = previous.mean(dim=1)
+            elif per_class_alpha and previous.ndim == 2:
+                previous = previous.unsqueeze(1).expand(B, M, -1)
             alpha_init = (
                 previous
                 .detach()
@@ -1450,6 +1582,7 @@ class DualSolver(Solver):
         blowup_ratio: float = 10.0,
         max_rows_per_call: int = 4096,
         optimize_iters: int = 20,
+        max_tensor_mib: float = 0.0,
     ) -> Dict[int, Bounds]:
         """Metric-driven backward refinement of selected pre-activation bounds.
 
@@ -1495,6 +1628,10 @@ class DualSolver(Solver):
         if not selected:
             return bounds_dict
 
+        max_rows_per_call, _ = self._refinement_chunks(
+            bounds_dict, max_rows_per_call, 1, max_tensor_mib, optimize_iters)
+        if max_rows_per_call == 0:
+            return bounds_dict
         out = dict(bounds_dict)
         for lid in selected:
             preds = net.preds.get(lid, [])
@@ -1556,6 +1693,7 @@ class DualSolver(Solver):
         rows_cap: int = 64,
         optimize_iters: int = 0,
         lane_chunk: int = 32,
+        max_tensor_mib: float = 0.0,
     ) -> Dict[int, Bounds]:
         """K-lane per-subproblem sparse refinement of pre-activation bounds.
 
@@ -1583,6 +1721,10 @@ class DualSolver(Solver):
             )
 
         out = self._harden_split_bounds(bounds_dict, split_signs)
+        rows_cap, lane_chunk = self._refinement_chunks(
+            out, rows_cap, lane_chunk, max_tensor_mib, optimize_iters)
+        if rows_cap == 0:
+            return out
 
         stats: List[tuple[int, int]] = []
         for layer in net.layers:
@@ -1654,6 +1796,31 @@ class DualSolver(Solver):
             if pred_lid in out and out[pred_lid].lb.shape == refined.lb.shape:
                 out[pred_lid] = refined
         return out
+
+    @staticmethod
+    def _refinement_chunks(
+        bounds_dict: Dict[int, Bounds], rows: int, lanes: int,
+        max_tensor_mib: float, optimize_iters: int,
+    ) -> tuple[int, int]:
+        """Limit existing refinement chunks before allocating query tensors.
+
+        Both signs and optimizer state are included in the conservative
+        per-query estimate. If even one query cannot fit, retain the already
+        valid bounds instead of skipping a necessary verification solve.
+        """
+        if not math.isfinite(max_tensor_mib) or max_tensor_mib < 0:
+            raise ValueError("max_tensor_mib must be finite and non-negative")
+        if max_tensor_mib == 0:
+            return rows, lanes
+        per_query = sum(
+            box.lb[0].numel() * box.lb.element_size()
+            for box in bounds_dict.values()
+        ) * (16 if optimize_iters > 0 else 4)
+        capacity = int(max_tensor_mib * 1024**2) // max(1, per_query)
+        if capacity == 0:
+            return 0, 0
+        rows = min(rows, capacity)
+        return rows, min(lanes, max(1, capacity // rows))
 
     def recompute_bounds_and_nu(
         self,

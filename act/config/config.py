@@ -140,6 +140,10 @@ class BaBConfig:
     max_depth: int = 20
     max_nodes: int = 2000
     frontier_cap: int = 0
+    frontier_mem_safety: float = 0.0
+    """CUDA managed-memory fraction; zero preserves the existing unplanned path."""
+    frontier_offload: bool = True
+    """Allow host frontier storage when the CUDA memory planner is enabled."""
     top_k: int = 0
     """Cap on how many pooled subproblems a single BaB wave may pop, independently
     of the batch size. 0 = unbounded. Honoured by the TopKBounding family
@@ -229,6 +233,8 @@ class BaBConfig:
 
     intermediate_refine_ratio: float = 10.0
     """Width-blowup threshold multiplier for intermediate_refine='auto'."""
+    intermediate_refine_max_tensor_mib: float = 0.0
+    """Extra refinement tensor budget in MiB; zero leaves existing chunks unchanged."""
 
     root_bounds_reuse: str = "none"
     """Reuse of the root box's forward bounds by descendants (dual tiers).
@@ -347,6 +353,11 @@ class BaBConfig:
             )
         if self.top_k < 0:
             raise ConfigError(f"top_k must be non-negative, got {self.top_k}")
+        if not math.isfinite(self.frontier_mem_safety) or not 0.0 <= self.frontier_mem_safety <= 1.0:
+            raise ConfigError("frontier_mem_safety must be finite and in [0, 1]")
+        if (not math.isfinite(self.intermediate_refine_max_tensor_mib)
+                or self.intermediate_refine_max_tensor_mib < 0.0):
+            raise ConfigError("intermediate_refine_max_tensor_mib must be finite and non-negative")
         for name in ("milp_max_variables", "milp_max_constraints"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -645,11 +656,12 @@ class BackendConfig:
     see commit af797ff / C6).
     """
 
-    bab_max_batch_size: int = 8
+    bab_max_batch_size: Union[int, str] = 8
     """Maximum K for BaB sub-problem batching (tier 3).
 
     BaB dispatches up to K sub-problems per solve_batch call.  Set to 1 to
     disable batching inside BaB (equivalent to the legacy sequential loop).
+    "auto" chooses K from the existing adaptive batch policy.
     Must be 1 when solver='gurobi' (same N=1 restriction as lp_enabled).
     """
 
@@ -675,6 +687,12 @@ class BackendConfig:
             raise ConfigError(
                 f"Invalid solver {self.solver!r}; expected one of {_VALID_SOLVERS}"
             )
+        if self.bab_max_batch_size != "auto" and (
+            isinstance(self.bab_max_batch_size, bool)
+            or not isinstance(self.bab_max_batch_size, int)
+            or self.bab_max_batch_size < 1
+        ):
+            raise ConfigError("bab_max_batch_size must be a positive integer or 'auto'")
         if self.device not in _VALID_DEVICES:
             raise ConfigError(
                 f"Invalid device {self.device!r}; expected one of {_VALID_DEVICES}"
@@ -706,10 +724,10 @@ class BackendConfig:
                     "varying constraint matrices; see commit af797ff).  "
                     "Either set lp_enabled=False or switch to solver='torchlp'."
                 )
-            if self.bab_max_batch_size > 1:
+            if self.bab_max_batch_size != 1:
                 raise ConfigError(
                     f"BackendConfig: solver='gurobi' is incompatible with "
-                    f"bab_max_batch_size={self.bab_max_batch_size} > 1.  "
+                    f"bab_max_batch_size={self.bab_max_batch_size!r}; expected 1.  "
                     f"GurobiSolver.solve_batch raises for N>1.  "
                     f"Either set bab_max_batch_size=1 or switch to solver='torchlp'."
                 )

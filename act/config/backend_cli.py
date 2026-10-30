@@ -56,6 +56,10 @@ def _parse_config_value(tp: Any):
     origin = get_origin(base)
     if base in (int, float, str):
         return base
+    if origin is Union and get_args(base) == (int, str):
+        def _parse_batch_size(raw: str) -> Union[int, str]:
+            return "auto" if raw == "auto" else int(raw)
+        return _parse_batch_size
     if origin in (list, List):
         def _parse_list(raw: str) -> list[Any]:
             if raw.strip().startswith("["):
@@ -1831,6 +1835,49 @@ def _run_cli_cascade_smoke() -> int:
         cfg = BackendConfig()
         assert cfg.bab_max_batch_size == 8
 
+    def _t_frontier_config() -> None:
+        """Generated CLI preserves auto and rejects invalid memory budgets."""
+        from act.config.config import BaBConfig
+
+        parser = argparse.ArgumentParser()
+        _add_dataclass_config_args(parser)
+        for raw, expected in (("auto", "auto"), ("3", 3)):
+            args = parser.parse_args(["--bab-max-batch-size", raw])
+            assert BackendConfig(bab_max_batch_size=args.bab_max_batch_size).bab_max_batch_size == expected
+        flags = [
+            "--bab-frontier-mem-safety", "0.4", "--no-bab-frontier-offload",
+            "--bab-intermediate-refine-max-tensor-mib", "32",
+        ]
+        args = parser.parse_args(flags)
+        cfg = BackendConfig.from_yaml(**_collect_backend_overrides(args, lambda flag: flag in flags))
+        assert cfg.bab.frontier_mem_safety == 0.4
+        assert not cfg.bab.frontier_offload
+        assert cfg.bab.intermediate_refine_max_tensor_mib == 32
+        for value in (0, -1, True, 1.5, "invalid", "2"):
+            try:
+                BackendConfig.from_yaml(bab_max_batch_size=value)
+            except ConfigError:
+                pass
+            else:
+                raise AssertionError(f"accepted invalid K: {value!r}")
+        for field in ("frontier_mem_safety", "intermediate_refine_max_tensor_mib"):
+            for value in (-1.0, float("nan"), float("inf")):
+                try:
+                    if field == "frontier_mem_safety":
+                        BaBConfig(frontier_mem_safety=value)
+                    else:
+                        BaBConfig(intermediate_refine_max_tensor_mib=value)
+                except ConfigError:
+                    pass
+                else:
+                    raise AssertionError(f"accepted invalid {field}: {value}")
+        try:
+            BackendConfig(solver="gurobi", lp_enabled=False, bab_max_batch_size="auto")
+        except ConfigError:
+            pass
+        else:
+            raise AssertionError("Gurobi accepted unbounded batch sizing")
+
     def _t_dual_unsafe_linear() -> None:
         """The real cascade accepts EXISTS specs without certifying a tie."""
         from act.back_end.transfer_functions import set_solver_mode
@@ -2095,6 +2142,7 @@ def _run_cli_cascade_smoke() -> int:
     _check("cascade with lp_enabled=True dispatches tier-2 on UNKNOWN", _t_cascade_default_config)
     _check("lp_enabled=False skips tier-2", _t_lp_disabled_skips_tier2)
     _check("default bab_max_batch_size=8", _t_bab_max_batch_size_default)
+    _check("frontier CLI budgets and automatic K", _t_frontier_config)
     _check("dual cascade accepts unsafe-linear escape and rejects ties", _t_dual_unsafe_linear)
     _check("cascade shares one deadline across stages and lanes", _t_cascade_shares_deadline)
     _check("expired LP budget skips BaB", lambda: _t_cascade_shares_deadline(3.0, 8.0, (7.0,)))

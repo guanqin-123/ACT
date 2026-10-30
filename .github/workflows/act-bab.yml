@@ -387,7 +387,7 @@ jobs:
             --bab-child-n-iters 1 --bab-presolve-time-fraction 0.5 \
             --no-bab-climb-coarsening-enabled --no-bab-climb-propagation-enabled \
             --bab-max-depth 14 --bab-max-subproblems 250 --timeout 600 --verbose
-          for preset in climb climb_refined; do
+          for preset in climb climb_refined climb_split climb_split_lin; do
             coverage run -p -m act.back_end --verify \
               --network "$ACT_NETS_DIR/layer_testing_climb_reuse.json" \
               --solver dual --bab --bab-preset "$preset" --dual-n-iters 20 \
