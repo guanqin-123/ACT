@@ -776,6 +776,10 @@ def _conv1d_to_linear_matrix(
     groups: int = 1
 ) -> torch.Tensor:
     """Convert Conv1d to equivalent linear transformation matrix."""
+    # nn.Conv1d stores stride/padding/dilation as 1-tuples.
+    stride, padding, dilation = (
+        int(v[0]) if isinstance(v, (tuple, list)) else int(v) for v in (stride, padding, dilation)
+    )
     _, in_channels, in_w = input_shape
     _, out_channels, out_w = output_shape
 

@@ -146,7 +146,8 @@ def hz_tighten_bounds(base: Bounds, candidate: Bounds) -> Bounds:
             torch.maximum(lb.abs(), ub.abs()),
             torch.ones((), dtype=lb.dtype, device=lb.device),
         )
-        tolerance = 128 * torch.finfo(lb.dtype).eps * scale
+        # Fixed (zero-width) neurons deep in a network accumulate float64 rounding above 128 ulp.
+        tolerance = max(128 * torch.finfo(lb.dtype).eps, 1e-9) * scale
         if bool(((lb - ub > tolerance) & conflict).any()):
             raise ValueError("HZ and interval bounds have a non-numerical conflict")
     return Bounds(

@@ -123,6 +123,9 @@ def tf_dense(L: Layer, Bin: Bounds) -> Fact:
     W_neg = L.params.get("weight_neg", torch.clamp(W, max=0))
     b = L.params.get("bias", torch.zeros(W.shape[0]))
     
+    if Bin.lb.dim() > 2:  # e.g. a dense map over all tokens of an embedding INPUT [B, T, D]
+        batch = Bin.lb.shape[0]
+        Bin = Bounds(Bin.lb.reshape(batch, -1), Bin.ub.reshape(batch, -1))
     B = affine_bounds(W_pos, W_neg, b, Bin)
     C = ConSet(); C.replace(Con("EQ", tuple(L.out_vars + L.in_vars), {"tag": f"dense:{L.id}", "W": W, "b": b}))
     C.add_box(L.id, L.out_vars, B); return Fact(B,C)
