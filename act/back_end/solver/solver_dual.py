@@ -453,13 +453,33 @@ class DualSolver(Solver):
         LayerKind.ADD.value,
     }
 
-    def __init__(self, n_iters: int = 0):
+    def __init__(
+        self,
+        n_iters: int = 0,
+        *,
+        config: Optional[DualConfig] = None,
+        refresh_forward: bool = False,
+    ):
+        """Create a self-contained dual solver.
+
+        Args:
+            n_iters: α iterations of ``evaluate_spec``; zero keeps the
+                fixed-slope single pass.
+            config: optimizer policy of those iterations (learning rates,
+                decay, per-class α, stagnation/time stops, forward linear
+                cap); ``None`` keeps the built-in defaults.
+            refresh_forward: recompute the pre-activation forward bounds from
+                the current α on every iteration instead of keeping the
+                initial forward bounds fixed.
+        """
         # DualTF is a backward-handler registry (not a TransferFunction);
         # instantiate it internally so DualSolver is self-contained and callers
         # need no knowledge of it.
         from act.back_end.dual_tf.dual_tf import DualTF
         self.tf = DualTF()
         self.n_iters = n_iters
+        self.config = config
+        self.refresh_forward = refresh_forward
         self._last_bounds: Optional[Bounds] = None
         self.last_forward_bounds: Optional[Dict[int, Bounds]] = None
         self.last_alpha_iterations = 0
@@ -1960,6 +1980,20 @@ class DualSolver(Solver):
                 _obs.emit(DESCRIBERS["dual"](key, pre, alpha=alpha))
 
     @_obs.observed_phase("DualSolver.evaluate_spec")
+    def _spec_optimizer_options(self) -> Dict[str, Any]:
+        """Keyword arguments ``evaluate_spec`` adds to its certified-bound calls."""
+        options: Dict[str, Any] = {"refresh_forward": self.refresh_forward}
+        if self.config is not None:
+            options.update(
+                lr_alpha=self.config.lr_alpha,
+                lr_beta=self.config.lr_beta,
+                lr_decay=self.config.lr_decay,
+                per_class_alpha=self.config.per_class_alpha,
+                forward_lin_max_perturbed=self.config.forward_lin_max_perturbed,
+                dual_config=self.config,
+            )
+        return options
+
     def evaluate_spec(
         self, net: Net,
         out_spec: OutputSpec,
@@ -2023,6 +2057,8 @@ class DualSolver(Solver):
             seed_bounds = seed_from_input_specs(spec_layers)
             bounds_dict, forward_frame, _stats = compute_forward_bounds(
                 net, seed_bounds.lb, seed_bounds.ub, post_activation=False,
+                **({} if self.config is None else
+                   {"forward_lin_max_perturbed": self.config.forward_lin_max_perturbed}),
             )
 
         if collect_bounds:
@@ -2100,7 +2136,7 @@ class DualSolver(Solver):
                         forward_frame=forward_frame,
                         optimize=self.n_iters > 0, n_iters=self.n_iters,
                         return_optimized=self.n_iters > 0,
-                        refresh_forward=False,
+                        **self._spec_optimizer_options(),
                         return_sce=return_witness,
                     )
                     if _obs.enabled:
@@ -2145,7 +2181,7 @@ class DualSolver(Solver):
                     forward_frame=forward_frame,
                     optimize=self.n_iters > 0, n_iters=self.n_iters,
                     return_optimized=self.n_iters > 0,
-                    refresh_forward=False,
+                    **self._spec_optimizer_options(),
                     return_sce=return_witness,
                 )
                 if _obs.enabled:
@@ -2210,7 +2246,7 @@ class DualSolver(Solver):
                 forward_frame=forward_frame,
                 optimize=self.n_iters > 0, n_iters=self.n_iters,
                 return_optimized=self.n_iters > 0,
-                refresh_forward=False,
+                **self._spec_optimizer_options(),
             )
             if _obs.enabled and result.alpha_state is not None:
                 for lid, alpha in result.alpha_state.items():
