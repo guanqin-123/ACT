@@ -360,11 +360,13 @@ def get_onnx_input_shape(onnx_path: Path) -> Tuple[int, ...]:
         onnx_model = onnx.load(str(onnx_path))
         graph = onnx_model.graph
         
-        if not graph.input:
+        # IR < 4 models also list their initializers (weights) as graph inputs.
+        initializers = {init.name for init in graph.initializer}
+        data_inputs = [inp for inp in graph.input if inp.name not in initializers]
+        if not data_inputs:
             raise ONNXConversionError("ONNX model has no inputs")
         
-        # Get first input tensor
-        input_tensor = graph.input[0]
+        input_tensor = data_inputs[0]
         shape = _extract_shape_from_tensor(input_tensor)
         
         # Handle batch dimension - keep original, but normalize dynamic batch
