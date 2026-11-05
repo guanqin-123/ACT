@@ -983,17 +983,18 @@ def _build_input_spec(
     """
     lb_vals = [bounds_dict.get(i, (float('-inf'), float('inf')))[0] for i in range(num_inputs)]
     ub_vals = [bounds_dict.get(i, (float('-inf'), float('inf')))[1] for i in range(num_inputs)]
-    lb_tensor = torch.tensor(lb_vals)
-    ub_tensor = torch.tensor(ub_vals)
+    # Tighten on Python floats: per-element tensor access costs a device round trip.
     for xc, _yc, d in extra_x_ineqs:
         nonzero = [(i, v) for i, v in enumerate(xc) if v != 0]
         if len(nonzero) == 1:
             idx, coef = nonzero[0]
             bound = d / coef
-            if coef > 0 and bound < ub_tensor[idx].item():
-                ub_tensor[idx] = bound
-            elif coef < 0 and bound > lb_tensor[idx].item():
-                lb_tensor[idx] = bound
+            if coef > 0 and bound < ub_vals[idx]:
+                ub_vals[idx] = bound
+            elif coef < 0 and bound > lb_vals[idx]:
+                lb_vals[idx] = bound
+    lb_tensor = torch.tensor(lb_vals)
+    ub_tensor = torch.tensor(ub_vals)
     if input_shape is not None:
         lb_tensor = lb_tensor.view(*input_shape)
         ub_tensor = ub_tensor.view(*input_shape)
