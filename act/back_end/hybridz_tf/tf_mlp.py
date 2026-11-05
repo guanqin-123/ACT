@@ -379,7 +379,8 @@ def _sparse_matmul_const(L, hz: SparseHZono, const, *, variable_is_left: bool):
             return None
         eye = torch.eye(in_dim, dtype=torch.float64).view(in_dim, *y_shape)
         out = torch.matmul(W, eye).reshape(in_dim, -1)
-    return _sparse_apply_per_batch_linear(hz, sp.csr_matrix(out.t().numpy()))
+    # torch tensors here follow the default device (CUDA under ACT); scipy needs host memory.
+    return _sparse_apply_per_batch_linear(hz, sp.csr_matrix(out.t().cpu().numpy()))
 
 
 def _sparse_triplets(parts, shape):
@@ -417,8 +418,17 @@ def _sparse_relu_bounds(hz: SparseHZono, input_bounds: Bounds):
         raise ValueError("sparse ReLU bounds shape mismatch")
     lb = np.maximum(fact_lb, hz_lb)
     ub = np.minimum(fact_ub, hz_ub)
-    if np.any(lb > ub):
-        raise ValueError("sparse ReLU received inconsistent bounds")
+    gap = lb - ub
+    # Float32 interval facts and float64 zonotope bounds of a (nearly) fixed
+    # neuron can cross by rounding; keep the hull of such pairs.
+    tol = 1e-5 * (1.0 + np.maximum(np.abs(lb), np.abs(ub)))
+    if np.any(gap > tol):
+        worst = int(np.argmax(gap - tol))
+        raise ValueError(
+            f"sparse ReLU received inconsistent bounds: neuron {worst} has lb {lb[worst]!r} > ub {ub[worst]!r}"
+        )
+    crossed = gap > 0
+    lb[crossed], ub[crossed] = ub[crossed], lb[crossed]
     return lb, ub
 
 
@@ -1161,7 +1171,7 @@ def _row_indices_gather(L, n: int):
     else:
         indices = torch.as_tensor(raw_idx, dtype=torch.long)
     idx = torch.arange(int(n)).view(batch, *inp_shape)
-    return torch.index_select(idx, dim=axis + 1, index=indices.reshape(-1)).reshape(-1)
+    return torch.index_select(idx, dim=axis + 1, index=indices.reshape(-1).to(idx.device)).reshape(-1)
 
 
 def _row_indices_expand(L, n: int):
