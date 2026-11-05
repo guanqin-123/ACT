@@ -199,7 +199,17 @@ unchanged and hot emission sites check the module's `enabled` flag.
 budget optimizes alpha against the same forward bounds. Interval and HybridZ
 report each layer's committed output (stage `out`); dual forward reports
 activation inputs as `pre` and other layers as `out`; dual backward records
-(alpha `[B, M, n]`, margins and slack `[B, M]`) use pass `backward`.
+(alpha `[B, M, n]`, margins and slack `[B, M]`) use pass `backward`. The dual
+path also checks the dual witness of UNKNOWN lanes on the concrete model and
+reports FALSIFIED with that counterexample.
+
+Concrete candidates from dual, interval, LP and BaB use
+`counterexample.validate_counterexamples`: input constraints, finite outputs,
+and the canonical `OutputSpec` boundary semantics are checked together while
+preserving batch lanes. Candidate selection and verdict assembly stay with
+the verification caller. Terminal BaB additionally checks its node box and
+ReLU split phases in `bab/violation.py`. Inference errors propagate rather
+than being reported as an ordinary inconclusive result.
 
 - Set a **global device** (CPU/GPU) and dtype up front.
 - Use `@torch.no_grad()` in analysis & CE validation.

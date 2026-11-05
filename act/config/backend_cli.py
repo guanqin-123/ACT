@@ -270,7 +270,7 @@ def _verify_net(
               backend_cfg.bab_enabled is True AND active TF propagates LP
               constraints. bab_max_batch_size=1 disables K-batching.
     """
-    from act.back_end.bab.violation import clear_violation_check_module_cache
+    from act.back_end.counterexample import clear_violation_check_module_cache
     from act.back_end.transfer_functions import (
         ensure_active_tf,
         is_dual_solver_active,
