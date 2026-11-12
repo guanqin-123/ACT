@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, List, Tuple, Dict, Optional, override
 import logging
 import torch
+import torch.nn as nn
 
 from act.front_end.spec_creator_base import BaseSpecCreator, SpecTuple
 from act.front_end.vnnlib_loader.data_model_loader import (
@@ -30,6 +31,24 @@ from act.front_end.vnnlib_loader.vnnlib_parser import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _lane_rank1_input(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    """Give a rank-1 ONNX input (no batch dimension) ACT's leading lane dimension.
+
+    Only sound when the model treats the extra leading dimension as a batch,
+    i.e. maps ``x[None]`` to ``f(x)[None]``. Column-vector networks
+    (``W @ x``) broadcast it into the features instead, and are rejected.
+    """
+    lane = x.unsqueeze(0)
+    with torch.no_grad():
+        out, out_lane = model(x), model(lane)
+    if tuple(out_lane.shape) != (1, *out.shape) or not torch.allclose(out_lane[0], out):
+        raise UnsupportedSpecError(
+            f"rank-1 network input {tuple(x.shape)} cannot be given a batch lane: the model maps "
+            f"{tuple(lane.shape)} to {tuple(out_lane.shape)} instead of {(1, *out.shape)}"
+        )
+    return lane
 
 
 class VNNLibSpecCreator(BaseSpecCreator):
@@ -216,6 +235,8 @@ class VNNLibSpecCreator(BaseSpecCreator):
         
         pytorch_model = instance_data['model']
         labeled_tensor = instance_data['labeled_tensor']
+        if labeled_tensor.tensor.dim() == 1:
+            labeled_tensor.tensor = _lane_rank1_input(pytorch_model, labeled_tensor.tensor)
         vnnlib_path = Path(instance_data['vnnlib_path'])
         
         # Parse VNNLIB to create specs
